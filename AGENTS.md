@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Telegraph style. Root rules only. Read the nearest scoped `AGENTS.md` before subtree work.
+Telegraph style. Root rules apply throughout the repository. Read the nearest scoped `AGENTS.md` before subtree work.
 
 ## Start
 
-- Repo: monorepo for [Crab](https://crab.build) — serverless git remote helper. Repos live in cloud object storage (S3/GCS/Azure), no servers.
+- Repo: [Crab](https://crab.build) monorepo — serverless Git remote helper. Repositories live in cloud object storage (S3/GCS/Azure), with no Crab data server.
 - Replies: repo-root-relative refs only: `crab/src/cmd/push.rs:42`. No absolute paths, no `~/`.
 - Fix/triage answers need source, tests, current behavior, and dependency contract proof.
 - Reviews/answers: high confidence required. Default to exhaustive relevant codebase search/read, including callers, callees, siblings, tests, docs, and upstream/dependency contracts before verdict. Diff-only review is insufficient.
@@ -21,13 +21,18 @@ Telegraph style. Root rules only. Read the nearest scoped `AGENTS.md` before sub
 
 ```
 CrabBuild/
-├── crab/              Rust CLI + remote helper (product composition)
-├── crates/            Shared Rust contracts, data plane, storage, orchestration
-├── crab-web/          Next.js marketing site + Fumadocs docs
-└── .github/workflows/ CI: e2e-smoke, release, cache-service
+├── crab/              Rust CLI, remote helper, and product/server composition
+├── crates/            Shared Rust contracts, data plane, storage, and orchestration
+├── crab-web/          Next.js marketing site and Fumadocs documentation
+├── diagram/           Architecture diagrams and rendered assets
+├── .github/workflows/ CI, release, service, and evidence workflows
+├── .agent/            Repository-local agent workflows
+├── .claude/           Repository-local Claude commands and skills
+└── .codex/            Repository-local Codex skills
 ```
 
-Cargo workspace members: 19 shared crates under `crates/`, plus `crab`.
+Cargo workspace: 20 members — 19 shared crates under `crates/`, plus `crab`.
+There is no desktop application, Python package, or SDK package in this workspace; desktop material under `crab-web/` is documentation and marketing content.
 
 ## Architecture
 
@@ -41,15 +46,15 @@ Cargo workspace members: 19 shared crates under `crates/`, plus `crab`.
 ### crab (Rust CLI)
 
 - Entry: `crab/src/main.rs` — dual-mode: `git-remote-crab` remote helper + `crab` CLI.
-- Subcommands: `crab/src/cmd/` (~60 commands: add, clone, push, hydrate, dehydrate, gc, fsck, mount, status, doctor, etc.).
-- Internals: `engine/` (CDC chunking + dedup), `storage/` (xorb format, S3 upload), `metadata/` (chunk/shard/file index), `coordination/` (distributed locking), `git/` (filter driver, remote helper, push pipeline), `vfs/` (FUSE mount), `cache/` (chunk cache), `lfs/` (LFS transfer agent).
+- Subcommands: `crab/src/cmd/` (add, clone, push, hydrate, dehydrate, gc, fsck, mount, status, doctor, and other CLI commands).
+- Product modules under `crab/src/` cover command policy, chunking/deduplication, storage, metadata, coordination, Git integration, cache, LFS, auth/read/hydration, tiering/replication, import, and restriping. Reusable contracts and mechanics belong in `crates/`.
 - Stack: Rust 2024, tokio, `object_store`, `thiserror`, `tracing`, Blake3.
 
 ### crab-web (Next.js)
 
 - Marketing site + Fumadocs documentation. Hosted at crab.build.
-- Stack: Next.js 16 (Turbopack), React 19, Tailwind v4, Fumadocs, shadcn/ui.
-- Docs: CLI docs symlinked from `crab/docs/`.
+- Stack: Next.js 16 (Turbopack), React 19, Tailwind v4, Fumadocs, and shadcn/ui.
+- Docs: source content lives under `crab-web/content/docs/`; generated Fumadocs output under `crab-web/.source/` is not hand-edited.
 - Follow `AGENTS.md` and adjacent docs/components for web guidance.
 
 ### Design Principles
@@ -118,10 +123,12 @@ to trigger a second local build silently.
 ### Rust (crab)
 
 ```bash
-cd crab && make install    # release build + install + git-remote-crab symlink
-cd crab && make test       # cargo test + error_codes test
-cd crab && make clippy     # lint
-cd crab && make fmt        # format
+cd crab
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make install  # release binaries + install + git-remote-crab symlink
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make test     # full cargo test + error_codes test
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make clippy   # lint
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make fmt      # format
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make check    # fast compile check
 ```
 
 **Never** `cargo install` or manually copy binaries. Always `make install`.
@@ -134,6 +141,9 @@ npm install
 npm run dev                # next dev --turbopack
 npm run build              # next build
 npm run typecheck          # tsc --noEmit
+npm run lint               # eslint
+npm run test               # vitest --run
+npm run check:links        # docs/link validation
 ```
 
 ### Cross-compilation
@@ -163,16 +173,6 @@ npm run typecheck          # tsc --noEmit
 - No spec/task IDs in code comments. No requirement IDs, task numbers, or property numbers.
 - Doc comments (`///`) for public APIs only: one-sentence summary, then preconditions/postconditions/error conditions. Skip examples for obvious functions.
 - Keep public API surfaces small. Use `#[must_use]` where return values matter.
-
-## Code — TypeScript (Desktop)
-
-- Strict mode. `unknown` over `any`. `interface` over `type` for objects.
-- Functional React components only. State: React context + `useState`/`useReducer`.
-- Tailwind utility classes exclusively — no inline styles, no CSS modules.
-- Use `gx-*` design tokens for all colors. Never hardcode hex.
-- Electron main: async everything, never block main thread. `electron-log` for logging.
-- Sidecar communication through `agent.ts` only — never spawn the binary directly.
-- IPC contract defined in `src/ipc.ts`. Adding new IPC: handler in `electron/` → `preload.ts` → typed signature in `ipc.ts`.
 
 ## Code — TypeScript (Web)
 
@@ -205,9 +205,8 @@ npm run typecheck          # tsc --noEmit
 
 ## Tests
 
-- **Rust**: `cd crab && make test`. Property tests with `proptest`. Snapshot tests with `cargo insta`. `#[tokio::test(flavor = "multi_thread")]` for concurrency.
-- **Desktop**: `npm run test` (Vitest), `npm run test:e2e-smoke` (Playwright), `npm run test:a11y` (axe-core). Sidecar: `cd agent && cargo test`.
-- **Web**: `npm run test` (Vitest).
+- **Rust**: `cd crab && CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make test`. Property tests with `proptest`. Snapshot tests with `cargo insta`. `#[tokio::test(flavor = "multi_thread")]` for concurrency.
+- **Web**: `cd crab-web && npm run test` (Vitest); also run `npm run typecheck` and `npm run lint`, plus `npm run check:links` for docs/link changes.
 - Name the property, not the requirement: `batch_remove_preserves_entries_for_non_deleted_xorbs`.
 - One logical assertion per test. Clean timers/env/globals/mocks.
 - Tests prove behavior/regressions, not every internal branch.
@@ -248,7 +247,7 @@ A feature is only "working" if Level 3+ is achieved:
 | 4 | Error paths work (failures shown in UI) |
 | 5 | Production ready (perf, a11y, persistence) |
 
-Watch for: interface sandwiches, event emitters to nowhere, IPC stub graveyards, test-only wiring, optimistic UI lies.
+Watch for: test-only wiring, unreachable side effects, optimistic UI lies, missing failure states, and integration paths that are never exercised.
 
 ## Validation
 
@@ -272,7 +271,7 @@ Watch for: interface sandwiches, event emitters to nowhere, IPC stub graveyards,
 
 - Product name: **Crab**. CLI/package/path/config: `crab`.
 - Blog: `crab-web/content/blog/`; follow adjacent posts and their frontmatter.
-- SVG diagrams: follow nearby diagrams and existing rendering conventions.
+- SVG diagrams: `diagram/` and `crab-web/app/diagrams/`; follow nearby diagram components and existing rendering conventions.
 - Docs change with behavior/API changes.
 - Docs final answers: include relevant `https://crab.build/docs/...` URL(s) when applicable.
 
@@ -296,18 +295,9 @@ Watch for: interface sandwiches, event emitters to nowhere, IPC stub graveyards,
 - Hardcode names, ids, or log phrases in prod code unless they are an explicit contract.
 - Add runtime shims, aliases, or fallback readers for legacy/retired shapes. Doctor/migration code only.
 
-## Scoped Guides
+## Scoped Guidance
 
-Read before working in these subtrees:
-
-| Path | Steering |
-|------|----------|
-| `crates/` | `crates/AGENTS.md` |
-| `crab/` | `AGENTS.md` |
-| `crab-web/` | `AGENTS.md` and adjacent docs/components |
-| `crab-web/content/blog/` | Adjacent posts and frontmatter |
-| SVG diagrams | Nearby diagrams and rendering conventions |
-| E2E verification | `crab-cli-verification` skill |
-| Subsystem audits | `AGENTS.md` and relevant subsystem docs |
-| Feature validation | `AGENTS.md` feature-validation table |
-| General methodology | `AGENTS.md` methodology section |
+- `crates/`: read `crates/AGENTS.md` before changing shared crates.
+- `crab/`, `crab-web/`, and `diagram/`: no additional tracked scoped `AGENTS.md`; inspect the nearest README, manifest, docs, tests, and neighboring implementations.
+- E2E verification: use the `crab-cli-verification` skill.
+- Repository-local agent workflows and task-specific skills live in `.agent/`, `.claude/`, and `.codex/`.
