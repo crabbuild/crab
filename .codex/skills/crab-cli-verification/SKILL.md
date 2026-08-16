@@ -12,11 +12,11 @@ parses or compiles. The default proof uses a local RustFS S3 endpoint, the
 ## Setup
 
 1. Work from the CrabBuild repo root.
-2. Read `AGENTS.md`, `.kiro/steering/crab.md`, `.kiro/steering/code-style.md`, and `.kiro/steering/crab-e2e-verification.md`.
+2. Read `AGENTS.md` and any nearest scoped `AGENTS.md` before changing or validating code.
 3. Check `git status --short`; do not overwrite unrelated changes.
 4. Keep build artifacts off a full repo-local disk when needed:
    ```bash
-   export CARGO_TARGET_DIR=/Volumes/Workspace/CrabBuild/target
+   export CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/<checkout>
    ```
 
 ## RustFS Contract
@@ -131,4 +131,3 @@ Report:
 - Concrete side effects observed.
 - Byte-identical proof after clone/hydrate.
 - Any proof skipped and why.
-

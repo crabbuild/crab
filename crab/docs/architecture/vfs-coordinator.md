@@ -422,4 +422,4 @@ The coordinator respects these environment variables:
 - Guide: [`crab/docs/guides/mount.md`](../guides/mount.md)
 - Architecture: [`crab/docs/architecture/virtual-filesystem.md`](virtual-filesystem.md)
 - Source: `crates/crab-vfs/src/coordinator.rs`, `crates/crab-vfs/src/ipc.rs`
-- Spec: `.kiro/specs/vfs-ux-simplification/`
+- Design context: this document and `crab/docs/architecture/virtual-filesystem.md`.

@@ -84,7 +84,7 @@ crab skills install codex crab-large-files --skill=crab-large-files
 
 The provider may be any supported Agent Skills host, including `codex`,
 `claude-code`, `gemini-cli`, `cursor`, `windsurf`, `cline`, `roo`,
-`github-copilot`, `opencode`, `goose`, `kiro-cli`, `qwen-code`, `trae`, and
+`github-copilot`, `opencode`, `goose`, `qwen-code`, `trae`, and
 `zed`. The default destination follows that provider's documented global
 skills directory. `CODEX_HOME`, `CLAUDE_HOME`, and `GEMINI_HOME` override the
 corresponding provider home; `--root PATH` selects a final directory for

@@ -43,8 +43,8 @@ repeatable.
   binaries. The Python HTTP endpoint lives at `crab/deploy/auth`.
 - `crates/crab-cache-server/Cargo.toml:1` owns the private cache-service runtime.
 - Internal designs exist under `crab/docs/architecture/managed-platform.md`,
-  `crab/docs/architecture/cache-service-implementation.md`, `.kiro/specs`,
-  `openspec`, and `crab/roadmap`.
+  `crab/docs/architecture/cache-service-implementation.md`, historical
+  planning/spec material, `openspec`, and `crab/roadmap`.
 - The repository has Apache-2.0 at `LICENSE:1`, but contributor provenance and
   third-party license policy have not been approved for a public snapshot.
 
@@ -100,7 +100,7 @@ Record an owner, date, and explicit `approved` or `rejected` result for each:
    `crab-py`, and `crab-agent-tools`.
 6. Private products: auth server/helpers, cache server, deployment/IaC,
    managed-service code and operations, `crab-desktop`, and `crab-web` source.
-7. Public documentation exclusions: internal roadmaps, active OpenSpec/Kiro work,
+7. Public documentation exclusions: internal roadmaps, active planning work,
    managed-platform implementation designs, enterprise evidence, operational
    runbooks, billing/tenancy, and deployment internals.
 8. History policy: preserve full history only in the private repository; public
@@ -136,8 +136,8 @@ packages = ["crab-desktop-agent"]
 must include root Cargo/license/config files, `crab/`, approved `crates/*`,
 `crab-sdk/`, `crab-py/`, public scripts/docs/tests, and selected public GitHub
 workflows. The private denylist must name server crates, `crab/deploy/auth`,
-`crab/deploy/cache-service`, desktop/web, `.kiro/specs`, `openspec`,
-`crab/roadmap`, private architecture/design docs, and live evidence.
+`crab/deploy/cache-service`, desktop/web, historical planning/spec material,
+`openspec`, `crab/roadmap`, private architecture/design docs, and live evidence.
 
 ## Steps
 

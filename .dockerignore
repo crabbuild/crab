@@ -26,7 +26,6 @@
 
 .git/
 .crab/
-.kiro/
 .tmp-cache-e2e/
 target/
 **/target/

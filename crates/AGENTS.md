@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Scoped rules for `crates/`. Root `AGENTS.md` and `.kiro/steering/code-style.md` also apply.
+Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 
 ## Purpose
 

@@ -24,8 +24,7 @@
 
 //! Crab — serverless git remote helper and large-file filter driver.
 //!
-//! See `.kiro/steering/crab.md` for the project overview and
-//! `.kiro/steering/code-style.md` for coding conventions.
+//! See `AGENTS.md` for the project overview and coding conventions.
 
 pub mod audit;
 pub mod auth;

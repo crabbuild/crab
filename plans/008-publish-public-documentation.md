@@ -38,7 +38,8 @@ to contribute, and what remains proprietary.
 - CLI docs live under `crab/docs`; `crab-web/content/docs` contains a separate
   copy rather than a reliable pinned source.
 - Internal/private docs include managed-platform, cache-service implementation,
-  enterprise readiness, `.kiro/specs`, `openspec`, and `crab/roadmap` material.
+  enterprise readiness, historical planning/spec material, `openspec`, and
+  `crab/roadmap` material.
 - Most Cargo packages have `license` and `description` but lack consistent
   `repository`, `homepage`, `documentation`, `readme`, `rust-version`,
   `keywords`, and `categories` metadata.
@@ -71,7 +72,7 @@ private components as server/hosted implementations.
 | Rust docs | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-public cargo doc --workspace --no-deps --locked` | exit 0; no rustdoc warnings promoted by CI |
 | Doc links | project-selected Markdown link checker over tracked `*.md` | exit 0; no broken internal/private link |
 | Metadata | `cargo metadata --locked --no-deps --format-version 1` | all public package URLs use `crabbuild/crab` |
-| Private leakage | `rg -n 'managed-platform|cache-service-implementation|replica-enterprise-readiness|\.kiro/specs|openspec|crab/roadmap' .` | no private document/path reference except explicit boundary prose |
+| Private leakage | `rg -n 'managed-platform|cache-service-implementation|replica-enterprise-readiness|openspec|crab/roadmap' .` | no private document/path reference except explicit boundary prose |
 | Fresh start | follow README quickstart in a fresh clone and temporary object-store test environment | documented visible result |
 
 ## Scope

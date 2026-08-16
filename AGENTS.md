@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Telegraph style. Root rules only. Read scoped steering (`.kiro/steering/`) before subtree work.
+Telegraph style. Root rules only. Read the nearest scoped `AGENTS.md` before subtree work.
 
 ## Start
 
@@ -24,7 +24,6 @@ CrabBuild/
 ├── crab/              Rust CLI + remote helper (product composition)
 ├── crates/            Shared Rust contracts, data plane, storage, orchestration
 ├── crab-web/          Next.js marketing site + Fumadocs docs
-├── .kiro/steering/    Scoped design + style guides (source of truth)
 └── .github/workflows/ CI: e2e-smoke, release, cache-service
 ```
 
@@ -51,7 +50,7 @@ Cargo workspace members: 19 shared crates under `crates/`, plus `crab`.
 - Marketing site + Fumadocs documentation. Hosted at crab.build.
 - Stack: Next.js 16 (Turbopack), React 19, Tailwind v4, Fumadocs, shadcn/ui.
 - Docs: CLI docs symlinked from `crab/docs/`.
-- Steering: `.kiro/steering/crab-web.md`.
+- Follow `AGENTS.md` and adjacent docs/components for web guidance.
 
 ### Design Principles
 
@@ -183,7 +182,7 @@ npm run typecheck          # tsc --noEmit
 - SVG diagrams as React components in `app/diagrams/`. Use CSS custom properties for colors.
 - Performance: LCP < 2.5s, CLS < 0.1. `loading="lazy"` on below-fold images. Explicit dimensions.
 - Every marketing page needs at least one visual diagram.
-- Steering: `.kiro/steering/crab-web.md` for visual identity, component patterns, docs conventions.
+- Follow `AGENTS.md` and adjacent components for visual identity, component patterns, and docs conventions.
 
 ## Code — General
 
@@ -272,8 +271,8 @@ Watch for: interface sandwiches, event emitters to nowhere, IPC stub graveyards,
 ## Docs
 
 - Product name: **Crab**. CLI/package/path/config: `crab`.
-- Blog: `crab-web/content/blog/`. Guide: `.kiro/steering/blog-drafting.md`.
-- SVG diagrams: `.kiro/steering/svg-diagrams.md`.
+- Blog: `crab-web/content/blog/`; follow adjacent posts and their frontmatter.
+- SVG diagrams: follow nearby diagrams and existing rendering conventions.
 - Docs change with behavior/API changes.
 - Docs final answers: include relevant `https://crab.build/docs/...` URL(s) when applicable.
 
@@ -303,12 +302,12 @@ Read before working in these subtrees:
 
 | Path | Steering |
 |------|----------|
-| `crates/` | `crates/AGENTS.md`, `.kiro/steering/code-style.md` |
-| `crab/` | `.kiro/steering/crab.md`, `code-style.md` |
-| `crab-web/` | `.kiro/steering/crab-web.md` |
-| `crab-web/content/blog/` | `.kiro/steering/blog-drafting.md` |
-| SVG diagrams | `.kiro/steering/svg-diagrams.md` |
-| E2E verification | `.kiro/steering/crab-e2e-verification.md` |
-| Subsystem audits | `.kiro/steering/subsystem-evaluation.md` |
-| Feature validation | `.kiro/steering/feature-validation.md` |
-| General methodology | `.kiro/steering/methodology.md` |
+| `crates/` | `crates/AGENTS.md` |
+| `crab/` | `AGENTS.md` |
+| `crab-web/` | `AGENTS.md` and adjacent docs/components |
+| `crab-web/content/blog/` | Adjacent posts and frontmatter |
+| SVG diagrams | Nearby diagrams and rendering conventions |
+| E2E verification | `crab-cli-verification` skill |
+| Subsystem audits | `AGENTS.md` and relevant subsystem docs |
+| Feature validation | `AGENTS.md` feature-validation table |
+| General methodology | `AGENTS.md` methodology section |
