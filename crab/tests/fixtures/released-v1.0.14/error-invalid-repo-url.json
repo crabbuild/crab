@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "error": "invalid_repo_url",
+    "message": "repository URL must use crab://bucket/prefix"
+  }
+}

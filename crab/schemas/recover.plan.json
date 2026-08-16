@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "RecoverCandidate": {
+      "properties": {
+        "file_hash": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "source_kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecoverCandidateKind"
+            }
+          ],
+          "default": "explicit_path"
+        },
+        "source_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_hash",
+        "size",
+        "source_path"
+      ],
+      "type": "object"
+    },
+    "RecoverCandidateKind": {
+      "enum": [
+        "explicit_path",
+        "local_cache",
+        "configured_replica",
+        "import_journal",
+        "workflow_journal"
+      ],
+      "type": "string"
+    },
+    "RecoverItemKind": {
+      "enum": [
+        "file",
+        "shard",
+        "xorb",
+        "pack",
+        "file_index"
+      ],
+      "type": "string"
+    },
+    "RecoverItemState": {
+      "enum": [
+        "repairable",
+        "unrecoverable",
+        "inventory_only"
+      ],
+      "type": "string"
+    },
+    "RecoverPlanItem": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecoverCandidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "file_hash": {
+          "type": "string"
+        },
+        "item_kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecoverItemKind"
+            }
+          ],
+          "default": "file"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/RecoverItemState"
+        }
+      },
+      "required": [
+        "action",
+        "file_hash",
+        "path",
+        "size",
+        "state"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "inventory_only": {
+      "default": 0,
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/definitions/RecoverPlanItem"
+      },
+      "type": "array"
+    },
+    "manifest_path": {
+      "type": "string"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "repairable": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "sources": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "unrecoverable": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "items",
+    "manifest_path",
+    "plan_id",
+    "repairable",
+    "sources",
+    "unrecoverable"
+  ],
+  "title": "RecoverPlanPayload",
+  "type": "object"
+}

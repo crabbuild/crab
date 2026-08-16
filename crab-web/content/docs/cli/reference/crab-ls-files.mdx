@@ -1,0 +1,56 @@
+---
+title: "crab ls-files"
+description: "List files tracked by Crab with their sizes and chunk information."
+---
+
+# crab ls-files
+
+List files tracked by Crab.
+
+## Synopsis
+
+```bash
+crab ls-files [OPTIONS]
+```
+
+## Description
+
+`crab ls-files` lists files managed by Crab's filter driver and reports their
+hydration state. It currently lists the repository-wide set; use the display
+options to control which fields are shown.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-l, --long` | `false` | Show full 64-character hashes |
+| `-s, --size` | `false` | Include file sizes |
+| `-n, --name-only` | `false` | Show only file names |
+| `-j, --json` | `false` | Emit machine-readable JSON output |
+| `-d, --debug` | `false` | Show all available fields for debugging |
+
+## Examples
+
+### List all tracked files
+
+```bash
+crab ls-files
+```
+
+### List with hashes and sizes
+
+```bash
+crab ls-files --long --size
+```
+
+### Show only names
+
+```bash
+crab ls-files --name-only
+```
+
+## Related Commands
+
+- [`crab status`](/docs/cli/reference/crab-status) — hydration state of files.
+- [`crab track`](/docs/cli/reference/crab-track) — manage tracking patterns.
+- [`crab du`](/docs/cli/reference/crab-du) — report storage usage by object class and tier.

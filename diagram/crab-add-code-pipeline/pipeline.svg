@@ -1,0 +1,277 @@
+<svg width="1920" height="1280" viewBox="0 0 1920 1280" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Crab add code-backed pipeline</title>
+  <desc id="desc">Architecture and algorithm diagram for the crab add operation based on source code reads.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1920" y2="1280" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="0.48" stop-color="#0c1222"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111c30" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#0f172a" stop-opacity="0.96"/>
+    </linearGradient>
+    <linearGradient id="cardBlue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11243a"/>
+      <stop offset="1" stop-color="#0f1b2e"/>
+    </linearGradient>
+    <linearGradient id="cardGreen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#102c2a"/>
+      <stop offset="1" stop-color="#10202b"/>
+    </linearGradient>
+    <linearGradient id="cardAmber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#30240f"/>
+      <stop offset="1" stop-color="#1e1a14"/>
+    </linearGradient>
+    <linearGradient id="cardRose" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#321827"/>
+      <stop offset="1" stop-color="#1d1725"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#020617" flood-opacity="0.38"/>
+    </filter>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="10" flood-color="#22d3ee" flood-opacity="0.18"/>
+    </filter>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" stroke="#334155" stroke-opacity="0.12" stroke-width="1"/>
+    </pattern>
+    <marker id="arrowCyan" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 11 5 L 0 10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 11 5 L 0 10 z" fill="#f59e0b"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 11 5 L 0 10 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowRose" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 11 5 L 0 10 z" fill="#fb7185"/>
+    </marker>
+    <style>
+      .font { font-family: Inter, "SF Pro Display", "SF Pro Text", "Segoe UI", Arial, sans-serif; }
+      .mono { font-family: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Consolas, monospace; }
+      .title { font-size: 44px; font-weight: 780; fill: #f8fafc; letter-spacing: 0; }
+      .subtitle { font-size: 18px; font-weight: 500; fill: #94a3b8; letter-spacing: 0; }
+      .panelTitle { font-size: 23px; font-weight: 760; fill: #e2e8f0; letter-spacing: 0; }
+      .cardTitle { font-size: 20px; font-weight: 760; fill: #f8fafc; letter-spacing: 0; }
+      .cardSub { font-size: 13px; font-weight: 650; fill: #67e8f9; letter-spacing: 0; }
+      .small { font-size: 14px; font-weight: 520; fill: #cbd5e1; letter-spacing: 0; }
+      .tiny { font-size: 12px; font-weight: 520; fill: #94a3b8; letter-spacing: 0; }
+      .label { font-size: 13px; font-weight: 700; fill: #0f172a; letter-spacing: 0; }
+      .stepNum { font-size: 16px; font-weight: 820; fill: #06111f; letter-spacing: 0; }
+      .source { font-size: 11px; font-weight: 650; fill: #a5b4fc; letter-spacing: 0; }
+      .sourceTiny { font-size: 9.5px; font-weight: 650; fill: #a5b4fc; letter-spacing: 0; }
+      .mutedStroke { stroke: #334155; stroke-opacity: 0.75; }
+      .cardStroke { stroke: #475569; stroke-opacity: 0.68; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1280" fill="url(#bg)"/>
+  <rect width="1920" height="1280" fill="url(#grid)"/>
+  <circle cx="1680" cy="145" r="280" fill="#0e7490" opacity="0.08"/>
+  <circle cx="220" cy="1110" r="300" fill="#7c3aed" opacity="0.05"/>
+
+  <g class="font">
+    <text class="title" x="72" y="74">Crab add pipeline</text>
+    <text class="subtitle" x="72" y="108">Code-backed architecture and algorithms. Facts are sourced from Rust implementation reads, not docs or prior memory.</text>
+    <g transform="translate(1450 54)">
+      <rect x="0" y="0" width="390" height="56" rx="10" fill="#0f172a" stroke="#334155"/>
+      <circle cx="28" cy="28" r="8" fill="#22d3ee"/>
+      <text class="tiny" x="48" y="23">Main evidence surface</text>
+      <text class="source mono" x="48" y="42">crab/src/cmd/add.rs + stream_stage.rs</text>
+    </g>
+
+    <rect x="60" y="146" width="1800" height="520" rx="18" fill="url(#panel)" stroke="#334155" filter="url(#shadow)"/>
+    <text class="panelTitle" x="92" y="194">1. Runtime architecture</text>
+    <text class="subtitle" x="92" y="222">Data path from CLI orchestration to pointer publication, with ownership boundaries matching source modules.</text>
+
+    <g id="runtime-cards">
+      <g transform="translate(92 258)">
+        <rect width="294" height="332" rx="14" fill="url(#cardBlue)" stroke="#38bdf8" stroke-opacity="0.45" filter="url(#softGlow)"/>
+        <rect x="18" y="18" width="42" height="42" rx="10" fill="#22d3ee"/>
+        <text class="stepNum" x="33" y="46">1</text>
+        <text class="cardTitle" x="74" y="35">CLI orchestration</text>
+        <text class="cardSub mono" x="74" y="56">run_add</text>
+        <text class="small" x="24" y="96">- Resolve worktree and repo root</text>
+        <text class="small" x="24" y="123">- Open TrackedClassifier</text>
+        <text class="small" x="24" y="150">- Auto-track large files if empty</text>
+        <text class="small" x="24" y="177">- Collect candidates and skip clean</text>
+        <text class="small" x="24" y="204">  indexed pointer entries</text>
+        <text class="small" x="24" y="231">- Open shared StagingArea</text>
+        <text class="small" x="24" y="258">- Clamp jobs and spawn tasks</text>
+        <line x1="24" y1="286" x2="266" y2="286" stroke="#334155"/>
+        <text class="source mono" x="24" y="309">add.rs:797-904, 940-974</text>
+      </g>
+
+      <g transform="translate(427 258)">
+        <rect width="294" height="332" rx="14" fill="url(#cardBlue)" stroke="#38bdf8" stroke-opacity="0.45"/>
+        <rect x="18" y="18" width="42" height="42" rx="10" fill="#22d3ee"/>
+        <text class="stepNum" x="33" y="46">2</text>
+        <text class="cardTitle" x="74" y="35">Per-file task</text>
+        <text class="cardSub mono" x="74" y="56">process_file</text>
+        <text class="small" x="24" y="96">- Enter stage_file_streaming</text>
+        <text class="small" x="24" y="123">- Read working-tree file once</text>
+        <text class="small" x="24" y="150">- Working tree is not rewritten</text>
+        <text class="small" x="24" y="177">- Return FileResult with:</text>
+        <text class="small" x="44" y="204">file hash, chunk pairs, stat</text>
+        <text class="small" x="24" y="231">- Progress events are per file</text>
+        <line x1="24" y1="286" x2="266" y2="286" stroke="#334155"/>
+        <text class="source mono" x="24" y="309">add.rs:1234-1298</text>
+      </g>
+
+      <g transform="translate(762 258)">
+        <rect width="294" height="332" rx="14" fill="url(#cardGreen)" stroke="#34d399" stroke-opacity="0.45"/>
+        <rect x="18" y="18" width="42" height="42" rx="10" fill="#34d399"/>
+        <text class="stepNum" x="33" y="46">3</text>
+        <text class="cardTitle" x="74" y="35">Streaming chunker</text>
+        <text class="cardSub mono" x="74" y="56">stream_stage.rs</text>
+        <text class="small" x="24" y="96">- 128 KiB read buffer</text>
+        <text class="small" x="24" y="123">- GearChunker emits chunks</text>
+        <text class="small" x="24" y="150">- Blake3 hashes file and chunks</text>
+        <text class="small" x="24" y="177">- Batches stage in groups of 64</text>
+        <text class="small" x="24" y="204">- Provisional file hash first</text>
+        <text class="small" x="24" y="231">- Adopt to final file hash later</text>
+        <line x1="24" y1="286" x2="266" y2="286" stroke="#334155"/>
+        <text class="source mono" x="24" y="309">stream_stage.rs:22-26, 274-351, 388-422</text>
+      </g>
+
+      <g transform="translate(1097 258)">
+        <rect width="294" height="332" rx="14" fill="url(#cardGreen)" stroke="#34d399" stroke-opacity="0.45"/>
+        <rect x="18" y="18" width="42" height="42" rx="10" fill="#34d399"/>
+        <text class="stepNum" x="33" y="46">4</text>
+        <text class="cardTitle" x="74" y="35">StagingArea</text>
+        <text class="cardSub mono" x="74" y="56">crab-staging</text>
+        <text class="small" x="24" y="96">- stage_chunks_batch is atomic</text>
+        <text class="small" x="24" y="123">- Batch dedup checks existing refs</text>
+        <text class="small" x="24" y="150">- New chunks append to segments</text>
+        <text class="small" x="24" y="177">- Duplicate batch chunks reuse</text>
+        <text class="small" x="24" y="204">  first locator</text>
+        <text class="small" x="24" y="231">- flush_pending fsyncs and</text>
+        <text class="small" x="44" y="258">promotes pending index rows</text>
+        <line x1="24" y1="286" x2="266" y2="286" stroke="#334155"/>
+        <text class="sourceTiny mono" x="24" y="306">crates/crab-staging/src/lib.rs:1052-1225</text>
+        <text class="sourceTiny mono" x="24" y="321">crates/crab-staging/src/lib.rs:1286-1305</text>
+      </g>
+
+      <g transform="translate(1432 258)">
+        <rect width="294" height="332" rx="14" fill="url(#cardAmber)" stroke="#f59e0b" stroke-opacity="0.54"/>
+        <rect x="18" y="18" width="42" height="42" rx="10" fill="#f59e0b"/>
+        <text class="stepNum" x="33" y="46">5</text>
+        <text class="cardTitle" x="74" y="35">Plan and publish</text>
+        <text class="cardSub mono" x="74" y="56">push plan + git index</text>
+        <text class="small" x="24" y="96">- Verify staged chunk sequence</text>
+        <text class="small" x="24" y="123">- Reuse remote/local candidates</text>
+        <text class="small" x="24" y="150">- Pack new chunks into xorbs</text>
+        <text class="small" x="24" y="177">- Write FilePushPlan v3</text>
+        <text class="small" x="24" y="204">- Flush and close staging</text>
+        <text class="small" x="24" y="231">- Write pointer blobs and call</text>
+        <text class="small" x="44" y="258">git update-index -z --index-info</text>
+        <line x1="24" y1="286" x2="266" y2="286" stroke="#334155"/>
+        <text class="sourceTiny mono" x="24" y="306">crates/crab-staging/src/add_push_plan.rs:88-155, 174-355</text>
+        <text class="sourceTiny mono" x="24" y="321">add.rs:1135-1184, 2083-2225</text>
+      </g>
+    </g>
+
+    <path d="M 386 424 L 421 424" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrowCyan)"/>
+    <path d="M 721 424 L 756 424" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrowCyan)"/>
+    <path d="M 1056 424 L 1091 424" stroke="#34d399" stroke-width="4" marker-end="url(#arrowGreen)"/>
+    <path d="M 1391 424 L 1426 424" stroke="#f59e0b" stroke-width="4" marker-end="url(#arrowAmber)"/>
+
+    <g transform="translate(1432 180)">
+      <rect x="0" y="0" width="294" height="50" rx="10" fill="#1f2937" stroke="#f59e0b" stroke-dasharray="6 6"/>
+      <text class="tiny" x="18" y="22">Optional remote lookup:</text>
+      <text class="source mono" x="18" y="39">4096 batch, 3s timeout</text>
+    </g>
+    <path d="M 1579 230 C 1585 244, 1585 244, 1579 258" stroke="#f59e0b" stroke-width="3" stroke-dasharray="6 8" marker-end="url(#arrowAmber)"/>
+
+    <rect x="60" y="704" width="1800" height="484" rx="18" fill="url(#panel)" stroke="#334155" filter="url(#shadow)"/>
+    <text class="panelTitle" x="92" y="752">2. Algorithms and guardrails</text>
+    <text class="subtitle" x="92" y="780">The lower panel shows the critical correctness checks that run inside the architecture above.</text>
+
+    <g transform="translate(92 820)">
+      <rect width="410" height="318" rx="14" fill="#0f172a" stroke="#38bdf8" stroke-opacity="0.55"/>
+      <text class="cardTitle" x="24" y="38">Eligibility and scheduling</text>
+      <text class="small" x="24" y="75">1. Resolve WorktreeContext from cwd.</text>
+      <text class="small" x="24" y="102">2. If no crab filter patterns exist, auto-track</text>
+      <text class="small" x="44" y="129">large files and reopen classifier.</text>
+      <text class="small" x="24" y="156">3. Walk repo with ignore handling, tracked</text>
+      <text class="small" x="44" y="183">classifier, and user pattern filter.</text>
+      <text class="small" x="24" y="210">4. Skip candidates whose Git index pointer</text>
+      <text class="small" x="44" y="237">blob and filesystem stat still match.</text>
+      <text class="small" x="24" y="264">5. Process remaining files with a semaphore.</text>
+      <line x1="24" y1="280" x2="386" y2="280" stroke="#334155"/>
+      <text class="source mono" x="24" y="300">add.rs:802-885, 1529-1638, 1868-1923</text>
+    </g>
+
+    <g transform="translate(534 820)">
+      <rect width="410" height="318" rx="14" fill="#0f172a" stroke="#34d399" stroke-opacity="0.55"/>
+      <text class="cardTitle" x="24" y="38">Streaming staging algorithm</text>
+      <text class="small" x="24" y="75">1. Pre-register file under a provisional hash.</text>
+      <text class="small" x="24" y="102">2. Capture stat before reading.</text>
+      <text class="small" x="24" y="129">3. Read chunks, hash bytes, stage batches.</text>
+      <text class="small" x="24" y="156">4. Capture stat after reading.</text>
+      <text class="small" x="24" y="183">5. If file changed, retire staged rows and</text>
+      <text class="small" x="44" y="210">return FileChangedDuringStaging.</text>
+      <text class="small" x="24" y="237">6. Adopt provisional rows to final hash and</text>
+      <text class="small" x="44" y="264">record the file path.</text>
+      <line x1="24" y1="280" x2="386" y2="280" stroke="#334155"/>
+      <text class="source mono" x="24" y="300">stream_stage.rs:105-214, 217-246</text>
+    </g>
+
+    <g transform="translate(976 820)">
+      <rect width="410" height="318" rx="14" fill="#0f172a" stroke="#f59e0b" stroke-opacity="0.6"/>
+      <text class="cardTitle" x="24" y="38">Push-plan preparation</text>
+      <text class="small" x="24" y="75">1. Load prepared-xorb cache for wanted chunks.</text>
+      <text class="small" x="24" y="102">2. Verify staged chunk rows equal run_add input.</text>
+      <text class="small" x="24" y="129">3. Verify summed staged sizes equal file size.</text>
+      <text class="small" x="24" y="156">4. Accept remote existing refs only when size</text>
+      <text class="small" x="44" y="183">matches the staged chunk.</text>
+      <text class="small" x="24" y="210">5. Rank prepared candidates by coverage, then</text>
+      <text class="small" x="44" y="237">smaller xorb bytes, then hash.</text>
+      <text class="small" x="24" y="264">6. Pack new chunks in reads of 128 staged chunks.</text>
+      <line x1="24" y1="280" x2="386" y2="280" stroke="#334155"/>
+      <text class="sourceTiny mono" x="24" y="296">crates/crab-staging/src/add_push_plan.rs:101-155,</text>
+      <text class="sourceTiny mono" x="24" y="310">174-355, 358-410</text>
+    </g>
+
+    <g transform="translate(1418 820)">
+      <rect width="410" height="318" rx="14" fill="#0f172a" stroke="#a78bfa" stroke-opacity="0.55"/>
+      <text class="cardTitle" x="24" y="38">Git publication boundary</text>
+      <text class="small" x="24" y="75">1. Roll back staged files if earlier failures exist.</text>
+      <text class="small" x="24" y="102">2. Close staging: flush_pending, try_unwrap, close.</text>
+      <text class="small" x="24" y="129">3. Publish only if no skip_git_add, entries exist,</text>
+      <text class="small" x="44" y="156">and there were no failures.</text>
+      <text class="small" x="24" y="183">4. Create pointer payload with shard hints.</text>
+      <text class="small" x="24" y="210">5. write_blob with gix, then batch publish via</text>
+      <text class="small" x="44" y="237">git update-index -z --index-info.</text>
+      <text class="small" x="24" y="264">6. Patch Git stat cache when file stat still matches.</text>
+      <line x1="24" y1="280" x2="386" y2="280" stroke="#334155"/>
+      <text class="source mono" x="24" y="300">add.rs:1055-1184, 1516-1525, 2083-2225, 2290-2303</text>
+    </g>
+
+    <path d="M 502 972 L 528 972" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrowCyan)"/>
+    <path d="M 944 972 L 970 972" stroke="#34d399" stroke-width="4" marker-end="url(#arrowGreen)"/>
+    <path d="M 1386 972 L 1412 972" stroke="#f59e0b" stroke-width="4" marker-end="url(#arrowAmber)"/>
+
+    <g transform="translate(92 1148)">
+      <rect x="0" y="0" width="1736" height="40" rx="10" fill="#111827" stroke="#334155"/>
+      <circle cx="22" cy="20" r="6" fill="#22d3ee"/>
+      <text class="tiny" x="38" y="25">cyan: data flow</text>
+      <circle cx="176" cy="20" r="6" fill="#34d399"/>
+      <text class="tiny" x="192" y="25">green: local staging/index mutation</text>
+      <circle cx="448" cy="20" r="6" fill="#f59e0b"/>
+      <text class="tiny" x="464" y="25">amber: optional reuse, planning, publication</text>
+      <circle cx="774" cy="20" r="6" fill="#fb7185"/>
+      <text class="tiny" x="790" y="25">rose: failure/cancel rollback before Git index publication</text>
+      <text class="source mono" x="1220" y="25">Generated artifact: diagram/crab-add-code-pipeline/pipeline.svg</text>
+    </g>
+
+    <g transform="translate(1155 686)">
+      <path d="M 0 0 C 90 -34, 180 -34, 270 0" stroke="#fb7185" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#arrowRose)"/>
+      <rect x="284" y="-30" width="455" height="58" rx="10" fill="#241524" stroke="#fb7185" stroke-opacity="0.65"/>
+      <text class="small" x="304" y="-7">Rollback guard: file failures, cancellation, or push-plan</text>
+      <text class="small" x="304" y="17">errors retire staged files before Git index publication.</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,150 @@
+---
+title: "Why We Built Crab: The Problem with Large Files in Git"
+description: "The origin story behind Crab — why large files strain Git, why server-based fixes add operational weight, and how object storage can become the remote."
+date: "2025-09-08"
+author: "Crab Team"
+category: "product"
+tags: ["beginner", "origin-story", "motivation"]
+excerpt: "Git wasn't built for large files. Instead of adding another server to babysit, Crab asks a simpler question: what if object storage is the remote?"
+level: "beginner"
+path: "start-here"
+order: 2
+concepts: ["large files", "git limits", "serverless architecture"]
+prerequisites: ["What Is Crab?"]
+outcome: "See why Crab exists and how its serverless premise changes the tradeoffs of large-file versioning."
+diagramType: "Problem framing"
+---
+
+## The Pain: Git Wasn't Built for Large Files
+
+If you've ever tried to commit a 2 GB machine learning model, a 500 MB game texture pack, or a dataset that grows every week, you already know the feeling. Git slows to a crawl. Your `.git` folder balloons. Clones take forever. Colleagues curse your name in Slack.
+
+Git is brilliant at tracking text — source code, configs, documentation. It diffs line by line, compresses efficiently, and keeps a full history without breaking a sweat. But hand it a binary file larger than a few megabytes and the whole model breaks down. Every version of that file gets stored in full. There's no meaningful diff. Your repository becomes a liability.
+
+We lived this pain firsthand. Our team was working with repositories containing hundreds of gigabytes of ML model weights, training data, and media assets. Every `git clone` was a coffee break. Every `git push` was a prayer. We needed a better way.
+
+## Existing Solutions and Their Tradeoffs
+
+We tried everything. Here's what we found:
+
+**Git LFS** — the most popular option. It replaces large files with pointer files and stores the actual content on a separate server. It works, but you need to run (or pay for) an LFS server. GitHub's LFS has bandwidth limits. Self-hosted LFS means another service to maintain, monitor, and scale. And there's no deduplication — store the same 1 GB file in two branches and you're paying for 2 GB.
+
+**DVC (Data Version Control)** — designed for ML pipelines. It tracks large files outside git and pushes them to remote storage. But DVC introduces its own CLI, its own workflow (`dvc push`, `dvc pull`), and its own metadata files. Your team now needs to learn two version control systems. And if someone forgets `dvc pull` after cloning, nothing works.
+
+**Manual cloud storage** — just throw files in S3 and reference them by URL. Simple, but now you've lost versioning. You've lost atomic commits. You can't roll back to "the model that worked last Tuesday" without building your own tracking system. You've essentially given up on git's core value proposition.
+
+Every solution we evaluated had the same fundamental architecture:
+
+```
+Your Machine → Git Server → Separate Storage Server
+                              ↑
+                    (you maintain this)
+```
+
+There's always a server in the middle. Something to deploy, configure, monitor, patch, and pay for — even when all you want is to store bytes somewhere and get them back later.
+
+## The Insight: What If Storage IS the Server?
+
+One evening, staring at yet another LFS server outage alert, we asked a simple question: **why do we need a server at all?**
+
+Think about what an LFS server actually does. It receives file uploads and puts them in object storage (usually S3). It receives download requests and streams files back from that same object storage. It's a middleman. A proxy. A $200/month EC2 instance whose entire job is to shuttle bytes between your laptop and an S3 bucket.
+
+What if we cut out the middleman entirely?
+
+Cloud object storage — S3, GCS, Azure Blob — already provides everything a file server does: uploads, downloads, access control, durability, availability. It's managed infrastructure that scales to exabytes without you lifting a finger. The only reason we put a server in front of it is because git doesn't know how to talk to S3 directly.
+
+But git has an extension point for exactly this: **remote helpers**. A git remote helper is a program that teaches git how to push and pull from any storage backend. If we wrote a remote helper that speaks directly to object storage, we could eliminate the server entirely.
+
+That was the moment Crab was born.
+
+<svg viewBox="0 0 800 480" width="100%" role="img" aria-label="Diagram showing pain points on the left (server maintenance, bandwidth costs, no deduplication, complex setup) mapped to Crab's solutions on the right (serverless, pay only for storage, content-addressed dedup, zero config)">
+  <defs>
+    <marker id="arrow-why" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)"/>
+    </marker>
+  </defs>
+
+  <text x="400" y="35" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Pain Points → Crab's Solutions"}</text>
+
+  <rect x="30" y="60" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="180" y="90" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Server maintenance & monitoring"}</text>
+
+  <rect x="30" y="130" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="180" y="160" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Bandwidth costs & transfer limits"}</text>
+
+  <rect x="30" y="200" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="180" y="230" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"No deduplication across versions"}</text>
+
+  <rect x="30" y="270" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="180" y="300" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Complex setup & configuration"}</text>
+
+  <rect x="30" y="340" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="180" y="370" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Separate workflow from git"}</text>
+
+  <rect x="470" y="60" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="620" y="90" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Serverless — just object storage"}</text>
+
+  <rect x="470" y="130" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="620" y="160" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Pay only for storage you use"}</text>
+
+  <rect x="470" y="200" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="620" y="230" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Content-addressed deduplication"}</text>
+
+  <rect x="470" y="270" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="620" y="300" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Zero config — works out of the box"}</text>
+
+  <rect x="470" y="340" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="620" y="370" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Native git commands — no new CLI"}</text>
+
+  <line x1="330" y1="85" x2="470" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+  <line x1="330" y1="155" x2="470" y2="155" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+  <line x1="330" y1="225" x2="470" y2="225" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+  <line x1="330" y1="295" x2="470" y2="295" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+  <line x1="330" y1="365" x2="470" y2="365" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+
+  <text x="400" y="440" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Every pain point maps to a design decision"}</text>
+</svg>
+
+## Design Goals
+
+With the core insight in hand, we set four non-negotiable design goals:
+
+**Serverless.** No EC2 instances, no containers, no databases. Your repository lives entirely in cloud object storage. The only infrastructure you manage is a bucket — and your cloud provider handles the rest. No more 3 AM pager alerts because your LFS server ran out of disk.
+
+**Content-addressed deduplication.** When you modify 10 bytes in a 1 GB file, you shouldn't re-upload 1 GB. Crab splits files into variable-size chunks using content-defined chunking. Identical chunks are stored once, regardless of which file or branch they appear in. Iterative large-file work starts to scale with changed chunks, not whole-file versions.
+
+**Git-native.** No new commands to learn. No separate push/pull workflow. You use `git add`, `git commit`, `git push`, and `git clone` exactly as you always have. Crab hooks into git's remote helper and filter process protocols to handle large files transparently. If you know git, you already know Crab.
+
+**Zero configuration.** Point Crab at a bucket and start pushing. No server provisioning, no webhook setup, no token management beyond your existing cloud credentials. A new team member clones the repo and everything works — no "did you install the LFS extension?" conversations.
+
+Here's what the workflow looks like in practice:
+
+```bash
+# Initialize Crab in your repo (one time)
+crab init --storage-provider s3 crab://my-team-bucket/ml-models
+crab setup
+
+# Add a large file — Crab chunks and deduplicates it
+crab add training-data/model-v3.safetensors
+
+# Commit and push — standard git commands
+git commit -m "Add v3 model weights"
+git push origin main
+
+# On another machine — clone and everything is there
+git clone crab://my-team-bucket/ml-models
+```
+
+No server to deploy. No LFS endpoint to configure. No separate `dvc pull` to remember. Just git, a bucket, and your files.
+
+## Where Crab Is Today
+
+What started as a frustrated question — "why do we need a server?" — has grown into a tool used by ML teams, game studios, and data engineering groups who got tired of maintaining infrastructure just to store files.
+
+Crab today supports S3, Google Cloud Storage, and Azure Blob Storage. It handles repositories with hundreds of gigabytes of data. It deduplicates aggressively, caches intelligently, and integrates with existing Git LFS workflows for teams migrating gradually.
+
+We're still building. Lazy checkout lets you clone pointer metadata first and download file content only when you need it. A FUSE-based virtual filesystem can make large repositories feel local while bytes stream on demand. Garbage collection reclaims space from deleted branches when you run it.
+
+But the core insight hasn't changed: your cloud storage is already a world-class file server. You just needed a git remote helper smart enough to use it directly.
+
+If you've felt the pain of large files in git — the slow clones, the ballooning costs, the server babysitting — we built Crab for you. Give it a try and let us know what you think.

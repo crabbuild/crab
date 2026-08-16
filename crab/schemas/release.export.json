@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseExportPayload",
+  "type": "object",
+  "required": [
+    "manifest_digest",
+    "output_path",
+    "release_id"
+  ],
+  "properties": {
+    "manifest_digest": {
+      "type": "string"
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "release_id": {
+      "type": "string"
+    }
+  }
+}

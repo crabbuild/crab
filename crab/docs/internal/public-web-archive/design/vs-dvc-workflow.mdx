@@ -1,0 +1,314 @@
+# Crab Workflow Engine vs DVC Pipeline Engine — Deep Comparison
+
+## Executive Summary
+
+Crab's workflow engine is **feature-superior to DVC's pipeline engine** in
+several critical dimensions (parallelism, crash recovery, resource-aware
+scheduling, structured output). DVC has advantages in ecosystem maturity,
+templating, and experiment management UX. This document maps every DVC
+capability to its Crab equivalent and identifies gaps.
+
+Sources: [DVC docs](https://dvc.org/doc/user-guide/pipelines),
+[DVC dvc.yaml spec](https://dvc.org/doc/user-guide/project-structure/dvcyaml-files),
+[DVC run cache](https://dvc.org/doc/user-guide/pipelines/run-cache),
+[DVC experiments](https://dvc.org/doc/user-guide/experiment-management/running-experiments).
+
+---
+
+## 1. Pipeline Definition
+
+| Aspect | DVC (`dvc.yaml`) | Crab (`crab.yaml`) | Verdict |
+|--------|-------------------|------------------------|---------|
+| Format | YAML 1.2, `deny_unknown_fields` | YAML 1.2, `deny_unknown_fields` | Parity |
+| Stage command | `cmd:` (string or list of strings) | `cmd:` (shell string) or `cmd: {argv: [...]}` | Parity |
+| Dependencies | `deps:` (file paths) | `deps:` (file paths + structured forms) | **Crab ahead** — also supports `crab:`, `git:`, `url:`, `oci:`, `stage_out:` |
+| Outputs | `outs:` with `cache`, `persist`, `push` subfields | `outs:` with `cache`, `persist`, `kind`, `max_bytes` subfields | Parity (different extras) |
+| Parameters | `params:` with dot-path keys from `params.yaml` | `params:` with dot-path keys from `params.yaml` | Parity |
+| Metrics | `metrics:` file list | `metrics:` file list | Parity |
+| Plots | `plots:` with rich x/y/template config | `plots:` file list (no rendering config) | **DVC ahead** — plot rendering config |
+| Working dir | `wdir:` per stage | Not supported (always repo root) | **DVC ahead** |
+| Frozen stages | `frozen: true` | Not supported | **DVC ahead** |
+| Always changed | `always_changed: true` | `nondeterministic: true` (similar semantics) | Parity |
+| Stage description | `desc:` field | Not supported | **DVC ahead** (minor) |
+| Meta field | `meta:` (arbitrary ignored data) | Not supported | **DVC ahead** (minor) |
+
+### Templating & Iteration
+
+| Feature | DVC | Crab | Verdict |
+|---------|-----|--------|---------|
+| Variable substitution | `${param.key}` from params or `vars:` | Not supported | **DVC ahead** |
+| `foreach` stages | Iterate over list/dict, expand to N stages | Not supported | **DVC ahead** |
+| `matrix` stages | Cartesian product expansion | Not supported | **DVC ahead** |
+| Dictionary unpacking in cmd | `${mydict}` → `--key val` args | Not supported | **DVC ahead** |
+
+**Gap assessment**: DVC's templating is a significant productivity feature for
+hyperparameter sweeps. Crab compensates with the experiment system (param
+overrides per experiment) but lacks the declarative expansion.
+
+---
+
+## 2. DAG Execution
+
+| Aspect | DVC (`dvc repro`) | Crab (`crab run`) | Verdict |
+|--------|-------------------|------------------------|---------|
+| Execution model | **Sequential** — stages run one at a time in topo order | **Parallel** — independent stages run concurrently (semaphore-bounded) | **Crab far ahead** |
+| Parallelism config | None (single-threaded) | `--parallelism N` or `[workflow] parallelism` | **Crab ahead** |
+| Partial failure | Stops at first failure | `--keep-going` (independent branches continue) | **Crab ahead** |
+| Ignore errors | Not supported | `--ignore-errors` (attempt all stages) | **Crab ahead** |
+| Resource constraints | Not supported | `resources: {cpu, gpu, memory}` gates scheduling | **Crab ahead** |
+| Stage timeout | Not supported | `timeout: "1h"` per stage | **Crab ahead** |
+| Retry on failure | Not supported | `retry: {max_attempts, on_exit_codes, on_signals, backoff}` | **Crab ahead** |
+| Crash recovery | None — re-run from scratch | Journal-based resume (committed stages skipped) | **Crab far ahead** |
+| Scheduler lock | `.dvc/tmp/lock` (whole project) | Per-ref scheduler lock with configurable timeout | **Crab ahead** |
+| Target selection | `dvc repro <stage>` runs one stage + upstream | `crab run <stage>` from yaml, or full DAG | Parity |
+| Single-item mode | `--single-item` (one stage only) | `--name <stage> --deps --outs -- cmd` (inline) | Parity |
+
+**Key insight**: DVC runs stages **strictly sequentially**. There is no
+intra-pipeline parallelism in `dvc repro`. DVC's parallelism only exists at
+the *experiment* level (`dvc queue start --jobs N`), where entire pipeline
+copies run in isolated workspaces. Crab parallelizes *within* a single
+pipeline run.
+
+---
+
+## 3. Caching & Invalidation
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Cache key | MD5 of (cmd + dep hashes + param values) | Blake3 of (cmd + dep hashes + param values + env + flags) | **Crab ahead** (stronger hash, more inputs) |
+| Hash algorithm | MD5 (legacy), SHA-256 (DVC 3.0+) | Blake3 (faster, collision-resistant) | **Crab ahead** |
+| Run cache | `.dvc/cache/runs/` — stores `dvc.lock` backup | `.crab/cache/stages/{shard}/{hash}.json` — stores full entry | Parity |
+| Cache hit behavior | Restores outputs from cache, skips execution | Restores outputs, skips execution | Parity |
+| Remote cache | `dvc push/pull --run-cache` | `crab run --cache-push` / `--pull-cache` | Parity |
+| Cache integrity | MD5 verification | Blake3 verification + schema version check | **Crab ahead** |
+| Explain miss | Not supported | `--explain-miss` (field-by-field diff) | **Crab ahead** |
+| Cache-only mode | Not supported | `--cache-only` (exit 3 on miss) | **Crab ahead** |
+| Disk pressure | No handling | Graceful degradation (skip writes, warn) | **Crab ahead** |
+| Read-only cache | Not supported | Auto-detected, operates without cache | **Crab ahead** |
+| `cache: false` per output | Disables run cache for that stage | `cache: false` per output | Parity |
+| `persist: true` | Output not deleted before re-run | `persist: true` | Parity |
+
+### What DVC hashes for the run cache
+
+DVC's run cache key is a hash of:
+- The literal `cmd` string
+- MD5/SHA-256 of each dep file
+- Param key-value pairs (from params files)
+
+Crab's stage hash includes all of the above plus:
+- Environment variable allowlist values
+- `hermetic` / `nondeterministic` flags
+- Output path declarations (so renaming an out invalidates)
+
+---
+
+## 4. Lockfile
+
+| Aspect | DVC (`dvc.lock`) | Crab (`crab.lock`) | Verdict |
+|--------|------------------|------------------------|---------|
+| Format | YAML with `schema: '2.0'` | YAML with `schema_version` + `crab_hash_algo` | Parity |
+| Content | cmd, dep hashes, param values, out hashes+sizes | cmd, dep hashes, param values, out hashes+sizes+modes | **Crab ahead** (preserves file modes) |
+| Canonical form | Not enforced | Double-quoted strings, sorted keys | **Crab ahead** (deterministic diffs) |
+| Multi-stage | All stages in one file | All stages in one file | Parity |
+| Templating expansion | `foreach`/`matrix` expanded in lock | N/A (no templating) | N/A |
+
+---
+
+## 5. Experiment Management
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Experiment tracking | `dvc exp run` creates hidden Git refs | `crab run` with experiment worktrees | Parity |
+| Param override CLI | `--set-param key=value` | Experiment system (param overrides) | Parity |
+| Experiment queue | `dvc exp run --queue` + `dvc queue start` | Not supported (no queue) | **DVC ahead** |
+| Parallel experiments | `dvc queue start --jobs N` (isolated workspaces) | Not supported at experiment level | **DVC ahead** |
+| Grid search | `--set-param 'key=range(0.01,0.1,0.01)'` | Not supported declaratively | **DVC ahead** |
+| Experiment comparison | `dvc exp show`, `dvc exp diff` | Experiment metadata refs + structured output | Parity |
+| Experiment apply | `dvc exp apply <name>` | Experiment worktree checkout | Parity |
+| Experiment persistence | `dvc exp push/pull` to Git remote | Experiment refs pushed to crab remote | Parity |
+
+**Gap assessment**: DVC's experiment queue with parallel workers is a
+significant UX advantage for hyperparameter sweeps. Crab's intra-pipeline
+parallelism is orthogonal — it speeds up a single run, while DVC's queue
+parallelizes across runs.
+
+---
+
+## 6. Observability & Output
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Structured output | Limited (some JSON in newer versions) | `--json` (envelope) and `--jsonl` (streaming events) | **Crab far ahead** |
+| Progress events | Text-based ("Running stage 'X'") | Typed JSONL events (started, cache_checked, produced, committed) | **Crab far ahead** |
+| OTLP tracing | Not supported | OpenTelemetry spans per stage | **Crab ahead** |
+| Dry-run | `dvc repro --dry` | `--dry-run` (inline) / `--validate` (YAML check) | Parity |
+| DAG visualization | `dvc dag` (ASCII, Mermaid, dot) | `crab workflow dag` (ASCII, Mermaid, JSON) | Parity |
+| Verbose/debug | `-v` / `-vv` flags | `RUST_LOG=debug` / tracing levels | Parity |
+
+---
+
+## 7. Data Management Integration
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Large file tracking | `.dvc` files + `dvc add` | Pointer blobs + `crab add` (CDC chunking) | **Crab ahead** (dedup) |
+| Remote storage | S3, GCS, Azure, SSH, HTTP, HDFS | S3, GCS, Azure | DVC has more backends |
+| Content-defined chunking | Not supported (whole-file hash) | Gearhash CDC with 3-tier dedup | **Crab far ahead** |
+| Lazy checkout / VFS | Not supported | FUSE mount, on-demand hydration | **Crab far ahead** |
+| Git LFS compat | Separate tool | Built-in LFS transfer agent | **Crab ahead** |
+
+---
+
+## 8. Multi-Root / Discovery
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Multiple `dvc.yaml` files | Scans entire project tree automatically | `--recursive` flag or `[workflow] discover` config | Parity |
+| Stage name scoping | Flat namespace (must be unique across all files) | Dotted prefix from directory path (`data.clean`) | **Crab ahead** |
+| Cross-file deps | Implicit via file path overlap | Implicit via file path overlap + `stage_out:` explicit | **Crab ahead** |
+
+---
+
+## 9. Side Effects & Hooks
+
+| Aspect | DVC | Crab | Verdict |
+|--------|-----|--------|---------|
+| Side-effect stages | No explicit concept | `side_effects: true` + `on_cache_hit:` hook | **Crab ahead** |
+| Post-stage hooks | Not supported | `on_cache_hit` command execution | **Crab ahead** |
+| Watch mode | Not supported | `--watch` (re-execute on dep changes) | **Crab ahead** |
+
+---
+
+## 10. Gaps Where DVC Is Ahead (Action Items for Crab)
+
+### High Priority
+
+1. **Templating / Variable Substitution** — DVC's `${param.key}` in any YAML
+   field is heavily used. Without it, users must duplicate values or use
+   external templating (envsubst, jinja).
+
+2. **`foreach` / `matrix` Stage Expansion** — Critical for hyperparameter
+   sweeps. DVC users define one stage template and expand it to N stages
+   declaratively.
+
+3. **Experiment Queue** — `dvc exp run --queue` + `dvc queue start --jobs N`
+   enables batch hyperparameter search with workspace isolation. Crab has
+   no equivalent.
+
+### Medium Priority
+
+4. **`wdir:` (Working Directory)** — Useful for monorepos where stages run
+   in subdirectories. Currently Crab stages always run from repo root.
+
+5. **`frozen: true`** — Prevents a stage from being re-executed even if
+   inputs changed. Useful during development to skip expensive stages.
+
+6. **Plot Configuration** — DVC's plot system with templates, x/y axis
+   config, and rendering is more mature than Crab's file-list approach.
+
+### Low Priority
+
+7. **`desc:` / `meta:` fields** — Documentation metadata. Nice-to-have.
+
+8. **`--pull` / `--allow-missing`** — DVC's ability to skip stages with
+   missing data (and pull only what's needed) is useful for partial
+   reproduction on CI. Crab's `--cache-only` partially covers this.
+
+---
+
+## 11. Gaps Where Crab Is Ahead (Competitive Advantages)
+
+1. **Parallel DAG execution** — DVC is strictly sequential within a pipeline.
+   This is Crab's biggest differentiator for multi-stage pipelines.
+
+2. **Crash recovery / Journal** — DVC has no resume mechanism. A killed
+   `dvc repro` re-runs everything from scratch.
+
+3. **Retry with backoff** — DVC has no built-in retry. Users must wrap
+   commands in shell retry loops.
+
+4. **Resource-aware scheduling** — DVC has no concept of CPU/GPU/memory
+   requirements per stage.
+
+5. **Structured JSONL streaming** — DVC's output is text-based. Crab
+   emits machine-parseable events suitable for desktop UIs and CI systems.
+
+6. **Content-defined chunking** — DVC hashes whole files. Crab deduplicates
+   at the chunk level, dramatically reducing storage for large files with
+   small changes.
+
+7. **Explain-miss diagnostics** — DVC offers no way to understand *why* a
+   stage was invalidated beyond `dvc status` (which shows what changed, not
+   the hash diff).
+
+8. **Blake3 hashing** — Faster and more collision-resistant than MD5/SHA-256.
+
+9. **Watch mode** — Continuous re-execution on file changes.
+
+10. **Side-effect hooks** — `on_cache_hit` enables notifications, deployments,
+    etc. without re-executing the stage.
+
+---
+
+## 12. Architecture Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         DVC Architecture                         │
+├─────────────────────────────────────────────────────────────────┤
+│  dvc.yaml ──parse──▶ Stage objects ──toposort──▶ Sequential     │
+│                                                   executor      │
+│                                                      │          │
+│  For each stage:                                     ▼          │
+│    1. Check dvc.lock (has anything changed?)                    │
+│    2. If changed: delete outs, run cmd, hash outs, update lock  │
+│    3. If unchanged: skip ("didn't change, skipping")            │
+│    4. Run cache: if same (cmd+deps+params) seen before,         │
+│       restore outs from .dvc/cache without running              │
+│                                                                  │
+│  Experiment queue (separate system):                             │
+│    - Copies workspace to .dvc/tmp/exps/                         │
+│    - Runs full pipeline in isolation                            │
+│    - Multiple workers = multiple full pipeline copies           │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                       Crab Architecture                        │
+├─────────────────────────────────────────────────────────────────┤
+│  crab.yaml ──parse──▶ Stage objects ──Graph::build──▶ DAG     │
+│                                                          │      │
+│  DagScheduler:                                           ▼      │
+│    ready_queue (min-heap) ◀── source nodes (in-degree 0)        │
+│    semaphore (bounds concurrency to N)                           │
+│    resource_pool (CPU/GPU/memory tracking)                       │
+│                                                                  │
+│  For each ready stage (parallel):                                │
+│    1. Compute stage_hash (blake3 of cmd+deps+params+env+flags)  │
+│    2. Check local cache → remote cache → execute                │
+│    3. If execute: run cmd, hash outs, write cache entry          │
+│    4. Journal: write state transitions (crash-safe)             │
+│    5. On success: decrement in-degree of consumers,             │
+│       push newly-ready stages to ready_queue                    │
+│    6. On failure: apply keep-going policy                       │
+│                                                                  │
+│  Experiment system:                                              │
+│    - Worktree-based isolation (git worktree)                    │
+│    - Metadata stored as refs in crab remote                   │
+│    - No queue (experiments run immediately)                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 13. Conclusion
+
+Crab's workflow engine is **more capable than DVC's pipeline engine** for
+production workloads: parallel execution, crash recovery, retry, resource
+scheduling, and structured observability are all features DVC lacks. The
+primary gaps are in **developer ergonomics** (templating, foreach/matrix,
+experiment queue) rather than execution capability.
+
+For users migrating from DVC, the `crab.yaml` schema is intentionally
+similar enough that most `dvc.yaml` files can be converted with minimal
+changes (rename `dvc.yaml` → `crab.yaml`, remove unsupported fields like
+`wdir`/`frozen`/`vars`). The execution semantics are a strict superset.

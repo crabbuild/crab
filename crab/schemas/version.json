@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VersionPayload",
+  "description": "Payload emitted by `crab version --json`.",
+  "type": "object",
+  "required": [
+    "build_timestamp",
+    "crab_version",
+    "git_sha",
+    "schemas"
+  ],
+  "properties": {
+    "build_timestamp": {
+      "type": "string"
+    },
+    "crab_version": {
+      "type": "string"
+    },
+    "git_sha": {
+      "type": "string"
+    },
+    "schemas": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

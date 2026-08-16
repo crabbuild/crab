@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ImportPlanSummary",
+  "description": "Dry-run manifest preview: what the real run would have done if the user hadn't passed `--dry-run`.\n\nKept separate from the main [`ImportSummary`] body so the dry-run-only fields can grow without disturbing the terminal schema for real imports.",
+  "type": "object",
+  "required": [
+    "bytes_total",
+    "collision_warnings",
+    "extension_histogram",
+    "files_total",
+    "lfs_pointer_count",
+    "planned_commit_count",
+    "same_bucket",
+    "versioning"
+  ],
+  "properties": {
+    "bytes_total": {
+      "description": "Total source-object bytes across those files.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "collision_warnings": {
+      "description": "Collision / safety warnings gathered during preflight. Empty when the plan is clean. Rendered verbatim by the text mode.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extension_histogram": {
+      "description": "Extension histogram over the enumerated entries.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExtensionBucket"
+      }
+    },
+    "files_total": {
+      "description": "Total files the real run would have attempted to ingest.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "lfs_pointer_count": {
+      "description": "Number of entries the ingest guard would have flagged as LFS pointer blobs.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "planned_commit_count": {
+      "description": "Number of commits the window planner produced. For `Flat` / `SingleSnapshot` always `1`.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "same_bucket": {
+      "description": "`true` when `--from` and `--to` resolve to the same physical bucket. Informational only; affects nothing about the plan itself.",
+      "type": "boolean"
+    },
+    "versioning": {
+      "description": "Versioning mode the detect stage reported.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/SummaryVersioning"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "ExtensionBucket": {
+      "description": "One bucket in the extension histogram reported by a dry-run.\n\n`count` and `total_bytes` are across every matching entry before deduplication — i.e. summed source-object sizes, not post-CDC staging bytes. That's the honest \"how much is in this bucket?\" answer for a dry-run; real byte accounting lands after ingest runs.",
+      "type": "object",
+      "required": [
+        "count",
+        "extension",
+        "total_bytes"
+      ],
+      "properties": {
+        "count": {
+          "description": "Number of matching entries across all windows.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "extension": {
+          "description": "Lowercase file extension (no leading dot). `\"\"` for entries without an extension.",
+          "type": "string"
+        },
+        "total_bytes": {
+          "description": "Summed source-object bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SummaryVersioning": {
+      "description": "Versioning mode reported by the detect stage, exposed on [`ImportSummary`] and in the [`ImportPlanSummary`].\n\nKept serialisable so operators can filter summaries by mode without parsing the source URL back apart.",
+      "oneOf": [
+        {
+          "description": "Non-versioned bucket; exactly one commit reflects the current state.",
+          "type": "string",
+          "enum": [
+            "flat"
+          ]
+        },
+        {
+          "description": "Versioned bucket; history landed as N time-windowed commits.",
+          "type": "string",
+          "enum": [
+            "versioned"
+          ]
+        },
+        {
+          "description": "`--at <timestamp>` single-snapshot import.",
+          "type": "string",
+          "enum": [
+            "single_snapshot"
+          ]
+        }
+      ]
+    }
+  }
+}

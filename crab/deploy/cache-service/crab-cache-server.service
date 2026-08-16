@@ -1,0 +1,44 @@
+# Systemd unit file for crab-cache-server.
+#
+# Install:
+#   cp crab-cache-server.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now crab-cache-server
+#
+# The binary reads its config from --config; TLS keys and cloud
+# credentials come from environment variables or IAM instance roles.
+
+[Unit]
+Description=Crab Cache Service — org-level object cache and chunk dedup
+Documentation=https://github.com/your-org/crab
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crab-cache-server --config /etc/crab-cache-server/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Allow plenty of file descriptors for concurrent connections + NVMe I/O.
+LimitNOFILE=65536
+
+# Graceful shutdown: SIGTERM triggers drain of in-flight requests.
+KillSignal=SIGTERM
+TimeoutStopSec=35
+
+# Run as a dedicated service user (create with: useradd -r -s /sbin/nologin crab-cache).
+User=crab-cache
+Group=crab-cache
+
+# Hardening.
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+ReadWritePaths=/data/crab-cache /var/log/crab-cache
+
+# Cloud credentials via environment (override in a drop-in or EnvironmentFile).
+EnvironmentFile=-/etc/crab-cache-server/env
+
+[Install]
+WantedBy=multi-user.target

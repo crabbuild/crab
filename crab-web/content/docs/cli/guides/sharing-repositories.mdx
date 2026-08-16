@@ -1,0 +1,209 @@
+---
+title: "Sharing Repositories"
+description: "Clone and work with a shared Crab repository as a collaborator, including hydrating files, making changes, and pushing back."
+---
+
+# Sharing Repositories
+
+This guide walks through the collaborator workflow: cloning a shared Crab
+repository, hydrating the files you need, making changes, and pushing them
+back. If you are setting up a repository for the first time, see
+[Creating a Repository](/docs/cli/getting-started/first-repository) instead.
+
+## Overview
+
+Crab repositories use lazy checkout by default. When you clone, the working
+tree contains lightweight pointer stubs instead of full file content. This
+means cloning a 50 GB repository takes seconds, not hours. You then
+selectively hydrate only the files you need to work with.
+
+The typical collaborator workflow looks like this:
+
+1. Clone the repository (instant, lazy)
+2. Hydrate the files you need
+3. Make changes and stage them
+4. Dehydrate before pulling (if others have pushed)
+5. Push your changes
+
+## Prerequisites
+
+- The `crab` binary installed and on your `PATH`
+  ([Installation](/docs/cli/getting-started/installation))
+- `git` version 2.27 or later
+- Cloud credentials configured for the remote bucket
+  ([Authentication & Config](/docs/cli/authentication/configuration))
+
+## Step 1: Clone the repository
+
+Use `crab clone` with the `crab://` URL shared by your team:
+
+```bash
+crab clone crab://team-bucket/ml-project
+cd ml-project
+```
+
+This creates a local clone with pointer stubs for all tracked files. The
+clone is nearly instant regardless of how much data the repository holds.
+
+To clone a specific branch:
+
+```bash
+crab clone --branch feature/new-model crab://team-bucket/ml-project
+```
+
+For CI or bandwidth-constrained environments, combine with a shallow clone:
+
+```bash
+crab clone --depth 1 crab://team-bucket/ml-project
+```
+
+See [`crab clone`](/docs/cli/getting-started/cloning-a-repository) for all
+available options.
+
+## Step 2: Hydrate the files you need
+
+After cloning, check which files are pointers and which are hydrated:
+
+```bash
+crab status
+```
+
+Hydrate specific file types you plan to work with:
+
+```bash
+crab hydrate '*.safetensors' '*.bin'
+```
+
+Or hydrate a specific directory:
+
+```bash
+crab hydrate --include 'models/**'
+```
+
+If you need everything (and have the disk space):
+
+```bash
+crab hydrate --all
+```
+
+For CI pipelines, use a manifest file to hydrate a precise set of paths:
+
+```bash
+crab hydrate --manifest .crab/manifests/ci.txt
+```
+
+See [`crab hydrate`](/docs/cli/daily-workflow/hydrating-files) for pattern
+resolution, manifest hydration, and performance tips.
+
+## Step 3: Make changes
+
+Once files are hydrated, work with them normally. Edit, replace, or create
+new files as needed. When you are ready to commit:
+
+```bash
+# Stage new or modified large files with crab
+crab add models/updated-weights.bin
+
+# Stage other changes with git as usual
+git add src/train.py
+
+# Commit everything together
+git commit -m "Update model weights after fine-tuning"
+```
+
+`crab add` chunks the file, deduplicates content, and writes a pointer blob
+to the git index. The actual data is staged locally in `.crab/staging/` until
+you push.
+
+See [`crab add`](/docs/cli/daily-workflow/adding-files) for details on
+staging behavior and glob patterns.
+
+## Step 4: Push your changes
+
+Push both the git refs and the backing chunk data in one command:
+
+```bash
+crab push
+```
+
+This uploads new xorbs from your local staging area to the remote object
+store and advances the remote ref. It is equivalent to `git push` but also
+handles the large-file data plane.
+
+See [`crab push`](/docs/cli/daily-workflow/pushing-changes) for options like
+concurrent upload tuning and refspec selection.
+
+## Pulling changes from others
+
+When collaborators have pushed new commits, pull their changes:
+
+```bash
+# Dehydrate first to avoid conflicts between pointers and full content
+crab dehydrate --all
+
+# Pull the latest commits
+git pull
+
+# Hydrate the files you need from the updated tree
+crab hydrate '*.safetensors'
+```
+
+The dehydrate-before-pull pattern is important: hydrated files show as
+modified in git's view (full content vs. pointer in the index). Dehydrating
+first ensures `git pull` merges cleanly on the pointer blobs, then you
+re-hydrate to get the updated content.
+
+See [`crab dehydrate`](/docs/cli/daily-workflow/dehydrating-files) for
+selective dehydration options.
+
+## Handling conflicts
+
+Conflicts on pointer files are resolved the same way as normal git conflicts.
+Because pointers are small text blobs, standard merge tools work fine:
+
+```bash
+git pull
+# If conflicts arise on pointer files:
+git checkout --theirs models/weights.bin
+crab hydrate 'models/weights.bin'
+```
+
+Or keep your version:
+
+```bash
+git checkout --ours models/weights.bin
+git add models/weights.bin
+git commit
+```
+
+For workflow lockfile conflicts (if using the pipeline layer), use the
+dedicated resolver:
+
+```bash
+crab workflow lockfile resolve
+```
+
+## Tips for teams
+
+- **Agree on hydration patterns.** Share a `.crab/manifests/` directory with
+  role-specific manifests (e.g., `ci.txt`, `training.txt`, `evaluation.txt`)
+  so each team member hydrates only what they need.
+
+- **Use shallow clones in CI.** Combine `--depth 1` with manifest hydration
+  for the fastest possible pipeline setup.
+
+- **Dehydrate before switching branches.** This avoids large diffs caused by
+  hydrated content appearing as modifications on the new branch.
+
+- **Pre-warm the cache.** Run `crab fetch` after cloning to download chunk
+  metadata into the local cache, making subsequent hydrations faster.
+
+## Related commands
+
+- [`crab clone`](/docs/cli/getting-started/cloning-a-repository) — clone a repository with lazy checkout
+- [`crab hydrate`](/docs/cli/daily-workflow/hydrating-files) — materialize pointer files into full content
+- [`crab dehydrate`](/docs/cli/daily-workflow/dehydrating-files) — replace hydrated files with pointers
+- [`crab add`](/docs/cli/daily-workflow/adding-files) — stage large files for crab tracking
+- [`crab push`](/docs/cli/daily-workflow/pushing-changes) — push content and refs to the remote
+- [`crab fetch`](/docs/cli/daily-workflow/fetching-updates) — pre-fetch objects into the local cache
+- [`crab status`](/docs/cli/file-inspection/file-status) — see hydration state of tracked files

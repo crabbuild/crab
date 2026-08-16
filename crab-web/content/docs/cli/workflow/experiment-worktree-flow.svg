@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 500" width="980" height="500" role="img" aria-label="Experiment worktree flow">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#0D9488"/>
+    </marker>
+  </defs>
+  <rect width="980" height="500" fill="#F9FAFB"/>
+  <text x="490" y="46" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#0F172A">Experiment Run Lifecycle</text>
+
+  <g font-family="Inter, -apple-system, sans-serif">
+    <rect x="45" y="145" width="150" height="74" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="120" y="176" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">HEAD</text>
+    <text x="120" y="197" text-anchor="middle" font-size="12" fill="#64748B">committed baseline</text>
+
+    <rect x="250" y="110" width="180" height="145" rx="14" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+    <text x="340" y="145" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">temp worktree</text>
+    <text x="340" y="168" text-anchor="middle" font-size="12" fill="#64748B">isolated checkout</text>
+    <rect x="280" y="190" width="120" height="34" rx="8" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <text x="340" y="212" text-anchor="middle" font-size="12" fill="#334155">apply -S values</text>
+
+    <rect x="500" y="145" width="150" height="74" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1.5"/>
+    <text x="575" y="176" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">run DAG</text>
+    <text x="575" y="197" text-anchor="middle" font-size="12" fill="#0D9488">cache aware</text>
+
+    <rect x="720" y="88" width="190" height="70" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="815" y="116" text-anchor="middle" font-size="14" font-weight="700" fill="#0F172A">metadata</text>
+    <text x="815" y="137" text-anchor="middle" font-size="12" fill="#64748B">params, metrics, hashes</text>
+
+    <rect x="720" y="205" width="190" height="70" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="815" y="233" text-anchor="middle" font-size="14" font-weight="700" fill="#0F172A">apply</text>
+    <text x="815" y="254" text-anchor="middle" font-size="12" fill="#64748B">materialize result</text>
+
+    <rect x="720" y="322" width="190" height="70" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="815" y="350" text-anchor="middle" font-size="14" font-weight="700" fill="#0F172A">push or promote</text>
+    <text x="815" y="371" text-anchor="middle" font-size="12" fill="#64748B">share or branch</text>
+
+    <path d="M 195 182 L 250 182" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 430 182 L 500 182" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 650 182 L 685 182 L 685 123 L 720 123" fill="none" stroke="#0D9488" stroke-width="1.8" marker-end="url(#arrow-teal)"/>
+    <path d="M 650 182 L 685 182 L 685 240 L 720 240" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 650 182 L 685 182 L 685 357 L 720 357" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <rect x="260" y="330" width="360" height="52" rx="10" fill="#F1F5F9" stroke="#CBD5E1"/>
+    <text x="440" y="361" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">The workspace stays clean until you explicitly apply an experiment</text>
+  </g>
+</svg>

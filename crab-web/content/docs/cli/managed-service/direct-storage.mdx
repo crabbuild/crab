@@ -1,0 +1,93 @@
+---
+title: "Managed and Direct Storage"
+description: "Understand how hosted managed repositories coexist with existing direct BYOC crab:// URLs without probing or fallback."
+---
+
+# Managed and Direct Storage
+
+Managed service support is additive. Existing direct repositories continue to
+use customer-provided object storage, credentials, layout, and coordination.
+Crab classifies the URL before constructing any object-store client.
+
+| URL | Classification |
+|-----|----------------|
+| `crab://crab.build/acme/models` | Hosted managed repository; `crab.build` is permanently reserved |
+| `crab://code.corp.example/ml/models` | Managed only when an exact `code.corp.example` service profile is installed |
+| `crab://team-bucket/ml/models` | Direct BYOC when no exact service profile binds `team-bucket` |
+
+## No probing and no fallback
+
+Crab does not send HTTPS discovery requests to arbitrary bucket authorities.
+For `crab.build` or an explicitly installed enterprise authority, resolution
+failure is a managed-service error. Crab never retries that URL as a bucket.
+
+For an unconfigured authority, Crab preserves direct parsing and does not
+contact a managed service. This keeps direct behavior independent of network
+state and prevents credentials from being routed to a guessed endpoint.
+
+## Direct BYOC workflow
+
+Direct repositories continue to accept physical bucket/prefix URLs:
+
+```bash
+crab clone crab://team-bucket/ml/models
+cd models
+crab add weights.safetensors
+git add weights.safetensors .gitattributes
+git commit -m "Update weights"
+crab push
+```
+
+Direct authentication remains provider-specific. When the configured direct
+provider uses OIDC, select it explicitly so the positional argument is not
+mistaken for a managed service origin:
+
+```bash
+crab login --provider aws-oidc
+```
+
+Ambient workload identity and static credential behavior remain as documented
+in [Authentication & Config](/docs/cli/authentication/configuration).
+
+## Managed workflow
+
+Managed repositories use a logical organization/repository identity:
+
+```bash
+crab login https://crab.build
+crab clone crab://crab.build/acme/models
+```
+
+The service selects placement and returns only bounded transfer access. Managed
+pushes upload to a session-specific staging scope and ask the service to verify
+and publish canonical state. Supplying a bucket, prefix, provider, or endpoint
+override is not supported.
+
+## Custom enterprise authority
+
+Installing a profile deliberately changes classification for that exact
+authority:
+
+```bash
+crab login https://code.corp.example
+crab clone crab://code.corp.example/ml/models
+```
+
+This does not affect sibling names such as `storage.code.corp.example`, and it
+does not reinterpret other direct bucket URLs.
+
+## A new URL does not move data
+
+Changing a remote from `crab://team-bucket/ml/models` to
+`crab://crab.build/acme/models` changes repository identity; it does not import
+or relocate the direct repository's objects. Create or provision the managed
+repository and use the documented migration workflow before changing remotes.
+Never point a managed logical URL at an existing physical prefix as a shortcut.
+
+Follow [Migrate to the Managed Service](/docs/cli/managed-service/migration)
+for the physical copy, integrity proof, cutover, and rollback boundaries. The
+same guide separately covers replacing the Python `crab-auth` endpoint without
+moving a direct repository.
+
+For the hosted workflow, return to the
+[Managed Service Quickstart](/docs/cli/managed-service).

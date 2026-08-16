@@ -1,0 +1,35 @@
+[package]
+name = "crab-staging"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Local staging area, prepared xorb plans, and recovery for Crab."
+
+[lib]
+name = "crab_staging"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+crab-diff = { workspace = true }
+crab-xet = { workspace = true, features = ["chunker"] }
+crc32c = "0.6"
+fs4 = "0.13"
+gix-index = { workspace = true, features = ["sha1"] }
+libc = "0.2"
+rusqlite = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+memory-stats = "1"
+proptest = "1"
+tempfile = { workspace = true }

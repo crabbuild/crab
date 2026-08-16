@@ -1,0 +1,231 @@
+---
+title: "DAG Visualization"
+description: "Visualize the workflow dependency graph in ASCII, Mermaid, or structured JSON."
+---
+
+# crab workflow dag
+
+Visualize the workflow dependency graph. Parses `crab.yaml` (and any
+`*.workflow.yaml` files), builds the stage dependency graph, and renders the
+topological structure in ASCII, Mermaid, or structured JSON format.
+
+## Synopsis
+
+```
+crab workflow dag [OPTIONS]
+```
+
+## Description
+
+`crab workflow dag` is a read-only command that renders the workflow's directed
+acyclic graph (DAG) so you can inspect stage dependencies, verify pipeline
+structure, and export the graph for external tooling.
+
+The command discovers workflow definitions using the same logic as `crab run`:
+
+- **Root mode** (default) — parses only the repo-root `crab.yaml`. If nested
+  `crab.yaml` files exist elsewhere in the tree, the command errors with
+  `WorkflowDiscoveryAmbiguous` to avoid guessing which one you meant.
+
+- **Recursive mode** (`--recursive` or `[workflow] discover = "recursive"` in
+  config) — discovers and merges every `crab.yaml` and `*.workflow.yaml` file
+  under the repo root. The root yaml is always processed first; nested files
+  are sorted by path for deterministic ordering. Stages from named workflow
+  files (e.g., `train.workflow.yaml`) are prefixed with the workflow name
+  (`train.stage_name`) when merged.
+
+After discovery, the command builds the full dependency graph and outputs it in
+one of three formats:
+
+- **ASCII** (default) — a tree-shaped layout printed to the terminal with one
+  header line per stage in topological order. Incoming dependencies are listed
+  beneath each stage using box-drawing characters (`├─` / `└─`). Source stages
+  with no upstream dependencies show `└─ (no deps)`.
+
+- **Mermaid** — a `graph TD` block ready to paste into any Markdown surface
+  that renders Mermaid diagrams (GitHub, GitLab, Notion, etc.). Node IDs are
+  sanitized for Mermaid compatibility.
+
+- **JSON** — a structured `workflow.dag` envelope listing every stage (with
+  resource declarations) and every inferred edge. Useful for CI dashboards,
+  static-analysis bots, or custom visualization tools.
+
+The command is safe to run at any time — it doesn't open the journal, touch the
+cache, or acquire the scheduler lock. You can run it while another `crab run`
+is executing.
+
+Expanded stages (from `foreach` or `matrix` expansion) appear as individual
+nodes and are annotated with `[expanded]` in ASCII output. Their names contain
+`@` separating the base stage name from the expansion key.
+
+## Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--format` | | `ascii` | Output format: `ascii` for terminal display, `mermaid` for Markdown-embeddable graph. |
+| `--recursive` | | `false` | Merge every `crab.yaml` and `*.workflow.yaml` under the repo root. Defaults to the `[workflow] discover` config setting when unset. |
+| `--json` | | `false` | Emit a single structured JSON envelope instead of text output. |
+
+## Prerequisites
+
+- Workflow feature enabled with `crab config set workflow.enabled true`.
+- At least one `crab.yaml` or `*.workflow.yaml` file must exist at the
+  repository root (or be discoverable via `--recursive`).
+
+## Multi-File Workflows
+
+Crab workflows support splitting pipeline definitions across multiple files:
+
+- **`crab.yaml`** — the primary workflow file at the repo root. Contains shared
+  defaults, params, and stages.
+- **`*.workflow.yaml`** — named workflow files (e.g., `train.workflow.yaml`,
+  `data.workflow.yaml`). Stages declared in these files are automatically
+  prefixed with the workflow name when merged into the unified DAG. For example,
+  stages in `train.workflow.yaml` appear as `train.preprocess`, `train.fit`, etc.
+
+In **Root mode** (default), only the repo-root `crab.yaml` is parsed. Named
+workflow files in the same directory are included, but nested directories are
+not scanned.
+
+In **Recursive mode**, the discovery walks the entire repo tree, collecting all
+`crab.yaml` and `*.workflow.yaml` files. This is useful for monorepos where
+different subdirectories define independent pipeline segments that compose into
+a single DAG.
+
+```bash
+# View the merged DAG from all workflow files in a monorepo
+crab workflow dag --recursive
+```
+
+You can also set the default in `.crab/config.toml`:
+
+```toml
+[workflow]
+enabled = true
+discover = "recursive"
+```
+
+With this config, `crab workflow dag` automatically discovers all workflow files
+without needing `--recursive` on every invocation.
+
+## Examples
+
+### View the DAG in ASCII format
+
+```bash
+crab workflow dag
+```
+
+Output for a three-stage linear pipeline:
+
+```
+ingest
+└─ (no deps)
+preprocess
+└─ ingest
+train
+└─ preprocess
+```
+
+### Render as a Mermaid diagram
+
+```bash
+crab workflow dag --format mermaid
+```
+
+Output:
+
+```
+graph TD
+    ingest["ingest"]
+    preprocess["preprocess"]
+    train["train"]
+    ingest --> preprocess
+    preprocess --> train
+```
+
+Paste this into any Markdown file to get a rendered flowchart.
+
+### Export as structured JSON
+
+```bash
+crab workflow dag --json
+```
+
+Produces a `workflow.dag` envelope with full stage metadata and edges (see
+JSON Output section below).
+
+### Visualize a multi-file recursive workflow
+
+```bash
+crab workflow dag --recursive
+```
+
+Discovers and merges all `crab.yaml` and `*.workflow.yaml` files under the repo
+root, prefixing nested stage names with their directory paths and workflow names.
+
+## JSON Output
+
+When invoked with `--json`, emits a single envelope:
+
+```json
+{
+  "schema": "workflow.dag",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:15:42.000Z",
+  "data": {
+    "stages": [
+      {
+        "name": "ingest",
+        "expanded": false,
+        "resources": { "cpu": 1, "gpu": 0, "memory_bytes": 0 },
+        "desc": "Download raw data from S3"
+      },
+      {
+        "name": "preprocess@split_a",
+        "expanded": true,
+        "resources": { "cpu": 2, "gpu": 0, "memory_bytes": 4294967296 }
+      },
+      {
+        "name": "train",
+        "expanded": false,
+        "resources": { "cpu": 4, "gpu": 1, "memory_bytes": 17179869184 },
+        "desc": "Train the model"
+      }
+    ],
+    "edges": [
+      { "from": "ingest", "to": "preprocess@split_a" },
+      { "from": "preprocess@split_a", "to": "train" }
+    ]
+  }
+}
+```
+
+**Stage fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Stage name. Expanded stages contain `@`. Named-workflow stages contain `.` as a prefix separator. |
+| `expanded` | boolean | Whether this stage was generated by `foreach` or `matrix` expansion. |
+| `resources.cpu` | number | CPU cores requested. |
+| `resources.gpu` | number | GPU devices requested. |
+| `resources.memory_bytes` | number | Memory requested in bytes. |
+| `desc` | string? | Human-readable description from the `desc:` field. Omitted if not set. |
+
+**Edge fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from` | string | Producer stage name. |
+| `to` | string | Consumer stage name. |
+
+Stages are listed in topological order. Edges are sorted by `(from, to)` for
+deterministic output across runs.
+
+## Related Commands
+
+- [`crab run`](/docs/cli/automation/running-commands) — execute stages with content-addressed caching and DAG scheduling.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — manage workflow definitions and inspect the pipeline.
+- [`crab workflow journal`](/docs/cli/automation/workflow-journal) — inspect run journals and stage history.
+- [`crab params`](/docs/cli/automation/parameters) — manage workflow parameters.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and query stage metrics.

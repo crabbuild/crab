@@ -1,0 +1,287 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1220" role="img" aria-labelledby="title desc">
+  <title id="title">Crab enterprise AuthN, AuthZ, and ACL architecture</title>
+  <desc id="desc">Architecture diagram showing how Crab enterprise authentication, authorization, ACL policy, scoped cloud credentials, filtered reads, and protected push work together.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.55"/>
+    </pattern>
+
+    <linearGradient id="cyanFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d3443"/>
+      <stop offset="1" stop-color="#0b2634"/>
+    </linearGradient>
+    <linearGradient id="blueFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d4078"/>
+      <stop offset="1" stop-color="#142b53"/>
+    </linearGradient>
+    <linearGradient id="greenFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b3f37"/>
+      <stop offset="1" stop-color="#092c2b"/>
+    </linearGradient>
+    <linearGradient id="violetFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#33216d"/>
+      <stop offset="1" stop-color="#21184d"/>
+    </linearGradient>
+    <linearGradient id="orangeFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#593925"/>
+      <stop offset="1" stop-color="#3b281f"/>
+    </linearGradient>
+    <linearGradient id="roseFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b1633"/>
+      <stop offset="1" stop-color="#381225"/>
+    </linearGradient>
+    <linearGradient id="slateFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172033"/>
+      <stop offset="1" stop-color="#101827"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-8%" y="-16%" width="116%" height="132%">
+      <feDropShadow dx="0" dy="10" stdDeviation="13" flood-color="#020817" flood-opacity="0.33"/>
+    </filter>
+
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#fb7185"/>
+    </marker>
+  </defs>
+
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; letter-spacing: 0; }
+    .title { fill: #f8fafc; font-size: 28px; font-weight: 800; }
+    .subtitle { fill: #94a3b8; font-size: 11px; font-weight: 500; }
+    .lane-title { font-size: 11px; font-weight: 800; }
+    .node-title { fill: #f8fafc; font-size: 13px; font-weight: 800; }
+    .node-copy { fill: #a8b3c7; font-size: 9.6px; font-weight: 500; }
+    .tiny { fill: #9aa7bc; font-size: 8.4px; font-weight: 500; }
+    .label { fill: #d8e2f0; font-size: 8.6px; font-weight: 700; }
+    .soft-title { fill: #f8fafc; font-size: 11.5px; font-weight: 800; }
+    .soft-copy { fill: #a8b3c7; font-size: 9px; font-weight: 500; }
+    .lane { fill: rgba(15, 23, 42, 0.22); stroke-width: 1.4; stroke-dasharray: 8 7; }
+    .box { stroke-width: 1.7; filter: url(#shadow); }
+    .soft { fill: rgba(15, 23, 42, 0.72); stroke: #334155; stroke-width: 1.2; }
+    .cyan { stroke: #22d3ee; }
+    .blue { stroke: #60a5fa; }
+    .green { stroke: #34d399; }
+    .violet { stroke: #a78bfa; }
+    .orange { stroke: #fb923c; }
+    .rose { stroke: #fb7185; }
+    .muted { stroke: #94a3b8; }
+    .flow { fill: none; stroke-width: 2.2; stroke-linecap: butt; stroke-linejoin: round; }
+    .flow-cyan { stroke: #22d3ee; marker-end: url(#arrow-cyan); }
+    .flow-green { stroke: #34d399; marker-end: url(#arrow-green); }
+    .flow-violet { stroke: #a78bfa; marker-end: url(#arrow-violet); }
+    .flow-orange { stroke: #fb923c; stroke-dasharray: 7 7; marker-end: url(#arrow-orange); }
+    .flow-rose { stroke: #fb7185; marker-end: url(#arrow-rose); }
+  </style>
+
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)" opacity="0.82"/>
+
+  <text x="42" y="58" class="title">Crab enterprise AuthN, AuthZ, and ACL</text>
+  <text x="42" y="86" class="subtitle">AuthN stays with the enterprise IdP. AuthZ happens in a self-hosted Crab Auth service that verifies tokens, evaluates ACL policy, and vends scoped cloud credentials.</text>
+  <text x="42" y="106" class="subtitle">Normal reads get short-lived repo or view-scoped access. Protected push only gets staging writes; manifest and ref publication are service-owned.</text>
+
+  <!-- Lane backgrounds -->
+  <rect x="36" y="138" width="1728" height="212" rx="14" class="lane cyan"/>
+  <text x="58" y="163" class="lane-title" fill="#22d3ee">AuthN lane: enterprise identity and local token state</text>
+
+  <rect x="36" y="382" width="1728" height="250" rx="14" class="lane green"/>
+  <text x="58" y="407" class="lane-title" fill="#34d399">AuthZ lane: operation-scoped credentials for read and maintenance commands</text>
+
+  <rect x="36" y="666" width="1728" height="260" rx="14" class="lane rose"/>
+  <text x="58" y="691" class="lane-title" fill="#fb7185">Protected push lane: ACL-checked ref updates, verified paths, and service-owned publication</text>
+
+  <rect x="36" y="958" width="1728" height="110" rx="14" class="lane blue"/>
+  <text x="58" y="983" class="lane-title" fill="#60a5fa">Enterprise contract</text>
+
+  <!-- Top lane connections -->
+  <path d="M 288 235 H 335" class="flow flow-cyan"/>
+  <path d="M 553 235 H 600" class="flow flow-cyan"/>
+  <path d="M 818 235 H 865" class="flow flow-cyan"/>
+  <path d="M 1083 235 H 1130" class="flow flow-cyan"/>
+
+  <!-- Middle lane connections -->
+  <path d="M 272 505 H 308" class="flow flow-green"/>
+  <path d="M 502 505 H 538" class="flow flow-green"/>
+  <path d="M 732 505 H 768" class="flow flow-cyan"/>
+  <path d="M 962 505 H 998" class="flow flow-cyan"/>
+  <path d="M 1192 505 H 1228" class="flow flow-rose"/>
+  <path d="M 1422 505 H 1458" class="flow flow-violet"/>
+
+  <!-- Optional filtered read view -->
+  <path d="M 1325 573 V 598 H 1576 V 573" class="flow flow-orange"/>
+  <text x="1348" y="592" class="label" text-anchor="middle">path ACL can materialize a scoped view</text>
+
+  <!-- Push lane connections -->
+  <path d="M 272 785 H 308" class="flow flow-rose"/>
+  <path d="M 502 785 H 538" class="flow flow-rose"/>
+  <path d="M 732 785 H 768" class="flow flow-green"/>
+  <path d="M 962 785 H 998" class="flow flow-violet"/>
+  <path d="M 1192 785 H 1228" class="flow flow-rose"/>
+  <path d="M 1422 785 H 1458" class="flow flow-violet"/>
+
+  <!-- Audit connector -->
+  <path d="M 1310 570 V 736" class="flow flow-orange"/>
+  <text x="1338" y="655" class="label">audit identity, repo, policy result</text>
+
+  <!-- AuthN lane nodes -->
+  <rect x="70" y="190" width="218" height="90" rx="8" fill="url(#cyanFill)" class="box cyan"/>
+  <text x="179" y="224" class="node-title" text-anchor="middle">Developer or CI</text>
+  <text x="179" y="248" class="node-copy" text-anchor="middle">human, bot, service user</text>
+  <text x="179" y="266" class="node-copy" text-anchor="middle">uses normal crab commands</text>
+
+  <rect x="335" y="190" width="218" height="90" rx="8" fill="url(#blueFill)" class="box blue"/>
+  <text x="444" y="224" class="node-title" text-anchor="middle">crab login</text>
+  <text x="444" y="248" class="node-copy" text-anchor="middle">browser PKCE or device code</text>
+  <text x="444" y="266" class="node-copy" text-anchor="middle">provider key: crab-auth</text>
+
+  <rect x="600" y="190" width="218" height="90" rx="8" fill="url(#orangeFill)" class="box orange"/>
+  <text x="709" y="224" class="node-title" text-anchor="middle">Corporate IdP</text>
+  <text x="709" y="248" class="node-copy" text-anchor="middle">OIDC issuer and JWKS</text>
+  <text x="709" y="266" class="node-copy" text-anchor="middle">email, subject, groups</text>
+
+  <rect x="865" y="190" width="218" height="90" rx="8" fill="url(#violetFill)" class="box violet"/>
+  <text x="974" y="224" class="node-title" text-anchor="middle">Token cache</text>
+  <text x="974" y="248" class="node-copy" text-anchor="middle">encrypted ID and refresh token</text>
+  <text x="974" y="266" class="node-copy" text-anchor="middle">auto-refresh before expiry</text>
+
+  <rect x="1130" y="190" width="218" height="90" rx="8" fill="url(#greenFill)" class="box green"/>
+  <text x="1239" y="224" class="node-title" text-anchor="middle">Auth config</text>
+  <text x="1239" y="248" class="node-copy" text-anchor="middle">issuer_url, client_id</text>
+  <text x="1239" y="266" class="node-copy" text-anchor="middle">auth_endpoint, scopes</text>
+
+  <rect x="1395" y="190" width="300" height="90" rx="8" fill="url(#slateFill)" class="box muted"/>
+  <text x="1545" y="224" class="node-title" text-anchor="middle">Enterprise admins</text>
+  <text x="1545" y="248" class="node-copy" text-anchor="middle">IdP groups, repo namespaces</text>
+  <text x="1545" y="266" class="node-copy" text-anchor="middle">YAML RBAC or custom policy engine</text>
+
+  <!-- AuthZ lane nodes -->
+  <rect x="70" y="455" width="202" height="100" rx="8" fill="url(#cyanFill)" class="box cyan"/>
+  <text x="171" y="491" class="node-title" text-anchor="middle">Crab operation</text>
+  <text x="171" y="516" class="node-copy" text-anchor="middle">fetch, clone, hydrate, mount</text>
+  <text x="171" y="534" class="node-copy" text-anchor="middle">gc, fsck, repack, doctor</text>
+
+  <rect x="308" y="455" width="194" height="100" rx="8" fill="url(#blueFill)" class="box blue"/>
+  <text x="405" y="491" class="node-title" text-anchor="middle">build_store</text>
+  <text x="405" y="516" class="node-copy" text-anchor="middle">single storage entry point</text>
+  <text x="405" y="534" class="node-copy" text-anchor="middle">passes bucket, prefix, op</text>
+
+  <rect x="538" y="455" width="194" height="100" rx="8" fill="url(#greenFill)" class="box green"/>
+  <text x="635" y="491" class="node-title" text-anchor="middle">CrabAuthProvider</text>
+  <text x="635" y="516" class="node-copy" text-anchor="middle">loads cached ID token</text>
+  <text x="635" y="534" class="node-copy" text-anchor="middle">refreshes and retries safely</text>
+
+  <rect x="768" y="455" width="194" height="100" rx="8" fill="url(#roseFill)" class="box rose"/>
+  <text x="865" y="491" class="node-title" text-anchor="middle">/v1/credentials</text>
+  <text x="865" y="516" class="node-copy" text-anchor="middle">rejects push requests</text>
+  <text x="865" y="534" class="node-copy" text-anchor="middle">rate-limited, fail closed</text>
+
+  <rect x="998" y="455" width="194" height="118" rx="8" fill="url(#orangeFill)" class="box orange"/>
+  <text x="1095" y="487" class="node-title" text-anchor="middle">JWT verifier</text>
+  <text x="1095" y="512" class="node-copy" text-anchor="middle">JWKS signature check</text>
+  <text x="1095" y="530" class="node-copy" text-anchor="middle">iss, aud, exp, nbf</text>
+  <text x="1095" y="548" class="node-copy" text-anchor="middle">extract identity + groups</text>
+
+  <rect x="1228" y="455" width="194" height="118" rx="8" fill="url(#orangeFill)" class="box orange"/>
+  <text x="1325" y="487" class="node-title" text-anchor="middle">RBAC / ACL policy</text>
+  <text x="1325" y="512" class="node-copy" text-anchor="middle">deny rules first</text>
+  <text x="1325" y="530" class="node-copy" text-anchor="middle">identity/group + repo glob</text>
+  <text x="1325" y="548" class="node-copy" text-anchor="middle">operation + read/write paths</text>
+
+  <rect x="1458" y="455" width="237" height="118" rx="8" fill="url(#violetFill)" class="box violet"/>
+  <text x="1576" y="487" class="node-title" text-anchor="middle">Scoped cloud access</text>
+  <text x="1576" y="512" class="node-copy" text-anchor="middle">AWS STS, GCP CAB, Azure SAS</text>
+  <text x="1576" y="530" class="node-copy" text-anchor="middle">short-lived repo or view scope</text>
+  <text x="1576" y="548" class="node-copy" text-anchor="middle">object store remains authority</text>
+
+  <!-- Push lane nodes -->
+  <rect x="70" y="735" width="202" height="100" rx="8" fill="url(#cyanFill)" class="box cyan"/>
+  <text x="171" y="771" class="node-title" text-anchor="middle">git push / crab push</text>
+  <text x="171" y="796" class="node-copy" text-anchor="middle">ref updates resolved locally</text>
+  <text x="171" y="814" class="node-copy" text-anchor="middle">delete refs denied for now</text>
+
+  <rect x="308" y="735" width="194" height="100" rx="8" fill="url(#blueFill)" class="box blue"/>
+  <text x="405" y="771" class="node-title" text-anchor="middle">Prepare request</text>
+  <text x="405" y="796" class="node-copy" text-anchor="middle">repo_url + ref_updates</text>
+  <text x="405" y="814" class="node-copy" text-anchor="middle">old_oid and new_oid</text>
+
+  <rect x="538" y="735" width="194" height="100" rx="8" fill="url(#roseFill)" class="box rose"/>
+  <text x="635" y="771" class="node-title" text-anchor="middle">/v1/push/prepare</text>
+  <text x="635" y="796" class="node-copy" text-anchor="middle">provider policy check</text>
+  <text x="635" y="814" class="node-copy" text-anchor="middle">receive helper prepare</text>
+
+  <rect x="768" y="735" width="194" height="100" rx="8" fill="url(#greenFill)" class="box green"/>
+  <text x="865" y="771" class="node-title" text-anchor="middle">Staging creds</text>
+  <text x="865" y="796" class="node-copy" text-anchor="middle">immutable-write only</text>
+  <text x="865" y="814" class="node-copy" text-anchor="middle">prefix: repo/staging/push_id</text>
+
+  <rect x="998" y="735" width="194" height="100" rx="8" fill="url(#violetFill)" class="box violet"/>
+  <text x="1095" y="771" class="node-title" text-anchor="middle">Upload bundle</text>
+  <text x="1095" y="796" class="node-copy" text-anchor="middle">xorbs, shards, packs first</text>
+  <text x="1095" y="814" class="node-copy" text-anchor="middle">push-plan.json staged</text>
+
+  <rect x="1228" y="735" width="194" height="118" rx="8" fill="url(#roseFill)" class="box rose"/>
+  <text x="1325" y="767" class="node-title" text-anchor="middle">/v1/push/finalize</text>
+  <text x="1325" y="792" class="node-copy" text-anchor="middle">verify staged bundle</text>
+  <text x="1325" y="810" class="node-copy" text-anchor="middle">derive changed paths</text>
+  <text x="1325" y="828" class="node-copy" text-anchor="middle">re-check path ACL</text>
+
+  <rect x="1458" y="735" width="237" height="118" rx="8" fill="url(#violetFill)" class="box violet"/>
+  <text x="1576" y="767" class="node-title" text-anchor="middle">Service-owned commit</text>
+  <text x="1576" y="792" class="node-copy" text-anchor="middle">manifest CAS and refs</text>
+  <text x="1576" y="810" class="node-copy" text-anchor="middle">no client mutable writes</text>
+  <text x="1576" y="828" class="node-copy" text-anchor="middle">409 on stale conflicts</text>
+
+  <path d="M 1545 280 V 365 H 1325 V 455" class="flow flow-orange"/>
+  <text x="1435" y="360" class="label" text-anchor="middle">admin policy inputs</text>
+
+  <!-- Contract cards -->
+  <rect x="70" y="1004" width="300" height="44" rx="7" class="soft"/>
+  <text x="220" y="1022" class="soft-title" text-anchor="middle">Enterprise-owned identity</text>
+  <text x="220" y="1040" class="soft-copy" text-anchor="middle">IdP owns users; Crab stores no passwords.</text>
+
+  <rect x="400" y="1004" width="300" height="44" rx="7" class="soft"/>
+  <text x="550" y="1022" class="soft-title" text-anchor="middle">Central ACL</text>
+  <text x="550" y="1040" class="soft-copy" text-anchor="middle">Policy checks identity, repo, op, and paths.</text>
+
+  <rect x="730" y="1004" width="300" height="44" rx="7" class="soft"/>
+  <text x="880" y="1022" class="soft-title" text-anchor="middle">Least-privilege credentials</text>
+  <text x="880" y="1040" class="soft-copy" text-anchor="middle">Short-lived tokens are operation scoped.</text>
+
+  <rect x="1060" y="1004" width="300" height="44" rx="7" class="soft"/>
+  <text x="1210" y="1022" class="soft-title" text-anchor="middle">Two-phase protected push</text>
+  <text x="1210" y="1040" class="soft-copy" text-anchor="middle">Client stages; service publishes refs.</text>
+
+  <rect x="1390" y="1004" width="305" height="44" rx="7" class="soft"/>
+  <text x="1543" y="1022" class="soft-title" text-anchor="middle">Object store durability</text>
+  <text x="1543" y="1040" class="soft-copy" text-anchor="middle">S3, GCS, or Azure hold canonical bytes.</text>
+
+  <!-- Legend -->
+  <rect x="36" y="1100" width="1728" height="76" rx="12" fill="rgba(15, 23, 42, 0.72)" stroke="#334155" stroke-width="1.3"/>
+
+  <path d="M 90 1138 H 158" class="flow flow-cyan"/>
+  <text x="178" y="1142" class="tiny">login / client request</text>
+
+  <path d="M 392 1138 H 460" class="flow flow-green"/>
+  <text x="480" y="1142" class="tiny">credential resolution</text>
+
+  <path d="M 712 1138 H 780" class="flow flow-rose"/>
+  <text x="800" y="1142" class="tiny">authorization / protected push control</text>
+
+  <path d="M 1092 1138 H 1160" class="flow flow-violet"/>
+  <text x="1180" y="1142" class="tiny">object-store data path</text>
+
+  <path d="M 1450 1138 H 1518" class="flow flow-orange"/>
+  <text x="1538" y="1142" class="tiny">refresh, filtered view, audit, admin policy</text>
+</svg>

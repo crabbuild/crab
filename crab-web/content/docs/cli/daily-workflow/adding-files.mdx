@@ -1,0 +1,54 @@
+---
+title: "Adding Files"
+description: "Stage large files for Crab storage with parallel chunking and Git pointer updates."
+---
+
+# Adding Files
+
+Use `crab add` when a file should be stored by Crab instead of directly in
+Git. It chunks matching files, deduplicates the content, stores new chunks in
+`.crab/staging/`, and stages pointer blobs in Git.
+
+```bash
+crab add models/checkpoint.safetensors
+crab add 'data/*.parquet'
+crab add .
+```
+
+## When to Use It
+
+| Situation | Command |
+| --- | --- |
+| Add one large file | `crab add models/model.bin` |
+| Add files by pattern | `crab add '*.safetensors'` |
+| Add everything matched by Crab tracking rules | `crab add .` |
+| Preview without staging | `crab add . --dry-run` |
+| Tune local parallelism | `crab add . --jobs 16` |
+
+Run `crab track <glob>` first for reusable patterns, then commit the resulting
+`.gitattributes` change so collaborators use the same rules.
+
+## After Adding
+
+```bash
+crab status
+crab ls-files --size
+git diff --cached
+git commit -m "Add dataset"
+crab push origin main
+```
+
+`crab add` stages Crab pointer blobs for Git. Keep using normal Git commands
+for review and commits.
+
+## Common Pitfalls
+
+- Shell globs can expand before Crab sees them. Quote patterns like
+  `crab add '*.bin'` when you want Crab to match them.
+- `crab add` is local until you push. The staged chunks stay in
+  `.crab/staging/` until `crab push` uploads them.
+- If a file is not matched, check `.gitattributes` and `crab track --list`.
+- Re-run `crab add` after changing a large file before committing.
+
+For complete syntax, flags, path matching details, and JSON/JSONL output, see
+the [crab add reference](/docs/cli/reference/crab-add).

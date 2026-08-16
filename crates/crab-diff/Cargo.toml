@@ -1,0 +1,16 @@
+[package]
+name = "crab-diff"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "crab_diff"
+path = "src/lib.rs"
+
+[dependencies]
+crab-types = { workspace = true }
+crab-xet = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }

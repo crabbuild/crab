@@ -1,0 +1,54 @@
+---
+title: "Resetting Staged Files"
+description: "How to unstage files from Crab's staging area and clean up orphaned chunk data."
+---
+
+# Resetting Staged Files
+
+Sometimes you stage files with `crab add` and then change your mind — maybe you added the wrong files, or you want to re-chunk with different settings. Resetting unstages files from git's index and cleans up the corresponding chunk data from Crab's local staging area.
+
+## What Reset Does
+
+When you `crab add` a file, two things happen:
+
+1. The file's chunks are written to `.crab/staging/`
+2. A pointer blob is added to git's index (via `git add`)
+
+Resetting reverses both: it runs `git reset HEAD` on the pointer files and removes the orphaned chunk data from the staging area.
+
+## When to Reset
+
+- **Added the wrong files** — You ran `crab add '*.bin'` but meant to exclude some files.
+- **Want to re-add** — You changed chunking settings and want to re-process files.
+- **Cleaning up after manual git operations** — You used `git reset` or `git rm` directly, leaving orphaned staging data.
+
+## Basic Usage
+
+```bash
+# Unstage specific file types
+crab reset '*.safetensors'
+
+# Unstage files from a directory
+crab reset 'models/*'
+
+# Preview what would be unstaged
+crab reset --dry-run '*.bin'
+```
+
+## Sync Mode
+
+If you've used `git reset` or `git rm` directly (bypassing Crab), the staging area may contain chunk data for files that are no longer in git's index. Sync mode cleans these orphans:
+
+```bash
+crab reset --sync
+```
+
+This scans the staging area, checks each entry against git's current index, and removes data for files that are no longer staged.
+
+## Relationship to Git Reset
+
+`crab reset` is a superset of `git reset HEAD -- <paths>`. It does everything git reset does (unstage from the index) plus cleans up Crab's staging data. If you only use `git reset` directly, the staging area retains orphaned chunks until you run `crab reset --sync` or `crab staging clean`.
+
+## CLI Reference
+
+For complete command syntax and options, see the [crab reset reference](/docs/cli/reference/crab-reset).

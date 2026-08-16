@@ -1,0 +1,232 @@
+---
+title: "Git LFS Compatibility Layer"
+description: "Already using Git LFS? Crab can preserve familiar pointer and pattern workflows while moving large-file bytes to your own cloud bucket."
+date: "2025-07-21"
+author: "Crab Team"
+category: "architecture"
+tags: ["git-lfs", "migration", "compatibility", "deduplication"]
+excerpt: "Crab uses Git LFS extension points to route large-file bytes to your own bucket, then lets teams adopt deduplication and history migration when they are ready."
+level: "intermediate"
+path: "advanced-operations"
+order: 5
+concepts: ["Git LFS", "custom transfer", "migration", ".gitattributes"]
+prerequisites: ["Cost Optimization: S3 Storage Classes and Request Budgets", "Crab vs Git LFS"]
+outcome: "Plan a gradual migration from Git LFS while keeping existing patterns and automation usable."
+diagramType: "Migration bridge"
+---
+
+<BeforeAfter
+  before={[
+    "Large files move through a hosted or self-managed LFS server.",
+    "Storage, bandwidth, and availability are tied to that server.",
+    "Migration usually feels like a disruptive cutover."
+  ]}
+  after={[
+    "Existing LFS pointers and patterns keep working.",
+    "Large-file bytes stream directly to your cloud bucket.",
+    "Teams can adopt Crab incrementally and optimize later."
+  ]}
+/>
+
+## Already Using Git LFS? Crab Works with Your Existing Setup
+
+If your team uses Git LFS today, you already have the basics in place: a `.gitattributes` file marks which patterns are large, `git lfs` commands move bytes around, and your CI runs `git lfs pull` before tests. The pieces work — but a separate LFS server sits in the middle, and that server is the part that breaks, throttles, or gets expensive.
+
+Crab keeps every part of your workflow except the server. Your `.gitattributes`, your `git lfs` commands, your CI scripts — none of it has to change. LFS-tracked files just go straight to your own cloud bucket instead of through a hosted middleman.
+
+You can adopt Crab one step at a time. There's no big-bang cutover, no flag day, and no need to rewrite history before things start working.
+
+## TL;DR
+
+- **Drop-in compatible** — your `.gitattributes`, `git lfs` commands, and CI pipelines keep working unchanged
+- **No LFS server** — large files travel directly to S3, GCS, or Azure Blob using your own credentials
+- **Optional deduplication** is available when you are ready to optimize overlapping large-file history
+- **Migrate incrementally** — install the transfer agent first, rewrite history later (or never)
+
+---
+
+## How Crab Slots into Git LFS
+
+Git LFS leans on two well-defined extension points: a `.gitattributes` filter rule that tells Git "this file type is large", and a [custom transfer agent](https://github.com/git-lfs/git-lfs/blob/main/docs/custom-transfers.md) that handles the actual upload and download. The traditional LFS server is just one possible agent. Crab is another.
+
+When Git encounters a file marked with `filter=lfs`, it writes a small pointer in your repo (a few hundred bytes) and hands the real content to the transfer agent. With Crab installed, that agent is `crab` itself — and instead of POSTing to a Batch API server, it streams the bytes straight to your bucket.
+
+<svg viewBox="0 0 760 280" width="100%" role="img" aria-label="Diagram showing how Crab routes Git LFS pointer files directly to your cloud bucket, replacing the traditional LFS server.">
+  <defs>
+    <marker id="arrow-lfs-route" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="none" stroke="var(--primary)" strokeWidth="1.5" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="380" y="34" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"LFS pointer → your cloud bucket"}</text>
+
+  {/* LFS Pointer */}
+  <rect x="40" y="100" width="180" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="130" y="132" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"LFS Pointer"}</text>
+  <text x="130" y="154" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"~130 bytes in git"}</text>
+
+  {/* Crab transfer agent */}
+  <rect x="280" y="100" width="200" height="80" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="380" y="132" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Crab Transfer Agent"}</text>
+  <text x="380" y="154" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"runs locally on your machine"}</text>
+
+  {/* Cloud bucket */}
+  <rect x="540" y="60" width="200" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="640" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Your Cloud Bucket"}</text>
+  <text x="640" y="114" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"S3 / GCS / Azure"}</text>
+
+  {/* Faded LFS server */}
+  <rect x="540" y="170" width="200" height="70" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" strokeDasharray="6 4" opacity="0.45" />
+  <text x="640" y="200" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14" opacity="0.7">{"Hosted LFS Server"}</text>
+  <text x="640" y="222" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12" opacity="0.7">{"no longer required"}</text>
+  <line x1="552" y1="178" x2="728" y2="232" stroke="var(--primary)" strokeWidth="2" opacity="0.55" />
+
+  {/* Arrows */}
+  <line x1="220" y1="140" x2="272" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-route)" />
+  <line x1="480" y1="125" x2="532" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-route)" />
+</svg>
+
+The pointer file in your git history is the same format LFS has always used. Anyone with a working LFS setup can still read it — Crab just adds a faster, cheaper, server-free way to fetch the bytes it points to.
+
+## Install Once, Keep Working
+
+The first step takes one command and changes nothing about how you work day to day:
+
+```bash
+crab lfs install
+# Configures git to route lfs transfers through crab.
+# Your .gitattributes, hooks, and CI scripts stay exactly as they are.
+```
+
+After that, `git lfs track`, `git push`, and `git lfs pull` all behave like before. The only thing that's different is where the bytes end up — your bucket, addressed by your credentials. Developers who haven't installed Crab yet can keep using the old LFS server (if one is still online), so adoption can be gradual rather than coordinated.
+
+This is the entire migration for many teams. You stop paying for a hosted LFS plan, point Crab at your bucket, and the rest of the workflow stays put.
+
+## Compatibility First, Savings When You're Ready
+
+Crab gives you a choice in how stored objects are laid out, and the choice is meant to be reversible.
+
+**Compatibility mode** stores each LFS object whole, in the same SHA-256-addressed layout an LFS server would use. That predictability matters during a migration: if your CI scripts or backup tools expect to find objects under a familiar path, they still find them.
+
+**Crab-native storage** runs files through Crab's content-defined chunking pipeline, so files that share large stretches of bytes can share storage. The LFS compatibility layer can coexist with that native path, and `crab lfs dedup --dry-run` helps identify local LFS objects that also exist in Crab staging before any cleanup.
+
+The savings show up wherever your team iterates on big files. A model checkpoint that grows by a small percentage each week, a Unity scene with daily edits, a dataset that gets re-exported with mostly stable rows — all of those can store roughly the changed slice instead of the whole file. The exact reduction depends on how much byte-level overlap exists between versions.
+
+Most teams start with compatibility, confirm everything is healthy, and only then decide whether a Crab-native migration or cleanup pass is worth coordinating. You don't have to commit upfront.
+
+## Migrating an Existing Repository
+
+For most teams, the install step is enough. If you also want existing history rewritten, Crab exposes the same style of import/export workflow teams know from `git lfs migrate`. Use it deliberately: it rewrites refs, requires a clean working tree, and should be tested on a backup before force-pushing shared branches.
+
+<svg viewBox="0 0 780 220" width="100%" role="img" aria-label="Three-phase migration workflow: inspect repository history, import matching files as LFS pointers, then verify and coordinate the rewritten refs.">
+  <defs>
+    <marker id="arrow-lfs-migrate" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="none" stroke="var(--primary)" strokeWidth="1.5" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="390" y="36" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Migration pipeline"}</text>
+
+  {/* Step 1 */}
+  <rect x="40" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="140" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 1"}</text>
+  <text x="140" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Inspect"}</text>
+  <text x="140" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"find large files"}</text>
+  <text x="140" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"or existing pointers"}</text>
+
+  {/* Arrow 1→2 */}
+  <line x1="240" y1="120" x2="288" y2="120" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-migrate)" />
+
+  {/* Step 2 */}
+  <rect x="296" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="396" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 2"}</text>
+  <text x="396" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Import"}</text>
+  <text x="396" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"rewrite matching"}</text>
+  <text x="396" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"history blobs"}</text>
+
+  {/* Arrow 2→3 */}
+  <line x1="496" y1="120" x2="544" y2="120" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-migrate)" />
+
+  {/* Step 3 */}
+  <rect x="552" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="652" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 3"}</text>
+  <text x="652" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Verify"}</text>
+  <text x="652" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"check status,"}</text>
+  <text x="652" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"fsck, then push"}</text>
+
+  {/* Footnote line */}
+  <text x="390" y="200" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"Inspect first; rewrite only after a backup and a clean working tree."}</text>
+</svg>
+
+Start by inspecting the repository. `crab lfs migrate info` summarizes large candidates, and `--pointers` switches the report to existing LFS pointers in `HEAD`:
+
+```bash
+crab lfs migrate info --above 10mb
+crab lfs migrate info --pointers
+```
+
+When you are ready to rewrite, choose the exact pattern and scope. `--everything` expands the rewrite from the current branch to all local branches:
+
+```bash
+crab lfs migrate import --include "*.safetensors" --everything
+```
+
+Under the hood, Crab uses a `git fast-export` → transform → `git fast-import` pipeline. Matching blobs are replaced with canonical LFS pointer files, `.gitattributes` is updated with the LFS filter line, and original bytes are cached locally and uploaded to the configured LFS store when a remote store is available. If `git fast-import` fails, Crab restores the saved refs before returning the error.
+
+<Callout type="warning" title="Rewriting history is the one coordination point">
+A full migration ends with a force-push of rewritten refs. Everyone with a clone needs to re-clone or reset. Keep the previous LFS remote available until all active clones and CI jobs have moved to the rewritten history.
+</Callout>
+
+## What Stays the Same, What Changes
+
+Most of the contract you've built around LFS is preserved.
+
+**Stays the same:**
+
+- `.gitattributes` lines like `*.safetensors filter=lfs diff=lfs merge=lfs -text`
+- The `git lfs track`, `git lfs pull`, and `git lfs push` commands you have memorized
+- The pointer-file format inside your git history
+- CI jobs and scripts that drive LFS through standard git commands
+- Branching, merging, and review workflows
+
+**What changes:**
+
+- The hosted LFS server is gone — bytes go to your own bucket
+- You manage cloud credentials directly instead of an LFS server's auth layer
+- Crab-native dedup can reduce storage when large files share byte ranges
+- Optional lazy checkout means clones only download files you actually open
+
+There's nothing forcing you to use the optional pieces. A team that just wants its LFS bill to go away can stop after `crab lfs install`.
+
+## Tradeoffs Worth Knowing
+
+Removing the server gives you simpler infrastructure, but it does shift a few responsibilities.
+
+Every client needs read or write access to the bucket, since there's no server brokering signed URLs on demand. Most teams handle this with scoped IAM roles or per-repo prefixes — the same patterns you'd use for any internal tool that talks to S3.
+
+Server-side policy hooks (max file size, allowed extensions, quotas) don't have a hosted server to live on. Bucket policies cover most cases, and Crab provides a `pre-push` hook for client-side enforcement when you want stricter rules.
+
+Finally, full history rewrite is a one-time event. If you skip phase 3 and only adopt the transfer agent, you keep all of this optional. New pushes get the benefits, old history stays as-is, and there's nothing to coordinate across the team.
+
+## What This Means for You
+
+Git LFS is a fine tool, and a lot of teams do well with the standard hosted setup. Crab is for the moment that arrangement starts to feel like a bottleneck — when the LFS server's bandwidth caps your CI, when storage bills creep up, or when a vendor outage blocks a release.
+
+In that situation you don't need to throw out what you've built. Keep your `.gitattributes`. Keep your `git lfs` muscle memory. Keep the pointer files in your history. Just point the transfer at storage you already trust, and turn on deduplication when you want the savings.
+
+<Cards>
+<Card title="Zero Server">
+LFS objects go straight to your cloud bucket. Nothing extra to deploy or pay for.
+</Card>
+<Card title="Drop-In Compatible">
+Existing `.gitattributes`, `git lfs` commands, and CI pipelines keep working.
+</Card>
+<Card title="Optional Dedup">
+Deduplication shrinks workflows where new versions share chunks with old ones.
+</Card>
+<Card title="Migrate Your Way">
+Install the agent today, rewrite history later — or never.
+</Card>
+</Cards>

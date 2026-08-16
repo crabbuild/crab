@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+"""Run concurrent Crab push smokes against a local RustFS/S3 endpoint.
+
+The harness creates a unique remote under ``crab://<bucket>/e2e-concurrent-push``
+and local workdirs under ``/Volumes/Workspace/CrabRepos`` by default. It models
+two AI-agent push cases:
+
+* branch fanout: many agents push independent branches at the same time; all
+  pushes must succeed.
+* same-branch contention: many agents push divergent commits to ``main`` at the
+  same time; exactly one push may land, and all losers must fail with structured
+  push statuses rather than corrupting remote state. With
+  ``--rebase-on-non-fast-forward``, every same-branch agent must eventually
+  integrate and the final clone must contain every agent file. The command loop
+  acquires the push lock before refreshing/rebasing, then hands that lock into
+  the push pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import shutil
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_BUCKET = "crab"
+DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
+REMOTE_PREFIX = "e2e-concurrent-push"
+SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object"}
+
+
+class SmokeError(RuntimeError):
+    """Raised when a smoke step fails."""
+
+
+@dataclass
+class CommandRecord:
+    name: str
+    args: list[str]
+    cwd: str
+    exit_code: int
+    duration_ms: int
+    stdout_log: str
+    stderr_log: str
+
+
+@dataclass
+class PushRecord:
+    agent: str
+    branch: str
+    command: CommandRecord
+    status: str
+    retryable: bool | None = None
+    retry_after_secs: int | None = None
+    integration_retries: int | None = None
+    integration_retry_limit: int | None = None
+
+
+@dataclass
+class SmokeReport:
+    run_id: str
+    status: str
+    remote_url: str
+    root: str
+    endpoint_url: str
+    env: dict[str, str]
+    commands: list[dict[str, Any]] = field(default_factory=list)
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    branch_fanout: list[dict[str, Any]] = field(default_factory=list)
+    same_branch: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: dict[str, str] = field(default_factory=dict)
+    updated_at: str = ""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def make_run_id() -> str:
+    return "concurrent-push-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def slug(value: str) -> str:
+    out = "".join(c if c.isalnum() or c in "._-" else "-" for c in value.lower())
+    return out.strip("-") or "command"
+
+
+def redact_env(env: dict[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for key, value in sorted(env.items()):
+        if key in SECRET_KEYS:
+            redacted[key] = "<redacted>"
+        elif key.startswith("AWS_") or key.startswith("CRAB_") or key.startswith("GIT_"):
+            redacted[key] = value
+    return redacted
+
+
+def first_json_object(text: str, schema: str) -> dict[str, Any] | None:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if value.get("schema") == schema:
+            return value
+    return None
+
+
+class ConcurrentPushSmoke:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.run_id = args.run_id or make_run_id()
+        self.run_root = args.root / self.run_id
+        self.logs = self.run_root / "logs"
+        self.artifacts = self.run_root / "artifacts"
+        self.seed = self.run_root / "seed"
+        self.branch_agents = self.run_root / "branch-agents"
+        self.same_agents = self.run_root / "same-branch-agents"
+        self.remote_url = f"crab://{args.bucket}/{REMOTE_PREFIX}/{self.run_id}"
+        self.env = self.build_env()
+        self.command_index = 0
+        self.command_lock = threading.Lock()
+        self.report = SmokeReport(
+            run_id=self.run_id,
+            status="running",
+            remote_url=self.remote_url,
+            root=str(self.run_root),
+            endpoint_url=args.endpoint_url,
+            env=redact_env(self.env),
+            updated_at=utc_now(),
+        )
+
+    def build_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "AWS_ACCESS_KEY_ID": self.args.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.args.secret_key,
+                "AWS_REGION": self.args.region,
+                "AWS_ENDPOINT_URL": self.args.endpoint_url,
+                "AWS_ALLOW_HTTP": "true",
+                "AWS_EC2_METADATA_DISABLED": "true",
+                "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_MERGE_AUTOEDIT": "no",
+            }
+        )
+        return env
+
+    def write_report(self) -> None:
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        self.report.updated_at = utc_now()
+        path = self.artifacts / "report.json"
+        payload = asdict(self.report)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self.report.artifacts["report"] = str(path)
+
+    def check(self, name: str, ok: bool, detail: dict[str, Any] | None = None) -> None:
+        self.report.checks.append(
+            {
+                "name": name,
+                "ok": ok,
+                "detail": detail or {},
+                "timestamp": utc_now(),
+            }
+        )
+        self.write_report()
+        if not ok:
+            raise SmokeError(f"check failed: {name}")
+
+    def next_log_paths(self, name: str) -> tuple[Path, Path]:
+        with self.command_lock:
+            self.command_index += 1
+            index = self.command_index
+        base = f"{index:03d}-{slug(name)}"
+        self.logs.mkdir(parents=True, exist_ok=True)
+        return self.logs / f"{base}.stdout.log", self.logs / f"{base}.stderr.log"
+
+    def record_command(
+        self,
+        name: str,
+        args: list[str],
+        cwd: Path,
+        exit_code: int,
+        duration_ms: int,
+        stdout: str,
+        stderr: str,
+    ) -> CommandRecord:
+        stdout_log, stderr_log = self.next_log_paths(name)
+        stdout_log.write_text(stdout, encoding="utf-8", errors="replace")
+        stderr_log.write_text(stderr, encoding="utf-8", errors="replace")
+        record = CommandRecord(
+            name=name,
+            args=args,
+            cwd=str(cwd),
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
+        )
+        self.report.commands.append(asdict(record))
+        self.write_report()
+        return record
+
+    def run_cmd(
+        self,
+        name: str,
+        args: list[str],
+        cwd: Path,
+        *,
+        check: bool = True,
+        timeout: int | None = None,
+    ) -> CommandRecord:
+        start = time.monotonic()
+        proc = subprocess.run(
+            args,
+            cwd=cwd,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout or self.args.timeout,
+            check=False,
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+        record = self.record_command(
+            name,
+            args,
+            cwd,
+            proc.returncode,
+            duration_ms,
+            proc.stdout,
+            proc.stderr,
+        )
+        if check and proc.returncode != 0:
+            raise SmokeError(
+                f"{name} failed with exit {proc.returncode}; stderr log: {record.stderr_log}"
+            )
+        return record
+
+    def run_git(self, repo: Path, args: list[str], *, name: str | None = None) -> CommandRecord:
+        return self.run_cmd(name or "git " + " ".join(args), ["git", *args], repo)
+
+    def run_crab(self, repo: Path, args: list[str], *, name: str | None = None) -> CommandRecord:
+        return self.run_cmd(name or "crab " + " ".join(args), [self.args.crab_bin, *args], repo)
+
+    def configure_git_identity(self, repo: Path, who: str) -> None:
+        self.run_git(repo, ["config", "user.name", f"Crab {who}"])
+        self.run_git(repo, ["config", "user.email", f"{who}@example.invalid"])
+
+    def configure_crab_repo(self, repo: Path) -> None:
+        self.run_crab(repo, ["config", "set", "push.lock_wait_secs", str(self.args.lock_wait_secs)])
+        self.run_crab(
+            repo,
+            ["config", "set", "push.max_cas_retries", str(self.args.manifest_cas_retries)],
+        )
+
+    def preflight(self) -> None:
+        self.run_root.mkdir(parents=True, exist_ok=True)
+        self.logs.mkdir(parents=True, exist_ok=True)
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        self.write_report()
+
+        try:
+            with urllib.request.urlopen(self.args.endpoint_url, timeout=5) as response:
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        except OSError as exc:
+            self.check("rustfs-endpoint-reachable", False, {"error": str(exc)})
+            return
+        self.check("rustfs-endpoint-reachable", status < 500, {"status": status})
+
+        if shutil.which("aws"):
+            record = self.run_cmd(
+                "aws create bucket",
+                [
+                    "aws",
+                    "s3api",
+                    "create-bucket",
+                    "--bucket",
+                    self.args.bucket,
+                    "--endpoint-url",
+                    self.args.endpoint_url,
+                ],
+                self.run_root,
+                check=False,
+            )
+            stderr = Path(record.stderr_log).read_text(encoding="utf-8", errors="replace")
+            already_exists = "BucketAlready" in stderr or "already" in stderr.lower()
+            self.check(
+                "bucket-create-or-exists",
+                record.exit_code == 0 or already_exists,
+                {"exit_code": record.exit_code, "already_exists": already_exists},
+            )
+        else:
+            self.report.checks.append(
+                {
+                    "name": "bucket-create-skipped",
+                    "ok": True,
+                    "detail": {"reason": "aws CLI not found; assuming bucket exists"},
+                    "timestamp": utc_now(),
+                }
+            )
+            self.write_report()
+
+    def init_seed(self) -> None:
+        self.seed.mkdir(parents=True)
+        self.run_git(self.seed, ["init", "-b", "main"])
+        self.configure_git_identity(self.seed, "seed")
+        self.run_crab(self.seed, ["init", self.remote_url], name="crab init seed")
+        self.configure_crab_repo(self.seed)
+        (self.seed / "README.md").write_text(
+            f"# Concurrent push smoke\n\nrun_id: {self.run_id}\n",
+            encoding="utf-8",
+        )
+        self.run_git(self.seed, ["add", "-A"])
+        self.run_git(self.seed, ["commit", "-m", "seed concurrent push smoke"])
+        self.run_crab(
+            self.seed,
+            [
+                "push",
+                "--json",
+                "--lock-wait-secs",
+                str(self.args.lock_wait_secs),
+                "origin",
+                "HEAD:refs/heads/main",
+            ],
+            name="crab push seed",
+        )
+
+    def clone_agent(self, root: Path, index: int, prefix: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / f"{prefix}-{index:03d}"
+        self.run_cmd(
+            f"crab clone {prefix}-{index:03d}",
+            [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
+            self.run_root,
+        )
+        self.configure_git_identity(target, f"{prefix}-{index:03d}")
+        self.configure_crab_repo(target)
+        return target
+
+    def prepare_branch_agent(self, index: int) -> tuple[str, str, Path]:
+        repo = self.clone_agent(self.branch_agents, index, "branch-agent")
+        branch = f"agents/agent-{index:03d}"
+        dst = f"refs/heads/{branch}"
+        self.run_git(repo, ["checkout", "-b", branch])
+        path = repo / "agents" / f"agent-{index:03d}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"branch fanout agent {index}\nrun_id {self.run_id}\n",
+            encoding="utf-8",
+        )
+        self.run_git(repo, ["add", str(path.relative_to(repo))])
+        self.run_git(repo, ["commit", "-m", f"agent {index:03d} branch fanout"])
+        return f"branch-agent-{index:03d}", dst, repo
+
+    def prepare_same_branch_agent(self, index: int) -> tuple[str, str, Path]:
+        repo = self.clone_agent(self.same_agents, index, "same-agent")
+        path = repo / "same-branch" / f"agent-{index:03d}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"same branch agent {index}\nrun_id {self.run_id}\n",
+            encoding="utf-8",
+        )
+        self.run_git(repo, ["add", str(path.relative_to(repo))])
+        self.run_git(repo, ["commit", "-m", f"agent {index:03d} same branch"])
+        return f"same-agent-{index:03d}", "refs/heads/main", repo
+
+    def push_args(self, refspec: str) -> list[str]:
+        args = [
+            self.args.crab_bin,
+            "push",
+            "--json",
+            "--manifest-cas-retries",
+            str(self.args.manifest_cas_retries),
+            "--upload-concurrency",
+            str(self.args.upload_concurrency),
+            "origin",
+            refspec,
+        ]
+        if not self.args.omit_lock_wait_secs:
+            args[3:3] = ["--lock-wait-secs", str(self.args.lock_wait_secs)]
+        if self.args.rebase_on_non_fast_forward:
+            args.extend(
+                [
+                    "--rebase-on-non-fast-forward",
+                    "--rebase-retry-limit",
+                    str(self.args.rebase_retry_limit),
+                ]
+            )
+        return args
+
+    def run_push_job(self, agent: str, branch: str, repo: Path, refspec: str) -> PushRecord:
+        record = self.run_cmd(
+            f"{agent} crab push",
+            self.push_args(refspec),
+            repo,
+            check=False,
+            timeout=self.args.push_timeout,
+        )
+        payload = first_json_object(Path(record.stdout_log).read_text(encoding="utf-8"), "push")
+        status = "missing-json"
+        retryable = None
+        retry_after_secs = None
+        integration_retries = None
+        integration_retry_limit = None
+        if payload and payload.get("data"):
+            integration_retries = payload["data"].get("integration_retries")
+            integration_retry_limit = payload["data"].get("integration_retry_limit")
+            refs = payload["data"].get("refs") or []
+            if refs:
+                status = str(refs[0].get("status"))
+                retryable = refs[0].get("retryable")
+                retry_after_secs = refs[0].get("retry_after_secs")
+        elif record.exit_code == 0:
+            status = "ok"
+        return PushRecord(
+            agent,
+            branch,
+            record,
+            status,
+            retryable,
+            retry_after_secs,
+            integration_retries,
+            integration_retry_limit,
+        )
+
+    def push_concurrently(self, jobs: list[tuple[str, str, Path, str]]) -> list[PushRecord]:
+        max_workers = max(1, min(len(jobs), self.args.max_parallel_pushes))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(self.run_push_job, agent, branch, repo, refspec)
+                for agent, branch, repo, refspec in jobs
+            ]
+            return [future.result() for future in concurrent.futures.as_completed(futures)]
+
+    def run_branch_fanout(self) -> None:
+        prepared = [self.prepare_branch_agent(i) for i in range(self.args.agents)]
+        jobs = [
+            (agent, branch, repo, f"HEAD:{branch}")
+            for agent, branch, repo in prepared
+        ]
+        results = self.push_concurrently(jobs)
+        self.report.branch_fanout = [asdict(result) for result in results]
+        self.write_report()
+
+        statuses = {result.status for result in results}
+        self.check(
+            "branch-fanout-all-pushed",
+            statuses == {"ok"},
+            {"statuses": sorted(statuses), "count": len(results)},
+        )
+        refs = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, "refs/heads/agents/*"],
+            name="git ls-remote branch fanout refs",
+        )
+        visible = [
+            line
+            for line in Path(refs.stdout_log).read_text(encoding="utf-8").splitlines()
+            if "refs/heads/agents/" in line
+        ]
+        self.check(
+            "branch-fanout-refs-visible",
+            len(visible) >= self.args.agents,
+            {"visible": len(visible), "expected": self.args.agents},
+        )
+
+    def run_same_branch_contention(self) -> None:
+        prepared = [self.prepare_same_branch_agent(i) for i in range(self.args.same_branch_agents)]
+        jobs = [(agent, branch, repo, "HEAD:refs/heads/main") for agent, branch, repo in prepared]
+        results = self.push_concurrently(jobs)
+        self.report.same_branch = [asdict(result) for result in results]
+        self.write_report()
+
+        ok = [result for result in results if result.status == "ok" and result.command.exit_code == 0]
+        rejected = [result for result in results if result.status != "ok"]
+        bad = [result for result in results if result.status in BAD_PUSH_STATUSES]
+        if self.args.rebase_on_non_fast_forward:
+            retry_counts = [
+                result.integration_retries
+                for result in results
+                if result.integration_retries is not None
+            ]
+            telemetry_ok = all(
+                result.integration_retries is not None
+                and result.integration_retry_limit == self.args.rebase_retry_limit
+                for result in results
+            )
+            self.check(
+                "same-branch-all-integrated",
+                len(ok) == self.args.same_branch_agents and not bad and telemetry_ok,
+                {
+                    "ok": len(ok),
+                    "total": len(results),
+                    "statuses": sorted({r.status for r in results}),
+                    "telemetry_ok": telemetry_ok,
+                    "max_integration_retries": max(retry_counts) if retry_counts else None,
+                    "retry_limit": self.args.rebase_retry_limit,
+                    "bad_statuses": [asdict(result) for result in bad],
+                },
+            )
+            self.check_same_branch_files_visible()
+            return
+
+        self.check(
+            "same-branch-one-winner",
+            len(ok) == 1,
+            {"ok": len(ok), "total": len(results), "statuses": sorted({r.status for r in results})},
+        )
+        self.check(
+            "same-branch-losers-structured",
+            len(rejected) == self.args.same_branch_agents - 1 and not bad,
+            {
+                "rejected": len(rejected),
+                "bad_statuses": [asdict(result) for result in bad],
+            },
+        )
+
+    def check_same_branch_files_visible(self) -> None:
+        target = self.run_root / "same-branch-final"
+        self.run_cmd(
+            "crab clone same-branch final",
+            [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
+            self.run_root,
+        )
+        visible = sorted((target / "same-branch").glob("agent-*.txt"))
+        self.check(
+            "same-branch-integrated-files-visible",
+            len(visible) == self.args.same_branch_agents,
+            {"visible": len(visible), "expected": self.args.same_branch_agents},
+        )
+
+    def run_fsck(self) -> None:
+        if self.args.skip_fsck:
+            return
+        record = self.run_crab(self.seed, ["fsck", "--json"], name="crab fsck")
+        payload = first_json_object(Path(record.stdout_log).read_text(encoding="utf-8"), "fsck")
+        errors = None
+        if payload and payload.get("data"):
+            errors = payload["data"].get("errors")
+        self.check("fsck-clean-or-no-errors", errors in (None, 0), {"errors": errors})
+
+    def run(self) -> int:
+        try:
+            self.preflight()
+            self.init_seed()
+            if not self.args.skip_branch_fanout:
+                self.run_branch_fanout()
+            if not self.args.skip_same_branch:
+                self.run_same_branch_contention()
+            self.run_fsck()
+        except Exception as exc:
+            self.report.status = "failed"
+            self.report.checks.append(
+                {
+                    "name": "exception",
+                    "ok": False,
+                    "detail": {"error": str(exc)},
+                    "timestamp": utc_now(),
+                }
+            )
+            self.write_report()
+            print(f"FAILED: {exc}")
+            print(f"report: {self.report.artifacts.get('report')}")
+            return 1
+
+        self.report.status = "ok"
+        self.write_report()
+        print("OK")
+        print(f"run: {self.run_root}")
+        print(f"remote: {self.remote_url}")
+        print(f"report: {self.report.artifacts.get('report')}")
+        return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--bucket", default=DEFAULT_BUCKET)
+    parser.add_argument("--endpoint-url", default=DEFAULT_ENDPOINT)
+    parser.add_argument("--access-key", default="crab")
+    parser.add_argument("--secret-key", default="crab")
+    parser.add_argument("--region", default="us-east-1")
+    parser.add_argument("--run-id")
+    parser.add_argument("--crab-bin", default=shutil.which("crab") or "crab")
+    parser.add_argument("--agents", type=int, default=8)
+    parser.add_argument("--same-branch-agents", type=int, default=8)
+    parser.add_argument("--max-parallel-pushes", type=int, default=32)
+    parser.add_argument("--upload-concurrency", type=int, default=4)
+    parser.add_argument("--lock-wait-secs", type=int, default=30)
+    parser.add_argument("--omit-lock-wait-secs", action="store_true")
+    parser.add_argument("--manifest-cas-retries", type=int, default=128)
+    parser.add_argument("--rebase-on-non-fast-forward", action="store_true")
+    parser.add_argument("--rebase-retry-limit", type=int, default=256)
+    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--push-timeout", type=int, default=300)
+    parser.add_argument("--skip-branch-fanout", action="store_true")
+    parser.add_argument("--skip-same-branch", action="store_true")
+    parser.add_argument("--skip-fsck", action="store_true")
+    args = parser.parse_args()
+    args.crab_bin = resolve_executable(args.crab_bin)
+    return args
+
+
+def resolve_executable(value: str) -> str:
+    path = Path(value).expanduser()
+    if path.is_absolute() or os.sep in value:
+        return str(path.resolve())
+    resolved = shutil.which(value)
+    return resolved or value
+
+
+def main() -> int:
+    args = parse_args()
+    smoke = ConcurrentPushSmoke(args)
+    return smoke.run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

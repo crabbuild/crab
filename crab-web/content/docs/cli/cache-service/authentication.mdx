@@ -1,0 +1,188 @@
+---
+title: "Authentication"
+description: "Choose and configure cache-service authentication."
+---
+
+# Authentication
+
+The cache service supports PSK, bearer, native mTLS, and proxy-terminated mTLS patterns. For most first deployments, use PSK on a private network.
+
+## Recommended Choices
+
+| Environment | Recommended auth |
+|-------------|------------------|
+| Local development | PSK or none |
+| Single-team private network | PSK |
+| CI on private network | PSK from CI secrets |
+| Multi-team enterprise platform | Native mTLS or proxy-terminated mTLS with policy |
+| Public internet | Do not expose directly |
+
+## PSK
+
+PSK uses one shared secret. Clients send the secret with each authenticated request. The server stores only a Blake3 hash of the secret.
+
+Generate the server hash:
+
+```bash
+printf '%s' "your-shared-secret" | b3sum | cut -d' ' -f1
+```
+
+Server:
+
+```toml
+[auth]
+mechanism = "psk"
+psk_hash = "<64-character-blake3-hash>"
+```
+
+Client:
+
+```toml
+[cache]
+service_auth = "psk"
+```
+
+```bash
+export CRAB_CACHE_PSK="your-shared-secret"
+```
+
+PSK clients share one identity. Use PSK only over native TLS, proxy-terminated TLS, or a trusted private network; `crab-cache-server check` warns when PSK would travel over plain HTTP. Use separate cache services or mTLS when you need per-user or per-team identities.
+
+## Bearer
+
+Bearer mode accepts a bearer token from the client:
+
+```toml
+[cache]
+service_auth = "bearer"
+service_token_path = "/var/run/crab/cache-token"
+```
+
+or:
+
+```bash
+export CRAB_CACHE_TOKEN="token-value"
+```
+
+Current bearer mode does not validate token signatures. Use it only on trusted networks or behind infrastructure that already authenticates requests.
+
+## Native mTLS
+
+Native mTLS lets `crab-cache-server` validate client certificates directly. Configure a server certificate, private key, and trusted client CA bundle:
+
+```toml
+[tls]
+cert_path = "/etc/crab-cache-server/tls/server.pem"
+key_path = "/etc/crab-cache-server/tls/server-key.pem"
+client_ca_path = "/etc/crab-cache-server/tls/client-ca.pem"
+
+[auth]
+mechanism = "mtls"
+```
+
+Clients must present a certificate signed by `client_ca_path`. The authenticated principal is the SHA-256 fingerprint of the verified leaf certificate:
+
+```text
+mtls-sha256:<leaf-certificate-fingerprint>
+```
+
+Use that exact principal in `policy_path` rules.
+
+Derive the fingerprint from a client certificate with:
+
+```bash
+openssl x509 -in /etc/crab/client.pem -outform DER |
+  openssl dgst -sha256 -r | awk '{print "mtls-sha256:" $1}'
+```
+
+Client configuration:
+
+```toml
+[cache]
+service_auth = "mtls"
+service_ca_cert = "/etc/crab-cache-server/tls/client-ca.pem"
+service_client_cert = "/etc/crab/client.pem"
+service_client_key = "/etc/crab/client-key.pem"
+```
+
+## Proxy-Terminated mTLS
+
+For mTLS, validate client certificates at a trusted proxy, ingress, or service mesh. The proxy forwards the validated identity to the cache service.
+
+Server:
+
+```toml
+[auth]
+mechanism = "mtls"
+```
+
+Proxy requirement:
+
+```text
+X-Client-CN: <validated-client-identity>
+```
+
+Do not allow untrusted clients to set this header directly.
+
+## Authorization Policy
+
+Authentication identifies the client. A policy file controls what that client can do.
+
+Example:
+
+```yaml
+rules:
+  - principal: "psk-client"
+    repos: ["my-org/*", ".crab"]
+    actions: ["read", "write", "dedup"]
+
+  - principal: "ci-runner-prod"
+    repos: ["my-org/*", ".crab"]
+    actions: ["read", "dedup"]
+
+  - principal: "deployer"
+    repos: ["*"]
+    actions: ["read", "write", "dedup", "admin"]
+```
+
+Policy fields:
+
+| Field | Description |
+|-------|-------------|
+| `principal` | Exact authenticated identity. PSK uses `psk-client`; native mTLS uses `mtls-sha256:<leaf-certificate-fingerprint>`; proxy mTLS uses the forwarded `X-Client-CN` value. |
+| `repos` | Repository patterns. Include real repo prefixes for repo-scoped dedup and `.crab` for normal shared Crab object traffic. |
+| `actions` | `read`, `write`, `dedup`, or `admin`. |
+
+Policy files are validated during startup and by `crab-cache-server check`.
+Rules, principals, repos, and actions must be non-empty. Repo wildcards are
+limited to one trailing `*`, and repo patterns cannot contain `.` or `..` path
+segments. Unknown actions fail preflight instead of becoming runtime-only
+authorization denials.
+
+`crab-cache-server check --json` also emits redacted policy diagnostics: rule
+count, repo-pattern count, and the configured action set. Principal values are
+not included in that summary.
+
+If no `policy_path` is configured, every authenticated principal can read,
+write, dedup, and call admin endpoints. Preflight reports that open policy as a
+warning so enterprise deployments can fail their own rollout gate before
+serving traffic.
+
+Use separate cache services when dedup visibility itself must be isolated.
+
+For native mTLS deployments, verify policy before rollout by running the cache
+service preflight and checking one allowed client plus one denied client. The
+native-mTLS E2E smoke in the Crab repository covers this path: it loads a
+policy, proves the configured client can read, write, dedup, and call admin
+stats, and proves a second CA-signed client is rejected by policy.
+
+## Rotation
+
+For PSK rotation:
+
+1. Generate a new secret and hash.
+2. Update the server config.
+3. Restart or roll the cache service.
+4. Update client secrets.
+
+For zero-downtime rotation, run two cache services during the cutover window and move clients gradually.

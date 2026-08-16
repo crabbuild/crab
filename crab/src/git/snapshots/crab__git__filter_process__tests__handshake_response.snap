@@ -1,0 +1,10 @@
+---
+source: crab/src/git/filter_process.rs
+expression: output_str
+---
+0016git-filter-server
+000eversion=2
+00000015capability=clean
+0016capability=smudge
+0015capability=delay
+0000

@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HydrateSummaryPayload",
+  "description": "Serializable payload for `--json` / `--jsonl` result events.",
+  "type": "object",
+  "required": [
+    "bytes_skipped",
+    "bytes_written",
+    "duration_ms",
+    "failed",
+    "hydrated",
+    "skipped"
+  ],
+  "properties": {
+    "bytes_cow_cloned": {
+      "description": "Bytes materialized through sibling-worktree CoW clones.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "bytes_recovered": {
+      "description": "Bytes restored via `--recover-from` (subset of `bytes_written`).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "bytes_skipped": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "bytes_written": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cow_cloned": {
+      "description": "Files materialized through sibling-worktree CoW clones.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "failed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "hydrated": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "recovered": {
+      "description": "Files materialized from `--recover-from` (subset of `hydrated`).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "skipped": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

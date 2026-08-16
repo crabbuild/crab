@@ -1,0 +1,316 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1240" role="img" aria-labelledby="title desc">
+  <title id="title">Crab push pipeline architecture</title>
+  <desc id="desc">Architecture diagram focused on the Crab push pipeline, from Git and crab push entry points through the shared PushPipeline, object storage writes, enterprise auth, cache acceleration, and optional active-active coordination.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#60a5fa"/>
+    </marker>
+  </defs>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+    text { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace; }
+    .title { fill: #f8fafc; font-size: 20px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 9px; }
+    .region-label { font-size: 9px; font-weight: 600; letter-spacing: 0; }
+    .name { fill: #f8fafc; font-size: 11px; font-weight: 600; }
+    .sub { fill: #94a3b8; font-size: 8.5px; font-weight: 400; }
+    .tiny { fill: #94a3b8; font-size: 7.5px; font-weight: 400; }
+    .label { fill: #cbd5e1; font-size: 8px; font-weight: 500; }
+    .mask { fill: #0f172a; }
+    .primary { fill: rgba(8, 51, 68, 0.4); stroke: #22d3ee; }
+    .secondary { fill: rgba(6, 78, 59, 0.4); stroke: #34d399; }
+    .tertiary { fill: rgba(76, 29, 149, 0.4); stroke: #a78bfa; }
+    .accent { fill: rgba(120, 53, 15, 0.3); stroke: #fbbf24; }
+    .alert { fill: rgba(136, 19, 55, 0.4); stroke: #fb7185; }
+    .connector { fill: rgba(251, 146, 60, 0.3); stroke: #fb923c; }
+    .neutral { fill: rgba(30, 41, 59, 0.5); stroke: #94a3b8; }
+    .highlight { fill: rgba(59, 130, 246, 0.3); stroke: #60a5fa; }
+    .box { stroke-width: 1.5; }
+    .region { fill: none; stroke-width: 1; stroke-dasharray: 8 4; }
+    .security-region { fill: none; stroke-width: 1; stroke-dasharray: 4 4; }
+    .flow { fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+    .flow-cyan { stroke: #22d3ee; marker-end: url(#arrow-cyan); }
+    .flow-green { stroke: #34d399; marker-end: url(#arrow-green); }
+    .flow-orange { stroke: #fb923c; marker-end: url(#arrow-orange); }
+    .flow-rose { stroke: #fb7185; marker-end: url(#arrow-rose); }
+    .flow-violet { stroke: #a78bfa; marker-end: url(#arrow-violet); }
+    .flow-blue { stroke: #60a5fa; marker-end: url(#arrow-blue); }
+    .muted { stroke: #64748b; opacity: 0.72; }
+    .dash { stroke-dasharray: 5 5; }
+    .thin { stroke-width: 1.2; }
+    .rail { fill: none; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; opacity: 0.82; }
+    .rail-violet { stroke: #a78bfa; }
+    .rail-orange { stroke: #fb923c; stroke-dasharray: 5 5; }
+  </style>
+
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+
+  <text x="40" y="45" class="title">Crab push pipeline architecture</text>
+  <text x="40" y="63" class="subtitle">Focus: git push / crab push, shared PushPipeline, immutable uploads, manifest commit, enterprise auth, and cache acceleration.</text>
+  <text x="40" y="78" class="subtitle">Source surfaces: crab/src/cmd/push.rs, crab/src/git/remote_helper.rs, crab/src/git/push_native.rs, crab/src/git/push.rs</text>
+
+  <!-- Region boundaries -->
+  <rect x="40" y="200" width="280" height="360" rx="12" class="region" stroke="#22d3ee"/>
+  <text x="52" y="218" class="region-label" fill="#22d3ee">Push entry points</text>
+
+  <rect x="350" y="205" width="730" height="720" rx="12" class="region" stroke="#34d399"/>
+  <text x="362" y="223" class="region-label" fill="#34d399">crab process: native front-end plus shared push state machine</text>
+
+  <rect x="380" y="350" width="655" height="470" rx="10" class="security-region" stroke="#34d399"/>
+  <text x="392" y="368" class="region-label" fill="#34d399">Shared PushPipeline: immutable data first, mutable manifest last</text>
+
+  <rect x="1120" y="205" width="280" height="650" rx="12" class="region" stroke="#a78bfa"/>
+  <text x="1132" y="223" class="region-label" fill="#a78bfa">Cloud object store</text>
+
+  <rect x="680" y="90" width="360" height="105" rx="12" class="security-region" stroke="#fb7185"/>
+  <text x="692" y="108" class="region-label" fill="#fb7185">Enterprise auth service (optional)</text>
+
+  <rect x="500" y="980" width="380" height="140" rx="12" class="region" stroke="#fb923c"/>
+  <text x="512" y="998" class="region-label" fill="#fb923c">Enterprise cache service (optional)</text>
+
+  <rect x="930" y="980" width="300" height="140" rx="12" class="region" stroke="#60a5fa"/>
+  <text x="942" y="998" class="region-label" fill="#60a5fa">Active-active write coordinator (optional)</text>
+
+  <!-- Connections: entry to push core -->
+  <path d="M 180 310 L 180 340" class="flow flow-cyan"/>
+  <path d="M 285 370 L 340 370 L 340 270 L 380 270" class="flow flow-cyan"/>
+  <path d="M 285 460 L 320 460 L 320 294 L 380 294" class="flow flow-cyan"/>
+  <path d="M 600 282 L 640 282" class="flow flow-green"/>
+  <path d="M 835 319 L 835 350" class="flow flow-green"/>
+  <path d="M 490 319 L 490 390" class="flow flow-green"/>
+
+  <!-- Connections: auth service -->
+  <path d="M 600 270 L 660 270 L 660 145 L 680 145" class="flow flow-rose"/>
+  <path d="M 830 195 L 830 228 L 520 228 L 520 245" class="flow flow-rose"/>
+  <path d="M 1005 636 L 1100 636 L 1100 145 L 1040 145" class="flow flow-rose"/>
+
+  <!-- Connections: shared pipeline happy path -->
+  <path d="M 595 422 L 630 422" class="flow flow-green"/>
+  <path d="M 810 422 L 845 422" class="flow flow-green"/>
+  <path d="M 925 455 L 925 480 L 500 480 L 500 505" class="flow flow-green"/>
+  <path d="M 595 538 L 630 538" class="flow flow-green"/>
+  <path d="M 810 538 L 845 538" class="flow flow-green"/>
+  <path d="M 925 570 L 925 610 L 500 610 L 500 620" class="flow flow-green"/>
+  <path d="M 595 652 L 630 652" class="flow flow-green"/>
+  <path d="M 810 652 L 845 652" class="flow flow-green"/>
+  <path d="M 925 685 L 925 760 L 810 760" class="flow flow-green"/>
+
+  <!-- Connections: object store writes and reads -->
+  <path d="M 1088 304 L 1088 779" class="rail rail-violet"/>
+  <path d="M 720 505 L 720 478 L 1088 478" class="rail rail-violet"/>
+  <path d="M 1005 538 L 1088 538" class="rail rail-violet"/>
+  <path d="M 500 570 L 500 582 L 1088 582" class="rail rail-violet"/>
+  <path d="M 500 685 L 500 708 L 1088 708" class="rail rail-violet"/>
+  <path d="M 1005 664 L 1088 664" class="rail rail-violet"/>
+  <path d="M 1088 304 L 1150 304" class="flow flow-violet"/>
+  <path d="M 1088 428 L 1150 428" class="flow flow-violet"/>
+  <path d="M 1088 550 L 1150 550" class="flow flow-violet"/>
+  <path d="M 1088 664 L 1150 664" class="flow flow-violet"/>
+  <path d="M 1088 779 L 1150 779" class="flow flow-violet"/>
+
+  <!-- Connections: cache service. Dashed because fallback repacks or goes to origin. -->
+  <path d="M 810 422 L 825 422 L 825 330 L 1048 330 L 1048 810 L 1108 810 L 1108 945 L 690 945 L 690 980" class="flow flow-orange dash"/>
+  <path d="M 810 768 L 1048 768 L 1048 810 L 1108 810 L 1108 945 L 780 945 L 780 980" class="flow flow-orange dash"/>
+
+  <!-- Connections: active-active coordinator -->
+  <path d="M 1005 676 L 1072 676 L 1072 980" class="flow flow-blue"/>
+  <path d="M 1200 1050 L 1385 1050 L 1385 664 L 1370 664" class="flow flow-blue"/>
+
+  <!-- Arrow labels -->
+  <rect x="310" y="306" width="76" height="17" rx="4" fill="#0f172a"/>
+  <text x="348" y="318" class="label" text-anchor="middle">PushSpec batch</text>
+  <rect x="628" y="128" width="69" height="17" rx="4" fill="#0f172a"/>
+  <text x="662" y="140" class="label" text-anchor="middle">prepare</text>
+  <rect x="875" y="128" width="121" height="17" rx="4" fill="#0f172a"/>
+  <text x="936" y="140" class="label" text-anchor="middle">finalize protected push</text>
+  <rect x="908" y="313" width="85" height="17" rx="4" fill="#0f172a"/>
+  <text x="950" y="325" class="label" text-anchor="middle">dedup query</text>
+  <rect x="858" y="936" width="88" height="17" rx="4" fill="#0f172a"/>
+  <text x="902" y="948" class="label" text-anchor="middle">push warming</text>
+  <rect x="1102" y="936" width="118" height="17" rx="4" fill="#0f172a"/>
+  <text x="1161" y="948" class="label" text-anchor="middle">linearizable commit</text>
+
+  <!-- Entry boxes -->
+  <rect x="75" y="250" width="210" height="60" rx="6" class="mask"/>
+  <rect x="75" y="250" width="210" height="60" rx="6" class="box primary"/>
+  <text x="180" y="273" class="name" text-anchor="middle">git push</text>
+  <text x="180" y="289" class="sub" text-anchor="middle">Git owns protocol stdout</text>
+
+  <rect x="75" y="340" width="210" height="60" rx="6" class="mask"/>
+  <rect x="75" y="340" width="210" height="60" rx="6" class="box primary"/>
+  <text x="180" y="363" class="name" text-anchor="middle">git-remote-crab</text>
+  <text x="180" y="379" class="sub" text-anchor="middle">capabilities, list, push</text>
+
+  <rect x="75" y="430" width="210" height="60" rx="6" class="mask"/>
+  <rect x="75" y="430" width="210" height="60" rx="6" class="box primary"/>
+  <text x="180" y="453" class="name" text-anchor="middle">crab push</text>
+  <text x="180" y="469" class="sub" text-anchor="middle">native concurrent push</text>
+
+  <!-- Front-end boxes -->
+  <rect x="380" y="245" width="220" height="74" rx="6" class="mask"/>
+  <rect x="380" y="245" width="220" height="74" rx="6" class="box secondary"/>
+  <text x="490" y="270" class="name" text-anchor="middle">Input + store setup</text>
+  <text x="490" y="286" class="sub" text-anchor="middle">resolve remote, config, auth</text>
+  <text x="490" y="300" class="sub" text-anchor="middle">open staging, StoreLayout</text>
+
+  <rect x="640" y="245" width="395" height="74" rx="6" class="mask"/>
+  <rect x="640" y="245" width="395" height="74" rx="6" class="box highlight"/>
+  <text x="837.5" y="270" class="name" text-anchor="middle">Native push orchestrator</text>
+  <text x="837.5" y="286" class="sub" text-anchor="middle">incremental discover, follow-tags, pre-acquired lock handoff</text>
+  <text x="837.5" y="300" class="sub" text-anchor="middle">delegates to the same PushPipeline for correctness</text>
+
+  <!-- PushPipeline phase boxes -->
+  <rect x="405" y="390" width="190" height="65" rx="6" class="mask"/>
+  <rect x="405" y="390" width="190" height="65" rx="6" class="box secondary"/>
+  <text x="500" y="413" class="name" text-anchor="middle">Discover + staging</text>
+  <text x="500" y="429" class="sub" text-anchor="middle">pointer blobs, commit graph</text>
+  <text x="500" y="443" class="sub" text-anchor="middle">verify local chunks or remote file-index</text>
+
+  <rect x="630" y="390" width="180" height="65" rx="6" class="mask"/>
+  <rect x="630" y="390" width="180" height="65" rx="6" class="box secondary"/>
+  <text x="720" y="413" class="name" text-anchor="middle">Classify chunks</text>
+  <text x="720" y="429" class="sub" text-anchor="middle">existing, staged, new</text>
+  <text x="720" y="443" class="sub" text-anchor="middle">MetaDb + cache dedup</text>
+
+  <rect x="845" y="390" width="160" height="65" rx="6" class="mask"/>
+  <rect x="845" y="390" width="160" height="65" rx="6" class="box secondary"/>
+  <text x="925" y="413" class="name" text-anchor="middle">Pack xorbs</text>
+  <text x="925" y="429" class="sub" text-anchor="middle">XorbBuilder</text>
+  <text x="925" y="443" class="sub" text-anchor="middle">content-addressed bundles</text>
+
+  <rect x="405" y="505" width="190" height="65" rx="6" class="mask"/>
+  <rect x="405" y="505" width="190" height="65" rx="6" class="box accent"/>
+  <text x="500" y="528" class="name" text-anchor="middle">Lock + resume</text>
+  <text x="500" y="544" class="sub" text-anchor="middle">per-ref lease + heartbeat</text>
+  <text x="500" y="558" class="sub" text-anchor="middle">HEAD check skips existing xorbs</text>
+
+  <rect x="630" y="505" width="180" height="65" rx="6" class="mask"/>
+  <rect x="630" y="505" width="180" height="65" rx="6" class="box tertiary"/>
+  <text x="720" y="528" class="name" text-anchor="middle">Upload content</text>
+  <text x="720" y="544" class="sub" text-anchor="middle">xorbs and shards first</text>
+  <text x="720" y="558" class="sub" text-anchor="middle">bounded parallel PUTs</text>
+
+  <rect x="845" y="505" width="160" height="65" rx="6" class="mask"/>
+  <rect x="845" y="505" width="160" height="65" rx="6" class="box tertiary"/>
+  <text x="925" y="528" class="name" text-anchor="middle">MetaDb commit</text>
+  <text x="925" y="544" class="sub" text-anchor="middle">file_index_db</text>
+  <text x="925" y="558" class="sub" text-anchor="middle">chunk_index_db</text>
+
+  <rect x="405" y="620" width="190" height="65" rx="6" class="mask"/>
+  <rect x="405" y="620" width="190" height="65" rx="6" class="box tertiary"/>
+  <text x="500" y="643" class="name" text-anchor="middle">Pack + verify</text>
+  <text x="500" y="659" class="sub" text-anchor="middle">Git pack, PackMetadata</text>
+  <text x="500" y="673" class="sub" text-anchor="middle">connectivity/fsck before commit</text>
+
+  <rect x="630" y="620" width="180" height="65" rx="6" class="mask"/>
+  <rect x="630" y="620" width="180" height="65" rx="6" class="box tertiary"/>
+  <text x="720" y="643" class="name" text-anchor="middle">Build manifest</text>
+  <text x="720" y="659" class="sub" text-anchor="middle">refs + shard-list</text>
+  <text x="720" y="673" class="sub" text-anchor="middle">pack-list + commit graph</text>
+
+  <rect x="845" y="620" width="160" height="65" rx="6" class="mask"/>
+  <rect x="845" y="620" width="160" height="65" rx="6" class="box alert"/>
+  <text x="925" y="643" class="name" text-anchor="middle">Commit refs</text>
+  <text x="925" y="659" class="sub" text-anchor="middle">manifest CAS</text>
+  <text x="925" y="673" class="sub" text-anchor="middle">or auth/coordinator finalize</text>
+
+  <rect x="630" y="735" width="180" height="65" rx="6" class="mask"/>
+  <rect x="630" y="735" width="180" height="65" rx="6" class="box neutral"/>
+  <text x="720" y="758" class="name" text-anchor="middle">Cleanup + result</text>
+  <text x="720" y="774" class="sub" text-anchor="middle">release locks, warm cache</text>
+  <text x="720" y="788" class="sub" text-anchor="middle">retire staging or preserve on failure</text>
+
+  <!-- Enterprise auth service box -->
+  <rect x="710" y="122" width="300" height="52" rx="6" class="mask"/>
+  <rect x="710" y="122" width="300" height="52" rx="6" class="box alert"/>
+  <text x="860" y="144" class="name" text-anchor="middle">Enterprise auth service</text>
+  <text x="860" y="160" class="sub" text-anchor="middle">ACLs, branch policy, scoped upload credentials</text>
+
+  <!-- Object store boxes -->
+  <rect x="1150" y="260" width="220" height="88" rx="6" class="mask"/>
+  <rect x="1150" y="260" width="220" height="88" rx="6" class="box tertiary"/>
+  <text x="1260" y="287" class="name" text-anchor="middle">Global content</text>
+  <text x="1260" y="304" class="sub" text-anchor="middle">.crab/xorbs/{hash}</text>
+  <text x="1260" y="318" class="sub" text-anchor="middle">.crab/shards/{hash}</text>
+  <text x="1260" y="332" class="sub" text-anchor="middle">immutable, write-once</text>
+
+  <rect x="1150" y="385" width="220" height="88" rx="6" class="mask"/>
+  <rect x="1150" y="385" width="220" height="88" rx="6" class="box tertiary"/>
+  <text x="1260" y="412" class="name" text-anchor="middle">MetaDb</text>
+  <text x="1260" y="429" class="sub" text-anchor="middle">{repo}/file_index_db</text>
+  <text x="1260" y="443" class="sub" text-anchor="middle">.crab/chunk_index_db</text>
+  <text x="1260" y="457" class="sub" text-anchor="middle">dedup and hydrate lookup</text>
+
+  <rect x="1150" y="510" width="220" height="78" rx="6" class="mask"/>
+  <rect x="1150" y="510" width="220" height="78" rx="6" class="box tertiary"/>
+  <text x="1260" y="537" class="name" text-anchor="middle">Git pack objects</text>
+  <text x="1260" y="554" class="sub" text-anchor="middle">{repo}/packs/*.pack</text>
+  <text x="1260" y="568" class="sub" text-anchor="middle">commits, trees, pointer blobs</text>
+
+  <rect x="1150" y="625" width="220" height="78" rx="6" class="mask"/>
+  <rect x="1150" y="625" width="220" height="78" rx="6" class="box alert"/>
+  <text x="1260" y="652" class="name" text-anchor="middle">Manifest pointer</text>
+  <text x="1260" y="669" class="sub" text-anchor="middle">{repo}/manifest</text>
+  <text x="1260" y="683" class="sub" text-anchor="middle">single CAS linearization point</text>
+
+  <rect x="1150" y="740" width="220" height="78" rx="6" class="mask"/>
+  <rect x="1150" y="740" width="220" height="78" rx="6" class="box accent"/>
+  <text x="1260" y="767" class="name" text-anchor="middle">Push locks</text>
+  <text x="1260" y="784" class="sub" text-anchor="middle">{repo}/locks/refs/*</text>
+  <text x="1260" y="798" class="sub" text-anchor="middle">short TTL, CAS release</text>
+
+  <!-- Cache service box -->
+  <rect x="530" y="1012" width="320" height="80" rx="6" class="mask"/>
+  <rect x="530" y="1012" width="320" height="80" rx="6" class="box connector"/>
+  <text x="690" y="1037" class="name" text-anchor="middle">Enterprise cache service</text>
+  <text x="690" y="1054" class="sub" text-anchor="middle">dedup query returns verified cached chunk refs</text>
+  <text x="690" y="1068" class="sub" text-anchor="middle">push warming stores uploaded xorbs/shards</text>
+  <text x="690" y="1082" class="sub" text-anchor="middle">misses fall back without changing correctness</text>
+
+  <!-- Active-active coordinator box -->
+  <rect x="960" y="1012" width="240" height="80" rx="6" class="mask"/>
+  <rect x="960" y="1012" width="240" height="80" rx="6" class="box highlight"/>
+  <text x="1080" y="1037" class="name" text-anchor="middle">Write coordinator</text>
+  <text x="1080" y="1054" class="sub" text-anchor="middle">DynamoDB, Spanner, CosmosDB</text>
+  <text x="1080" y="1068" class="sub" text-anchor="middle">begin, objects uploaded, commit</text>
+  <text x="1080" y="1082" class="sub" text-anchor="middle">manifest materialized per region</text>
+
+  <!-- Key invariant callout -->
+  <rect x="390" y="845" width="660" height="58" rx="6" fill="rgba(6, 78, 59, 0.34)" stroke="#34d399" stroke-width="1"/>
+  <text x="720" y="862" class="label" text-anchor="middle" fill="#34d399">Durability invariant</text>
+  <text x="720" y="879" class="tiny" text-anchor="middle">Immutable data becomes durable before refs are exposed through the manifest pointer.</text>
+  <text x="720" y="893" class="tiny" text-anchor="middle">A failed push may leave orphan xorbs/shards/packs for GC, but it must not publish dangling history.</text>
+
+  <!-- Legend -->
+  <rect x="40" y="1175" width="1360" height="45" rx="8" fill="rgba(15,23,42,0.88)" stroke="#334155" stroke-width="1"/>
+  <path d="M 70 1198 L 120 1198" class="flow flow-green"/>
+  <text x="130" y="1202" class="tiny">solid green: required client-side push flow</text>
+  <path d="M 360 1198 L 410 1198" class="flow flow-violet"/>
+  <text x="420" y="1202" class="tiny">solid violet: object-store durability writes</text>
+  <path d="M 675 1198 L 725 1198" class="flow flow-rose"/>
+  <text x="735" y="1202" class="tiny">solid rose: required when protected push is enabled</text>
+  <path d="M 1010 1198 L 1060 1198" class="flow flow-orange dash"/>
+  <text x="1070" y="1202" class="tiny">dashed orange: optional cache optimization with safe fallback</text>
+</svg>

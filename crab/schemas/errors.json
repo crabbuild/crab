@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ErrorCatalogPayload",
+  "description": "Payload for `crab errors --json` (no code argument).",
+  "type": "object",
+  "required": [
+    "codes"
+  ],
+  "properties": {
+    "codes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ErrorDocEntry"
+      }
+    }
+  },
+  "definitions": {
+    "ErrorDocEntry": {
+      "description": "One row in the error catalog listing.",
+      "type": "object",
+      "required": [
+        "category",
+        "code",
+        "message_template",
+        "name",
+        "remediation",
+        "retryable"
+      ],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message_template": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

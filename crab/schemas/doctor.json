@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DoctorPayload",
+  "description": "Payload emitted by `crab doctor --json`.",
+  "type": "object",
+  "required": [
+    "checks",
+    "summary"
+  ],
+  "properties": {
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CheckResult"
+      }
+    },
+    "summary": {
+      "$ref": "#/definitions/DoctorSummary"
+    }
+  },
+  "definitions": {
+    "CheckResult": {
+      "description": "A single diagnostic result.",
+      "type": "object",
+      "required": [
+        "detail",
+        "name",
+        "status"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/CheckStatus"
+        }
+      }
+    },
+    "CheckStatus": {
+      "description": "Outcome of a single diagnostic check.",
+      "type": "string",
+      "enum": [
+        "ok",
+        "warn",
+        "fail"
+      ]
+    },
+    "DoctorSummary": {
+      "description": "Summary counts for the doctor report.",
+      "type": "object",
+      "required": [
+        "fail",
+        "ok",
+        "warn"
+      ],
+      "properties": {
+        "fail": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "ok": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "warn": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

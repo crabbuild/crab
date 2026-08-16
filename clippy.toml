@@ -1,0 +1,24 @@
+# Crab workspace-wide Clippy configuration
+#
+# See .kiro/steering/code-style.md for the full rationale.
+
+# Flag functions with excessive boolean parameters — these are hard to
+# call correctly without named arguments.
+max-fn-params-bools = 3
+
+# Flag overly complex types (deeply nested generics, long tuples).
+type-complexity-threshold = 250
+
+# Warn on large enum variants that bloat the entire enum's stack size.
+enum-variant-size-threshold = 200
+
+# Limit function cognitive complexity to keep individual functions
+# reviewable. Bump per-function with #[expect(clippy::cognitive_complexity)]
+# and a justification comment when genuinely warranted.
+cognitive-complexity-threshold = 30
+
+# Warn when too many arguments make a function hard to call correctly.
+too-many-arguments-threshold = 8
+
+# Warn on large futures that may blow the async stack.
+future-size-threshold = 16384

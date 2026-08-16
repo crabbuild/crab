@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatusEntry",
+  "description": "One file in the `StatusPayload.files` array.",
+  "type": "object",
+  "required": [
+    "bytes",
+    "path",
+    "state"
+  ],
+  "properties": {
+    "bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "path": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,110 @@
+---
+title: "Log Management"
+description: "How to configure, inspect, and manage Crab's diagnostic logs for debugging and troubleshooting."
+---
+
+## Diagnostic Logging
+
+Crab writes structured trace logs for every operation. When something goes wrong, these logs contain the detailed context you need to understand what happened — which chunks were processed, what network calls were made, and where things went sideways.
+
+## Log Location
+
+Logs are written to `~/.crab/logs/` by default (one file per day). Override with:
+
+```bash
+export CRAB_LOG_DIR=/path/to/logs
+```
+
+## Viewing Logs
+
+### See the most recent log
+
+```bash
+crab logs last
+```
+
+This is the fastest way to check what happened during a failed operation.
+
+### List all log files
+
+```bash
+crab logs list
+```
+
+```
+2024-01-14.log
+2024-01-15.log
+2024-01-16.log
+```
+
+### View a specific day's log
+
+```bash
+crab logs show 2024-01-15.log
+```
+
+### Clear all logs
+
+```bash
+crab logs clear
+# cleared /home/user/.crab/logs
+```
+
+## Controlling Verbosity
+
+Set the log level with the `CRAB_LOG` environment variable or the `--log-level` flag:
+
+```bash
+# Environment variable
+CRAB_LOG=debug crab add '*.bin'
+
+# CLI flag
+crab --log-level debug add '*.bin'
+```
+
+### Log Levels
+
+| Level | What it captures |
+|-------|-----------------|
+| `error` | User-visible failures only |
+| `warn` | Degraded behavior (retries, fallbacks) |
+| `info` | Lifecycle events (one per command) |
+| `debug` | Operation flow, decisions made |
+| `trace` | Per-chunk noise, full request/response details |
+
+### Module-Level Filters
+
+Target specific subsystems for detailed logging without flooding the output:
+
+```bash
+CRAB_LOG=crab::engine=debug crab add '*.bin'
+CRAB_LOG=crab::storage=trace crab push
+```
+
+## Typical Workflows
+
+### Debug a failed push
+
+```bash
+git push origin main  # fails
+crab logs last        # see what happened
+crab errors CRAB-E0017  # look up the error code
+```
+
+### Attach logs to a bug report
+
+```bash
+crab logs last > debug-log.txt
+crab env > env-info.txt
+# Attach both files to your issue
+```
+
+### Verbose operation for investigation
+
+```bash
+CRAB_LOG=debug crab hydrate --all 2> hydrate-debug.log
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab logs reference](/docs/cli/reference/crab-logs).

@@ -1,0 +1,331 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 980" role="img" aria-labelledby="title desc">
+  <title id="title">Crab internal architecture with enterprise cache and auth services</title>
+  <desc id="desc">Architecture diagram showing Git and Crab client surfaces, core chunking, staging, metadata, cache, object storage, and optional enterprise auth and cache services.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#a78bfa"/>
+    </marker>
+  </defs>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+    text { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace; }
+    .title { fill: #f8fafc; font-size: 18px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 9px; }
+    .region-label { font-size: 9px; font-weight: 600; letter-spacing: 0; }
+    .name { fill: #f8fafc; font-size: 11px; font-weight: 600; }
+    .sub { fill: #94a3b8; font-size: 8.5px; font-weight: 400; }
+    .tiny { fill: #94a3b8; font-size: 7.5px; }
+    .label { fill: #cbd5e1; font-size: 8px; font-weight: 500; }
+    .mask { fill: #0f172a; }
+    .primary { fill: rgba(8, 51, 68, 0.4); stroke: #22d3ee; }
+    .secondary { fill: rgba(6, 78, 59, 0.4); stroke: #34d399; }
+    .tertiary { fill: rgba(76, 29, 149, 0.4); stroke: #a78bfa; }
+    .accent { fill: rgba(120, 53, 15, 0.3); stroke: #fbbf24; }
+    .alert { fill: rgba(136, 19, 55, 0.4); stroke: #fb7185; }
+    .connector { fill: rgba(251, 146, 60, 0.3); stroke: #fb923c; }
+    .neutral { fill: rgba(30, 41, 59, 0.5); stroke: #94a3b8; }
+    .highlight { fill: rgba(59, 130, 246, 0.3); stroke: #60a5fa; }
+    .box { stroke-width: 1.5; rx: 6; }
+    .region { fill: none; stroke-width: 1; stroke-dasharray: 8 4; }
+    .security-region { fill: none; stroke-width: 1; stroke-dasharray: 4 4; }
+    .flow { fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow); }
+    .flow-cyan { stroke: #22d3ee; marker-end: url(#arrow-cyan); }
+    .flow-green { stroke: #34d399; marker-end: url(#arrow-green); }
+    .flow-orange { stroke: #fb923c; marker-end: url(#arrow-orange); }
+    .flow-rose { stroke: #fb7185; marker-end: url(#arrow-rose); }
+    .flow-violet { stroke: #a78bfa; marker-end: url(#arrow-violet); }
+    .muted { stroke: #64748b; opacity: 0.72; }
+    .dash { stroke-dasharray: 5 5; }
+  </style>
+
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+
+  <!-- Region boundaries -->
+  <rect x="35" y="110" width="225" height="515" rx="12" class="region" stroke="#22d3ee"/>
+  <text x="47" y="128" class="region-label" fill="#22d3ee">Git and user surfaces</text>
+
+  <rect x="300" y="100" width="455" height="525" rx="12" class="region" stroke="#34d399"/>
+  <text x="312" y="118" class="region-label" fill="#34d399">crab core in process</text>
+
+  <rect x="790" y="100" width="225" height="525" rx="12" class="region" stroke="#a78bfa"/>
+  <text x="802" y="118" class="region-label" fill="#a78bfa">Origin object storage</text>
+
+  <rect x="300" y="665" width="455" height="235" rx="12" class="region" stroke="#fb923c"/>
+  <text x="312" y="683" class="region-label" fill="#fb923c">Enterprise cache service (optional)</text>
+
+  <rect x="790" y="665" width="445" height="235" rx="12" class="security-region" stroke="#fb7185"/>
+  <text x="802" y="683" class="region-label" fill="#fb7185">Enterprise auth service (optional)</text>
+
+  <!-- Connection lines: core surfaces -->
+  <path d="M 235 173 L 325 173" class="flow flow-cyan"/>
+  <path d="M 235 258 L 325 258" class="flow flow-cyan"/>
+  <path d="M 235 343 L 325 343" class="flow flow-cyan"/>
+  <path d="M 235 515 L 325 515" class="flow flow-cyan"/>
+
+  <path d="M 485 173 L 545 173" class="flow flow-green"/>
+  <path d="M 407 203 L 407 232" class="flow flow-green"/>
+  <path d="M 485 263 L 545 263" class="flow flow-green"/>
+  <path d="M 407 293 L 407 322" class="flow flow-green"/>
+  <path d="M 630 293 L 630 322" class="flow flow-green"/>
+  <path d="M 407 383 L 407 415" class="flow flow-green"/>
+  <path d="M 630 383 L 630 415" class="flow flow-green"/>
+  <path d="M 485 452 L 545 452" class="flow flow-green"/>
+  <path d="M 485 542 L 545 542" class="flow flow-green"/>
+  <path d="M 630 475 L 630 505" class="flow flow-green"/>
+
+  <path d="M 715 173 L 835 173" class="flow flow-violet"/>
+  <path d="M 715 452 L 835 285" class="flow flow-violet"/>
+  <path d="M 715 452 L 835 375" class="flow flow-violet"/>
+  <path d="M 715 452 L 835 485" class="flow flow-violet"/>
+  <path d="M 715 542 L 835 570" class="flow muted"/>
+
+  <!-- Cache path: route through the service lane below the core region. -->
+  <path d="M 715 472 L 765 472 L 765 638 L 405 638 L 405 707" class="flow flow-orange"/>
+  <path d="M 485 737 L 545 737" class="flow flow-orange"/>
+  <path d="M 407 762 L 407 797" class="flow flow-orange"/>
+  <path d="M 485 827 L 545 827" class="flow flow-orange"/>
+  <path d="M 715 827 L 765 827 L 765 638 L 1015 638 L 1015 285 L 975 285" class="flow flow-orange"/>
+
+  <!-- Auth control path: keep control-plane traffic outside the core boxes. -->
+  <path d="M 715 190 L 780 190 L 780 653 L 1100 653 L 1100 707" class="flow flow-rose"/>
+  <path d="M 965 737 L 1015 737" class="flow flow-rose"/>
+  <path d="M 1100 767 L 1100 797" class="flow flow-rose"/>
+  <path d="M 1100 767 L 1100 782 L 890 782 L 890 797" class="flow flow-rose"/>
+  <path d="M 1185 827 L 1215 827 L 1215 638 L 1015 638 L 1015 375 L 975 375" class="flow flow-rose"/>
+
+  <!-- Labels on major arrows -->
+  <rect x="261" y="157" width="58" height="17" rx="4" fill="#0f172a"/>
+  <text x="290" y="169" class="label" text-anchor="middle">commands</text>
+  <rect x="748" y="156" width="75" height="17" rx="4" fill="#0f172a"/>
+  <text x="785" y="168" class="label" text-anchor="middle">signed I/O</text>
+  <rect x="518" y="625" width="126" height="17" rx="4" fill="#0f172a"/>
+  <text x="581" y="637" class="label" text-anchor="middle">cache lookup + warm</text>
+  <rect x="872" y="625" width="126" height="17" rx="4" fill="#0f172a"/>
+  <text x="935" y="637" class="label" text-anchor="middle">cache misses to origin</text>
+  <rect x="890" y="641" width="150" height="17" rx="4" fill="#0f172a"/>
+  <text x="965" y="653" class="label" text-anchor="middle">credential request/response</text>
+
+  <!-- Left column boxes -->
+  <rect x="65" y="145" width="170" height="58" rx="6" class="mask"/>
+  <rect x="65" y="145" width="170" height="58" rx="6" class="box primary"/>
+  <text x="150" y="168" class="name" text-anchor="middle">Git worktree</text>
+  <text x="150" y="184" class="sub" text-anchor="middle">clone, add, commit</text>
+
+  <rect x="65" y="230" width="170" height="58" rx="6" class="mask"/>
+  <rect x="65" y="230" width="170" height="58" rx="6" class="box primary"/>
+  <text x="150" y="253" class="name" text-anchor="middle">crab CLI</text>
+  <text x="150" y="269" class="sub" text-anchor="middle">push, fetch, hydrate</text>
+
+  <rect x="65" y="315" width="170" height="58" rx="6" class="mask"/>
+  <rect x="65" y="315" width="170" height="58" rx="6" class="box primary"/>
+  <text x="150" y="338" class="name" text-anchor="middle">git-remote-crab</text>
+  <text x="150" y="354" class="sub" text-anchor="middle">remote helper protocol</text>
+
+  <rect x="65" y="400" width="170" height="58" rx="6" class="mask"/>
+  <rect x="65" y="400" width="170" height="58" rx="6" class="box primary"/>
+  <text x="150" y="423" class="name" text-anchor="middle">filter process</text>
+  <text x="150" y="439" class="sub" text-anchor="middle">clean, smudge, LFS</text>
+
+  <rect x="65" y="487" width="170" height="58" rx="6" class="mask"/>
+  <rect x="65" y="487" width="170" height="58" rx="6" class="box primary"/>
+  <text x="150" y="510" class="name" text-anchor="middle">VFS and diagnostics</text>
+  <text x="150" y="526" class="sub" text-anchor="middle">mount, fsck, doctor</text>
+
+  <!-- Core boxes -->
+  <rect x="325" y="145" width="160" height="58" rx="6" class="mask"/>
+  <rect x="325" y="145" width="160" height="58" rx="6" class="box secondary"/>
+  <text x="405" y="168" class="name" text-anchor="middle">Entry + config</text>
+  <text x="405" y="184" class="sub" text-anchor="middle">main.rs, cmd/*</text>
+
+  <rect x="545" y="145" width="170" height="58" rx="6" class="mask"/>
+  <rect x="545" y="145" width="170" height="58" rx="6" class="box alert"/>
+  <text x="630" y="168" class="name" text-anchor="middle">Auth-aware Store</text>
+  <text x="630" y="184" class="sub" text-anchor="middle">CredentialProvider</text>
+
+  <rect x="325" y="235" width="160" height="58" rx="6" class="mask"/>
+  <rect x="325" y="235" width="160" height="58" rx="6" class="box secondary"/>
+  <text x="405" y="258" class="name" text-anchor="middle">CDC + dedup engine</text>
+  <text x="405" y="274" class="sub" text-anchor="middle">chunks, hashes, pointers</text>
+
+  <rect x="545" y="235" width="170" height="58" rx="6" class="mask"/>
+  <rect x="545" y="235" width="170" height="58" rx="6" class="box secondary"/>
+  <text x="630" y="258" class="name" text-anchor="middle">Staging area</text>
+  <text x="630" y="274" class="sub" text-anchor="middle">segments + SQLite index</text>
+
+  <rect x="325" y="325" width="160" height="58" rx="6" class="mask"/>
+  <rect x="325" y="325" width="160" height="58" rx="6" class="box secondary"/>
+  <text x="405" y="348" class="name" text-anchor="middle">Push pipeline</text>
+  <text x="405" y="364" class="sub" text-anchor="middle">locks, packs, manifests</text>
+
+  <rect x="545" y="325" width="170" height="58" rx="6" class="mask"/>
+  <rect x="545" y="325" width="170" height="58" rx="6" class="box highlight"/>
+  <text x="630" y="348" class="name" text-anchor="middle">Read pipeline</text>
+  <text x="630" y="364" class="sub" text-anchor="middle">fetch, hydrate, FUSE</text>
+
+  <rect x="325" y="415" width="160" height="70" rx="6" class="mask"/>
+  <rect x="325" y="415" width="160" height="70" rx="6" class="box tertiary"/>
+  <text x="405" y="439" class="name" text-anchor="middle">Metadata</text>
+  <text x="405" y="455" class="sub" text-anchor="middle">shards, file index</text>
+  <text x="405" y="469" class="sub" text-anchor="middle">chunk index, manifest</text>
+
+  <rect x="545" y="415" width="170" height="70" rx="6" class="mask"/>
+  <rect x="545" y="415" width="170" height="70" rx="6" class="box tertiary"/>
+  <text x="630" y="439" class="name" text-anchor="middle">StoreLayout + CAS</text>
+  <text x="630" y="455" class="sub" text-anchor="middle">global content vs repo state</text>
+  <text x="630" y="469" class="sub" text-anchor="middle">retry + compare-and-swap</text>
+
+  <rect x="325" y="505" width="160" height="70" rx="6" class="mask"/>
+  <rect x="325" y="505" width="160" height="70" rx="6" class="box neutral"/>
+  <text x="405" y="529" class="name" text-anchor="middle">Operations</text>
+  <text x="405" y="545" class="sub" text-anchor="middle">GC, fsck, tier, restripe</text>
+  <text x="405" y="559" class="sub" text-anchor="middle">locks + replication</text>
+
+  <rect x="545" y="505" width="170" height="70" rx="6" class="mask"/>
+  <rect x="545" y="505" width="170" height="70" rx="6" class="box neutral"/>
+  <text x="630" y="529" class="name" text-anchor="middle">Automation</text>
+  <text x="630" y="545" class="sub" text-anchor="middle">workflow, import, cost</text>
+  <text x="630" y="559" class="sub" text-anchor="middle">cache-aware reuse</text>
+
+  <!-- Origin object storage boxes -->
+  <g transform="translate(835,145)">
+    <rect x="0" y="10" width="140" height="54" rx="2" class="mask"/>
+    <ellipse cx="70" cy="10" rx="70" ry="13" class="mask"/>
+    <ellipse cx="70" cy="64" rx="70" ry="13" class="mask"/>
+    <rect x="0" y="10" width="140" height="54" fill="rgba(76,29,149,0.4)"/>
+    <ellipse cx="70" cy="10" rx="70" ry="13" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <ellipse cx="70" cy="64" rx="70" ry="13" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <line x1="0" y1="10" x2="0" y2="64" stroke="#a78bfa" stroke-width="1.5"/>
+    <line x1="140" y1="10" x2="140" y2="64" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="70" y="35" class="name" text-anchor="middle">Bucket / container</text>
+    <text x="70" y="51" class="sub" text-anchor="middle">S3, GCS, Azure</text>
+  </g>
+
+  <rect x="835" y="255" width="140" height="60" rx="6" class="mask"/>
+  <rect x="835" y="255" width="140" height="60" rx="6" class="box tertiary"/>
+  <text x="905" y="278" class="name" text-anchor="middle">Global content</text>
+  <text x="905" y="294" class="sub" text-anchor="middle">.crab/xorbs</text>
+  <text x="905" y="307" class="sub" text-anchor="middle">.crab/shards</text>
+
+  <rect x="835" y="345" width="140" height="60" rx="6" class="mask"/>
+  <rect x="835" y="345" width="140" height="60" rx="6" class="box tertiary"/>
+  <text x="905" y="368" class="name" text-anchor="middle">Repo state</text>
+  <text x="905" y="384" class="sub" text-anchor="middle">refs, packs, locks</text>
+  <text x="905" y="397" class="sub" text-anchor="middle">manifest pointer</text>
+
+  <rect x="835" y="455" width="140" height="60" rx="6" class="mask"/>
+  <rect x="835" y="455" width="140" height="60" rx="6" class="box tertiary"/>
+  <text x="905" y="478" class="name" text-anchor="middle">MetaDB</text>
+  <text x="905" y="494" class="sub" text-anchor="middle">file_index_db</text>
+  <text x="905" y="507" class="sub" text-anchor="middle">chunk_index_db</text>
+
+  <rect x="835" y="545" width="140" height="60" rx="6" class="mask"/>
+  <rect x="835" y="545" width="140" height="60" rx="6" class="box tertiary"/>
+  <text x="905" y="568" class="name" text-anchor="middle">LFS objects</text>
+  <text x="905" y="584" class="sub" text-anchor="middle">SHA-256 fanout</text>
+
+  <!-- Cache service boxes -->
+  <rect x="325" y="707" width="160" height="60" rx="6" class="mask"/>
+  <rect x="325" y="707" width="160" height="60" rx="6" class="box connector"/>
+  <text x="405" y="730" class="name" text-anchor="middle">CachingStore</text>
+  <text x="405" y="746" class="sub" text-anchor="middle">local, remote, origin</text>
+  <text x="405" y="759" class="sub" text-anchor="middle">fallback wrapper</text>
+
+  <rect x="545" y="707" width="170" height="60" rx="6" class="mask"/>
+  <rect x="545" y="707" width="170" height="60" rx="6" class="box connector"/>
+  <text x="630" y="730" class="name" text-anchor="middle">Local disk cache</text>
+  <text x="630" y="746" class="sub" text-anchor="middle">hash-verified LRU</text>
+  <text x="630" y="759" class="sub" text-anchor="middle">per machine</text>
+
+  <rect x="325" y="797" width="160" height="60" rx="6" class="mask"/>
+  <rect x="325" y="797" width="160" height="60" rx="6" class="box connector"/>
+  <text x="405" y="820" class="name" text-anchor="middle">crab-cache-server</text>
+  <text x="405" y="836" class="sub" text-anchor="middle">GET, PUT, range</text>
+  <text x="405" y="849" class="sub" text-anchor="middle">/v1/dedup/query</text>
+
+  <rect x="545" y="797" width="170" height="60" rx="6" class="mask"/>
+  <rect x="545" y="797" width="170" height="60" rx="6" class="box connector"/>
+  <text x="630" y="820" class="name" text-anchor="middle">Server cache state</text>
+  <text x="630" y="836" class="sub" text-anchor="middle">SSD objects + SQLite</text>
+  <text x="630" y="849" class="sub" text-anchor="middle">chunk index + evictor</text>
+
+  <rect x="330" y="873" width="385" height="15" rx="4" fill="#0f172a"/>
+  <text x="522" y="884" class="tiny" text-anchor="middle">Reads: local cache -> cache service -> origin. Pushes: origin first, best-effort cache warm.</text>
+
+  <!-- Enterprise auth boxes -->
+  <rect x="815" y="707" width="150" height="60" rx="6" class="mask"/>
+  <rect x="815" y="707" width="150" height="60" rx="6" class="box alert"/>
+  <text x="890" y="730" class="name" text-anchor="middle">Corporate IdP</text>
+  <text x="890" y="746" class="sub" text-anchor="middle">OIDC login, JWKS</text>
+  <text x="890" y="759" class="sub" text-anchor="middle">groups + identity</text>
+
+  <rect x="1015" y="707" width="170" height="60" rx="6" class="mask"/>
+  <rect x="1015" y="707" width="170" height="60" rx="6" class="box alert"/>
+  <text x="1100" y="730" class="name" text-anchor="middle">crab-auth API</text>
+  <text x="1100" y="746" class="sub" text-anchor="middle">/v1/credentials</text>
+  <text x="1100" y="759" class="sub" text-anchor="middle">prepare + finalize</text>
+
+  <rect x="815" y="797" width="150" height="60" rx="6" class="mask"/>
+  <rect x="815" y="797" width="150" height="60" rx="6" class="box alert"/>
+  <text x="890" y="820" class="name" text-anchor="middle">RBAC + policy</text>
+  <text x="890" y="836" class="sub" text-anchor="middle">repo, op, path rules</text>
+  <text x="890" y="849" class="sub" text-anchor="middle">deny before allow</text>
+
+  <rect x="1015" y="797" width="170" height="60" rx="6" class="mask"/>
+  <rect x="1015" y="797" width="170" height="60" rx="6" class="box alert"/>
+  <text x="1100" y="820" class="name" text-anchor="middle">Service helpers</text>
+  <text x="1100" y="836" class="sub" text-anchor="middle">receive + ACL view</text>
+  <text x="1100" y="849" class="sub" text-anchor="middle">promote staged data</text>
+
+  <rect x="1040" y="872" width="120" height="15" rx="4" fill="#0f172a"/>
+  <text x="1100" y="883" class="tiny" text-anchor="middle">issues scoped cloud creds</text>
+
+  <!-- Callout notes -->
+  <rect x="1045" y="140" width="180" height="112" rx="8" class="mask"/>
+  <rect x="1045" y="140" width="180" height="112" rx="8" fill="rgba(30,41,59,0.7)" stroke="#94a3b8" stroke-width="1"/>
+  <text x="1060" y="163" class="name">Correctness boundary</text>
+  <text x="1060" y="184" class="sub">Origin object storage owns</text>
+  <text x="1060" y="198" class="sub">repository state. Cache</text>
+  <text x="1060" y="212" class="sub">failures should slow reads,</text>
+  <text x="1060" y="226" class="sub">not break reconstruction.</text>
+
+  <rect x="1045" y="280" width="180" height="126" rx="8" class="mask"/>
+  <rect x="1045" y="280" width="180" height="126" rx="8" fill="rgba(30,41,59,0.7)" stroke="#94a3b8" stroke-width="1"/>
+  <text x="1060" y="303" class="name">Immutable vs mutable</text>
+  <text x="1060" y="324" class="sub">xorbs, shards, packs can</text>
+  <text x="1060" y="338" class="sub">be cached. refs, locks,</text>
+  <text x="1060" y="352" class="sub">manifest pointer, mutable</text>
+  <text x="1060" y="366" class="sub">config always route to</text>
+  <text x="1060" y="380" class="sub">origin CAS semantics.</text>
+
+  <!-- Legend -->
+  <rect x="40" y="915" width="545" height="42" rx="8" fill="rgba(15,23,42,0.85)" stroke="#334155" stroke-width="1"/>
+  <line x1="62" y1="934" x2="112" y2="934" class="flow flow-green"/>
+  <text x="122" y="937" class="tiny">core data path</text>
+  <line x1="218" y1="934" x2="268" y2="934" class="flow flow-orange"/>
+  <text x="278" y="937" class="tiny">cache acceleration</text>
+  <line x1="400" y1="934" x2="450" y2="934" class="flow flow-rose"/>
+  <text x="460" y="937" class="tiny">enterprise auth service</text>
+
+  <!-- Title block -->
+  <text x="35" y="42" class="title">How Crab works internally</text>
+  <text x="35" y="61" class="subtitle">Serverless Git remote helper: local chunking and metadata, object-storage authority, optional enterprise cache and auth services.</text>
+</svg>

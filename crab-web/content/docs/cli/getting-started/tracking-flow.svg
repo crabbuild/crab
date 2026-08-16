@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 620" width="680" height="620">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="cmdGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="processGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="resultGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="decisionGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#CBD5E1"/>
+      <stop offset="100%" stop-color="#94A3B8"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="680" height="620" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+  </g>
+
+  <g id="nodes">
+    <!-- Row 1: Command -->
+    <rect x="240" y="30" width="200" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+
+    <!-- Row 2: Process -->
+    <rect x="225" y="130" width="230" height="50" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+
+    <!-- Row 3: Code output (wider) -->
+    <rect x="120" y="230" width="440" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+
+    <!-- Row 4: Decision diamond -->
+    <polygon points="340,320 460,370 340,420 220,370" fill="url(#decisionGrad)" stroke="#64748B" stroke-width="1.5"/>
+
+    <!-- Row 5: Yes/No branches -->
+    <rect x="60" y="470" width="220" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="400" y="470" width="220" height="50" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+
+    <!-- Row 6: Final results -->
+    <rect x="60" y="560" width="220" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="400" y="560" width="220" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Row 1 -->
+    <text x="340" y="60" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab track '*.bin'</text>
+
+    <!-- Row 2 -->
+    <text x="340" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">Writes to .gitattributes</text>
+
+    <!-- Row 3 -->
+    <text x="340" y="260" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#94A3B8">*.bin filter=crab diff=crab merge=crab -text</text>
+
+    <!-- Row 4: Diamond -->
+    <text x="340" y="366" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#1E293B">File matches</text>
+    <text x="340" y="382" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#1E293B">pattern?</text>
+
+    <!-- Branch labels -->
+    <text x="205" y="438" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">Yes</text>
+    <text x="475" y="438" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#64748B">No</text>
+
+    <!-- Row 5 -->
+    <text x="170" y="500" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Routed through Crab filter</text>
+    <text x="510" y="500" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Handled by git normally</text>
+
+    <!-- Row 6 -->
+    <text x="170" y="590" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">Chunked + stored as pointer</text>
+    <text x="510" y="590" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">Stored in git objects</text>
+  </g>
+
+  <g id="connections">
+    <!-- A → B -->
+    <line x1="340" y1="80" x2="340" y2="130" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- B → C -->
+    <line x1="340" y1="180" x2="340" y2="230" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- C → D (diamond top) -->
+    <line x1="340" y1="280" x2="340" y2="320" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- D → E (Yes, left branch) -->
+    <path d="M 220 370 L 170 370 L 170 470" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- D → F (No, right branch) -->
+    <path d="M 460 370 L 510 370 L 510 470" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- E → G -->
+    <line x1="170" y1="520" x2="170" y2="560" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- F → H -->
+    <line x1="510" y1="520" x2="510" y2="560" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

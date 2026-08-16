@@ -1,0 +1,38 @@
+[package]
+name = "crab-coordination"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Coordination contracts for Crab active-active writes."
+
+[features]
+default = []
+object-store-lock = ["dep:bytes", "dep:futures-util", "dep:object_store", "dep:tracing", "tokio/rt"]
+coordinator-dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
+coordinator-spanner = ["dep:google-cloud-storage", "dep:google-cloud-token", "dep:reqwest"]
+coordinator-cosmosdb = ["dep:azure_core", "dep:azure_identity", "dep:reqwest", "dep:urlencoding"]
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+schemars = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+azure_core = { workspace = true, optional = true }
+azure_identity = { workspace = true, optional = true }
+google-cloud-storage = { workspace = true, optional = true }
+google-cloud-token = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["rustls-tls", "json"], optional = true }
+urlencoding = { version = "2.1", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

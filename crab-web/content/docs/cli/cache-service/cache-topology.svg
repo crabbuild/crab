@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="800" height="600" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+    <rect x="40" y="70" width="720" height="130" rx="10" fill="#F0F9FF" stroke="#7DD3FC" stroke-width="1.5" stroke-dasharray="6,4"/>
+  </g>
+
+  <g id="nodes">
+    <rect x="80"  y="110" width="180" height="70" rx="8" fill="#0EA5E9" stroke="#0369A1" stroke-width="2"/>
+    <rect x="310" y="110" width="180" height="70" rx="8" fill="#0EA5E9" stroke="#0369A1" stroke-width="2"/>
+    <rect x="540" y="110" width="180" height="70" rx="8" fill="#0EA5E9" stroke="#0369A1" stroke-width="2"/>
+
+    <rect x="180" y="260" width="440" height="180" rx="10" fill="#1E293B" stroke="#0F172A" stroke-width="2"/>
+
+    <rect x="270" y="500" width="260" height="70" rx="8" fill="#475569" stroke="#1E293B" stroke-width="2"/>
+  </g>
+
+  <g id="labels">
+    <text x="400" y="36" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="bold" fill="#0F172A">Cache Service Topology</text>
+
+    <text x="55" y="92" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#0369A1">Crab clients</text>
+
+    <text x="170" y="138" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">Developer</text>
+    <text x="170" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">workstation</text>
+
+    <text x="400" y="138" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">CI</text>
+    <text x="400" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">runner</text>
+
+    <text x="630" y="138" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">CLI / clients</text>
+    <text x="630" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">client</text>
+
+    <text x="400" y="294" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="bold" fill="#FFFFFF">crab-cache-server</text>
+    <text x="400" y="316" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#94A3B8">NVMe local disk · 1 TiB cache</text>
+    <text x="220" y="356" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#E0F2FE">• Caches xorbs, shards, packs</text>
+    <text x="220" y="382" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#E0F2FE">• Serves cross-repo dedup queries</text>
+    <text x="220" y="408" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#E0F2FE">• Push warming for new uploads</text>
+
+    <text x="400" y="528" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">Origin object store</text>
+    <text x="400" y="550" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#CBD5E1">S3 · GCS · Azure Blob</text>
+
+    <text x="278" y="220" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#475569">HTTPS</text>
+    <text x="400" y="220" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#475569">HTTPS</text>
+    <text x="522" y="220" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#475569">HTTPS</text>
+
+    <text x="412" y="474" font-family="Arial, Helvetica, sans-serif" font-size="11" font-style="italic" fill="#475569">cache miss / origin probe</text>
+  </g>
+
+  <g id="connections">
+    <path d="M 170 182 L 170 230 L 278 230 L 278 258" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <line x1="400" y1="182" x2="400" y2="258" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <path d="M 630 182 L 630 230 L 522 230 L 522 258" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+    <line x1="400" y1="442" x2="400" y2="498" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

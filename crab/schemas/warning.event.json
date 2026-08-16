@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WarningPayload",
+  "description": "Non-fatal warning emitted during a streaming operation.",
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "properties": {
+    "code": {
+      "description": "Warning code, e.g. a `CRAB-E####` code or a command-specific tag.",
+      "type": "string"
+    },
+    "message": {
+      "description": "Human-readable warning message.",
+      "type": "string"
+    },
+    "path": {
+      "description": "Optional file path associated with the warning.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

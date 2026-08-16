@@ -1,0 +1,50 @@
+---
+title: "crab auth status"
+description: "Display authentication state for the configured direct cloud provider."
+---
+
+# crab auth status
+
+Display current authentication state.
+
+## Synopsis
+
+```
+crab auth status [OPTIONS]
+```
+
+## Description
+
+`crab auth status` shows token state and non-secret settings for the direct
+cloud provider selected by `[auth].provider` — whether its token is present,
+expired, and refreshable.
+
+For a live managed-service profile check, use an authenticated control-plane
+command instead:
+
+```bash
+crab organization list --service crab.build --limit 1 --json
+```
+
+That probe covers the exact profile, discovery/API compatibility, token
+refresh, and managed service response.
+
+For conceptual background, see [Authentication Status](/docs/cli/authentication/auth-status).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+```bash
+crab auth status
+```
+
+## Related Commands
+
+- [`crab login`](/docs/cli/reference/crab-login) — authenticate.
+- [`crab logout`](/docs/cli/reference/crab-logout) — remove credentials.
+- [`crab env`](/docs/cli/reference/crab-env) — full environment info.

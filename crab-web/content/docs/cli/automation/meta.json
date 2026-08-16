@@ -1,0 +1,17 @@
+{
+  "title": "Automation & Pipelines",
+  "pages": [
+    "index",
+    "running-commands",
+    "workflow-pipelines",
+    "templating",
+    "foreach-matrix",
+    "workflow-journal",
+    "workflow-lockfile",
+    "experiments",
+    "experiment-queue",
+    "parameters",
+    "metrics-tracking",
+    "dag-visualization"
+  ]
+}

@@ -1,0 +1,112 @@
+---
+title: "Managed Service Diagnostics"
+description: "Diagnose managed profiles, login, repository state, authorization, API compatibility, grants, and service availability safely."
+---
+
+# Managed Service Diagnostics
+
+Managed failures use the stable CLI error code `CRAB-E0140` plus a more
+specific placement-free diagnostic in `error.details.kind`. The details never
+contain bucket names, physical prefixes, provider credentials, or tokens.
+
+## Confirm the CLI and locator
+
+```bash
+crab version
+crab errors CRAB-E0140
+```
+
+The hosted locator must be exactly:
+
+```text
+crab://crab.build/acme/models
+```
+
+It cannot contain an empty segment, extra path segment, user information,
+explicit port, query, or fragment. In particular,
+`crab://crab.build//acme/models` fails before authentication or storage access.
+
+## Confirm profile and live access
+
+The most direct live check is an authenticated list request:
+
+```bash
+crab organization list --service crab.build --limit 1 --json
+```
+
+This validates the installed exact-authority profile, cached discovery,
+compatible API, token refresh, and service response. `crab auth status` reports
+the configured direct-provider token state; it is not a replacement for this
+managed-service probe.
+
+If no profile is active, install and activate one:
+
+```bash
+crab login https://crab.build
+```
+
+For an enterprise authority, use the exact origin and configured CA trust from
+your administrator. Crab never probes arbitrary `crab://` authorities to guess
+whether they are managed.
+
+## Inspect repository state
+
+```bash
+crab repo info acme/models --json
+```
+
+Only active repositories are cloneable and writable. A newly created
+repository may be `provisioning`; an archived repository is readable only where
+policy permits and is not writable; deleting, deleted, restoring, and failed
+states require the lifecycle action or operator remediation named by the
+service.
+
+## Read structured failures
+
+Commands that support structured output write a standard error envelope and
+exit non-zero. Inspect both the stable code and managed kind:
+
+```bash
+if ! output=$(crab repo info acme/models --json 2>/dev/null); then
+  printf '%s\n' "$output" | jq '{
+    code: .error.code,
+    category: .error.category,
+    retryable: .error.retryable,
+    kind: .error.details.kind,
+    message: .error.message
+  }'
+fi
+```
+
+| Managed kind | Meaning | Action |
+|--------------|---------|--------|
+| `malformed_locator` | The managed URL grammar is invalid | Correct the canonical URL before retrying |
+| `missing_profile` or `active_profile_missing` | No exact service profile is installed or selected | Run `crab login https://<authority>` |
+| `invalid_profile` | Stored authority, origin, or trust data is invalid | Reinstall the administrator-approved profile |
+| `discovery_failed` | HTTPS discovery could not be validated | Check DNS, TLS, CA trust, and `/.well-known/crab` |
+| `incompatible_api` | CLI and service have no compatible API version | Upgrade the CLI or service |
+| `login_required` or `invalid_bearer` | Authentication is absent or rejected | Log in again; do not retry the same rejected token |
+| `not_found` | Repository is absent or intentionally non-disclosed | Verify the logical URL and ask an administrator |
+| `forbidden` | The authenticated principal lacks the requested action | Request the appropriate role; no storage placement is disclosed |
+| `expired_grant` | A short-lived transfer grant expired | Retry the operation so Crab can request a fresh authorized grant |
+| `service_unavailable` | The managed API is temporarily unavailable | Retry with bounded backoff; never reinterpret the authority as a bucket |
+| `invalid_service_response` | The service returned an invalid contract | Check version compatibility and service health |
+| `inactive` | Repository lifecycle state does not allow the operation | Wait for provisioning/restoration or ask an administrator |
+
+Only retry conditions that are explicitly marked retryable. A permission,
+profile, locator, or compatibility failure requires correction rather than a
+tight retry loop.
+
+## Protect diagnostic output
+
+Use `--log-level debug` only when needed and keep diagnostic output in an
+access-controlled location. Crab redacts managed tokens and physical placement,
+but organization and repository logical names may still be sensitive business
+metadata. Never paste the one-time output from service-account creation or
+rotation into a support ticket.
+
+For local repository checks, also use [`crab doctor`](/docs/cli/reference/crab-doctor),
+[`crab logs`](/docs/cli/reference/crab-logs), and
+[Structured Output](/docs/cli/reference/structured-output). For HTTP status,
+headers, and stable service error codes, see the
+[Managed Service API Reference](/docs/cli/managed-service/api-reference).

@@ -1,0 +1,229 @@
+---
+title: "Authoring Stages"
+description: "Write production Crab workflow stages with DVC-style helpers, YAML, templating, foreach, matrix, and external resources."
+---
+
+# Authoring Stages
+
+You can author stages with `crab stage add` or by editing `crab.yaml` directly.
+Use the helper when you want DVC-style command ergonomics. Edit YAML directly
+when the stage uses advanced fields, shared defaults, `foreach`, or `matrix`.
+
+## Use `crab stage add`
+
+```bash
+crab stage add -n prepare \
+  -d src/prepare.py \
+  -d data/raw.csv \
+  -o data/prepared.csv \
+  python src/prepare.py
+```
+
+Add metrics and plots:
+
+```bash
+crab stage add -n train \
+  -d src/train.py \
+  -d data/prepared.csv \
+  -p train.lr \
+  -p train.epochs \
+  -o models/model.pkl \
+  -m metrics/train.json \
+  --plots metrics/loss.csv \
+  python src/train.py
+```
+
+Use `--force` to replace an existing stage definition. Use `--run` when the
+stage should run immediately after being written.
+
+## Write YAML Directly
+
+```yaml
+params:
+  - params.yaml
+
+stages:
+  train:
+    desc: Train the model used by batch scoring
+    cmd: python src/train.py --config params.yaml
+    deps:
+      - src/train.py
+      - data/features.parquet
+    params:
+      - train.lr
+      - train.epochs
+    outs:
+      - models/model.pkl
+    metrics:
+      - metrics/train.json
+    plots:
+      - metrics/loss.csv:
+          x: epoch
+          y: loss
+```
+
+Keep stages narrow. One stage should produce one logical result. If a command
+downloads data, trains a model, and publishes a report, split it unless those
+steps must always be invalidated together.
+
+## Command Forms
+
+Use a shell string for common pipelines:
+
+```yaml
+cmd: python src/train.py && python src/evaluate.py
+```
+
+Use a list when you want to preserve separate command lines:
+
+```yaml
+cmd:
+  - python src/train.py
+  - python src/evaluate.py
+```
+
+Prefer explicit scripts over long inline shell blocks. That keeps workflow diffs
+small and makes stage hashes easier to reason about.
+
+## Working Directories
+
+`wdir` runs the command from a subdirectory. Relative deps, outs, metrics, and
+stage-local params are resolved from that working directory.
+
+```yaml
+stages:
+  train:
+    wdir: pipelines/training
+    cmd: python train.py
+    deps:
+      - train.py
+      - ../../data/features.parquet
+    outs:
+      - model.pkl
+```
+
+Use `wdir` for subprojects. Do not use it to hide cross-project dependencies;
+declare those paths explicitly.
+
+## Templating
+
+Use `${...}` to reuse values from `vars` and params files:
+
+```yaml
+vars:
+  - codedir: src
+  - params.yaml: [paths, train]
+
+stages:
+  prepare:
+    cmd: python ${codedir}/prepare.py --out ${paths.prepared}
+    deps:
+      - ${codedir}/prepare.py
+      - ${paths.raw}
+    outs:
+      - ${paths.prepared}
+```
+
+Template values should describe stable project structure, not per-run choices.
+Use params and experiments for per-run choices.
+
+## Foreach and Matrix
+
+Use `foreach` when one stage shape repeats over a list or map:
+
+```yaml
+stages:
+  featurize:
+    foreach:
+      small:
+        window: 8
+      large:
+        window: 32
+    do:
+      cmd: python src/featurize.py --window ${item.window} --out data/${key}.parquet
+      deps:
+        - src/featurize.py
+        - data/raw.csv
+      outs:
+        - data/${key}.parquet
+```
+
+Use `matrix` for cartesian products:
+
+```yaml
+stages:
+  train:
+    matrix:
+      model: [linear, forest]
+      seed: [1, 2, 3]
+    cmd: python src/train.py --model ${item.model} --seed ${item.seed}
+    deps:
+      - src/train.py
+      - data/features.parquet
+    outs:
+      - models/${item.model}-${item.seed}.pkl
+```
+
+Expanded stage names appear in DAG and status output with `@` suffixes.
+
+## Frozen and Nondeterministic Stages
+
+Freeze a stage when upstream changes should not trigger it:
+
+```bash
+crab freeze train
+crab unfreeze train
+```
+
+YAML form:
+
+```yaml
+stages:
+  train:
+    frozen: true
+```
+
+Use `nondeterministic: true` or DVC-compatible `always_changed: true` for
+commands that should run every time, such as live data imports or timestamped
+reports:
+
+```yaml
+stages:
+  ingest:
+    nondeterministic: true
+```
+
+Prefer deterministic stages for production pipelines. Nondeterministic stages
+are useful at boundaries, but they reduce cache reuse.
+
+## External Dependencies and Outputs
+
+Stages can depend on local paths, upstream outs, URLs, and configured workflow
+remote aliases. Pin remote data with digests when reproducibility matters.
+
+```yaml
+stages:
+  train:
+    deps:
+      - data/features.parquet
+      - url: https://example.com/schema.json
+        digest: b3:0000000000000000000000000000000000000000000000000000000000000000
+    outs:
+      - models/model.pkl
+```
+
+For object-store outputs, configure workflow remotes in `.crab/config.toml` and
+use them consistently across stages. Keep credentials out of committed files.
+
+## Validate Before Running
+
+```bash
+crab run --validate
+crab workflow dag
+```
+
+Validation catches duplicate outputs, cycles, invalid names, and malformed
+stage fields before an expensive command starts.
+
+For command-level details, see [Running Commands](/docs/cli/automation/running-commands)
+and [Workflow Pipelines](/docs/cli/automation/workflow-pipelines).

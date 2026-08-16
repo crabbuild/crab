@@ -1,0 +1,43 @@
+---
+title: "crab prune"
+description: "Evict local cache objects to free disk space."
+---
+
+# crab prune
+
+Evict local cache objects.
+
+## Synopsis
+
+```
+crab prune [OPTIONS]
+```
+
+## Description
+
+`crab prune` runs local LRU eviction for current cache objects: chunks, xorbs,
+and shards. This frees disk space without affecting the remote store — pruned
+data can be fetched again when needed.
+
+For conceptual background, see [Pruning Objects](/docs/cli/storage/pruning-objects).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dry-run` | `false` | Show what would be pruned without deleting |
+| `--verbose` | `false` | Print each pruned cache object |
+| `--json` | `false` | Emit one structured JSON result |
+| `--jsonl` | `false` | Emit streaming JSONL events |
+
+## Examples
+
+```bash
+crab prune --dry-run
+crab prune
+```
+
+## Related Commands
+
+- [`crab gc`](/docs/cli/reference/crab-gc) — remove unreachable remote objects.
+- [`crab cache`](/docs/cli/reference/crab-cache) — manage the chunk cache.

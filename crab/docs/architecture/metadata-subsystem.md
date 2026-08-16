@@ -1,0 +1,402 @@
+# Metadata Subsystem
+
+## Overview
+
+Crab's remote metadata layer is built on two purpose-specific SlateDB
+instances plus a retained two-tier local cache. Each SlateDB has a scope
+chosen for its role; nothing else in the system is a SlateDB.
+
+- **`file_index_db`** — one SlateDB per repository at
+  `{repo_prefix}/file_index_db/`. Maps `file_hash → shard_hash`.
+  Contention is bounded to concurrent pushes on the same repo.
+- **`chunk_index_db`** — one globally shared SlateDB at
+  `.crab/chunk_index_db/`. Maps `chunk_hash → XorbRef`. A chunk
+  uploaded by any client in any repo in the bucket is visible to every
+  other client's push classifier.
+
+Both instances sit behind a thin `Db` wrapper that hides the `slatedb::Db`
+API. Writes compose through a single in-memory `Transaction` that carries
+put/delete ops tagged with a `DbTarget` (either `FileIndex` or
+`ChunkIndex`); committing the transaction splits it into one
+`slatedb::WriteBatch` per database, and the two batches run in parallel
+via `tokio::try_join!`. Each batch is atomic per database. There is no
+cross-database transaction — the manifest CAS is the linearization point
+for a push.
+
+A session-level `MetaDbGuard` holds the opened instances and closes every
+one of them on every exit path (normal return, error, cancellation,
+panic, SIGINT/SIGTERM). Fresh SlateDB instances come into being on first
+write via `Db::open` (create-if-missing); there is no bootstrap command.
+
+Source: `crab/src/metadata/metadb/`
+
+### ZeroFS lineage
+
+The `Db` + `Transaction` shape is a direct port of ZeroFS's
+`zerofs/src/db.rs` façade pattern: one `Db` wrapper over a SlateDB
+handle, one `Transaction` that records ops and splits into batches at
+commit time, the caller never touches `slatedb::Db` directly. The
+"one SlateDB per logical database, many prefix-keyspaces inside"
+convention is the same — crab has two logical databases, so crab
+has two `Db` handles per session.
+
+## Storage Layout
+
+See [Object Storage Layout V1](object-storage-layout.md) for the normative
+scope, key grammar, ownership, and cross-language interpretation. The tree
+below focuses on the two metadata databases.
+
+```
+s3://{bucket}/
+├── .crab/                          ← global, cross-repo
+│   ├── chunk_index_db/               ← ONE SlateDB instance
+│   │   ├── manifest
+│   │   ├── wal/
+│   │   └── compacted/
+│   ├── xorbs/{hash}                  ← immutable compressed chunk bundles
+│   └── shards/{hash}                 ← immutable reconstruction recipes;
+│                                         authoritative shard listing via
+│                                         S3 LIST
+├── {repo_a}/
+│   ├── file_index_db/                ← ONE per-repo SlateDB instance
+│   │   ├── manifest
+│   │   ├── wal/
+│   │   └── compacted/
+│   ├── manifest
+│   ├── refs/
+│   ├── packs/
+│   └── locks/
+├── {repo_b}/
+│   ├── file_index_db/
+│   ├── manifest
+│   └── ...
+```
+
+Per session, a push opens exactly two SlateDB instances: the per-repo
+`file_index_db` and the global `chunk_index_db`. Concurrent pushes to
+different repos open different `file_index_db` instances and never
+contend on that database; concurrent pushes to any repo in the bucket
+share the one `chunk_index_db` and serialize at SlateDB's
+manifest-update step (sub-second per commit, acceptable for the
+expected concurrency of dozens of pushes).
+
+## Key Codec
+
+Each SlateDB instance holds one logical table. Keys use a single-byte
+prefix to cleanly separate content-addressed entries from system
+metadata, mirroring the ZeroFS key-codec convention.
+
+| Prefix | Meaning | Notes |
+|--------|---------|-------|
+| `0x01` | Content-addressed key | 33-byte fixed: `0x01 ‖ hash[32]` |
+| `0xFF` | System key | Variable length: `0xFF ‖ "sys:<name>"` |
+
+### Wire formats
+
+**Content keys (33 bytes):**
+
+```
+file_index_db    key  = 0x01 ‖ file_hash[32]
+                 val  = shard_hash[32]                           (32 bytes)
+
+chunk_index_db   key  = 0x01 ‖ chunk_hash[32]
+                 val  = xorb_hash[32] ‖ chunk_index (u32 LE)
+                        ‖ uncompressed_size (u32 LE)             (40 bytes)
+```
+
+**System keys (per database):**
+
+```
+0xFF "sys:format_version"   u32 LE    schema version (currently 1)
+0xFF "sys:epoch"            u64 LE    write-batch counter
+0xFF "sys:created_at"       u64 LE    unix milliseconds
+0xFF "sys:gc_generation"    u64 LE    chunk_index_db only; bumped by GC
+```
+
+The explicit `0x01` prefix (rather than raw 32-byte hashes discriminated
+by length against `0xFF`-prefixed system keys) costs one byte per entry
+but gives unambiguous classification for any future tooling and leaves
+room to add new keyspaces without migration.
+
+Source: `crab/src/metadata/metadb/key_codec.rs`
+
+## Component Model
+
+The crate layout under `crab/src/metadata/metadb/`:
+
+```
+metadb/
+├── mod.rs          # MetaDb session facade + MetaDbConfig + CacheDriftOutcome
+├── db.rs           # Thin Db wrapper over slatedb::Db
+├── transaction.rs  # Transaction + DbTarget + TxOp + PushWriteReceipt
+├── key_codec.rs    # Prefix constants + encode/decode helpers
+├── once.rs         # OnceAsync<T> lazy async initializer
+├── guard.rs        # MetaDbGuard (Drop safety net)
+└── stores/
+    ├── mod.rs
+    ├── file_index.rs   # FileIndexStore
+    └── chunk_index.rs  # ChunkIndexStore (three-tier)
+```
+
+### `Db`
+
+Thin wrapper over `slatedb::Db`. Hides `ReadOptions` / `WriteOptions`
+plumbing, maps `slatedb::Error` into `MetaDbError`, and exposes the
+handful of operations crab actually uses: `open`, `get`, `get_batch`,
+`write`, `flush`, `close`. Every caller inside `metadata::metadb::*`
+goes through this type; `slatedb::Db` is not re-exported.
+
+Carries a `label` field (`"file_index_db"` or `"chunk_index_db"`) that
+appears in metrics, tracing spans, and error payloads so operators can
+tell which database a failure came from without parsing paths.
+
+Source: `crab/src/metadata/metadb/db.rs` (modelled on
+`ZeroFS/zerofs/src/db.rs`).
+
+### `Transaction` and `DbTarget`
+
+```rust
+pub enum DbTarget { FileIndex, ChunkIndex }
+
+enum TxOp {
+    Put    { target: DbTarget, key: Bytes, value: Bytes },
+    Delete { target: DbTarget, key: Bytes },
+}
+
+pub struct Transaction { ops: Vec<TxOp> }
+```
+
+Callers push ops through store APIs (which know their own target) and
+commit via `MetaDb::commit(txn)`. The commit splits the op list into two
+per-database `slatedb::WriteBatch`es and runs both through
+`tokio::try_join!`. Either per-database batch may be empty; an empty
+batch skips opening its SlateDB altogether.
+
+Source: `crab/src/metadata/metadb/transaction.rs`
+
+### `FileIndexStore`
+
+```rust
+#[derive(Clone)]
+pub struct FileIndexStore { db: Arc<Db> }
+```
+
+Cheap-cloneable accessor for the per-repo `file_index_db`. Point
+operations only: `get`, `get_batch`, `save`, `save_batch`, `delete`.
+Writes push ops into a caller-owned `Transaction`; reads hit the
+remote directly (this tier has no local cache). Corrupt values
+(wrong length, unexpected key kind) return `MetaDbError::CorruptValue`.
+
+### `ChunkIndexStore`
+
+```rust
+#[derive(Clone)]
+pub struct ChunkIndexStore {
+    db: Arc<Db>,                         // remote chunk_index_db
+    memory: Arc<Mutex<ChunkIndex>>,      // in-memory hot tier
+    persistent: Option<Arc<PersistentChunkIndex>>, // SQLite warm tier
+}
+```
+
+The only accessor for the global `chunk_index_db`, and the only place
+the three cache tiers are glued together. `get` and `get_batch` are
+cache-first: in-memory → persistent, when available → remote, with
+remote hits writing back to every available local tier. The persistent
+SQLite tier is advisory: if the local warm tier cannot be opened or updated,
+`ChunkIndexStore` still serves from memory and the remote `chunk_index_db`
+instead of disabling global dedup lookup. `save_batch` and `delete` push ops
+into a caller-owned `Transaction`.
+
+The API intentionally exposes point operations only. No `range` /
+`scan` / `iter` on content keys — chunk hashes are uniformly
+distributed blake3 output with no semantic prefix, so range iteration
+over content keys is never useful for dedup classification.
+
+### `MetaDb`
+
+Session facade used by push, hydrate, mount, clone, gc, fsck, and the
+`crab metadb` subcommands. Holds lazy-open slots for the two SlateDB
+instances and the two local cache tiers, plus the `MetaDbConfig`
+derived from the `[metadb]` TOML section and `CRAB_METADB_*`
+environment overrides.
+
+Key methods:
+
+- `file_index() -> FileIndexStore` / `chunk_index() -> ChunkIndexStore`
+  — lazy-open typed accessors.
+- `new_transaction() -> Transaction` — build a fresh write composition.
+- `commit(txn) -> PushWriteReceipt` — split per database, commit in
+  parallel, return an observable receipt (file ops, chunk ops, bytes,
+  elapsed).
+- `check_cache_gc_drift() -> CacheDriftOutcome` — compare the remote
+  `sys:gc_generation` against the local `cache_gc_generation`; if
+  remote is ahead beyond `cache_gc_grace`, wipe both local tiers.
+- `flush_all()` / `close_all(self)` — teardown; every exit path ends
+  with `close_all`.
+
+### `MetaDbGuard`
+
+Session-level guard that owns a `MetaDb` and closes every opened
+instance on drop. Explicit `close()` is always preferred; `Drop`
+spawns a blocking task on a background runtime as a best-effort
+safety net and bumps the `metadb_close_on_drop_count` metric so
+operators can spot leaked sessions.
+
+Source: `crab/src/metadata/metadb/guard.rs`
+
+## Local Chunk-Index Cache
+
+The cache in front of `chunk_index_db` is a two-tier retained module
+pair. Neither module was replaced — both live at the same paths they
+have always lived at; what changed is how they are populated.
+
+- `crab/src/metadata/chunk_index.rs` — in-memory
+  `HashMap<MerkleHash, XorbRef>` with a 1 GiB memory ceiling
+  (configurable via `metadb.chunk_index.in_memory_ceiling_bytes`).
+  Unchanged APIs: `install_shard`, `insert`, `get`, `has_shard`,
+  `over_ceiling`.
+- `crab/src/metadata/persistent_chunk_index.rs` — optional SQLite-backed on-disk
+  cache at `~/.cache/crab/buckets/{bucket-hash}/chunk-index.sqlite`.
+  Extended with two small additions for the new population paths:
+  a single-entry `insert(chunk_hash, xorb_ref)` for lazy-on-miss
+  fills, and `cache_gc_generation` / `set_cache_gc_generation` /
+  `clear_entries` for GC-driven invalidation.
+
+### Three population paths
+
+1. **Warm-on-push** — during push step 9b, the client calls
+   `ChunkIndexStore::warm_local_shard(shard_hash, entries)` in parallel
+   with the remote commit. That warms the in-memory tier and, when the
+   SQLite handle is available, the persistent tier. Chunks this client
+   just pushed are immediately in its own caches.
+2. **Opt-in fetch-time shard sync** — when `crab clone --sync-chunk-index`,
+   `crab pull`, or `crab fetch` runs shard sync, the retained `ShardSynchronizer` downloads the
+   delta between the manifest's shard index and
+   `PersistentChunkIndex::installed_shards()`, then calls
+   `install_shard` on each new shard. This is the primary warming path
+   for chunks pushed by other clients. Its local generation cursor is written
+   through a sibling tempfile and atomic rename, so concurrent processes sharing
+   one cache root read either the previous complete cursor or the new complete
+   cursor.
+3. **Lazy-on-miss** — when `ChunkIndexStore::get` misses local tiers,
+   it issues one `Db::get` against `chunk_index_db`. A remote hit
+   writes back to `ChunkIndex::insert` and, when available,
+   `PersistentChunkIndex::insert` before returning. This catches chunks
+   pushed between our last pull and our push, and covers CI workloads
+   that skip the optional clone-time chunk-index warmup.
+
+### GC drift invalidation
+
+`MetaDb::check_cache_gc_drift` reads `sys:gc_generation` from the
+remote `chunk_index_db` (one read, not a fan-out), compares to the
+local `cache_gc_generation`, and — if the remote is ahead by more
+than `cache_gc_grace` (default 3) generations — calls
+`PersistentChunkIndex::clear_entries()` and swaps the in-memory
+`ChunkIndex` for a fresh one. The check is called explicitly by push
+/ clone / pull; it is not implicit on `chunk_index()` because that
+would force the remote open eagerly.
+
+## Shard Enumeration
+
+`.crab/shards/{hash}` objects remain immutable reconstruction
+recipes exactly as before. What changed is that the shards themselves
+are the authoritative source of truth for "what shards exist" — there
+is no shard-registry SlateDB.
+
+- Enumeration: `LIST .crab/shards/`. Paginated; ~1 LIST call per
+  1,000 shards, sub-second and sub-cent even at 100K shards.
+- Per-shard size + LastModified: S3 HEAD.
+- Per-shard content summary (xorb count, file count): bounded range-GET
+  on the shard's header (~200 bytes).
+
+`crab gc` and `crab fsck` tolerate the LIST cost because they are
+cold paths. The manifest's `shard_list_hash` remains as a consistency
+checkpoint and is used by pull/fetch-time shard sync to compute the
+download delta, but S3 LIST is authoritative.
+
+## Access Patterns
+
+Every production access pattern targets a known content hash. The
+complete list:
+
+| Access | Operation | Caller |
+|--------|-----------|--------|
+| Classify chunks during push | `ChunkIndexStore::get_batch(chunk_hashes)` | push step 4 |
+| Write chunk entries after xorb upload | `ChunkIndexStore::save_batch(&mut txn, entries)` | push step 9b |
+| FUSE chunk lookup on cache miss | `ChunkIndexStore::get(chunk_hash)` | `cmd/mount.rs` |
+| GC sweep of dead chunks | `ChunkIndexStore::delete(&mut txn, chunk_hash)` | `cmd/gc.rs` |
+| fsck spot-check | sample-based `ChunkIndexStore::get(chunk_hash)` | `cmd/fsck.rs` |
+| Resolve pointer during hydrate | `FileIndexStore::get_batch(file_hashes)` | `cmd/hydrate.rs` |
+| Write file-index entries after shard upload | `FileIndexStore::save(&mut txn, file_hash, shard_hash)` | push step 9b |
+
+No code path iterates content keys in order. System keys (`0xFF "sys:…"`)
+are scanned rarely (diagnose, doctor) and are well-separated from content
+keys by the prefix byte.
+
+## Push Pipeline Integration
+
+The pre-spec push pipeline had 14 steps. The MetaDB-backed path removes
+push-time shard sync from the classify phase so concurrent agents do not compete
+for shared local cache files before every push:
+
+1. Pre-push shard sync is removed. Pull/fetch/clone may still warm local shard
+   caches, and push can use those advisory entries if already present, but push
+   never downloads the remote shard list as part of classification.
+2. Chunk classification (step 4) now calls
+   `ChunkIndexStore::get_batch`, which is itself cache-first
+   (in-memory → persistent → `chunk_index_db`).
+3. A new step 9b sits between shard upload (step 9) and pack upload
+   (step 10). It commits a single `Transaction` spanning both stores
+   and warms the two local tiers, all in parallel:
+
+   ```rust
+   let mut txn = metadb.new_transaction();
+   file_index_store.save_batch(&mut txn, &file_entries);
+   chunk_index_store.save_batch(&mut txn, &chunk_entries);
+
+   tokio::try_join!(
+       metadb.commit(txn),                              // 2 SlateDB WriteBatches
+       chunk_index_store.warm_local_shard(shard_hash, &chunk_entries),
+   )?;
+   ```
+
+4. The per-file `{repo_prefix}/file-index/{hash}` PUT loop at the end
+   of step 9 is **removed**.
+
+If any commit in step 9b fails, the push aborts before the manifest
+CAS (step 12). Partial state is safe — all writes are content-addressed
+so a retry writes identical bytes, and fsck cleans up orphans unreachable
+from any committed manifest generation. Local-cache failures log at
+`warn!` and do NOT fail the push: the remote is still correct; the
+cache is an optimization.
+
+## What Was Removed
+
+This spec is a hard cutover. The following are gone from the tree:
+
+- **`crab/src/metadata/file_index.rs`** — the per-file S3 object
+  layout (`{repo_prefix}/file-index/{hash}` → `shard_hash`). Deleted
+  entirely; no caller references it.
+- **`upload_file_index_entries`** and the per-file PUT loop in
+  `git/push.rs` / `git/push_native.rs`. Replaced by
+  `FileIndexStore::save_batch` inside step 9b.
+- **The `ShardSyncer` trait** consumed by the pre-push sync step.
+  The concrete `ShardSynchronizer` type in
+  `crab/src/metadata/shard_sync.rs` is retained and invoked from
+  clone/pull/fetch; only the trait abstraction and the pre-push
+  wiring are gone.
+- **16-way chunk-index sharding.** Earlier drafts of this spec
+  hash-sharded `chunk_index_db` into 16 SlateDB instances with a
+  `route_chunk_shard` routing function and a `CHUNK_SHARD_COUNT`
+  constant. That approach was dropped in favor of the ZeroFS one-Db
+  pattern. There is one `chunk_index_db`, not sixteen. No routing
+  function exists, no `shard_XX` subdirectories exist, and no
+  `chunk_index_db/shard_*` paths are referenced anywhere in the
+  source tree (enforced by CI grep).
+
+No code path reads, writes, LISTs, or scans anything under
+`{repo_prefix}/file-index/`. Any stale pre-spec objects there are
+garbage and are ignored.
+
+Source: `crab/src/metadata/metadb/`, `crab/src/git/push.rs`,
+`crab/src/cmd/{hydrate,mount,clone,pull,fetch,gc,fsck,metadb,doctor}.rs`

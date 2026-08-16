@@ -1,0 +1,116 @@
+---
+title: "File Locking"
+description: "How Crab provides distributed advisory file locking to prevent concurrent edits on binary files."
+---
+
+# File Locking
+
+Binary files — 3D models, compiled assets, large media — can't be merged by git. When two people edit the same binary file simultaneously, one person's work gets overwritten. File locking prevents this by letting collaborators signal "I'm working on this file" before making changes.
+
+## Why Locking Matters for Large Files
+
+Text files have git's three-way merge. Binary files don't. If Alice and Bob both edit `character.fbx` on different branches, git can't merge them — someone loses their work. Locking solves this by making the conflict visible *before* work begins, not after.
+
+## How Crab Locks Work
+
+Crab's locks are:
+
+- **Distributed** — Lock records are stored in the remote object store (same bucket as your data), visible to all collaborators.
+- **Advisory** — Locks don't physically prevent file modification. They signal intent and block pushes from other users.
+- **Atomic** — Lock acquisition uses compare-and-swap (CAS) operations, so two people can't grab the same lock simultaneously.
+- **Identity-based** — Lock ownership is determined from `git config user.email`, so you can see who holds each lock.
+
+## The Locking Workflow
+
+### 1. Lock before editing
+
+```bash
+crab lock models/character.fbx
+```
+
+This creates a lock record in the remote store. Other collaborators will see the file is locked when they try to lock it or push changes to it.
+
+### 2. Make your changes
+
+Edit the file normally. The lock doesn't affect your local workflow — it only prevents others from pushing conflicting changes.
+
+### 3. Commit and push
+
+```bash
+crab add models/character.fbx
+git commit -m "Update character model"
+git push
+```
+
+### 4. Unlock when done
+
+```bash
+crab unlock models/character.fbx
+```
+
+## Checking Lock Status
+
+See all active locks in the repository:
+
+```bash
+crab locks
+```
+
+Output shows who holds each lock:
+
+```
+O models/character.fbx    alice@example.com    ID:abc123
+  data/train.bin          bob@example.com      ID:def456
+```
+
+The `O` marker indicates locks you own.
+
+Filter by owner or path:
+
+```bash
+# Your locks only
+crab locks --owner self
+
+# Locks on a specific file
+crab locks --path models/character.fbx
+```
+
+## Lock Conflicts
+
+If you try to lock a file that someone else has locked:
+
+```
+error: models/character.fbx is locked by bob@example.com
+```
+
+You have two options:
+1. Wait for them to finish and unlock
+2. Force-break the lock if it's stale (they forgot to unlock, or left the team)
+
+## Breaking Stale Locks
+
+If a collaborator forgot to unlock a file or is unavailable:
+
+```bash
+crab unlock --force models/character.fbx
+```
+
+Force-unlocking overrides the existing lock. Use this responsibly — communicate with your team first.
+
+## When to Use Locking
+
+| File Type | Lock? | Why |
+|-----------|-------|-----|
+| 3D models (.fbx, .blend) | Yes | Can't merge binary |
+| Compiled assets (.dll, .so) | Yes | Can't merge binary |
+| Large datasets (.parquet, .bin) | Maybe | Depends on workflow |
+| Config files (.yaml, .toml) | No | Git can merge text |
+| Source code (.rs, .py) | No | Git can merge text |
+
+## Lock Storage
+
+Lock records are stored in your remote bucket at `{repo-path}/locks/files/{hash}`. They're lightweight JSON objects containing the file path, owner, lock ID, and timestamp. No additional infrastructure is needed — locks use the same cloud storage as your data.
+
+## CLI Reference
+
+For complete command syntax, all options, and JSON output format, see the [crab lock reference](/docs/cli/reference/crab-lock).

@@ -1,0 +1,132 @@
+---
+title: "Workflow Pipelines"
+description: "Manage workflow pipeline cache by pushing local stage cache entries to the remote store."
+---
+
+# crab workflow
+
+Manage workflow lockfiles, stage state, DAG views, run journals, and local
+stage cache synchronization.
+
+## Synopsis
+
+```bash
+crab workflow <COMMAND>
+```
+
+## Description
+
+`crab workflow` provides these administrative subcommands:
+
+- `lockfile` — manage `crab.lock`
+- `status` — report per-stage state against `crab.lock`
+- `dag` — render the workflow DAG as ASCII, Mermaid, DOT, or artifacts
+- `journal` — inspect and prune run journals under `.crab/workflow/runs/`
+- `push-cache` — push local stage cache entries to the configured remote
+
+### push-cache
+
+Scans all local stage cache entries under `.crab/cache/stages/` and pushes any
+that lack a corresponding remote ref. This is the batch counterpart to
+`crab run --cache-push`, which pushes incrementally after each stage commits.
+
+Use `push-cache` when you have accumulated local cache entries (from runs
+without `--cache-push`) and want to share them with collaborators or CI
+runners that pull from the remote cache. It reuses the same credential chain
+and store construction as `crab push`, so no separate credential configuration
+is needed.
+
+If no local cache entries exist (`.crab/cache/` is absent), the command
+reports zero entries and exits successfully.
+
+## Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--all` | | `false` | Push all local stage cache entries missing from the remote. Required for batch operation. |
+| `--json` | | `false` | Emit structured JSON output instead of human-readable text. |
+
+## Prerequisites
+
+- Workflow feature enabled with `crab config set workflow.enabled true`.
+- A valid `crab://` remote URL configured (via `crab init` or git remote).
+- Valid cloud credentials for the configured object store (same as `crab push`).
+
+## Examples
+
+### Push all local cache entries to the remote
+
+```bash
+crab workflow push-cache --all
+```
+
+Scans `.crab/cache/stages/`, identifies entries without a remote counterpart,
+and uploads them. Output:
+
+```
+Pushed 12 entries, skipped 3 (already remote), 0 errors
+```
+
+### Push cache entries with JSON output for scripting
+
+```bash
+crab workflow push-cache --all --json
+```
+
+Emits a structured JSON envelope suitable for CI pipelines or automation
+scripts that need to parse the result programmatically.
+
+### Inspect a workflow before running it
+
+```bash
+crab workflow status
+crab workflow dag --format mermaid
+```
+
+### Backfill remote cache after offline work
+
+```bash
+# After running stages locally without --cache-push:
+crab run --name train --deps data/ --outs models/ -- python train.py
+crab run --name eval --deps models/ --outs reports/ -- python eval.py
+
+# Batch-push all accumulated cache entries:
+crab workflow push-cache --all
+```
+
+## JSON Output
+
+Supports `--json` for structured output.
+
+### crab workflow push-cache --json
+
+```json
+{
+  "schema": "workflow.push_cache",
+  "version": "1",
+  "data": {
+    "pushed": 12,
+    "skipped": 3,
+    "errors": 0
+  }
+}
+```
+
+### Schema Reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pushed` | integer | Number of cache entries successfully uploaded to the remote |
+| `skipped` | integer | Number of entries already present on the remote (no upload needed) |
+| `errors` | integer | Number of entries that failed to upload |
+
+See [Structured Output](/docs/cli/reference/structured-output) for envelope
+details and error handling conventions.
+
+## Related Commands
+
+- [`crab run`](/docs/cli/automation/running-commands) — execute stages with content-addressed caching (use `--cache-push` for incremental uploads).
+- [`crab workflow journal`](/docs/cli/automation/workflow-journal) — inspect run journals and stage history.
+- [`crab workflow lockfile`](/docs/cli/automation/workflow-lockfile) — inspect workflow lockfiles.
+- [`crab workflow dag`](/docs/cli/automation/dag-visualization) — visualize the stage dependency graph.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and query stage metrics.

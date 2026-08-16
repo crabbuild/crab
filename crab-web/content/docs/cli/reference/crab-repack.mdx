@@ -1,0 +1,42 @@
+---
+title: "crab repack"
+description: "Consolidate remote Git pack files to reduce pack count and listing overhead."
+---
+
+# crab repack
+
+Consolidate remote Git pack files.
+
+## Synopsis
+
+```
+crab repack [OPTIONS]
+```
+
+## Description
+
+`crab repack` consolidates remote Git pack files. Over time, many pushes can
+leave many small packs in the remote. Repacking merges those packs and
+atomically updates the pack list; old packs are reclaimed later by `crab gc`.
+
+For conceptual background, see [Repacking Objects](/docs/cli/storage/repacking-objects).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dry-run` | `false` | Show repack plan without executing |
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+```bash
+crab repack --dry-run
+crab repack
+```
+
+## Related Commands
+
+- [`crab gc`](/docs/cli/reference/crab-gc) — remove unreachable objects first.
+- [`crab optimize packs`](/docs/cli/reference/crab-optimize) — grouped optimize namespace for pack consolidation.
+- [`crab compact`](/docs/cli/reference/crab-compact) — compact metadata layers.

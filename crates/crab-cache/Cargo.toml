@@ -1,0 +1,39 @@
+[package]
+name = "crab-cache"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Local and remote cache contracts for Crab."
+
+[lib]
+name = "crab_cache"
+path = "src/lib.rs"
+
+[features]
+default = []
+active-probe = ["dep:reqwest"]
+local-cache = ["dep:filetime", "dep:rusqlite", "dep:tokio"]
+remote-client = ["active-probe", "dep:tokio"]
+xet-chunk-cache = ["dep:tokio", "dep:xet-client"]
+
+[dependencies]
+blake3 = { workspace = true, features = ["rayon"] }
+bytes = { workspace = true }
+crab-types = { workspace = true }
+crab-xet = { workspace = true }
+filetime = { version = "0.2", optional = true }
+globset = "0.4"
+reqwest = { workspace = true, features = ["rustls-tls", "json"], optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"], optional = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+xet-client = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json", "matched-path"] }
+tempfile = { workspace = true }

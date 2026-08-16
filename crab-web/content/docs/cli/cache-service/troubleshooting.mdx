@@ -1,0 +1,198 @@
+---
+title: "Troubleshooting"
+description: "Symptom-first diagnostics for the cache service."
+---
+
+# Troubleshooting
+
+Start with health, auth, and client configuration. Most cache-service incidents are one of those three.
+
+## Quick Checks
+
+From a configured Crab repo, collect a redacted support bundle first:
+
+```bash
+crab doctor --support-bundle --output cache-service-support.json
+```
+
+The bundle includes cache-service config posture, health/auth/admin probes,
+admin stats, repo-scoped authorization decisions, selected Prometheus metric
+totals, derived cache-effectiveness signals, and alert runbook URLs. It does
+not include PSKs, bearer tokens, mTLS private-key paths, raw service URLs, or
+raw metrics text.
+
+```bash
+curl -fsS https://crab-cache.example.com:8443/v1/health/live
+curl -fsS https://crab-cache.example.com:8443/v1/health
+curl -i https://crab-cache.example.com:8443/v1/admin/stats
+curl -i -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  https://crab-cache.example.com:8443/v1/admin/stats
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path":"org/repo"}' \
+  https://crab-cache.example.com:8443/v1/authz/check
+```
+
+Expected:
+
+- Liveness returns `ok`.
+- Readiness returns `ok`.
+- Admin without auth returns 401.
+- Admin with valid auth returns 200.
+- Authz returns `read`, `write`, and `dedup` as `true` for normal
+  cache+dedup clients.
+
+## Client Is Not Using The Cache
+
+Symptoms:
+
+- No cache traffic in server logs.
+- No cache hit or miss metrics move, and `/v1/admin/stats` does not show
+  `traffic.cache_hits` or `traffic.cache_misses` increasing.
+- Client logs say the service is unhealthy.
+
+Checks:
+
+1. Confirm `[cache].service_url` or `CRAB_CACHE_SERVICE_URL` is present in resolved Crab config.
+2. Confirm the client can reach `/v1/health`.
+3. Confirm auth mode matches server config.
+4. Confirm `CRAB_CACHE_PSK` or `CRAB_CACHE_TOKEN` is present in the environment running `crab`.
+5. Run `crab doctor --support-bundle --output cache-service-support.json`.
+6. Run with `RUST_LOG=info,crab::cache=debug`.
+
+## 401 Unauthorized
+
+Likely causes:
+
+- Missing PSK or bearer token.
+- Wrong PSK.
+- Client `service_auth` does not match server `mechanism`.
+- mTLS proxy did not forward the validated client identity.
+
+Fix:
+
+- Recompute the PSK hash and compare against server config.
+- Re-export secrets in CI steps.
+- Confirm proxy identity forwarding for mTLS deployments.
+
+## 403 Forbidden
+
+The client authenticated, but policy denied the action.
+
+Common fixes:
+
+- Add `read` for fetch, clone, and hydrate.
+- Add `write` for push warming.
+- Add `dedup` for dedup queries.
+- Add `admin` for admin stats and manual eviction.
+- Include `.crab` in repo patterns for normal Crab object traffic.
+
+From the affected repo, run `crab doctor --json` or call `/v1/authz/check`
+with that repo path to see which action is denied before changing policy.
+
+## 404 Not Found
+
+For object reads, 404 means the object is not in cache and not found at origin.
+
+Check:
+
+- The server `[origin].url` points at the correct bucket.
+- The object exists in the object store.
+- The client is using the expected repository remote.
+
+## 503 Or 504 Origin Problems
+
+Readiness failure or origin timeout usually means the cache service cannot reach the object store.
+
+Check:
+
+- Cloud provider status.
+- Bucket name and region.
+- IAM or service-account read permissions.
+- S3-compatible endpoint URL.
+- Network policy and DNS.
+
+## 507 Storage Pressure
+
+The cache disk is full or too close to full.
+
+Fix:
+
+- Increase disk size.
+- Lower `cache.max_bytes`.
+- Lower eviction high and low watermarks.
+- Trigger manual eviction if needed:
+
+```bash
+curl -X POST -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  -H "Content-Type: application/json" \
+  -d '{"object_type":"xorb"}' \
+  https://crab-cache.example.com:8443/v1/admin/evict
+```
+
+For surgical cleanup, evict one immutable object path instead:
+
+```bash
+curl -X POST -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"org/repo/packs/pack-id.pack"}' \
+  https://crab-cache.example.com:8443/v1/admin/evict
+```
+
+## Push Warming Does Not Increase
+
+Checks:
+
+1. Confirm client config has `push_warming = true`.
+2. Confirm `service_mode = "cache+dedup"` or `service_mode = "cache"`.
+3. Confirm the cache service health check succeeds from the client.
+4. Check server logs for 401, 403, or 507 during push.
+5. Confirm the push actually uploaded new large-file content.
+
+## Hit Rate Is Low
+
+Common causes:
+
+- Cache is new and still warming.
+- Cache is smaller than the working set.
+- Clients point to different cache instances.
+- CI jobs read data that is rarely reused.
+- Push warming is disabled.
+
+Fix:
+
+- Let the cache warm under normal traffic.
+- Increase cache size.
+- Route clients consistently.
+- Enable push warming for team workflows.
+
+## Slow Reads Despite Cache
+
+Check:
+
+- Are requests hitting cache or missing to origin?
+- Is the cache disk saturated?
+- Is the client far from the cache?
+- Is TLS or proxy latency high?
+- Is the working set being evicted too aggressively?
+
+Use metrics and `/v1/admin/stats` first, then logs for a specific request
+window. Warm repeated reads should increase `traffic.cache_hits` while
+`traffic.origin_fetches` stays flat.
+
+## When To Escalate
+
+File an issue or escalate through your support path when you see:
+
+- Repeated panics.
+- Reproducible data mismatch errors.
+- Non-deterministic responses for the same object.
+- Cache failures that also prevent normal origin fallback.
+
+Include:
+
+- Server version.
+- Sanitized config.
+- Recent logs.
+- `/v1/admin/stats` output.
+- The exact Crab command that reproduced the issue.

@@ -1,0 +1,342 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1220" role="img" aria-labelledby="title desc">
+  <title id="title">Crab cache mechanism architecture</title>
+  <desc id="desc">Architecture diagram explaining Crab local cache, xet-core chunk cache, optional enterprise cache service, dedup query, push warming, immutable object reads, mutable bypass, and origin fallback.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="8" markerHeight="6" refX="7.2" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#fb7185"/>
+    </marker>
+  </defs>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+    text { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace; letter-spacing: 0; }
+    .title { fill: #f8fafc; font-size: 24px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 9px; font-weight: 400; }
+    .region-label { font-size: 9.5px; font-weight: 700; }
+    .name { fill: #f8fafc; font-size: 12px; font-weight: 700; }
+    .sub { fill: #94a3b8; font-size: 8.7px; font-weight: 400; }
+    .tiny { fill: #94a3b8; font-size: 7.8px; font-weight: 400; }
+    .label { fill: #cbd5e1; font-size: 8px; font-weight: 600; }
+    .mask { fill: #0f172a; }
+    .box { stroke-width: 1.6; }
+    .primary { fill: rgba(8, 51, 68, 0.42); stroke: #22d3ee; }
+    .secondary { fill: rgba(6, 78, 59, 0.42); stroke: #34d399; }
+    .tertiary { fill: rgba(76, 29, 149, 0.42); stroke: #a78bfa; }
+    .connector { fill: rgba(251, 146, 60, 0.28); stroke: #fb923c; }
+    .alert { fill: rgba(136, 19, 55, 0.4); stroke: #fb7185; }
+    .neutral { fill: rgba(30, 41, 59, 0.58); stroke: #94a3b8; }
+    .highlight { fill: rgba(59, 130, 246, 0.32); stroke: #60a5fa; }
+    .region { fill: none; stroke-width: 1.1; stroke-dasharray: 8 5; }
+    .flow { fill: none; stroke-width: 1.8; stroke-linecap: butt; stroke-linejoin: round; }
+    .flow-cyan { stroke: #22d3ee; marker-end: url(#arrow-cyan); }
+    .flow-green { stroke: #34d399; marker-end: url(#arrow-green); }
+    .flow-orange { stroke: #fb923c; marker-end: url(#arrow-orange); }
+    .flow-violet { stroke: #a78bfa; marker-end: url(#arrow-violet); }
+    .flow-rose { stroke: #fb7185; marker-end: url(#arrow-rose); }
+    .dash { stroke-dasharray: 6 6; }
+    .muted { opacity: 0.72; }
+  </style>
+
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)" opacity="0.8"/>
+
+  <text x="40" y="45" class="title">Crab cache mechanism architecture</text>
+  <text x="40" y="66" class="subtitle">Local-first cache for immutable data, optional enterprise cache for fanout and dedup, origin object store remains the durability authority.</text>
+  <text x="40" y="84" class="subtitle">Cache hits cut object-store reads while mutable refs, locks, manifests, and CAS-sensitive state bypass the cache.</text>
+
+  <!-- Region boundaries -->
+  <rect x="40" y="130" width="320" height="670" rx="12" class="region" stroke="#22d3ee"/>
+  <text x="55" y="151" class="region-label" fill="#22d3ee">Cache consumers</text>
+
+  <rect x="395" y="130" width="640" height="670" rx="12" class="region" stroke="#34d399"/>
+  <text x="410" y="151" class="region-label" fill="#34d399">crab process: cache decision plane</text>
+
+  <rect x="1070" y="130" width="325" height="670" rx="12" class="region" stroke="#fb923c"/>
+  <text x="1085" y="151" class="region-label" fill="#fb923c">Optional enterprise cache boundary</text>
+
+  <rect x="1435" y="130" width="325" height="670" rx="12" class="region" stroke="#a78bfa"/>
+  <text x="1450" y="151" class="region-label" fill="#a78bfa">Origin object store</text>
+
+  <rect x="40" y="830" width="1720" height="250" rx="12" class="region" stroke="#60a5fa"/>
+  <text x="55" y="851" class="region-label" fill="#60a5fa">Cache behavior guarantees</text>
+
+  <!-- Connections -->
+  <g id="connections">
+    <!-- Consumers into crab process -->
+    <path d="M 320 229 L 375 229 L 375 310 L 445 310" class="flow flow-cyan"/>
+    <path d="M 320 377 L 375 377 L 375 342 L 445 342" class="flow flow-cyan"/>
+    <path d="M 320 510 L 437 510" class="flow flow-cyan"/>
+    <path d="M 320 680 L 437 680" class="flow flow-cyan"/>
+
+    <!-- Config and local routing -->
+    <path d="M 700 214 L 865 214 L 865 292" class="flow flow-green muted"/>
+    <path d="M 695 339 L 727 339" class="flow flow-green"/>
+    <path d="M 865 378 L 865 418 L 575 418 L 575 447" class="flow flow-green"/>
+    <path d="M 705 510 L 737 510" class="flow flow-green"/>
+    <path d="M 575 635 L 575 573" class="flow flow-green"/>
+
+    <!-- Origin and mutable bypass -->
+    <path d="M 930 300 L 930 120 L 1585 120 L 1585 212" class="flow flow-violet"/>
+    <path d="M 995 378 L 1028 378 L 1028 455 L 1447 455" class="flow flow-rose"/>
+
+    <!-- Optional enterprise cache service -->
+    <path d="M 995 340 L 1102 340" class="flow flow-orange dash"/>
+    <path d="M 995 365 L 1102 365" class="flow flow-orange dash"/>
+    <path d="M 995 388 L 1050 388 L 1050 555 L 1092 555" class="flow flow-orange dash"/>
+    <path d="M 1360 380 L 1410 380 L 1410 278 L 1447 278" class="flow flow-orange dash"/>
+
+    <!-- Enterprise service internals -->
+    <path d="M 1235 280 L 1235 322" class="flow flow-orange dash"/>
+  </g>
+
+  <!-- Node masks and boxes -->
+  <g id="nodes">
+    <!-- Consumers -->
+    <rect x="80" y="190" width="240" height="78" rx="7" class="mask"/>
+    <rect x="80" y="190" width="240" height="78" rx="7" class="box primary"/>
+
+    <rect x="80" y="330" width="240" height="94" rx="7" class="mask"/>
+    <rect x="80" y="330" width="240" height="94" rx="7" class="box primary"/>
+
+    <rect x="80" y="464" width="240" height="92" rx="7" class="mask"/>
+    <rect x="80" y="464" width="240" height="92" rx="7" class="box neutral"/>
+
+    <rect x="80" y="634" width="240" height="92" rx="7" class="mask"/>
+    <rect x="80" y="634" width="240" height="92" rx="7" class="box highlight"/>
+
+    <!-- Crab process -->
+    <rect x="450" y="175" width="250" height="78" rx="7" class="mask"/>
+    <rect x="450" y="175" width="250" height="78" rx="7" class="box connector"/>
+
+    <rect x="445" y="300" width="250" height="78" rx="7" class="mask"/>
+    <rect x="445" y="300" width="250" height="78" rx="7" class="box secondary"/>
+
+    <rect x="735" y="300" width="260" height="78" rx="7" class="mask"/>
+    <rect x="735" y="300" width="260" height="78" rx="7" class="box highlight"/>
+
+    <rect x="445" y="455" width="260" height="110" rx="7" class="mask"/>
+    <rect x="445" y="455" width="260" height="110" rx="7" class="box tertiary"/>
+
+    <rect x="745" y="455" width="250" height="110" rx="7" class="mask"/>
+    <rect x="745" y="455" width="250" height="110" rx="7" class="box secondary"/>
+
+    <rect x="445" y="635" width="260" height="90" rx="7" class="mask"/>
+    <rect x="445" y="635" width="260" height="90" rx="7" class="box tertiary"/>
+
+    <rect x="745" y="635" width="250" height="90" rx="7" class="mask"/>
+    <rect x="745" y="635" width="250" height="90" rx="7" class="box neutral"/>
+
+    <!-- Enterprise cache service -->
+    <rect x="1110" y="190" width="250" height="90" rx="7" class="mask"/>
+    <rect x="1110" y="190" width="250" height="90" rx="7" class="box connector"/>
+
+    <rect x="1110" y="330" width="250" height="100" rx="7" class="mask"/>
+    <rect x="1110" y="330" width="250" height="100" rx="7" class="box connector"/>
+
+    <rect x="1110" y="505" width="250" height="100" rx="7" class="mask"/>
+    <rect x="1110" y="505" width="250" height="100" rx="7" class="box connector"/>
+
+    <rect x="1110" y="655" width="250" height="90" rx="7" class="mask"/>
+    <rect x="1110" y="655" width="250" height="90" rx="7" class="box tertiary"/>
+
+    <!-- Origin object store -->
+    <rect x="1455" y="220" width="260" height="115" rx="7" class="mask"/>
+    <rect x="1455" y="220" width="260" height="115" rx="7" class="box tertiary"/>
+
+    <rect x="1455" y="430" width="260" height="115" rx="7" class="mask"/>
+    <rect x="1455" y="430" width="260" height="115" rx="7" class="box alert"/>
+
+    <rect x="1455" y="640" width="260" height="90" rx="7" class="mask"/>
+    <rect x="1455" y="640" width="260" height="90" rx="7" class="box tertiary"/>
+
+    <!-- Guarantee cards -->
+    <rect x="70" y="880" width="300" height="130" rx="7" class="mask"/>
+    <rect x="70" y="880" width="300" height="130" rx="7" class="box highlight"/>
+
+    <rect x="400" y="880" width="300" height="130" rx="7" class="mask"/>
+    <rect x="400" y="880" width="300" height="130" rx="7" class="box secondary"/>
+
+    <rect x="730" y="880" width="300" height="130" rx="7" class="mask"/>
+    <rect x="730" y="880" width="300" height="130" rx="7" class="box alert"/>
+
+    <rect x="1060" y="880" width="300" height="130" rx="7" class="mask"/>
+    <rect x="1060" y="880" width="300" height="130" rx="7" class="box secondary"/>
+
+    <rect x="1390" y="880" width="300" height="130" rx="7" class="mask"/>
+    <rect x="1390" y="880" width="300" height="130" rx="7" class="box neutral"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <!-- Consumers -->
+    <text x="200" y="218" class="name" text-anchor="middle">Push pipeline</text>
+    <text x="200" y="239" class="sub" text-anchor="middle">crab push / git push</text>
+    <text x="200" y="256" class="sub" text-anchor="middle">dedup query + cache warming</text>
+
+    <text x="200" y="361" class="name" text-anchor="middle">Read paths</text>
+    <text x="200" y="382" class="sub" text-anchor="middle">hydrate, smudge, fetch, diff</text>
+    <text x="200" y="399" class="sub" text-anchor="middle">shards, xorbs, packs, metadata</text>
+
+    <text x="200" y="496" class="name" text-anchor="middle">Cache CLI</text>
+    <text x="200" y="517" class="sub" text-anchor="middle">crab cache verify</text>
+    <text x="200" y="534" class="sub" text-anchor="middle">crab cache clean</text>
+
+    <text x="200" y="666" class="name" text-anchor="middle">VFS reconstruction</text>
+    <text x="200" y="687" class="sub" text-anchor="middle">FUSE lazy hydration</text>
+    <text x="200" y="704" class="sub" text-anchor="middle">range reads + chunk reuse</text>
+
+    <!-- Crab process -->
+    <text x="575" y="204" class="name" text-anchor="middle">Cache config</text>
+    <text x="575" y="225" class="sub" text-anchor="middle">service_url, mode, warming</text>
+    <text x="575" y="242" class="sub" text-anchor="middle">auth: PSK, bearer, mTLS</text>
+
+    <text x="570" y="329" class="name" text-anchor="middle">Path classifier</text>
+    <text x="570" y="350" class="sub" text-anchor="middle">immutable vs mutable</text>
+    <text x="570" y="367" class="sub" text-anchor="middle">shared route taxonomy</text>
+
+    <text x="865" y="329" class="name" text-anchor="middle">CachingStore</text>
+    <text x="865" y="350" class="sub" text-anchor="middle">Store wrapper for all callers</text>
+    <text x="865" y="367" class="sub" text-anchor="middle">local first, service second</text>
+
+    <text x="575" y="486" class="name" text-anchor="middle">LocalCache</text>
+    <text x="575" y="508" class="sub" text-anchor="middle">~/.cache/crab or CRAB_CACHE_DIR</text>
+    <text x="575" y="525" class="sub" text-anchor="middle">chunks, shards, xorbs, stages</text>
+    <text x="575" y="542" class="sub" text-anchor="middle">atomic write + mtime LRU</text>
+
+    <text x="870" y="486" class="name" text-anchor="middle">Integrity gate</text>
+    <text x="870" y="508" class="sub" text-anchor="middle">chunk/shard hash verify</text>
+    <text x="870" y="525" class="sub" text-anchor="middle">xorb metadata identity</text>
+    <text x="870" y="542" class="sub" text-anchor="middle">corrupt entries evicted</text>
+
+    <text x="575" y="667" class="name" text-anchor="middle">ChunkCache</text>
+    <text x="575" y="688" class="sub" text-anchor="middle">xet-core DiskCache</text>
+    <text x="575" y="705" class="sub" text-anchor="middle">one budget for range chunks</text>
+
+    <text x="870" y="667" class="name" text-anchor="middle">Side metadata caches</text>
+    <text x="870" y="688" class="sub" text-anchor="middle">ShardHintCache</text>
+    <text x="870" y="705" class="sub" text-anchor="middle">HydratedPointerCache</text>
+
+    <!-- Enterprise cache service -->
+    <text x="1235" y="219" class="name" text-anchor="middle">CacheClient</text>
+    <text x="1235" y="240" class="sub" text-anchor="middle">health + capabilities probe</text>
+    <text x="1235" y="257" class="sub" text-anchor="middle">route contract must match</text>
+
+    <text x="1235" y="361" class="name" text-anchor="middle">Object cache API</text>
+    <text x="1235" y="382" class="sub" text-anchor="middle">GET / HEAD / Range GET</text>
+    <text x="1235" y="399" class="sub" text-anchor="middle">PUT for push warming</text>
+    <text x="1235" y="416" class="sub" text-anchor="middle">immutable objects only</text>
+
+    <text x="1235" y="536" class="name" text-anchor="middle">Dedup index API</text>
+    <text x="1235" y="557" class="sub" text-anchor="middle">POST /v1/dedup/query</text>
+    <text x="1235" y="574" class="sub" text-anchor="middle">known chunk refs</text>
+    <text x="1235" y="591" class="sub" text-anchor="middle">cache_verified only</text>
+
+    <text x="1235" y="687" class="name" text-anchor="middle">Service cache store</text>
+    <text x="1235" y="708" class="sub" text-anchor="middle">shared warm objects</text>
+    <text x="1235" y="725" class="sub" text-anchor="middle">bill-cutting read fanout</text>
+
+    <!-- Origin object store -->
+    <text x="1585" y="253" class="name" text-anchor="middle">Immutable objects</text>
+    <text x="1585" y="275" class="sub" text-anchor="middle">.crab/xorbs/{hash}</text>
+    <text x="1585" y="292" class="sub" text-anchor="middle">.crab/shards/{hash}</text>
+    <text x="1585" y="309" class="sub" text-anchor="middle">packs + versioned metadata</text>
+
+    <text x="1585" y="463" class="name" text-anchor="middle">Mutable control objects</text>
+    <text x="1585" y="485" class="sub" text-anchor="middle">refs, HEAD, locks</text>
+    <text x="1585" y="502" class="sub" text-anchor="middle">manifests, current metadata</text>
+    <text x="1585" y="519" class="sub" text-anchor="middle">real ETag / CAS only here</text>
+
+    <text x="1585" y="673" class="name" text-anchor="middle">Durability authority</text>
+    <text x="1585" y="694" class="sub" text-anchor="middle">S3 / GCS / Azure</text>
+    <text x="1585" y="711" class="sub" text-anchor="middle">cache never replaces origin</text>
+
+    <!-- Flow labels -->
+    <rect x="1440" y="140" width="112" height="18" rx="4" fill="#0f172a"/>
+    <text x="1496" y="153" class="label" text-anchor="middle">origin PUT first</text>
+
+    <rect x="1034" y="337" width="112" height="18" rx="4" fill="#0f172a"/>
+    <text x="1090" y="350" class="label" text-anchor="middle">read via service</text>
+
+    <rect x="1028" y="384" width="124" height="18" rx="4" fill="#0f172a"/>
+    <text x="1090" y="397" class="label" text-anchor="middle">push warming PUT</text>
+
+    <rect x="1004" y="542" width="94" height="18" rx="4" fill="#0f172a"/>
+    <text x="1051" y="555" class="label" text-anchor="middle">dedup query</text>
+
+    <rect x="655" y="406" width="168" height="18" rx="4" fill="#0f172a"/>
+    <text x="739" y="419" class="label" text-anchor="middle">CachingStore fills LocalCache</text>
+
+    <rect x="1310" y="258" width="96" height="18" rx="4" fill="#0f172a"/>
+    <text x="1358" y="271" class="label" text-anchor="middle">miss fallback</text>
+
+    <rect x="1180" y="615" width="111" height="18" rx="4" fill="#0f172a"/>
+    <text x="1235" y="628" class="label" text-anchor="middle">non-fatal path</text>
+
+    <rect x="1070" y="440" width="100" height="18" rx="4" fill="#0f172a"/>
+    <text x="1120" y="453" class="label" text-anchor="middle">mutable bypass</text>
+
+    <!-- Guarantee cards -->
+    <text x="220" y="913" class="name" text-anchor="middle">Lookup order</text>
+    <text x="220" y="936" class="sub" text-anchor="middle">1. verified local disk</text>
+    <text x="220" y="954" class="sub" text-anchor="middle">2. enterprise cache service</text>
+    <text x="220" y="972" class="sub" text-anchor="middle">3. origin object store</text>
+    <text x="220" y="990" class="sub" text-anchor="middle">cache hit returns synthetic ETag</text>
+
+    <text x="550" y="913" class="name" text-anchor="middle">Cacheable surface</text>
+    <text x="550" y="936" class="sub" text-anchor="middle">content-addressed objects</text>
+    <text x="550" y="954" class="sub" text-anchor="middle">xorbs, shards, packs</text>
+    <text x="550" y="972" class="sub" text-anchor="middle">versioned SlateDB files</text>
+    <text x="550" y="990" class="sub" text-anchor="middle">shared across crab commands</text>
+
+    <text x="880" y="913" class="name" text-anchor="middle">Never cached</text>
+    <text x="880" y="936" class="sub" text-anchor="middle">refs, HEAD, locks</text>
+    <text x="880" y="954" class="sub" text-anchor="middle">manifests and current pointers</text>
+    <text x="880" y="972" class="sub" text-anchor="middle">mutable metadata discovery</text>
+    <text x="880" y="990" class="sub" text-anchor="middle">CAS uses real origin ETag</text>
+
+    <text x="1210" y="913" class="name" text-anchor="middle">Correctness contract</text>
+    <text x="1210" y="936" class="sub" text-anchor="middle">hash / identity checked first</text>
+    <text x="1210" y="954" class="sub" text-anchor="middle">bad local bytes are evicted</text>
+    <text x="1210" y="972" class="sub" text-anchor="middle">service errors fall back</text>
+    <text x="1210" y="990" class="sub" text-anchor="middle">dedup miss means repack</text>
+
+    <text x="1540" y="913" class="name" text-anchor="middle">Operations</text>
+    <text x="1540" y="936" class="sub" text-anchor="middle">crab cache verify evicts corrupt</text>
+    <text x="1540" y="954" class="sub" text-anchor="middle">crab cache clean reclaims disk</text>
+    <text x="1540" y="972" class="sub" text-anchor="middle">LRU uses file mtime</text>
+    <text x="1540" y="990" class="sub" text-anchor="middle">config controls size and service</text>
+  </g>
+
+  <!-- Legend -->
+  <g id="legend">
+    <rect x="40" y="1110" width="1720" height="70" rx="10" fill="rgba(15, 23, 42, 0.72)" stroke="#334155" stroke-width="1.2"/>
+    <path d="M 80 1145 L 150 1145" class="flow flow-cyan"/>
+    <text x="165" y="1149" class="tiny">solid cyan: caller request into cache-aware paths</text>
+
+    <path d="M 450 1145 L 520 1145" class="flow flow-green"/>
+    <text x="535" y="1149" class="tiny">solid green: verified local cache hit or fill</text>
+
+    <path d="M 790 1145 L 860 1145" class="flow flow-violet"/>
+    <text x="875" y="1149" class="tiny">solid violet: origin object-store durability</text>
+
+    <path d="M 1120 1145 L 1190 1145" class="flow flow-orange dash"/>
+    <text x="1205" y="1149" class="tiny">dashed orange: optional enterprise cache service</text>
+
+    <path d="M 1495 1145 L 1565 1145" class="flow flow-rose"/>
+    <text x="1580" y="1149" class="tiny">solid rose: mutable bypass</text>
+  </g>
+</svg>

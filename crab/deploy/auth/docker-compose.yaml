@@ -1,0 +1,50 @@
+# Docker Compose for local end-to-end testing of crab-auth.
+#
+# This spins up:
+#   1. crab-auth — the crab-auth endpoint
+#   2. mock-idp  — a minimal OIDC IdP that issues signed JWTs
+#
+# Usage:
+#   docker compose up --build
+#   # Then test with:
+#   curl -X POST http://localhost:8080/v1/credentials \
+#     -H "Content-Type: application/json" \
+#     -d '{"id_token":"<get from mock-idp>","repo_url":"crab://bucket/repo","operation":"fetch"}'
+#
+# Or use the included test script:
+#   ./scripts/e2e-test.sh
+
+services:
+  mock-idp:
+    build:
+      context: ./mock-idp
+      dockerfile: Dockerfile
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  crab-auth:
+    build:
+      context: ../../..
+      dockerfile: crab/deploy/auth/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - CRAB_AUTH_JWKS_URL=http://mock-idp:9090/.well-known/jwks.json
+      - CRAB_AUTH_ISSUER=http://mock-idp:9090
+      - CRAB_AUTH_AUDIENCE=crab-cli
+      - CRAB_AUTH_POLICY_PATH=/etc/crab-auth/policy.yaml
+      - CRAB_AUTH_LOG_LEVEL=DEBUG
+      - CRAB_AUTH_DRY_RUN=true
+      # For AWS provider (dry-run mode returns synthetic creds)
+      - CRAB_AUTH_AWS_ROLE_ARN=arn:aws:iam::123456789012:role/crab-auth
+      - CRAB_AUTH_AWS_REGION=us-east-1
+    volumes:
+      - ./config:/etc/crab-auth:ro
+    depends_on:
+      mock-idp:
+        condition: service_healthy

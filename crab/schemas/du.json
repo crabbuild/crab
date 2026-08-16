@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DuPayload",
+  "description": "Serializable payload for `--json` output. Field names and types are byte-compatible with the pre-envelope bare JSON that `du` used to emit.",
+  "type": "object",
+  "required": [
+    "cache_bytes",
+    "cache_path",
+    "git_dir_bytes",
+    "hydrated_bytes",
+    "hydrated_count",
+    "local_total_bytes",
+    "pointer_bytes",
+    "pointer_count",
+    "staging_bytes"
+  ],
+  "properties": {
+    "cache_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_path": {
+      "type": "string"
+    },
+    "git_dir_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "hydrated_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "hydrated_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "local_total_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "pointer_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "pointer_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "remote_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "remote_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "staging_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

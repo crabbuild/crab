@@ -1,0 +1,71 @@
+---
+title: "crab fetch"
+description: "Pre-fetch Crab shards and xorbs from the configured remote into the local cache."
+---
+
+# crab fetch
+
+Pre-fetch Crab objects for the current repository into the local cache. This
+warms data needed by later hydrate, checkout, or push operations without
+materializing files.
+
+## Synopsis
+
+```text
+crab fetch [OPTIONS]
+```
+
+The command reads the canonical repository URL from `.crab/remote`. For a
+managed URL it resolves the active exact-authority profile, refreshes
+authentication when needed, obtains a bounded read grant, and uses the same
+verified cache/reconstruction path as other reads.
+
+`crab fetch` does not negotiate Git refs. Run `git fetch origin` first when you
+also need remote Git ref and pack updates.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--include <PATTERN>` | None | Include matching file/object patterns; repeat as needed |
+| `--exclude <PATTERN>` | None | Exclude matching patterns; repeat as needed |
+| `--all` | Disabled | Fetch objects for all refs rather than only HEAD |
+| `--dry-run` | Disabled | Report the intended source and filters without downloading |
+| `--no-sync-chunk-index` | Disabled | Skip post-fetch local chunk-index warming |
+| `--json` | Disabled | Emit one terminal JSON envelope |
+| `--jsonl` | Disabled | Stream JSONL progress and a terminal result |
+
+## Examples
+
+### Fetch current managed repository data
+
+```bash
+cd models
+crab fetch
+```
+
+### Update refs and pre-warm all refs
+
+```bash
+git fetch origin
+crab fetch --all
+```
+
+### Pre-warm selected formats
+
+```bash
+crab fetch --include '*.safetensors' --exclude 'archive/**'
+```
+
+### Inspect without downloading
+
+```bash
+crab fetch --dry-run --json
+```
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [`crab clone`](/docs/cli/reference/crab-clone)
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate)
+- [Local Cache](/docs/cli/storage/local-cache)

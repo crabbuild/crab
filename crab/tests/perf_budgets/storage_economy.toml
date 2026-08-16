@@ -1,0 +1,30 @@
+# Storage Economy Performance Budgets
+# These targets are validated by perf_budgets.rs under --release.
+# Source of truth: requirements F1.
+
+[tier_plan]
+max_ms = 200
+description = "tier plan (no apply), local only"
+
+[tier_plan_apply_s3]
+max_ms = 3000
+description = "tier plan --apply on S3, single Put"
+
+[hydrate_post_restore]
+max_overhead_percent = 5.0
+description = "hydrate of a restored xorb vs warm"
+
+[doctor_cost_live]
+max_secs = 300
+concurrency = 32
+objects = 10_000_000
+description = "doctor --cost live, 10M objects, 1 Gbps"
+
+[doctor_cost_report]
+max_secs = 600
+objects = 100_000_000
+description = "doctor --cost via inventory-report, 100M objects"
+
+[restripe_throughput]
+fixture_gib = 10
+description = "restripe throughput >= push throughput on same host"

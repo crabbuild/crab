@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatPushPlanPayload",
+  "description": "Payload emitted by `crab stat push-plan --json`.",
+  "type": "object",
+  "required": [
+    "corrupt_prepared_xorb_files",
+    "existing_chunks",
+    "format_version",
+    "indexed_prepared_xorbs",
+    "invalid_indexed_prepared_xorbs",
+    "invalid_plan_files",
+    "metadata_mismatched_prepared_xorb_files",
+    "mismatched_prepared_xorb_files",
+    "missing_prepared_xorb_files",
+    "orphaned_indexed_prepared_xorbs",
+    "payload_hash_mismatched_prepared_xorb_files",
+    "plan_files",
+    "planned_chunks",
+    "planned_file_bytes",
+    "prepared_bytes",
+    "prepared_chunks",
+    "prepared_xorbs",
+    "referenced_prepared_xorb_file_bytes",
+    "referenced_prepared_xorb_files",
+    "stale_prepared_xorb_file_bytes",
+    "stale_prepared_xorb_files",
+    "verified_prepared_xorb_file_bytes",
+    "verified_prepared_xorb_files",
+    "verified_prepared_xorbs"
+  ],
+  "properties": {
+    "corrupt_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "existing_chunks": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "format_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "indexed_prepared_xorbs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "invalid_indexed_prepared_xorbs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "invalid_plan_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "metadata_mismatched_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "mismatched_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "missing_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "orphaned_indexed_prepared_xorbs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "payload_hash_mismatched_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "plan_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "planned_chunks": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "planned_file_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "prepared_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "prepared_chunks": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "prepared_xorbs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "referenced_prepared_xorb_file_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "referenced_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "stale_prepared_xorb_file_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "stale_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "verified_prepared_xorb_file_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "verified_prepared_xorb_files": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "verified_prepared_xorbs": {
+      "type": "boolean"
+    }
+  }
+}

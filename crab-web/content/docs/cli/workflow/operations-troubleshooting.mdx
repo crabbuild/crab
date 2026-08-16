@@ -1,0 +1,168 @@
+---
+title: "Operations and Troubleshooting"
+description: "Recover from workflow cache misses, stuck journals, scheduler locks, missing deps, dirty outputs, and experiment cleanup problems."
+---
+
+# Operations and Troubleshooting
+
+Production workflow operations are mostly about proving why Crab chose to run,
+skip, restore, or fail a stage.
+
+## First Commands to Run
+
+```bash
+crab run --validate
+crab workflow status
+crab workflow dag
+crab run --dry --explain-miss
+```
+
+These commands are read-oriented and safe to run before changing the workspace.
+
+## Stage Keeps Missing Cache
+
+Run:
+
+```bash
+crab run --dry --explain-miss train
+```
+
+Check:
+
+- A dep file changed content or path.
+- A declared param changed.
+- The command string changed.
+- An allowlisted env var changed.
+- `nondeterministic` or `always_changed` is set.
+- The stage was run with `--force` or `--no-run-cache`.
+
+Fix by updating the intended input, correcting the stage declaration, or
+accepting the new cache entry with `crab run --cache-push`.
+
+## Missing Dependency
+
+If a dependency is absent from the workspace:
+
+```bash
+crab run --pull
+```
+
+If the lockfile proves the missing dependency is unchanged and the stage can be
+skipped:
+
+```bash
+crab run --pull --allow-missing
+```
+
+If the dependency is an output of another stage, check the DAG:
+
+```bash
+crab workflow dag
+```
+
+## Dirty or Conflicting Outputs
+
+If a cache hit would overwrite local work, use:
+
+```bash
+crab run --no-overwrite
+```
+
+Then inspect the changed output:
+
+```bash
+git status --short
+git diff -- path/to/output
+```
+
+Commit, move, or discard the local output before replaying cache.
+
+## Scheduler Lock Is Held
+
+Another `crab run` may be active:
+
+```bash
+crab run --no-wait
+crab run --lock-timeout 30
+```
+
+If a previous run crashed, inspect journals:
+
+```bash
+crab workflow journal ls
+crab workflow journal show <run-id>
+```
+
+Abandon a stuck run:
+
+```bash
+crab run --abandon <run-id>
+```
+
+Only abandon runs you know are no longer active.
+
+## Interrupted Run
+
+Crab journals stage progress so interrupted runs can be inspected and resumed.
+If outputs exist but the journal did not record final hashes, use:
+
+```bash
+crab run --resume-trust-outputs
+```
+
+Use this only when you trust the existing outputs. Otherwise delete or move the
+outputs and rerun.
+
+## Lockfile Merge Conflict
+
+Resolve conflict markers:
+
+```bash
+crab workflow lockfile resolve crab.lock
+crab run --validate
+crab run --dry
+```
+
+Commit the resolved lockfile after a successful validation or rerun.
+
+## Experiment Cleanup
+
+List experiments:
+
+```bash
+crab exp ls
+```
+
+Clean temporary worktrees and stale queue state:
+
+```bash
+crab exp clean
+```
+
+Prune old metadata:
+
+```bash
+crab exp gc --keep 100 --dry-run
+crab exp gc --keep 100
+```
+
+## Journal Cleanup
+
+```bash
+crab workflow journal gc --keep 50
+```
+
+Keep enough journals to debug recent CI failures. Long-term reproducibility
+should come from committed workflow files, lockfiles, metrics, and remote cache,
+not local journals.
+
+## Production Checklist
+
+- `crab run --validate` passes.
+- `crab workflow dag` shows the expected producer and consumer edges.
+- `crab run --dry --explain-miss` explains every stale stage.
+- `crab.lock` or split lockfiles are committed.
+- CI either proves `--cache-only` or publishes with `--cache-push`.
+- Experiment metadata that needs sharing is pushed with `crab exp push`.
+- Credentials live in the environment or local config, not in committed docs or
+  workflow files.

@@ -1,0 +1,121 @@
+---
+title: "Experiment Queues"
+description: "Queue and process batches of Crab experiments with parameter sweeps and worker logs."
+---
+
+# Experiment Queues
+
+Use queues when you have many experiment overrides and want Crab to process
+them with one or more local workers.
+
+## Queue a Sweep
+
+```bash
+crab exp queue \
+  -S train.lr=0.001,0.003,0.01 \
+  -S train.seed=1,2,3 \
+  -m "learning-rate sweep"
+```
+
+Multiple `-S` flags produce the Cartesian product. The example queues nine
+experiments.
+
+Range expressions are supported:
+
+```bash
+crab exp queue -S train.lr=range(0.001,0.01,0.003)
+```
+
+Use `--json` when another tool needs task IDs:
+
+```bash
+crab exp queue -S train.lr=0.001,0.01 --json
+```
+
+## Copy Untracked Inputs
+
+Queued experiments start from committed state. Use `--copy-paths` for ignored
+or untracked local files that must be copied into every experiment worktree:
+
+```bash
+crab exp queue \
+  -S train.lr=0.001,0.01 \
+  --copy-paths notebooks/generated-features.json
+```
+
+Use this sparingly. Production queues should prefer committed configs and
+declared deps.
+
+## Start Workers
+
+```bash
+crab queue start --jobs 4
+```
+
+Workers run queued experiments in temporary worktrees. Set `--jobs` to the
+number of parallel experiments the machine can safely handle.
+
+For GPU workloads, start fewer jobs than available GPUs unless your training
+scripts allocate devices explicitly.
+
+## Inspect Queue State
+
+```bash
+crab queue status
+crab queue logs <task-id>
+```
+
+Use logs to debug failed tasks before removing queue entries.
+
+## Stop, Kill, and Remove
+
+Request graceful shutdown:
+
+```bash
+crab queue stop
+```
+
+Interrupt active tasks:
+
+```bash
+crab queue kill <task-id>
+```
+
+Remove completed or unwanted tasks:
+
+```bash
+crab queue remove --success
+crab queue remove <task-id>
+```
+
+Clean stale queue and temporary experiment files:
+
+```bash
+crab exp clean
+```
+
+## Operating Pattern
+
+For a production sweep:
+
+```bash
+git status --short
+crab run --validate
+crab exp queue -S train.lr=0.001,0.003,0.01 -S train.seed=1,2,3 -m "lr sweep"
+crab queue start --jobs 2
+crab queue status
+crab exp ls
+crab exp push --all
+```
+
+Start from a clean committed baseline when results need to be shared. Push the
+winning experiments after the queue completes.
+
+## When Not to Use Queues
+
+Do not use local queues as a distributed scheduler. They are best for one
+machine or one CI runner. If you need cluster scheduling, use `crab exp run`
+inside your scheduler jobs and push experiment metadata back to the Crab remote.
+
+See [Experiment Queue](/docs/cli/automation/experiment-queue) for command-level
+details.

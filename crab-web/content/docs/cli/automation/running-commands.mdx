@@ -1,0 +1,213 @@
+---
+title: "Running Commands"
+description: "Execute stages with content-addressed caching, DAG scheduling, and structured output."
+---
+
+# crab run
+
+Execute stages with content-addressed caching. Supports inline single-stage
+execution, named stages from `crab.yaml`, and full DAG scheduling.
+
+## Synopsis
+
+```
+crab run [OPTIONS] [--name <NAME> --deps <PATH>... --outs <PATH>... -- <CMD>...]
+crab run [OPTIONS] [<STAGE>]
+crab run [OPTIONS]
+```
+
+## Description
+
+`crab run` is the primary entry point for Crab's workflow execution engine. It
+runs commands (stages) while tracking their inputs and outputs, caching results
+based on content hashes so unchanged stages are skipped on subsequent runs.
+
+Three invocation modes are supported:
+
+1. **Inline single-stage** — pass `--name`, `--deps`, `--outs`, and a command
+   after `--`. Crab builds an ephemeral stage definition, resolves dep hashes
+   via whole-file blake3, checks the cache, and executes if stale.
+
+2. **Named stage from `crab.yaml`** — pass a single positional stage name.
+   Crab parses the workflow file, picks the named stage, resolves its deps
+   (working tree + lockfile), and executes via the DAG executor.
+
+3. **Full DAG mode** — run with no positional argument and no inline flags.
+   Crab parses `crab.yaml`, builds the dependency graph, topologically sorts
+   stages, skips cached stages, and executes every stale stage in order.
+
+Enable the workflow feature with `crab config set workflow.enabled true`.
+On first use, `crab run` ensures the workflow scratch directory is added to
+`.gitignore`.
+
+## Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--name` | | | Stage name (required for inline mode). Must match `^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$`. |
+| `--deps` | | | Dependency paths. Repeatable. Changes to these files invalidate the cache. |
+| `--outs` | | | Output paths. Repeatable. Cached and restored on cache hits. |
+| `--env` | | | Environment variable allowlist. Only named vars participate in the stage hash. Repeatable. |
+| `--empty-env` | | `false` | Run with a minimal environment (PATH, HOME, TMPDIR only). Conflicts with `--env`. |
+| `--timeout` | | | Per-stage timeout (e.g. `30s`, `5m`, `1h`). No timeout if omitted. |
+| `--hermetic` | | `false` | Opt into hermetic sandbox (not yet implemented; participates in stage hash). |
+| `--nondeterministic` | | `false` | Mark stage as non-reproducible. Affects cache key isolation. |
+| `--force` | | `false` | Ignore cache hits and force re-execution. |
+| `--dry-run` | | `false` | Print the execution plan and exit without running. |
+| `--cache-only` | | `false` | Materialize cached outputs only. Exits with code 3 on cache miss. |
+| `--no-overwrite` | | `false` | Refuse cache hits that would overwrite existing differing files at out paths. |
+| `--resume-trust-outputs` | | `false` | Trust filesystem outputs when resuming a crashed run, even without journal hashes. |
+| `--abandon` | | | Mark a stuck journal as Aborted by run ID, then exit. |
+| `--explain-miss` | | `false` | Print an input-hash breakdown on cache miss. Implied by `--dry-run`. |
+| `--lock-timeout` | | `600` | Seconds to wait for the scheduler lock. Overridden by `--no-wait`. |
+| `--no-wait` | | `false` | Fail immediately if another `crab run` holds the scheduler lock. Equivalent to `--lock-timeout 0`. |
+| `--recursive` | | `false` | Discover and merge all `crab.yaml` files under the repo root, prefixing nested stage names with directory paths. |
+| `--keep-going` | | `false` | On stage failure, skip downstream stages but continue unrelated branches. |
+| `--ignore-errors` | | `false` | Attempt all remaining stages even when producers failed. Implies `--keep-going`. |
+| `--parallelism` | | `min(num_cpus, 8)` | Maximum concurrent stage executions. Overrides `[workflow] parallelism`. |
+| `--cache-push` | | `false` | Push newly-produced cache entries to the configured remote after each stage commits. |
+| `--allow-missing` | | `false` | Skip stages whose deps are missing but lockfile hashes are unchanged. |
+| `--pull` | | `false` | Download missing dep files from the remote before executing stages that need them. |
+| `--validate` | | `false` | Parse and validate `crab.yaml` without executing. Exits 0 on valid, 2 on error. |
+| `--workflow` | | | Execute only stages belonging to the named workflow (plus upstream deps). |
+| `--stages` | | | Execute only stages matching a glob pattern (plus upstream deps). Supports `*` and `?`. |
+| `--json` | | `false` | Emit a single JSON envelope with the result. Conflicts with `--jsonl`. |
+| `--jsonl` | | `false` | Stream JSONL events (one per line). Conflicts with `--json`. |
+
+## Examples
+
+### Run an inline stage with deps and outs
+
+```bash
+crab run --name train \
+  --deps data/train.csv --deps src/model.py \
+  --outs models/latest.pkl \
+  -- python src/model.py --input data/train.csv --output models/latest.pkl
+```
+
+Crab hashes `data/train.csv` and `src/model.py`, checks the cache, and only
+runs the Python command if inputs have changed since the last successful run.
+
+### Run a named stage from crab.yaml
+
+```bash
+crab run preprocess
+```
+
+Executes the `preprocess` stage defined in `crab.yaml`, resolving its deps and
+outs from the workflow definition.
+
+### Run the full DAG
+
+```bash
+crab run
+```
+
+Parses `crab.yaml`, builds the dependency graph, and executes all stale stages
+in topological order. Cached stages are skipped automatically.
+
+### Dry run to preview the execution plan
+
+```bash
+crab run --dry-run
+```
+
+Shows which stages would execute, their cache status, and dep hashes without
+running anything.
+
+### Force re-execution ignoring cache
+
+```bash
+crab run --force --name build \
+  --deps src/ --outs dist/ \
+  -- npm run build
+```
+
+### Run with keep-going on failure
+
+```bash
+crab run --keep-going
+```
+
+If a stage fails, its downstream dependents are marked `NotStarted` but
+independent branches continue executing.
+
+### Validate workflow definition
+
+```bash
+crab run --validate
+```
+
+Parses `crab.yaml`, runs semantic checks (name grammar, self-loops, duplicate
+outs), and reports errors as structured JSON. Exits 0 if valid, 2 on error.
+
+## Prerequisites
+
+- Workflow feature enabled with `crab config set workflow.enabled true`.
+- For inline mode: `--name` and a command after `--` are required.
+- For yaml mode: a `crab.yaml` file must exist at the repository root (or
+  discoverable via `--recursive`).
+
+## JSON Output
+
+Supports `--json` and `--jsonl` (mutually exclusive).
+
+### crab run --json (single-stage result)
+
+```json
+{
+  "schema": "workflow.stage_result",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:15:42.000Z",
+  "data": {
+    "stage": "train",
+    "cache_hit": false,
+    "duration_ms": 12400,
+    "outs": [
+      { "path": "models/latest.pkl", "hash": "b3a1c2...", "size": 4521984 }
+    ]
+  }
+}
+```
+
+### crab run --json --dry-run (plan)
+
+```json
+{
+  "schema": "workflow.plan",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:15:42.000Z",
+  "data": {
+    "stage_name": "train",
+    "stage_hash": "a7f3b2...",
+    "cache_hit": false,
+    "deps": [
+      { "path": "data/train.csv", "file_hash": "c4d5e6...", "size": 1048576 },
+      { "path": "src/model.py", "file_hash": "f1a2b3...", "size": 2048 }
+    ],
+    "outs": [
+      { "path": "models/latest.pkl", "kind": "file" }
+    ],
+    "cmd": { "kind": "argv", "argv": ["python", "src/model.py", "--input", "data/train.csv", "--output", "models/latest.pkl"] }
+  }
+}
+```
+
+### crab run --jsonl (event stream)
+
+Each line is a complete JSON object:
+
+```
+{"schema":"workflow.stage.started","version":"1.0","timestamp":"2026-06-01T10:15:30.000Z","data":{"stage":"train","stage_hash":"a7f3b2..."}}
+{"schema":"workflow.stage.cache_checked","version":"1.0","timestamp":"2026-06-01T10:15:30.100Z","data":{"stage":"train","cache_hit":false,"hit_source":"none"}}
+{"schema":"workflow.stage.produced","version":"1.0","timestamp":"2026-06-01T10:15:42.000Z","data":{"stage":"train","stage_hash":"a7f3b2..."}}
+{"schema":"workflow.stage.committed","version":"1.0","timestamp":"2026-06-01T10:15:42.200Z","data":{"stage":"train","cache_hit":false,"duration_ms":12400}}
+```
+
+## Related Commands
+
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — manage workflow definitions and inspect the pipeline.
+- [`crab workflow journal`](/docs/cli/automation/workflow-journal) — inspect run journals and stage history.
+- [`crab workflow dag`](/docs/cli/automation/dag-visualization) — visualize the stage dependency graph.
+- [`crab params`](/docs/cli/automation/parameters) — manage workflow parameters.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and query stage metrics.

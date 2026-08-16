@@ -1,0 +1,48 @@
+---
+title: "crab exp"
+description: "Run and manage experiments with parameter, metric, cache, and queue state."
+---
+
+# crab exp
+
+Manage experiment runs and their local or remote metadata.
+
+## Synopsis
+
+```bash
+crab exp <COMMAND>
+```
+
+## Commands
+
+`run`, `show`, `diff`, `ls`, `promote`, `apply`, `save`, `rename`, `push`,
+`pull`, `remove`, `clean`, `gc`, `queue`, `start`, `status`, and `stop`.
+
+Each experiment is a DAG run against a temporary worktree. Metadata is stored
+under `.crab/workflow/exp/`. Use `crab exp <command> --help` for the exact
+parameters and queue controls for that command.
+
+## Examples
+
+### Run an experiment
+
+```bash
+crab exp run --set learning_rate=0.001 --set epochs=50
+```
+
+### List experiments
+
+```bash
+crab exp ls
+```
+
+### Compare two experiments
+
+```bash
+crab exp diff <experiment-a> <experiment-b>
+```
+
+## Related Commands
+
+- [`crab run`](/docs/cli/reference/crab-run) — cached command execution.
+- [`crab workflow`](/docs/cli/reference/crab-workflow) — multi-step pipelines.

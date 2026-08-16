@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CloneSummary",
+  "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
+  "type": "object",
+  "required": [
+    "directory",
+    "duration_ms",
+    "lazy",
+    "url"
+  ],
+  "properties": {
+    "branch": {
+      "description": "Branch checked out (if specified).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "directory": {
+      "description": "Directory the repository was cloned into.",
+      "type": "string"
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the entire clone in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "lazy": {
+      "description": "Whether the clone used lazy (pointer-only) checkout.",
+      "type": "boolean"
+    },
+    "url": {
+      "description": "Remote URL that was cloned.",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,1357 @@
+# crab — Add Pipeline Deep Dive
+
+**How `git add` and `crab add` transform working-tree files into staged
+chunks, pointer blobs, and (optionally) fast-path hints ready for push.**
+
+-----
+
+## Document Metadata
+
+| Field        | Value                                                        |
+|--------------|--------------------------------------------------------------|
+| Project      | crab                                                       |
+| Scope        | Add pipeline architecture, data flow, performance analysis   |
+| Status       | Living document                                              |
+| Companion to | `Crab-push.md` (push pipeline), `Crab-overview.md` (flow)|
+| Version      | 0.1                                                          |
+
+-----
+
+## Table of Contents
+
+- [crab — Add Pipeline Deep Dive](#crab--add-pipeline-deep-dive)
+  - [Document Metadata](#document-metadata)
+  - [Table of Contents](#table-of-contents)
+  - [1. Overview](#1-overview)
+  - [2. Two Entry Points, One Pipeline](#2-two-entry-points-one-pipeline)
+    - [Path A: `crab add` (Native, Parallel)](#path-a-crab-add-native-parallel)
+    - [Path B: `git add` → Clean Filter (Per-file, Serial)](#path-b-git-add--clean-filter-per-file-serial)
+    - [When Each Path Runs](#when-each-path-runs)
+  - [3. The Fused Hash + CDC Pass](#3-the-fused-hash--cdc-pass)
+    - [Why Fuse](#why-fuse)
+    - [The Block Loop](#the-block-loop)
+    - [Determinism Invariant](#determinism-invariant)
+  - [4. The Staging Area](#4-the-staging-area)
+    - [On-Disk Layout](#on-disk-layout)
+    - [Segment Format](#segment-format)
+    - [SQLite Schema](#sqlite-schema)
+    - [The `pending_chunks` → `chunks` Promotion](#the-pending_chunks--chunks-promotion)
+    - [Concurrency: Two Lock Layers](#concurrency-two-lock-layers)
+    - [Crash Recovery](#crash-recovery)
+  - [5. `crab add`: The Native Path in Detail](#5-crab-add-the-native-path-in-detail)
+    - [Step 1: Discover and Filter Candidates](#step-1-discover-and-filter-candidates)
+    - [Step 2: Parallel File Processing](#step-2-parallel-file-processing)
+    - [Step 3: Stage Chunks (Batch API)](#step-3-stage-chunks-batch-api)
+    - [Step 4: Flush Pending](#step-4-flush-pending)
+    - [Step 5: Write Pointers Directly to Git Index](#step-5-write-pointers-directly-to-git-index)
+    - [Step 6: Progress, JSONL, Summary](#step-6-progress-jsonl-summary)
+  - [6. The Clean Filter: Stock `git add` Path](#6-the-clean-filter-stock-git-add-path)
+    - [filter-process Handshake](#filter-process-handshake)
+    - [Per-File Dispatch](#per-file-dispatch)
+    - [LFS vs crab Branching](#lfs-vs-crab-branching)
+    - [Streaming Clean: `crab_clean_stream`](#streaming-clean-crab_clean_stream)
+    - [BackgroundChunkStager: Depth-1 Pipeline](#backgroundchunkstager-depth-1-pipeline)
+  - [7. The Fast Path](#7-the-fast-path)
+    - [Session-Scoped Bloom Filter](#session-scoped-bloom-filter)
+    - [`try_fast_path` Decision Tree](#try_fast_path-decision-tree)
+    - [ShardHintCache](#shardhintcache)
+    - [False-Positive Handling](#false-positive-handling)
+  - [8. The Pointer Blob](#8-the-pointer-blob)
+    - [On-Wire Format](#on-wire-format)
+    - [Size Budget](#size-budget)
+    - [Git's View of the Pointer](#gits-view-of-the-pointer)
+  - [9. End-to-End Data Flow Diagram](#9-end-to-end-data-flow-diagram)
+  - [10. Worked Example: Adding a 10 GB Model File](#10-worked-example-adding-a-10-gb-model-file)
+    - [Setup](#setup)
+    - [Timeline via `crab add`](#timeline-via-crab-add)
+    - [Timeline via Stock `git add` (First Time)](#timeline-via-stock-git-add-first-time)
+    - [Timeline via Stock `git add` (Second Time, Same Content)](#timeline-via-stock-git-add-second-time-same-content)
+  - [11. Failure Modes and Cancel-Safety](#11-failure-modes-and-cancel-safety)
+    - [Failure Matrix](#failure-matrix)
+    - [Cancel-Safety Guarantees](#cancel-safety-guarantees)
+  - [12. Performance Analysis](#12-performance-analysis)
+    - [Latency Breakdown (Single 10 GB File)](#latency-breakdown-single-10-gb-file)
+    - [Identified Bottlenecks](#identified-bottlenecks)
+      - [A1: Whole-File Read Before Hash (`crab add`)](#a1-whole-file-read-before-hash-crab-add)
+      - [A2: CDC in Single Thread (`crab add`)](#a2-cdc-in-single-thread-crab-add)
+      - [A3: No mtime+size Short-Circuit](#a3-no-mtimesize-short-circuit)
+      - [A4: `stage_chunks_batch` Holds the Writer Lock (Serial Inserts)](#a4-stage_chunks_batch-holds-the-writer-lock-serial-inserts)
+      - [A5: Bloom Filter Size vs File-Index Size](#a5-bloom-filter-size-vs-file-index-size)
+  - [13. Comparison: `crab add` vs `git add`](#13-comparison-crab-add-vs-git-add)
+  - [14. Configuration Reference](#14-configuration-reference)
+    - [Add-Related Config Keys](#add-related-config-keys)
+    - [CDC Parameters (inherited from xet-core)](#cdc-parameters-inherited-from-xet-core)
+    - [Staging Flush Thresholds](#staging-flush-thresholds)
+  - [15. Source Map](#15-source-map)
+  - [16. Observability and Metrics](#16-observability-and-metrics)
+    - [Add Metrics (emitted by `Metrics`)](#add-metrics-emitted-by-metrics)
+    - [Tracing Spans](#tracing-spans)
+    - [Recommended Dashboards](#recommended-dashboards)
+  - [17. Invariants Checklist](#17-invariants-checklist)
+
+-----
+
+## 1. Overview
+
+A `git add` (or `crab add`) on a crab-tracked file does four things:
+
+1. **Hashes** the file with blake3 to produce a stable content identifier.
+2. **Chunks** the content via content-defined chunking (CDC, gearhash).
+3. **Stages** the chunks into a local append-only segment store indexed
+   by SQLite.
+4. **Emits a pointer blob** (≤256 bytes) into git's object database
+   containing `file_hash`, `size`, and an optional `shard-hint`.
+
+The large file never enters git's object database. Git commits the
+pointer; the bytes live locally until `git push` uploads them to object
+storage.
+
+> **Invariant: A pointer blob is only written into git's index after
+> every chunk it references is durably staged.**
+>
+> This ensures `git push` can always find the chunks for any pointer it
+> discovers during the commit walk.
+
+-----
+
+## 2. Two Entry Points, One Pipeline
+
+crab exposes two ways to stage files. Both produce byte-identical
+pointer blobs and identical staged chunks — they differ in concurrency,
+progress reporting, and how the pointer reaches git's index.
+
+### Path A: `crab add` (Native, Parallel)
+
+```
+User: crab add '*.safetensors'
+       │
+       ▼
+┌───────────────────────────────────────────────────────────┐
+│  cmd/add.rs :: run_add                                    │
+│                                                           │
+│  1. Discover repo + parse .gitattributes                  │
+│  2. Walk working tree → candidate list                    │
+│  3. Open StagingArea (exclusive flock)                    │
+│  4. ┌───────────────── parallel ──────────────┐           │
+│     │  for each file (bounded by --jobs):     │           │
+│     │    spawn_blocking(hash + CDC)           │           │
+│     │    → stage_chunks_batch                 │           │
+│     └─────────────────────────────────────────┘           │
+│  5. staging.close()  (fsync pending)                      │
+│  6. write_pointers_to_git_index                           │
+│     (git hash-object -w --stdin + update-index)           │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Path B: `git add` → Clean Filter (Per-file, Serial)
+
+```
+User: git add model.safetensors
+       │
+       ▼ git invokes filter-process
+┌───────────────────────────────────────────────────────────┐
+│  git/filter_process.rs :: run_filter_process              │
+│                                                           │
+│  1. pkt-line handshake                                    │
+│  2. CleanSession::new  (bloom, confirmed_hashes)          │
+│  3. ┌──────── per-file, serial (git drives) ─────────┐    │
+│     │  read "clean" + pathname                       │    │
+│     │  CleanSession::clean_stream                    │    │
+│     │    ├── classify(): pointer passthrough?        │    │
+│     │    ├── lfs_clean_path (SHA-256 + LFS store)    │    │
+│     │    └── crab_clean_stream                     │    │
+│     │         ├── fused blake3 + CDC                 │    │
+│     │         ├── BackgroundChunkStager              │    │
+│     │         ├── try_fast_path → bloom+HEAD         │    │
+│     │         └── checkpoint: stage + emit pointer   │    │
+│     │  write pointer bytes back to git               │    │
+│     └────────────────────────────────────────────────┘    │
+│  4. git writes the pointer into its ODB + index           │
+└───────────────────────────────────────────────────────────┘
+```
+
+### When Each Path Runs
+
+| Scenario                            | Path                    |
+|-------------------------------------|-------------------------|
+| `crab add *.bin`                  | A (native, parallel)    |
+| `git add file.bin`                  | B (clean filter)        |
+| `git add .` after edit              | B (clean filter)        |
+| Branch switch hydrating pointers    | neither (smudge, not add)|
+| `crab dehydrate` then `git pull`  | neither (refs + packs)  |
+| IDE "stage all" button              | B (clean filter)        |
+
+Path A is strictly faster for batches because git's filter-process
+protocol is inherently one-file-at-a-time. Path B is the standard git
+entry point and works without any crab CLI involvement.
+
+-----
+
+## 3. The Fused Hash + CDC Pass
+
+Both paths share the same CPU-bound core: compute the blake3 file hash
+and the CDC chunk boundaries in a single pass over the file bytes.
+
+### Why Fuse
+
+A naive implementation would hash the whole file first, then chunk it:
+
+```
+// Naive: two full passes
+let file_hash = blake3::hash(&content);  // pass 1: ~300ms per GB
+let chunks = chunker.chunk_all(&content);// pass 2: ~500ms per GB
+```
+
+The fused approach folds both into one loop, halving memory bandwidth
+pressure and keeping the progress bar ticking per 128 KiB block:
+
+```
+for block in content.chunks(128 * 1024) {
+    file_hasher.update(block);
+    cdc_chunks.extend(chunker.feed(block));
+    bytes_done.fetch_add(block.len() as u64, Relaxed);  // per-block progress
+}
+let file_hash = file_hasher.finalize();
+let last = chunker.finalize();  // tail chunk
+```
+
+### The Block Loop
+
+The 128 KiB block size matches the CDC chunker's internal working set
+and the staging area's flush threshold. Smaller blocks (e.g. 4 KiB)
+waste function-call overhead; larger blocks (e.g. 1 MiB) hide progress
+updates during the block's hash+CDC work.
+
+### Determinism Invariant
+
+> **Invariant: For any input, the fused pass produces byte-identical
+> chunk boundaries and byte-identical `file_hash` regardless of feed
+> granularity.**
+
+Property tests verify this by feeding the same content in 4 KiB, 128
+KiB, and 16 MiB blocks and asserting chunk equality. Breaking this would
+mean identical content stages differently across paths and breaks dedup.
+
+-----
+
+## 4. The Staging Area
+
+The staging area is the on-disk bridge between `clean` (or
+`crab add`) and `crab push`. Its job: durably hold chunks under
+content-addressed keys so the push pipeline can read them back later.
+
+### On-Disk Layout
+
+```
+{repo}/.crab/staging/
+├── segments/
+│   ├── current.seg                 append-only, actively written
+│   ├── 0000000000000001.seg        sealed, frozen
+│   ├── 0000000000000002.seg        sealed, frozen
+│   └── …
+├── index.db                        SQLite WAL mode
+├── index.db-wal
+├── index.db-shm
+├── lockfile                        advisory flock + holder PID
+└── push-{uuid}.inflight            optional: push-in-progress markers
+```
+
+### Segment Format
+
+Each segment file is an append-only stream of frames:
+
+```
+┌──────────┬──────────┬──────────┬─────┐
+│ Frame 0  │ Frame 1  │ Frame 2  │ ... │
+└──────────┴──────────┴──────────┴─────┘
+
+Frame layout (length-prefixed with CRC trailer):
+┌──────────────┬──────────────────────────┬──────────────┐
+│ length: u32  │ chunk_data: [u8; length] │ crc32c: u32  │
+└──────────────┴──────────────────────────┴──────────────┘
+```
+
+Key properties:
+
+- **Append-only.** Once a frame is written at offset O, offset O+4+len
+  is where the next frame starts. Writers never seek backward.
+- **Fixed soft/hard caps.** `segment_target_bytes` (default 256 MiB)
+  triggers a seal-and-rotate; `segment_hard_cap_bytes` (default 1 GiB)
+  is the absolute limit.
+- **CRC32C per frame.** Detects bit-flips from non-ECC memory or flaky
+  storage. Verified on every read.
+- **Sealed vs current.** Sealed segments (`{id:016x}.seg`) are
+  immutable, fsynced, and renamed atomically. The `current.seg`
+  symlink (or rename) indicates the actively appended segment.
+
+### SQLite Schema
+
+```sql
+-- One row per file that has been staged.
+CREATE TABLE files (
+    file_hash  BLOB PRIMARY KEY,     -- 32 bytes, blake3
+    total_bytes INTEGER NOT NULL
+);
+
+-- Promoted chunks: visible to push, guaranteed durable on disk.
+CREATE TABLE chunks (
+    chunk_hash   BLOB PRIMARY KEY,
+    file_hash    BLOB NOT NULL REFERENCES files(file_hash),
+    seg_id       INTEGER NOT NULL,
+    seg_offset   INTEGER NOT NULL,
+    size         INTEGER NOT NULL,
+    chunk_index  INTEGER NOT NULL,
+    UNIQUE(file_hash, chunk_index)
+);
+
+-- Staging area for not-yet-fsynced chunks.
+-- Written during stage_chunks_batch, promoted to `chunks` on flush_pending.
+CREATE TABLE pending_chunks (
+    chunk_hash   BLOB PRIMARY KEY,
+    file_hash    BLOB NOT NULL,
+    seg_id       INTEGER NOT NULL,
+    seg_offset   INTEGER NOT NULL,
+    size         INTEGER NOT NULL,
+    chunk_index  INTEGER NOT NULL,
+    UNIQUE(file_hash, chunk_index)
+);
+
+-- Segment lifecycle tracking for GC / compaction.
+CREATE TABLE segments (
+    id                INTEGER PRIMARY KEY,
+    status            TEXT NOT NULL,    -- 'current' | 'sealed' | 'retired'
+    size_bytes        INTEGER NOT NULL,
+    live_chunk_count  INTEGER NOT NULL
+);
+```
+
+WAL mode means readers never block writers and vice versa. The index
+file and its `-wal`/`-shm` siblings move together.
+
+### The `pending_chunks` → `chunks` Promotion
+
+`stage_chunks_batch` writes frame bytes to the current segment and
+inserts rows into `pending_chunks` in a single transaction. Chunks in
+`pending_chunks` are persistent in SQLite but not yet guaranteed durable
+on the segment file.
+
+`flush_pending` performs the promotion:
+
+```
+1. fsync the current segment file (durable frames up to write_offset)
+2. BEGIN TRANSACTION
+3. INSERT INTO chunks SELECT * FROM pending_chunks
+   WHERE seg_offset + size <= write_offset
+4. DELETE FROM pending_chunks WHERE chunk_hash IN (promoted)
+5. COMMIT
+```
+
+Promotion is triggered by:
+
+- `stage_chunks_batch` when accumulated pending bytes exceed
+  `FLUSH_THRESHOLD` (8 MiB default).
+- `close()` at the end of a session.
+- `flush_pending()` called explicitly (e.g. at the end of an `add`
+  batch, before the push pipeline reads).
+
+> **Why two tables?** A mid-batch process kill must not leave
+> half-fsynced chunks visible to push. `pending_chunks` is the buffer
+> between "written to segment file" and "guaranteed durable." Only
+> rows in `chunks` are visible to `chunks_for_file`.
+
+### Concurrency: Two Lock Layers
+
+```
+Process A (crab add)                  Process B (git add --via filter)
+    │                                       │
+    ▼                                       ▼
+advisory flock (LOCK_EX on lockfile)    waits, retries w/ backoff
+    │                                       │
+    ▼                                       ▼
+  std::sync::Mutex<Index>                 (blocked)
+  tokio::sync::Mutex<SegmentWriter>
+```
+
+**Layer 1: advisory flock.** `LOCK_EX` for writers, `LOCK_SH` for
+read-only handles. Held for the lifetime of the `StagingArea`. Multiple
+reader handles can coexist but no writer while any reader is active.
+PID written into the lockfile so a crashed holder can be detected.
+
+**Layer 2: in-process.** `std::sync::Mutex<Index>` guards the SQLite
+connection (never held across `.await` — enforced by
+`#![deny(clippy::await_holding_lock)]`). `tokio::sync::Mutex<SegmentWriter>`
+guards the append fd and may be held across `.await` (e.g.
+`spawn_blocking` fsync).
+
+### Crash Recovery
+
+On open, `recovery::recover`:
+
+1. **Verify sealed segments.** Each sealed segment's frames are walked
+   from start to EOF, CRC-checking every frame. Corrupt files are
+   quarantined rather than deleted (manual triage).
+2. **Truncate current segment.** The current segment may contain
+   partial (unfrommitted) frames if the previous run was killed
+   mid-append. Truncate to the last committed offset recorded in
+   `segments.size_bytes`.
+3. **Clean orphan temps.** Delete `*.tmp` segment files left over
+   from interrupted seals.
+
+After recovery, the staging area is in a state consistent with the
+SQLite index.
+
+
+-----
+
+## 5. `crab add`: The Native Path in Detail
+
+### Step 1: Discover and Filter Candidates
+
+```
+┌────────────────────────────────────────────────────────┐
+│  cmd/add.rs :: run_add                                 │
+│                                                        │
+│  git_dir = discover_git_dir()                          │
+│  repo_root = git_dir.parent()                          │
+│                                                        │
+│  tracked_globs = parse_gitattributes_globs(repo_root)  │
+│    reads .gitattributes, extracts patterns where       │
+│    the line contains `filter=crab`                   │
+│                                                        │
+│  filter = build_filter(&args.patterns, &[])            │
+│    user's --pattern arguments (e.g. `*.safetensors`)   │
+│                                                        │
+│  candidates = walk_candidates(repo_root, …)            │
+│    recursive fs walk, skipping:                        │
+│      - hidden directories (.git, .crab, …)           │
+│      - non-files                                       │
+│      - paths not matching tracked_globs                │
+│      - paths not matching user filter                  │
+│      - files already in pointer form (dehydrated)      │
+└────────────────────────────────────────────────────────┘
+```
+
+The pointer-skip check uses `is_working_tree_pointer` which short-reads
+the first 256 bytes and tries `Pointer::parse`. This avoids re-staging
+files that were dehydrated earlier.
+
+### Step 2: Parallel File Processing
+
+```
+semaphore = Semaphore::new(args.jobs)
+
+for (abs_path, size) in candidates:
+    spawn tokio task:
+        permit = semaphore.acquire().await
+        process_file(abs_path, repo_root, &staging, &progress)
+```
+
+`process_file` does three things per file:
+
+1. **Read the file into memory.**
+   `tokio::fs::read(abs_path).await`
+2. **Hash + chunk in `spawn_blocking`.**
+   The fused pass (§3) runs on a blocking thread so it doesn't stall
+   the tokio reactor. The atomic `bytes_done` and `chunks_done`
+   counters are shared with the main ticker via `Arc`.
+3. **Stage via the batch API.**
+   `staging.pre_register_file(file_merkle, size)` inserts the `files`
+   row, then `staging.stage_chunks_batch(chunks, file_merkle, 0)`
+   writes frames and `pending_chunks` rows in a single SQLite
+   transaction.
+
+Memory bound: the file content + chunk vector is held for one file
+per task. With `args.jobs = 4` and 1 GiB files, peak memory is ~4 GiB
+plus duplicated chunk buffers. See §12 for the streaming redesign
+proposal.
+
+### Step 3: Stage Chunks (Batch API)
+
+```
+staging.stage_chunks_batch(&batch, &file_merkle, chunk_index_offset)
+    │
+    ▼
+acquire writer lock (tokio::sync::Mutex<SegmentWriter>)
+    │
+    ▼
+BEGIN TRANSACTION
+    │
+    ▼
+for (hash, data) in batch:
+    frame = encode_record(data)            // [len | data | crc32c]
+    writer.write_all(&frame)               // append to current.seg
+    insert INTO pending_chunks
+        (chunk_hash, file_hash, seg_id,
+         seg_offset, size, chunk_index)
+    │
+    ▼
+COMMIT
+    │
+    ▼
+if pending_bytes > FLUSH_THRESHOLD:
+    flush_pending()  (fsync + promote)
+```
+
+The offset parameter lets callers stage multiple batches for the same
+file (e.g. when content streams in chunks larger than a single batch).
+Each batch writes `chunk_index = offset + i`, keeping
+`(file_hash, chunk_index)` unique.
+
+### Step 4: Flush Pending
+
+After all files are processed, `run_add` calls `staging.close()` (via
+`Arc::try_unwrap`). `close` calls `flush_pending` which fsyncs the
+current segment and promotes any remaining `pending_chunks` rows to
+`chunks`. The progress bar flips to the `Flushing` phase during this
+window.
+
+If the `Arc<StagingArea>` has outstanding handles (shouldn't normally
+happen at this point), `close` is skipped with a warning — the next
+open will do crash recovery.
+
+### Step 5: Write Pointers Directly to Git Index
+
+> **Why not just run `git add`?** `git add` invokes the clean filter,
+> which re-reads and re-hashes the full file. For a 10 GB file that's
+> a ~20 s detour through the filter-process protocol with no visible
+> progress. We already have the hash — assemble the pointer ourselves.
+
+```
+for (abs_path, file_hash, size) in staged_entries:
+    pointer = Pointer {
+        file_hash,
+        size,
+        shard_hint: shard_hints.get(file_hash),  // from persistent cache
+    }
+    payload = pointer.serialize()
+
+    // 1. Write pointer blob into .git/objects/
+    sha = `git hash-object -w --stdin` <<< payload
+
+    // 2. Stage the blob at the relative path
+    `git update-index --add --replace --cacheinfo 100644,{sha},{rel_path}`
+
+    progress.files_done += 1
+```
+
+This still goes through git — but through `hash-object` (a lightweight
+single-object write) and `update-index` (a lightweight index mutation),
+not the filter protocol. Two subprocess spawns per file vs one
+protocol round-trip that re-reads the whole file.
+
+The `--skip-git-add` flag stops before this step — useful for scripts
+that batch their own `update-index` calls.
+
+### Step 6: Progress, JSONL, Summary
+
+Three output modes:
+
+- **Text (default).** Live progress bar redrawn every 200 ms on
+  stderr; phase label (`Chunking:` / `Flushing:` / `Indexing:`);
+  final summary line.
+- **JSON.** Single `AddSummary` emitted at the end.
+- **JSONL.** Per-file `file_done` events + rate-limited `progress`
+  events + final `result` event. Designed for IDE / CI integration.
+
+The progress bar has three phases:
+
+| Phase     | Fraction drive        | Label                            |
+|-----------|-----------------------|----------------------------------|
+| Chunking  | `bytes_done / total_bytes` | `Chunking:` + rate + chunks |
+| Flushing  | 1.0 (pinned)          | `Flushing: … staging segments fsync` |
+| Indexing  | `files_done / total_files` | `Indexing: … writing pointers` |
+
+The ticker task terminates when the cancellation token is signaled
+(either by SIGINT handler or normal completion).
+
+-----
+
+## 6. The Clean Filter: Stock `git add` Path
+
+### filter-process Handshake
+
+```
+git ──"crab filter-process"──► helper process spawn
+
+git → helper:  git-filter-client\n
+git → helper:  version=2\n
+git → helper:  (flush)
+helper → git:  git-filter-server\n
+helper → git:  version=2\n
+helper → git:  (flush)
+
+git → helper:  capability=clean\n
+git → helper:  capability=smudge\n
+git → helper:  capability=delay\n
+git → helper:  (flush)
+helper → git:  capability=clean\n
+helper → git:  capability=smudge\n
+helper → git:  capability=delay\n
+helper → git:  (flush)
+
+(then: loop of command/response pairs)
+```
+
+pkt-line framing: each packet is a 4-char hex length header followed
+by the payload. A flush packet is `0000`.
+
+### Per-File Dispatch
+
+```
+git → helper:  command=clean\n
+git → helper:  pathname=model.safetensors\n
+git → helper:  (flush)
+git → helper:  <content pkt 1>
+git → helper:  <content pkt 2>
+git → helper:  …
+git → helper:  (flush)
+
+helper:        CleanSession::clean_stream(pathname, &mut reader)
+               → pointer bytes
+
+helper → git:  status=success\n
+helper → git:  (flush)
+helper → git:  <pointer pkt>
+helper → git:  (flush)
+helper → git:  (flush)  # empty content list
+```
+
+The reader is a `PktLineReader` that yields individual packets. The
+clean session never materializes the full file in memory unless it
+has to (LFS SHA-256 requires the whole buffer).
+
+### LFS vs crab Branching
+
+```
+first_packet = reader.read_packet()
+
+match classify(first_packet):
+    Crab(_) | Lfs(_) →
+        # Content is already a pointer — pass through byte-for-byte.
+        # This happens when `git add` re-runs on a hydrated
+        # pointer (rare but valid).
+        drain_remaining_and_return(first_packet)
+
+    NotAPointer →
+        if is_lfs_tracked(pathname):
+            # Drain remaining + lfs_clean_path (SHA-256 + LfsObjectStore)
+            lfs_clean_path(pathname, full_content)
+        else:
+            # Stream into crab pipeline
+            crab_clean_stream(pathname, first_packet, reader)
+```
+
+LFS tracking is decided per-path by reading `.gitattributes` and
+checking for `filter=lfs`. The repo can have both LFS-tracked and
+crab-tracked patterns; each file goes to its configured path.
+
+### Streaming Clean: `crab_clean_stream`
+
+```
+file_hasher = blake3::Hasher::new()
+chunker     = GearChunker::new()
+bg_stager   = BackgroundChunkStager::new(estimated = 1)
+file_size   = 0
+
+# Process the peeked first packet.
+if !first.is_empty():
+    file_hasher.update(&first)
+    chunks = chunker.feed(&first)
+    bg_stager.add_chunks(chunks)
+    file_size += first.len()
+
+# Drain the rest.
+while let Some(pkt) = reader.read_packet()?:
+    file_hasher.update(pkt)
+    chunks = chunker.feed(pkt)
+    bg_stager.add_chunks(chunks)
+    file_size += pkt.len()
+
+# Tail chunk.
+if let Some(last) = chunker.finalize():
+    bg_stager.add_chunks(vec![last])
+
+file_hash = file_hasher.finalize()
+
+# Fast path (§7).
+if let Some(pointer_bytes) = try_fast_path(file_size, &file_hash)?:
+    # Fast-path hit — the chunks accumulated in bg_stager are dropped;
+    # they were never checkpointed to SQLite.
+    return Ok(pointer_bytes)
+
+# Slow path: stage everything, then emit pointer.
+bg_stager.checkpoint(&mut chunk_stager, &file_hash, file_size)?
+pointer = build_pointer(file_hash, file_size, None)
+Ok(pointer.serialize())
+```
+
+Peak memory is bounded by one pkt-line (≤64 KiB) + the chunker's
+internal state + `BackgroundChunkStager`'s pending batches — not the
+full file size. Critical for LFS-sized files hashed via the LFS path,
+but also relevant for the crab streaming path when files exceed RAM
+(e.g. 100 GB model dumps).
+
+### BackgroundChunkStager: Depth-1 Pipeline
+
+The CDC loop is CPU-bound; staging I/O (SQLite transaction + segment
+append) is I/O-bound. `BackgroundChunkStager` overlaps them:
+
+```
+   chunker      bg_stager             stager (spawn_blocking)
+      │              │                          │
+      │ add(batch 0) │                          │
+      │ ────────────►│                          │
+      │              │ (buffer)                 │
+      │ add(batch 1) │                          │
+      │ ────────────►│                          │
+      │              │ (buffer)                 │
+      │    …         │                          │
+      │              │                          │
+      │ checkpoint() │                          │
+      │ ────────────►│ spawn(stage batch 0) ───►│ fsync + INSERT pending
+      │              │                          │      │
+      │              │                          │      ▼
+      │              │ prepare batch 1          │  done: return stager
+      │              │ ◄──────── stager ────────│
+      │              │ spawn(stage batch 1) ───►│ fsync + INSERT pending
+      │              │                          │ …
+      │              │ ◄── stager ──────────────│
+      │              │ (all done)               │
+```
+
+Batches are sealed at 64 chunks. The stager is "returned" from each
+background task so the next batch reuses it without reconstructing the
+SQLite connection. At most one `spawn_blocking` task is in flight
+(depth-1).
+
+For single-batch files (most LFS-sized workloads don't hit 64 chunks
+per batch boundary), the stager skips the spawn dance and stages
+synchronously.
+
+-----
+
+## 7. The Fast Path
+
+The fast path lets the clean filter emit a pointer **without staging
+any chunks** when the file is already known to be on the remote. For a
+10 GB file that's already pushed, this turns a ~10 s clean into a
+~50 ms clean.
+
+### Session-Scoped Bloom Filter
+
+```
+struct FileHashBloom {
+    bits: Vec<u64>,           // bit vector
+    num_bits: u64,            // ~10 bits per expected item (1% FPR)
+}
+```
+
+Populated at session start from the local `.crab/bloom` file (if
+present) or left empty. The bloom is populated out-of-band by
+background jobs that scan the local file-index cache. k=3 hash
+functions derived from disjoint 8-byte slices of the blake3 file hash.
+
+**Persistence.** After a successful push, the pusher saves the bloom
+to disk so subsequent filter-process invocations can load it without
+rebuilding from scratch. Missing / corrupt bloom files are tolerated
+— the fast path just doesn't fire.
+
+### `try_fast_path` Decision Tree
+
+```
+try_fast_path(file_size, file_hash):
+    │
+    ▼
+  file_size ≥ fastpath_min_size (default 64 MiB)?  ────► No → None
+    │ Yes
+    ▼
+  bloom.maybe_contains(file_hash)?  ────► No → None (definite miss)
+    │ Yes
+    ▼
+  confirmed_hashes.contains(file_hash)?  ──Yes──► emit pointer (no shard-hint)
+    │ No
+    ▼
+  HEAD file-index/{file_hash}  ────► 404 → false positive → metrics, None
+    │ 200
+    ▼
+  confirmed_hashes.insert(file_hash)
+  emit pointer with shard_hint (if returned by HEAD)
+```
+
+Three gates (size, bloom, HEAD) give progressively tighter filtering:
+
+- **Size gate.** Small files aren't worth the HEAD — the staging is
+  cheaper.
+- **Bloom gate.** One arithmetic test per hash, no I/O.
+- **HEAD.** One S3 HEAD request. Gate of last resort; the authoritative
+  answer.
+
+Within a single filter-process session, `confirmed_hashes` caches
+HEAD-verified file hashes so duplicate `git add`s of the same content
+don't re-issue HEADs.
+
+### ShardHintCache
+
+The `shard-hint` field in the pointer accelerates future smudges:
+instead of looking up `file-index/{file_hash}` to find the shard, the
+smudge can go straight to `shards/{shard_hint}`.
+
+Two sources of hints:
+
+1. **File-index HEAD response headers.** The `StoreFileIndexChecker`
+   doesn't currently extract the shard-hint from HEAD headers (the
+   router does not yet encode it). When it does, fast-path pointers
+   get the most current hint.
+2. **Persistent `ShardHintCache`** at `~/.cache/crab/shard-hints`.
+   Updated after each push from the `file_shard_index` built during
+   step 8. This is the primary source today.
+
+`build_pointer` consults the explicit hint first (HEAD response),
+falling back to the persistent cache.
+
+### False-Positive Handling
+
+When bloom hits but HEAD 404s:
+
+```
+metrics.clean_fastpath_false_positives += 1
+bloom stays as-is (false positives are a property of bloom filters)
+slow path runs (chunks are staged)
+```
+
+The rate of false positives is monitored; a sustained high rate
+indicates the bloom is undersized relative to the file-index size.
+
+-----
+
+## 8. The Pointer Blob
+
+### On-Wire Format
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ version https://crab.dev/spec/v1\n                       │
+│ file-hash 7c1f2a3b8d9e6f4c5a8b1d2e3f4a5c6d7e8f9a0b1c2d3e4f5a\n │
+│ size 10737418240\n                                         │
+│ shard-hint a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4\n │
+└────────────────────────────────────────────────────────────┘
+```
+
+Lines are LF-terminated UTF-8. The `shard-hint` line is optional.
+Forward-compatible: unknown trailing lines are tolerated and ignored.
+
+### Size Budget
+
+`MAX_POINTER_SIZE = 256 bytes` enforced at parse and serialize time.
+The three required lines fit in ~150 bytes; the optional shard-hint
+adds ~80 bytes. 256 is conservative and leaves headroom for v2 fields.
+
+The 256-byte cap doubles as a detection heuristic: blobs larger than
+256 bytes cannot be pointers, so tree walks can skip them without
+parsing.
+
+### Git's View of the Pointer
+
+Git treats the pointer like any other blob. Commits, trees, diffs,
+merges, and branches all operate on pointer blobs. Nothing in
+git is aware that the pointer represents a chunked file elsewhere.
+
+This is the core of the "standard git UX" property: `git log`, `git
+diff`, `git blame`, `git stash` all work unmodified because they never
+touch the real content.
+
+
+-----
+
+## 9. End-to-End Data Flow Diagram
+
+```
+ WORKING TREE                      CDC + HASH                 STAGING AREA
+ ─────────────                     ──────────                 ────────────
+
+ ┌─────────────────┐
+ │ model.sft (10G) │
+ └────────┬────────┘
+          │
+          │ git add (clean) or crab add
+          │
+          ▼
+ ┌─────────────────┐
+ │ fused pass:     │
+ │  blake3 +       │
+ │  GearChunker    │
+ │  128 KiB blocks │
+ └────────┬────────┘
+          │
+          ├── file_hash (32 bytes, blake3)
+          │
+          └── chunks: [(hash_0, bytes_0), (hash_1, bytes_1), …]
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │ BackgroundChunkStager       (clean filter only)
+                    │   or direct stage_chunks_batch  (crab add)
+                    └─────────┬────────┘
+                              │
+                              ▼
+                    ┌──────────────────────────────────────┐
+                    │  StagingArea.stage_chunks_batch      │
+                    │    ┌───────────────────────────────┐ │
+                    │    │ segments/current.seg          │ │
+                    │    │ append frame per chunk        │ │
+                    │    │ [len | data | crc32c]         │ │
+                    │    └───────────────────────────────┘ │
+                    │    ┌───────────────────────────────┐ │
+                    │    │ SQLite (pending_chunks)       │ │
+                    │    │ INSERT (chunk_hash, file_hash,│ │
+                    │    │   seg_id, offset, size, idx)  │ │
+                    │    └───────────────────────────────┘ │
+                    │  if pending > 8 MiB:  flush_pending  │
+                    │    fsync + promote to `chunks`       │
+                    └──────────────────────────────────────┘
+                              │
+                              ▼
+                        all chunks durable
+
+
+ POINTER EMISSION                      GIT'S ODB
+ ────────────────                      ──────────
+
+ ┌───────────────────────────────┐
+ │  Pointer {                    │
+ │    file_hash,                 │
+ │    size,                      │
+ │    shard_hint,                │
+ │  }.serialize()                │
+ │  (≤256 bytes)                 │
+ └──────────────┬────────────────┘
+                │
+                ├── clean filter: write pkt-line back to git
+                │   (git writes the blob into .git/objects/)
+                │
+                └── crab add:
+                    git hash-object -w --stdin
+                    git update-index --add --cacheinfo ...
+                                │
+                                ▼
+                    ┌──────────────────────┐
+                    │ .git/objects/{sha}   │
+                    │ .git/index (entry)   │
+                    └──────────────────────┘
+                                │
+                                ▼
+                         git commit / git push
+```
+
+-----
+
+## 10. Worked Example: Adding a 10 GB Model File
+
+### Setup
+
+```
+repo: ~/Crab/ML
+.gitattributes:
+  *.safetensors filter=crab diff=crab merge=binary -text
+file: models/llama-7b.safetensors  (10,737,418,240 bytes)
+chunk size: 64 KiB target  →  ~164,000 chunks expected
+```
+
+### Timeline via `crab add`
+
+```
+wall clock   phase              event
+──────────   ─────              ─────
+0.00s        startup            crab add '*.safetensors'
+0.01s        discovery          parse .gitattributes → 1 tracked glob
+0.02s        walk               walk_candidates → 1 candidate
+0.03s        open staging       acquire flock, migrate SQLite, recover
+0.05s        begin file task    tokio spawn, permit acquired
+0.10s        read               tokio::fs::read 10 GB into memory
+15.8s        read done          (~650 MB/s from SSD)
+15.8s        hash + CDC start   spawn_blocking begins fused pass
+32.8s        hash + CDC done    (~600 MB/s CPU-bound)
+32.8s        stage batches      stage_chunks_batch writes 164k frames
+35.2s        flushes            flush_pending at 8 MiB boundaries (×1000)
+35.5s        all staged         promoted to `chunks`
+35.5s        close staging      final flush + fsync
+35.6s        write pointer      git hash-object + update-index (~50 ms)
+35.7s        summary            "Added 1 file(s) (10.0 GB, 164000 chunks) in 35.7s"
+```
+
+Peak memory: ~20 GB (content + chunk vector before staging).
+
+### Timeline via Stock `git add` (First Time)
+
+```
+0.00s        git add model.safetensors
+0.01s        git invokes filter-process
+0.03s        filter-process handshake
+0.05s        git sends "clean" command + pkt-line content stream
+0.05s        reader + hasher + chunker begin
+             → git pipes content through as it reads the file
+             → bottleneck: pipe + hash + CDC happen in lockstep
+45s          pipe closed, all data in
+45s          file_hash finalized
+45s          bg_stager.checkpoint → depth-1 pipeline begins
+             (staging I/O overlaps with nothing — already at EOF)
+50s          all chunks staged
+50.1s        pointer bytes returned to git
+50.2s        git writes blob + index entry
+```
+
+Slower than `crab add` because:
+- The filter protocol pipes through git stdin, single buffer at a time
+- No parallelism (one file at a time)
+- SQLite staging is serial after EOF
+
+### Timeline via Stock `git add` (Second Time, Same Content)
+
+The file is unchanged, the previous push succeeded, and the local bloom
+is populated:
+
+```
+0.00s        git add model.safetensors
+0.01s        filter-process handshake (or reuse of open helper)
+0.02s        reader + hasher + chunker begin
+45s          EOF, file_hash finalized
+45s          try_fast_path:
+             - size 10 GB ≥ 64 MiB ✓
+             - bloom.maybe_contains(file_hash) ✓
+             - HEAD file-index/{file_hash} → 200 (50 ms)
+45.05s       emit pointer with shard_hint, skip staging
+45.06s       pointer bytes returned to git
+```
+
+The hash + CDC still runs (content could have changed). With the
+streaming clean path, peak memory is bounded regardless of file size.
+A future optimization would mtime+size short-circuit when index hints
+strongly suggest unchanged content — see §12.
+
+
+-----
+
+## 11. Failure Modes and Cancel-Safety
+
+### Failure Matrix
+
+| Failure point                          | State after failure                                | Recovery on next run                   |
+|----------------------------------------|----------------------------------------------------|-----------------------------------------|
+| discovery / walk                       | No staging writes                                  | Retry safe                              |
+| `StagingArea::open` (lock held)        | No changes                                         | Wait for holder, or `--force-unlock`    |
+| `StagingArea::open` (corrupt db)       | No changes                                         | Returns `StagingCorrupt`; manual fix    |
+| fs read of file                        | No staging writes for that file                    | Other files proceed; retry skip stamp   |
+| hash + CDC (panic)                     | Task marked failed, others continue                | Retry safe                              |
+| `stage_chunks_batch` (mid-batch)       | Transaction aborts; no partial rows                | Retry safe                              |
+| `stage_chunks_batch` (crash)           | `pending_chunks` rows may exist for unfsynced frames | Recovery truncates current segment    |
+| `flush_pending` (fsync fails)          | Chunks remain in `pending_chunks`                  | Retry promotes them                     |
+| `staging.close()` (Arc still referenced) | Warning logged, skip close                       | Next open runs recovery                 |
+| `git hash-object` (non-zero exit)      | Pointer not in git index                           | Re-run `crab add` picks up staging    |
+| `git update-index` (non-zero exit)     | Blob in ODB but not indexed                        | Idempotent: next run re-indexes         |
+| SIGINT mid-run                         | Cancellation token fires; tasks exit cleanly       | Partial stage, resume with next run     |
+
+### Cancel-Safety Guarantees
+
+> **Invariant: Cancelling a clean or `crab add` mid-flight never
+> leaves `chunks` rows referencing non-durable segment bytes.**
+
+Enforced by three properties:
+
+1. **SQLite transactions.** `stage_chunks_batch` wraps writes in a
+   single transaction. Cancellation at any point aborts the transaction
+   and leaves `pending_chunks` unchanged.
+2. **fsync boundary.** `flush_pending` fsyncs *before* promoting rows
+   from `pending_chunks` to `chunks`. A cancellation between fsync and
+   the promotion transaction leaves chunks in `pending_chunks` (not
+   visible to push) but durable on disk (visible to recovery).
+3. **Crash recovery on open.** Corrupt or partial frames in the
+   current segment are truncated to the last committed offset. Any
+   `pending_chunks` rows pointing past that offset are unreachable;
+   they're cleaned up on the next `flush_pending`.
+
+The clean filter's `BackgroundChunkStager` adds one subtlety: if the
+filter-process is killed between "content fully read" and "checkpoint
+complete," some batches may have been staged and others not. The next
+`git add` on the same file restages from scratch — chunks
+deduplicate at the hash level, so restaging is cheap (staging discards
+duplicate `pending_chunks` rows via the `UNIQUE` constraint).
+
+-----
+
+## 12. Performance Analysis
+
+### Latency Breakdown (Single 10 GB File)
+
+```
+                           crab add     git add (clean filter)
+                           ──────────     ──────────────────────
+1.  open staging              ~20 ms            ~20 ms
+2.  read file                ~15 s             ~0 s  (piped by git)
+3.  hash + CDC (fused)       ~17 s            ~45 s  (piped read gates CPU)
+4.  stage chunks             ~2.5 s           ~3 s
+5.  flush pending             ~0.3 s           ~0.3 s
+6.  emit pointer              ~50 ms          ~50 ms
+                           ──────────     ──────────────────────
+Total                        ~35 s            ~50 s
+
+Fast path (file already pushed):
+  hash + CDC                 ~17 s            ~45 s
+  HEAD + emit                ~50 ms           ~50 ms
+                           ──────────     ──────────────────────
+Total                        ~17 s            ~45 s
+```
+
+Two observations:
+
+- The `crab add` wins come from **overlapping reads with CDC** (the
+  read happens during `tokio::fs::read`, then CDC is fed the full
+  buffer) and **parallelism across files**. For a single file, the
+  gap is narrower.
+- The fast path saves staging time but still pays hash + CDC. For a
+  content-unchanged workload, that's the largest remaining cost.
+
+### Identified Bottlenecks
+
+#### A1: Whole-File Read Before Hash (`crab add`)
+
+**Problem:** `tokio::fs::read(abs_path).await` materializes the entire
+file in memory before `spawn_blocking` begins. A 100 GB file needs
+100 GB of RAM.
+
+**Impact:** OOM for workstations; slow first-chunk latency for any
+large file.
+
+**Root cause:** The current design trades streaming for a simpler
+`spawn_blocking` boundary — one owned `Vec<u8>` crosses the thread
+boundary.
+
+**Proposed fix:** Memory-map the file and feed `hash_and_chunk_with_progress`
+a `&[u8]` view. Stage chunks as the CDC produces them rather than
+collecting into a `Vec<(hash, Bytes)>`. The clean-filter path already
+streams — apply the same approach here. See S-F1 below.
+
+#### A2: CDC in Single Thread (`crab add`)
+
+**Problem:** The fused hash + CDC runs on one `spawn_blocking` thread
+per file. For a single 10 GB file, that's one core doing ~600 MB/s
+while 7 cores idle.
+
+**Impact:** Single-large-file scenarios don't scale with more cores.
+
+**Root cause:** `GearChunker` has internal state that can't trivially
+be parallelized (the rolling hash window spans chunk boundaries).
+
+**Proposed fix:** Split the file into fixed-size slabs (e.g. 256 MiB
+each) and process slabs in parallel with independent gearhash state.
+Add a reconciliation pass that detects and corrects boundary artifacts
+at slab edges. xet-core's `Chunker` supports this via the
+`next_block_bytes` streaming API. See S-F2.
+
+#### A3: No mtime+size Short-Circuit
+
+**Problem:** The clean filter always hashes the full file, even when
+the content is guaranteed unchanged (mtime+size identical to a
+previous staging).
+
+**Impact:** Re-adding a 100 GB unchanged file still takes minutes.
+
+**Root cause:** Neither the bloom nor the `confirmed_hashes` cache is
+keyed by `(pathname, mtime, size)` — only by `file_hash`, which
+requires hashing first.
+
+**Proposed fix:** Introduce a `.crab/mtime-cache` keyed by
+`(inode, mtime_ns, size) → file_hash`. The clean filter consults it
+before the hash + CDC pass; on hit, skip straight to the HEAD check
+(with file_hash from the cache). Conservative: on mismatch or missing
+entry, fall through to the current pipeline. Similar to
+`git status`'s stat cache.
+
+#### A4: `stage_chunks_batch` Holds the Writer Lock (Serial Inserts)
+
+**Problem:** `stage_chunks_batch` acquires the segment writer's tokio
+Mutex and holds it for the whole batch (append frames + SQLite txn).
+Other tasks waiting to stage are serialized behind this one.
+
+**Impact:** `crab add --jobs 16` on 16 files converges to serial
+throughput at the staging layer.
+
+**Root cause:** One segment writer, one SQLite connection, one tokio
+Mutex.
+
+**Proposed fix:** Per-shard staging. Hash-partition files across N
+staging shards (N = `jobs` / 2 typical). Each shard has its own segment
++ SQLite connection + flock. A lightweight index overlay tracks which
+shard owns which chunk for the push pipeline. This is a large change
+(touches push, GC, recovery) but removes the last Amdahl bottleneck.
+
+#### A5: Bloom Filter Size vs File-Index Size
+
+**Problem:** The session-scoped bloom is built once per
+filter-process lifetime with a fixed `expected_items`. If the remote
+file-index grows past that count, false-positive rate climbs.
+
+**Impact:** Wasted HEAD requests; degrades toward slow-path behavior.
+
+**Root cause:** No bloom rebuild trigger.
+
+**Proposed fix:** Persist the expected size with the bloom file. On
+load, if the file-index has grown past 2× the expected size (tracked
+by a counter stored in the bloom header), rebuild on next push.
+
+-----
+
+## 13. Comparison: `crab add` vs `git add`
+
+| Aspect                    | `crab add`                               | `git add` (via clean filter)              |
+|---------------------------|--------------------------------------------|-------------------------------------------|
+| Entry point               | `crab` binary                            | stock `git`                                |
+| Parallelism across files  | Yes (`--jobs`)                             | No (one file at a time per filter process)|
+| File content in memory    | Whole file (`tokio::fs::read`)             | One pkt-line at a time (~64 KiB)           |
+| Progress reporting        | Live bar + JSONL events                    | Git's built-in "..." on very long ops      |
+| Pointer write to index    | Direct (`hash-object` + `update-index`)    | Filter protocol round-trip                 |
+| LFS tracked files         | Not handled — fall back to `git add`       | Detected by `.gitattributes`, SHA-256 path |
+| Works without crab CLI  | No                                         | Yes (git invokes filter transparently)     |
+| Best for                  | Large batches, scripts, CI                 | Ad-hoc single-file edits, IDEs             |
+
+Both paths produce byte-identical pointers and byte-identical staging,
+so they're interchangeable from the push pipeline's perspective.
+
+-----
+
+## 14. Configuration Reference
+
+### Add-Related Config Keys
+
+| Key                                  | Default              | Description |
+|--------------------------------------|----------------------|-------------|
+| `staging.segment_target_bytes`       | 256 MiB              | Soft cap per segment before seal+rotate |
+| `staging.segment_hard_cap_bytes`     | 1 GiB                | Absolute max segment size |
+| `staging.batch_read_size`            | 256                  | Chunks per batched read (used by push) |
+| `staging.fd_pool_size`               | 16                   | Segment file descriptors kept open in reader pool |
+| `clean.chunk_buffer_cap`             | 32 MiB               | Bloom-buffer ring cap for fast-path decision |
+| `clean.fastpath_min_size`            | 64 MiB               | Minimum file size to attempt fast path |
+| `clean.bloom_expected_items`         | 64 (min)             | Bloom filter sizing hint |
+| `jobs`                               | # CPUs               | Parallelism for `crab add` |
+
+### CDC Parameters (inherited from xet-core)
+
+| Parameter         | Value   | Description |
+|-------------------|---------|-------------|
+| Target chunk size | 64 KiB  | CDC target (`TARGET_CHUNK_SIZE`) |
+| Min chunk size    | 8 KiB   | `target / 8` |
+| Max chunk size    | 128 KiB | `target × 2` |
+| Hash algorithm    | gearhash| Rolling hash over 64-byte window |
+| SIMD              | AVX2 / NEON | Runtime-detected on x86_64, compile-time on aarch64 |
+
+### Staging Flush Thresholds
+
+| Parameter         | Default | Description |
+|-------------------|---------|-------------|
+| `FLUSH_THRESHOLD` | 8 MiB   | Pending bytes before auto-flush |
+| `FLOCK_MAX_RETRIES` | 5     | Flock acquisition retries |
+| `FLOCK_BASE_DELAY` | 50 ms  | Initial backoff, doubles each attempt |
+
+-----
+
+## 15. Source Map
+
+| Component                        | File                                      | Key Functions |
+|----------------------------------|-------------------------------------------|---------------|
+| `crab add` entry               | `cmd/add.rs`                              | `run_add`, `process_file`, `write_pointers_to_git_index` |
+| Fused hash + CDC (native)        | `cmd/add.rs`                              | `hash_and_chunk_with_progress` |
+| Candidate walk                   | `cmd/add.rs`                              | `collect_candidates`, `walk_candidates`, `matches_any_tracked` |
+| `.gitattributes` parse           | `cmd/add.rs`                              | `parse_gitattributes_globs` |
+| Clean filter entry               | `git/filter_process.rs`                   | `run_filter_process`, `dispatch_command`, `smudge_content` |
+| pkt-line protocol                | `git/filter_process.rs`                   | `PktLineReader`, `write_content`, `read_content_until_flush` |
+| Clean session                    | `git/clean.rs`                            | `CleanSession::clean_stream`, `crab_clean_stream`, `lfs_clean_path` |
+| Fast path                        | `git/clean.rs`                            | `CleanSession::try_fast_path`, `build_pointer` |
+| Session bloom                    | `git/clean.rs`                            | `FileHashBloom::maybe_contains`, `save`, `load` |
+| File-index HEAD                  | `git/clean.rs`                            | `StoreFileIndexChecker::head_file_index` |
+| Chunk stager (stream)            | `git/clean.rs`                            | `StagingChunkStager::stage_chunks`, `BackgroundChunkStager::checkpoint` |
+| CDC chunker                      | `engine/chunker.rs`                       | `GearChunker::feed`, `finalize` |
+| Pointer format                   | `engine/pointer.rs`                       | `Pointer::parse`, `serialize`, `is_pointer`, `is_working_tree_pointer` |
+| Shard-hint cache                 | `cache/shard_hints.rs`                    | `ShardHintCache::get`, `load_sync`, `store` |
+| Staging area (RW)                | `engine/staging/mod.rs`                   | `StagingArea::open`, `stage_chunks_batch`, `flush_pending`, `close`, `chunks_for_file`, `get_chunk` |
+| Staging index (SQLite)           | `engine/staging/index.rs`                 | `Index::open`, `insert_file`, `insert_pending_chunks`, `promote_chunks` |
+| Segment writer                   | `engine/staging/segment.rs`               | `SegmentWriter::new`, `write_record`, `seal`, `encode_record` |
+| Crash recovery                   | `engine/staging/recovery.rs`              | `recover`, `verify_sealed_segment`, `truncate_current_segment` |
+| Hashing helper (adaptive)        | `engine/hashing.rs`                       | `update_blake3_adaptive` (serial vs rayon based on size) |
+
+-----
+
+## 16. Observability and Metrics
+
+### Add Metrics (emitted by `Metrics`)
+
+| Metric                                  | Type    | Description |
+|-----------------------------------------|---------|-------------|
+| `clean_fastpath_taken`                  | Counter | Clean calls where fast path emitted without staging |
+| `clean_fastpath_false_positives`        | Counter | Bloom hit + HEAD miss events |
+| `staging_chunks_staged`                 | Counter | Chunks written to `pending_chunks` |
+| `staging_chunks_promoted`               | Counter | Chunks promoted from pending → durable |
+| `staging_bytes_staged`                  | Counter | Bytes appended to segment files |
+| `staging_segments_sealed`               | Counter | Segments closed and renamed |
+| `staging_fsyncs`                        | Counter | Segment fsync calls |
+| `staging_recovery_truncations`          | Counter | Current-segment truncations on open |
+| `add_files_staged`                      | Counter | Files successfully staged by `crab add` |
+| `add_files_failed`                      | Counter | Files that failed in `crab add` |
+
+### Tracing Spans
+
+```
+crab_add                      root span for `crab add` invocation
+  ├── candidate_walk            fs traversal + glob match
+  ├── process_file              per-file, instrumented with path/size
+  │     ├── read_file
+  │     ├── hash_and_chunk      blake3 + GearChunker fused pass
+  │     └── stage_chunks_batch  segment append + SQLite txn
+  ├── staging_close             final flush + fsync
+  └── write_pointers_to_git     hash-object + update-index per file
+
+clean_session                   per filter-process session
+  ├── clean_stream              per file passed to clean
+  │     ├── classify_first_pkt
+  │     ├── lfs_clean_path      (LFS files)
+  │     └── crab_clean_stream (crab files)
+  │           ├── hash_and_cdc
+  │           ├── try_fast_path
+  │           └── bg_stager_checkpoint
+```
+
+Each span records structured fields useful for grepping production logs:
+
+```
+clean_stream { path="models/model.safetensors", size=10737418240,
+               file_hash="7c1f2a3b…", chunks=164000 }
+try_fast_path { file_hash="7c1f2a3b…", bloom_hit=true,
+                head_result="200", shard_hint="a1b2c3d4…" }
+stage_chunks_batch { file_hash="7c1f2a3b…", chunks=64, bytes=4194304,
+                     segment_id=42, pending_rows=128 }
+```
+
+### Recommended Dashboards
+
+```
+Fast-path hit rate:   clean_fastpath_taken / total_cleans
+Bloom false-positive: clean_fastpath_false_positives / bloom_hits
+Staging throughput:   staging_bytes_staged / time (MB/s)
+Promote lag:          (staged - promoted) at t vs threshold
+Flock contention:     retries per acquire_flock_exclusive call
+```
+
+-----
+
+## 17. Invariants Checklist
+
+| # | Invariant                                                                 | Enforced By |
+|---|---------------------------------------------------------------------------|-------------|
+| 1 | Pointer blob only reaches git index after all referenced chunks are durable | `checkpoint` / `flush_pending` before `build_pointer` |
+| 2 | Identical content produces identical `file_hash` and identical chunks     | Fused pass is deterministic; property tests |
+| 3 | Identical content produces identical pointer bytes (byte-for-byte)        | `Pointer::serialize` is deterministic |
+| 4 | `stage_chunks_batch` either inserts all or none                           | Single SQLite transaction |
+| 5 | `chunks` rows always reference fsynced segment bytes                      | `flush_pending` fsyncs before promoting |
+| 6 | A crashed writer leaves no unreachable `pending_chunks` after recovery    | `recovery::recover` truncates current segment + cleans orphans |
+| 7 | Exclusive flock prevents concurrent writers                               | `acquire_flock_exclusive` with PID + retry |
+| 8 | Cancellation leaves staging in a consistent state                         | `cancel_token` checked at task boundary; transactions abort cleanly |
+| 9 | `shard-hint` is advisory: a wrong/stale hint degrades to file-index path  | Smudge tolerates 404 on `shards/{hint}` |
+| 10| No `unwrap`/`panic` in clean-filter or `crab add` code paths            | Code style rule; `?` propagation |

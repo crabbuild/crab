@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExportPlanEvent",
+  "description": "JSONL planning event emitted before an export writes files.",
+  "type": "object",
+  "required": [
+    "bytes",
+    "dry_run",
+    "files",
+    "force",
+    "repo",
+    "requested_revision",
+    "resolved_revision",
+    "target_url"
+  ],
+  "properties": {
+    "bytes": {
+      "description": "Logical bytes selected for export.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dry_run": {
+      "description": "Whether this invocation only planned writes.",
+      "type": "boolean"
+    },
+    "files": {
+      "description": "Number of files selected for export.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "force": {
+      "description": "Whether existing target objects may be overwritten.",
+      "type": "boolean"
+    },
+    "repo": {
+      "description": "Repository input string.",
+      "type": "string"
+    },
+    "requested_revision": {
+      "description": "Revision requested by the user.",
+      "type": "string"
+    },
+    "resolved_revision": {
+      "description": "Resolved commit SHA.",
+      "type": "string"
+    },
+    "target_url": {
+      "description": "Raw target URL.",
+      "type": "string"
+    }
+  }
+}

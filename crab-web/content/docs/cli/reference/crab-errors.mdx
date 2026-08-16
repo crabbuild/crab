@@ -1,0 +1,53 @@
+---
+title: "crab errors"
+description: "Look up error codes and their explanations."
+---
+
+# crab errors
+
+Look up error codes and explanations.
+
+## Synopsis
+
+```bash
+crab errors [OPTIONS] [CODE]
+```
+
+## Description
+
+`crab errors` displays explanations for Crab error codes. Without an argument,
+it lists known codes; with a code, it shows the explanation and suggested
+remediation. Codes use the `CRAB-E####` form.
+
+For conceptual background, see [Error Codes](/docs/cli/diagnostics/error-codes).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `CODE` | No | Specific error code to look up (e.g. `CRAB-E0017`) |
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Emit a structured JSON envelope |
+
+## Examples
+
+### Look up a specific error
+
+```bash
+crab errors CRAB-E0017
+```
+
+### List all error codes
+
+```bash
+crab errors
+```
+
+## Related Commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — diagnose issues.
+- [`crab logs`](/docs/cli/reference/crab-logs) — view diagnostic logs.

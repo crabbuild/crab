@@ -1,0 +1,121 @@
+---
+title: "crab init"
+description: "Initialize a Crab repository and connect it to a cloud storage backend."
+---
+
+# crab init
+
+Initialize a new Crab repository.
+
+## Synopsis
+
+```
+crab init [OPTIONS] [URL]
+```
+
+## Description
+
+`crab init` connects a local Git repository to a Crab remote. It creates or
+updates `.crab/` and `.crab.toml`, registers the Crab filter and diff drivers,
+and adds a Git remote. It does not scan the working tree.
+
+If no git repository exists in the current directory, `crab init` automatically
+runs `git init` first — no need to initialize git separately.
+
+Run `crab setup` afterward to scan for large files and write `.gitattributes`
+tracking rules. With no URL, `crab init` re-applies the configuration from an
+existing `.crab.toml`.
+
+For conceptual background, see [Creating a Repository](/docs/cli/getting-started/first-repository).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `[URL]` | No | Cloud storage URL; omit it to re-apply an existing `.crab.toml` |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--storage-provider <PROVIDER>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
+| `--mirror <REMOTE>` | — | Configure mirror mode using an existing Git remote |
+| `--json` | `false` | Emit structured JSON output |
+| `--jsonl` | `false` | Emit streaming JSONL output |
+| `--log-level` | — | Set log verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
+
+## What It Does
+
+1. **Creates a git repository** (if `.git` doesn't exist)
+2. **Creates `.crab/config.toml`** with the remote URL
+3. **Registers the filter and diff drivers** in `.git/config`
+4. **Adds or updates a Git remote** for the canonical `crab://` URL
+
+## Examples
+
+### New project from scratch
+
+```bash
+mkdir my-ml-project && cd my-ml-project
+crab init crab://my-bucket/ml-models
+# ✓ Initialized git repository
+# ✓ Created .crab/config.toml
+# ✓ Registered filter.crab driver
+# Next: crab setup
+```
+
+### Existing git repo
+
+```bash
+cd my-existing-repo
+crab init s3://team-bucket/my-repo
+# ✓ Created .crab/config.toml
+# ✓ Registered filter.crab driver
+# Next: crab setup
+```
+
+### Configure tracking separately
+
+```bash
+crab init crab://bucket/repo
+crab setup --no-auto-track
+# Install the filter driver without scanning for patterns
+```
+
+### Re-apply a committed project configuration
+
+```bash
+crab init
+```
+
+## Auto-Tracked Extensions
+
+When auto-tracking is enabled (the default), `crab setup` tracks extensions that meet either criterion:
+
+- **Size threshold**: Any file above 1 MiB triggers tracking for its extension
+- **Well-known binary formats**: These extensions are always tracked when found, regardless of size:
+
+| Domain | Extensions |
+|--------|-----------|
+| ML/AI | `.safetensors`, `.bin`, `.onnx`, `.pt`, `.pth`, `.h5`, `.hdf5`, `.pkl` |
+| Data | `.parquet`, `.arrow`, `.feather`, `.npy`, `.npz`, `.zarr` |
+| Media | `.fbx`, `.blend`, `.psd`, `.tiff`, `.exr`, `.dpx`, `.mov`, `.mp4`, `.wav` |
+| Archives | `.tar`, `.gz`, `.zip`, `.zst`, `.lz4` |
+| Databases | `.db`, `.sqlite`, `.sqlite3` |
+
+## URL Format
+
+Crab URLs follow the pattern `crab://<bucket>/<repo-path>`:
+
+```
+crab://my-bucket/my-project
+crab://company-data/team-ml/experiment-42
+s3://us-west-2-storage/repos/frontend-assets
+```
+
+## Related Commands
+
+- [`crab clone`](/docs/cli/reference/crab-clone) — clone an existing repository
+- [`crab track`](/docs/cli/reference/crab-track) — manually configure file patterns
+- [`crab install`](/docs/cli/getting-started/installation) — install filter driver globally
+- [`crab ship`](/docs/cli/reference/crab-ship) — one-shot add + commit + push

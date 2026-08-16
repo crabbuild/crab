@@ -1,0 +1,62 @@
+---
+title: "Hydrating Files"
+description: "Reconstruct full file content from Crab pointers."
+---
+
+# Hydrating Files
+
+Use `crab hydrate` when your working tree has Crab pointer files and you need
+the real content on disk.
+
+```bash
+crab hydrate --all
+crab hydrate 'models/**'
+crab hydrate --manifest .crab/manifests/ci.txt
+```
+
+Hydration reads each pointer, resolves its chunk metadata, downloads missing
+chunks from object storage or the local cache, writes the reconstructed file
+atomically, and verifies the result by hash.
+
+## Choose What to Hydrate
+
+| Goal | Command |
+| --- | --- |
+| Everything tracked by Crab | `crab hydrate --all` |
+| One file or glob | `crab hydrate models/v2.bin` |
+| Multiple globs | `crab hydrate '*.bin' '*.safetensors'` |
+| Include and exclude | `crab hydrate --include 'models/**' --exclude 'models/archive/**'` |
+| CI manifest | `crab hydrate --manifest .crab/manifests/test-job.txt` |
+| Manifest from Git | `crab hydrate --manifest-ref HEAD:.crab/manifests/test-job.txt` |
+
+Use selective hydration in large repositories. CI jobs should normally hydrate
+only fixtures, models, or datasets needed by that job.
+
+## Typical Flows
+
+```bash
+# After clone
+crab clone crab://team-bucket/ml-repo
+cd ml-repo
+crab hydrate 'models/**'
+
+# After pulling changes
+crab pull --remote origin
+
+# Before switching context
+crab dehydrate --all
+git checkout experiment/new-architecture
+crab hydrate 'models/**' 'data/eval/**'
+```
+
+## Troubleshooting
+
+- Already hydrated files are skipped.
+- Failed files remain as pointers, so rerunning the same command is safe.
+- Missing chunks usually mean the producing machine did not complete `crab push`
+  or the remote store was modified outside Crab.
+- For local recovery from a copy of the original file, use
+  `crab hydrate --recover-from <path>`.
+
+For full pattern precedence, manifest format, output modes, and options, see
+the [crab hydrate reference](/docs/cli/reference/crab-hydrate).

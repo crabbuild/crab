@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "dependency_bytes": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "dependency_objects": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "digest": {
+      "type": "string"
+    },
+    "generation": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "git_objects": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "packs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "refs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "shards": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "xorbs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "dependency_bytes",
+    "dependency_objects",
+    "digest",
+    "generation",
+    "git_objects",
+    "packs",
+    "refs",
+    "shards",
+    "xorbs"
+  ],
+  "title": "HistoryVerificationPayload",
+  "type": "object"
+}

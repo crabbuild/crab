@@ -1,0 +1,80 @@
+---
+title: "crab config"
+description: "Read and write Crab configuration settings."
+---
+
+# crab config
+
+Read and write Crab configuration settings.
+
+## Synopsis
+
+```
+crab config [OPTIONS] <COMMAND>
+crab config get <KEY>
+crab config set <KEY> <VALUE>
+```
+
+## Description
+
+`crab config` reads and writes repository-local settings in
+`.crab/config.toml`. Project settings that are safe to commit, such as the
+object-store provider, live in `.crab.toml` and can also be addressed by the
+same dotted-key commands.
+
+For conceptual background, see [Configuration](/docs/cli/authentication/configuration).
+
+## Common Keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `checkout.lazy` | boolean | `false` | Leave files as pointers on checkout. |
+| `hydrate.include` | array | `[]` | Default include patterns for `crab hydrate`. |
+| `hydrate.exclude` | array | `[]` | Default exclude patterns for `crab hydrate`. |
+| `hydrate.auto` | boolean | `false` | Automatically hydrate matching files. |
+| `workflow.enabled` | boolean | `false` | Enable workflow, stage, experiment, metric, plot, and queue commands. |
+| `workflow.discover` | enum | `root` | Use `root` discovery, or `recursive` for nested `crab.yaml` and `*.workflow.yaml` files. |
+| `workflow.lockfile` | enum | `single` | Use one `crab.lock`, or `split` for per-workflow lockfiles. |
+| `workflow.parallelism` | integer | `4` | Maximum concurrent stage executions unless overridden by `--parallelism`. |
+| `workflow.graceful_shutdown_timeout_secs` | integer | `10` | Seconds between terminating and killing an over-time stage process. |
+| `workflow.max_outs_per_stage` | integer | `10000` | Maximum declared outputs per stage. |
+| `workflow.max_out_bytes` | integer | `1099511627776` | Maximum bytes per declared output. |
+| `workflow.lock_timeout_secs` | integer | `600` | How long a second workflow run waits for the scheduler lock. |
+| `workflow.remote_cache_readonly` | boolean | `false` | Reject workflow cache pushes while allowing cache reads. |
+| `hydra.enabled` | boolean | `false` | Compose Hydra config groups for experiment parameter overrides. |
+| `hydra.config_dir` | string | `conf` | Hydra config root used by experiment runs. |
+| `hydra.config_name` | string | `config.yaml` | Hydra root config file name. |
+| `auth.storage_provider` | string | `auto` | Project-level object-store backend: `s3`, `gcs`, `azure`, or `auto`. |
+
+## Subcommands
+
+### get
+
+```bash
+crab config get checkout.lazy
+crab config get auth.storage_provider
+```
+
+### set
+
+```bash
+crab config set workflow.enabled true
+crab config set workflow.discover recursive
+crab config set auth.storage_provider s3
+```
+
+`auth.storage_provider` is a project-level key and is written to
+`.crab.toml`; the internal workflow keys are written to `.crab/config.toml`.
+
+### JSON output
+
+```bash
+crab config get checkout.lazy --json
+```
+
+Only `crab config get` accepts `--json`.
+
+## Related Commands
+
+- [`crab env`](/docs/cli/reference/crab-env) — display resolved environment.
+- [`crab auth status`](/docs/cli/reference/crab-auth-status) — authentication state.

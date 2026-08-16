@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LiveControlPlaneEvidencePayload",
+  "type": "object",
+  "required": [
+    "args",
+    "collected_at_ms",
+    "label",
+    "redacted",
+    "result",
+    "schema",
+    "version"
+  ],
+  "properties": {
+    "args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "collected_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "harness": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "label": {
+      "type": "string"
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "result": true,
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema": {
+      "$ref": "#/definitions/LiveControlPlaneEvidenceSchema"
+    },
+    "sequence": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "version": {
+      "$ref": "#/definitions/LiveEvidenceSchemaVersion"
+    }
+  },
+  "definitions": {
+    "LiveControlPlaneEvidenceSchema": {
+      "type": "string",
+      "enum": [
+        "replica.live-control-plane.evidence"
+      ]
+    },
+    "LiveEvidenceSchemaVersion": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    }
+  }
+}

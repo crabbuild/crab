@@ -1,0 +1,104 @@
+---
+title: "Environment Info"
+description: "How to inspect your Crab environment — version, remote configuration, filter driver setup, and relevant environment variables."
+---
+
+## Understanding Your Crab Environment
+
+When troubleshooting or filing a bug report, you need a snapshot of how Crab is configured in your current environment. `crab env` prints everything relevant in one command: version info, remote URL, filter driver settings, and active environment variables.
+
+## Usage
+
+```bash
+crab env
+```
+
+```
+crab version 1.0.14 (7dbbc61e)
+git version 2.44.0
+
+Remote=crab://my-bucket/my-repo
+  Bucket=my-bucket
+  RepoPath=my-repo
+
+git config filter.crab.process = "crab filter-process"
+git config filter.crab.clean = "crab filter-process"
+git config filter.crab.smudge = "crab filter-process"
+git config filter.crab.required = "true"
+git config diff.crab.command = "crab diff-driver"
+
+Environment:
+  AWS_REGION=us-east-1
+  AWS_PROFILE=default
+```
+
+The command works both inside and outside a Crab repository. Outside a repo, remote and filter sections show `<not configured>`.
+
+## Output Sections
+
+| Section | What it shows |
+|---------|--------------|
+| **Version** | Crab version string and git commit SHA |
+| **Git version** | Installed git version (or "git not found") |
+| **Remote** | Configured crab remote URL, parsed into bucket and repo path |
+| **Filter configuration** | Git config values for the crab filter driver |
+| **Environment variables** | Relevant set variables (`AWS_REGION`, `AWS_PROFILE`, `CRAB_LOG`, `CRAB_CACHE_DIR`, etc.) |
+
+Unset environment variables are omitted from the output.
+
+## Common Uses
+
+### Check static credential inputs
+
+```bash
+crab env
+```
+
+Use the environment section to confirm whether variables such as
+`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_REGION`, or `CRAB_STORAGE_PROVIDER`
+are visible to the current process. Secret values are still your
+responsibility: avoid sharing raw keys, tokens, service account JSON, SAS
+tokens, or connection strings.
+
+### Include in a bug report
+
+```bash
+crab env > /tmp/crab-env.txt
+# Attach to your issue
+```
+
+### Verify setup after initialization
+
+```bash
+crab init crab://my-bucket/my-repo
+crab env  # confirm everything is wired up
+```
+
+### Check in CI pipelines
+
+```bash
+crab env --json
+```
+
+The JSON output is useful for automation scripts that need to parse environment details programmatically:
+
+```json
+{
+  "schema": "env",
+  "version": "1.0",
+  "data": {
+    "crab_version": "1.0.14",
+    "git_sha": "7dbbc61e",
+    "build_timestamp": "2026-08-16 01:35:44 UTC",
+    "git_version": "git version 2.44.0",
+    "remote_url": "crab://my-bucket/my-repo",
+    "platform": "aarch64-unix-macos"
+  }
+}
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab env reference](/docs/cli/reference/crab-env).
+
+For how Crab discovers static cloud credentials, see [Static Credentials](static-credentials).

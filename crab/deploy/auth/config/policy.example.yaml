@@ -1,0 +1,80 @@
+# Crab Auth — RBAC Policy
+#
+# This file defines who can access which repositories and what operations
+# they can perform. Deny rules win first, then matching allow rules for the
+# same identity, repo, operation, and provider are unioned.
+#
+# Identities are matched against the `email` claim in the ID token (falling
+# back to `sub` if no email is present). Groups are matched against the
+# `groups` claim (array of strings) if your IdP includes it.
+#
+# Supported operations:
+#   Write: push, gc, repack, compact, lock, lfs, metadb, optimize-xorbs, tier, workflow-push-cache
+#   Read:  fetch, clone, clone:shard-sync, hydrate, pull, mount, fsck, du, doctor,
+#          smudge, prune, ship:manifest-check, diff, workflow-cache-pull
+# Use "*" as a wildcard for repos or operations.
+
+version: "1"
+
+# Default cloud provider for credential generation.
+# Override per-rule if repos span multiple clouds.
+default_provider: aws
+
+# Matching allow rules are unioned. If matching rules disagree on provider,
+# crab-auth fails closed instead of guessing which cloud owns the repo.
+rules:
+  # Platform admins get full access to everything.
+  - group: "platform-admins"
+    repos: ["*"]
+    operations: ["*"]
+    provider: aws  # optional: override default_provider
+
+  # ML team can push/fetch/clone only the listed paths in their model repos.
+  - group: "ml-team"
+    repos:
+      - "ml-models/*"
+      - "datasets/*"
+    operations: ["push", "fetch", "clone", "gc"]
+    read_paths:
+      - "models/**"
+      - "metadata/**"
+      - "README.md"
+    write_paths:
+      - "models/**"
+      - "metadata/**"
+      - "README.md"
+
+  # Data science team has read-only access to datasets.
+  - group: "data-science"
+    repos: ["datasets/*"]
+    operations: ["fetch", "clone"]
+
+  # Individual user access.
+  - identity: "alice@corp.example.com"
+    repos: ["experiments/alice/*"]
+    operations: ["push", "fetch", "clone", "gc", "fsck"]
+
+  # CI service accounts get push access to release repos.
+  - identity: "ci-bot@corp.example.com"
+    repos: ["releases/*"]
+    operations: ["push", "fetch", "clone"]
+
+  # Everyone in the org gets read access to public repos.
+  - identity: "*"
+    repos: ["public/*"]
+    operations: ["fetch", "clone"]
+
+# Deny rules (evaluated before allow rules).
+# Use sparingly — prefer not granting access in the first place.
+deny:
+  - identity: "former-employee@corp.example.com"
+    repos: ["*"]
+    operations: ["*"]
+
+  # Block secret material everywhere, even for otherwise allowed push rules.
+  - identity: "*"
+    repos: ["*"]
+    operations: ["push"]
+    write_paths:
+      - "secrets/**"
+      - "*.pem"

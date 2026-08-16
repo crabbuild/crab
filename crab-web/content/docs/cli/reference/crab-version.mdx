@@ -1,0 +1,46 @@
+---
+title: "crab version"
+description: "Display Crab version and build information."
+---
+
+# crab version
+
+Display Crab version and build information.
+
+## Synopsis
+
+```
+crab version [OPTIONS]
+```
+
+## Description
+
+`crab version` shows the installed Crab version, build commit, and build
+timestamp.
+
+For conceptual background, see [Version Info](/docs/cli/diagnostics/version-info).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+```bash
+crab version
+```
+
+Output includes the installed version, the build commit, and the build
+timestamp. Build metadata varies by release.
+
+```
+crab 1.0.14 (<build commit>)
+built at <UTC timestamp>
+```
+
+## Related Commands
+
+- [`crab env`](/docs/cli/reference/crab-env) — full environment info.
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.

@@ -1,0 +1,101 @@
+---
+title: "crab import"
+description: "Import existing cloud buckets as a Crab repository."
+---
+
+# crab import
+
+Import existing cloud buckets as a Crab repository.
+
+## Synopsis
+
+```bash
+crab import [OPTIONS] [SOURCE]
+```
+
+## Description
+
+`crab import` takes an existing raw object-storage prefix or local directory and
+converts it into a Crab repository — chunking, indexing, creating pointer blobs,
+and publishing the metadata structures needed for Crab operations.
+
+For conceptual background, see [Importing Existing Buckets](/docs/cli/getting-started/importing-buckets).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SOURCE` | Unless `--from` or `--resume` | Source URL or local path. Equivalent to `--from` when provided. |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--from <URL>` | | Raw source prefix: `s3://`, `gs://`, `az://`, `azure://`, or `file://`. |
+| `--to <URL>` | | Target repo URL: `crab://...` or the same raw scheme as `--from`. |
+| `--bucket <BUCKET>` | | Target Crab bucket, used with `--name` to build `crab://<bucket>/<name>`. |
+| `--name <REPO>` | | Target Crab repo name/path, used with `--bucket`. |
+| `--into <DIR>` | leaf of target URL | Local directory for the initialized Git repo. |
+| `--dest-prefix <PATH>` | | Directory prefix to place imported files under inside the Git repo. |
+| `--include <GLOB>` | | Include glob, relative to the source prefix. Repeatable. |
+| `--exclude <GLOB>` | | Exclude glob, relative to the source prefix. Repeatable. |
+| `--versions <MODE>` | `auto` | Version handling: `auto`, `on`, or `off`. |
+| `--window <DURATION>` | `1h` | Commit window for versioned imports, such as `30m` or `24h`. |
+| `--at <RFC3339>` | | Import one snapshot at a specific time. |
+| `--since <RFC3339>` / `--until <RFC3339>` | | Bound versioned history imports. |
+| `--branch <BRANCH>` | `main` | Initial branch name. |
+| `--message <TEXT>` | | Commit message or versioned-commit template. |
+| `--track <GLOB>` | | Add an extra `filter=crab` glob; repeatable. |
+| `--dry-run` | `false` | Plan the import without mutating the target. |
+| `--estimate` | `false` | Estimate xorb and shard bytes while in dry-run mode. |
+| `--resume` | `false` | Resume an interrupted import from `<into>/.crab/import-journal.db`. |
+| `-j, --jobs <N>` | CPU count | Import worker concurrency. |
+| `--fail-fast` | `false` | Abort on the first per-object error. |
+| `--force` | `false` | Bypass non-empty-target and remote-exists safety checks. |
+| `--lfs-source <MODE>` | `fail` | Handle LFS sources with `fail`, `resolve`, or `skip`. |
+| `--lfs-objects <URL>` | | Companion LFS object root when resolving pointers. |
+| `--yes` | `false` | Skip large-import confirmation. |
+| `--source-profile <NAME>` | | Credential profile hint for the source bucket. |
+| `--target-profile <NAME>` | | Credential profile hint for the target bucket. |
+| `--json` | `false` | Emit structured JSON output |
+| `--jsonl` | `false` | Emit streaming JSONL output |
+
+## Examples
+
+### Import a source prefix
+
+```bash
+crab import \
+  --from s3://my-data-bucket/models/ \
+  --to crab://crab-repos/models
+```
+
+### Quick import with target derivation
+
+```bash
+crab import s3://my-data-bucket/models/ \
+  --bucket crab-repos \
+  --name models
+```
+
+### Import a local directory
+
+```bash
+crab import ./large-files \
+  --bucket crab \
+  --name import-demo
+```
+
+### Place files under a repo path
+
+```bash
+crab import s3://crab/crab/large-files \
+  --bucket crab \
+  --name import-demo \
+  --dest-prefix crab/large-files
+```
+
+## Related Commands
+
+- [`crab init`](/docs/cli/reference/crab-init) — create a new empty repository.
+- [`crab add`](/docs/cli/reference/crab-add) — add files to an existing repository.

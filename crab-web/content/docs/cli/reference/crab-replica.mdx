@@ -1,0 +1,43 @@
+---
+title: "crab replica"
+description: "Configure and inspect read replicas and active-active replication."
+---
+
+# crab replica
+
+Manage read replicas and enterprise replication state for Crab remotes. Replica
+configuration is a storage-operations feature: verify provider replication and
+object readiness before enabling reads or promoting a replica.
+
+## Synopsis
+
+```bash
+crab replica <SUBCOMMAND> [OPTIONS]
+```
+
+The command currently includes:
+
+`add`, `export`, `cost`, `runbook`, `wait`, `verify`, `backfill`, `enable`,
+`disable`, `mode`, `writers`, `coordinator`, `failover`, `repair`, `promote`,
+`set-primary`, `diagnostics`, `certify`, `evidence`, `status`, `doctor`, and
+`remove`.
+
+## Typical readiness flow
+
+```bash
+crab replica add us-west \
+  --provider s3 \
+  --primary crab://primary-bucket/org/repo \
+  --replica s3://replica-bucket/org/repo \
+  --region us-west-2
+crab replica status --json
+crab replica verify --deep --json
+crab replica wait us-west --enable-read --json
+```
+
+Use `crab replica doctor` for configuration and readiness diagnostics. Use
+`promote` or `set-primary` only as guarded disaster-recovery operations after
+reviewing the generated plan and provider state.
+
+Run `crab replica <subcommand> --help` for the exact provider, active-active,
+failover, and evidence options available in the installed CLI.

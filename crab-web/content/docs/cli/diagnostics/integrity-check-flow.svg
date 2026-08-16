@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" width="720" height="420">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="cmdGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="checkGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="chainGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="720" height="420" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+    <!-- Data chain verification container -->
+    <rect x="30" y="260" width="660" height="130" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1"/>
+  </g>
+
+  <g id="nodes">
+    <!-- crab fsck -->
+    <rect x="280" y="30" width="160" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+
+    <!-- Check items (row) -->
+    <rect x="40" y="130" width="150" height="46" rx="8" fill="url(#checkGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="210" y="130" width="150" height="46" rx="8" fill="url(#checkGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="380" y="130" width="150" height="46" rx="8" fill="url(#checkGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="550" y="130" width="150" height="46" rx="8" fill="url(#checkGrad)" stroke="#334155" stroke-width="1.5"/>
+
+    <!-- Data chain (inside container) -->
+    <rect x="60" y="300" width="180" height="50" rx="8" fill="url(#chainGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="280" y="300" width="180" height="50" rx="8" fill="url(#chainGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="500" y="300" width="160" height="50" rx="8" fill="url(#chainGrad)" stroke="#0F172A" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- crab fsck -->
+    <text x="360" y="60" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab fsck</text>
+
+    <!-- Check items -->
+    <text x="115" y="158" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Check git refs</text>
+    <text x="285" y="158" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Verify pack list</text>
+    <text x="455" y="158" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Check push locks</text>
+    <text x="625" y="152" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Find abandoned</text>
+    <text x="625" y="168" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">uploads</text>
+
+    <!-- Container label -->
+    <text x="50" y="283" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7" letter-spacing="0.5">WALK DATA CHAIN</text>
+
+    <!-- Chain items -->
+    <text x="150" y="320" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">Pointer →</text>
+    <text x="150" y="338" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">File Index</text>
+
+    <text x="370" y="320" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">File Index →</text>
+    <text x="370" y="338" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">Shard</text>
+
+    <text x="580" y="320" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">Shard →</text>
+    <text x="580" y="338" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">Xorb</text>
+  </g>
+
+  <g id="connections">
+    <!-- fsck → checks (fan out) -->
+    <path d="M 310 80 L 310 100 L 115 100 L 115 130" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <path d="M 340 80 L 340 100 L 285 100 L 285 130" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <path d="M 380 80 L 380 100 L 455 100 L 455 130" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <path d="M 410 80 L 410 100 L 625 100 L 625 130" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- fsck → data chain container -->
+    <path d="M 360 80 L 360 100 L 360 200 L 150 200 L 150 300" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Chain connections -->
+    <line x1="240" y1="325" x2="280" y2="325" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="460" y1="325" x2="500" y2="325" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

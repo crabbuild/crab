@@ -1,0 +1,66 @@
+---
+title: "crab setup"
+description: "Configure large-file tracking after initializing a Crab repository."
+---
+
+# crab setup
+
+Configure large-file tracking for a repository after `crab init`.
+
+## Synopsis
+
+```bash
+crab setup [OPTIONS]
+```
+
+`crab setup` installs the Crab filter driver, scans the working tree for large
+files, writes matching rules to `.gitattributes`, and records detected patterns
+in `.crab.toml`. It stages `.gitattributes` and `.crab.toml` when it changes
+them.
+
+Run it from a Git repository that already has a `.crab.toml` created by
+`crab init`.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--no-auto-track` | Install the filter driver without scanning for large files |
+| `--track <PATTERN>` | Apply an explicit tracking pattern; repeat for multiple patterns |
+| `--include <DIR>` | Restrict scanning to a directory; repeat as needed |
+| `--exclude <DIR>` | Skip a directory during scanning; repeat as needed |
+| `--dry-run` | Preview changes without writing to disk |
+| `--force` | Replace existing Crab entries instead of appending |
+| `--json` | Emit one structured JSON result |
+| `--jsonl` | Emit streaming JSONL output |
+
+## Examples
+
+```bash
+crab init crab://my-bucket/models
+crab setup
+```
+
+Apply known patterns without a repository scan:
+
+```bash
+crab setup --track '*.safetensors' --track 'datasets/**'
+```
+
+Preview a scoped scan:
+
+```bash
+crab setup --include models --exclude models/cache --dry-run
+```
+
+Disable automatic detection when all patterns are managed manually:
+
+```bash
+crab setup --no-auto-track
+```
+
+## Related commands
+
+- [`crab init`](/docs/cli/reference/crab-init) — create or re-apply repository configuration.
+- [`crab track`](/docs/cli/reference/crab-track) — add one tracking pattern directly.
+- [`crab ship`](/docs/cli/reference/crab-ship) — stage, commit, and push files.

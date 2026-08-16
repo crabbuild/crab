@@ -1,0 +1,190 @@
+# Static / Multi-Cloud Authentication
+
+Use environment variables or cloud SDK default credentials with S3, GCS, or
+Azure Blob Storage.
+
+## Overview
+
+The `"static"` provider is the default. Crab reads credentials from
+environment variables or the cloud SDK's default credential chain — the same
+way it worked before enterprise auth was added. No login flow, no token
+management, no IdP.
+
+This guide covers how to use static credentials with each cloud backend.
+
+## Prerequisites
+
+- crab installed (`make install` from the repo root)
+- A cloud storage bucket (S3, GCS, or Azure) with appropriate permissions
+
+## Step 1: Choose your storage provider
+
+The `storage_provider` key tells crab which cloud backend to use:
+
+| Value | Backend | Builder |
+|-------|---------|---------|
+| `"s3"` | Amazon S3 (default) | `AmazonS3Builder::from_env()` |
+| `"gcs"` | Google Cloud Storage | `GoogleCloudStorageBuilder::from_env()` |
+| `"azure"` | Azure Blob Storage | `MicrosoftAzureBuilder::from_env()` |
+| `"auto"` | Auto-detect from env | Reads `CRAB_STORAGE_PROVIDER` |
+
+## Step 2: Configure
+
+### Option A: S3 (default — no config needed)
+
+If you're using S3, you don't need to change anything. The default config is:
+
+```toml
+# ~/.config/crab/config.toml (or .crab/config.toml)
+[auth]
+provider = "static"
+storage_provider = "s3"
+```
+
+Set your AWS credentials via environment variables or `~/.aws/credentials`:
+
+```bash
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=wJalr...
+export AWS_REGION=us-west-2
+
+# Or use a named profile:
+export AWS_PROFILE=my-profile
+```
+
+### Option B: Google Cloud Storage
+
+```toml
+[auth]
+provider = "static"
+storage_provider = "gcs"
+```
+
+Set GCS credentials:
+
+```bash
+# Application Default Credentials (recommended):
+gcloud auth application-default login
+
+# Or explicit service account key:
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+```
+
+### Option C: Azure Blob Storage
+
+```toml
+[auth]
+provider = "static"
+storage_provider = "azure"
+```
+
+Set Azure credentials (any one of these):
+
+```bash
+# Account key:
+export AZURE_STORAGE_ACCOUNT_NAME=myaccount
+export AZURE_STORAGE_ACCOUNT_KEY=base64key...
+
+# SAS token:
+export AZURE_STORAGE_ACCOUNT_NAME=myaccount
+export AZURE_STORAGE_SAS_TOKEN="sv=2024-11-04&ss=b&..."
+
+# Connection string:
+export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
+```
+
+### Option D: Auto-detect
+
+```toml
+[auth]
+provider = "static"
+storage_provider = "auto"
+```
+
+Set the `CRAB_STORAGE_PROVIDER` environment variable:
+
+```bash
+# S3 (default when unset):
+export CRAB_STORAGE_PROVIDER=s3
+
+# GCS:
+export CRAB_STORAGE_PROVIDER=gcs   # also: gs, google
+
+# Azure:
+export CRAB_STORAGE_PROVIDER=azure  # also: az, abs
+```
+
+This is useful for CI/CD pipelines that deploy to different clouds.
+
+## Step 3: Initialize and verify
+
+```bash
+# Initialize a repo (S3 example):
+crab init crab://my-bucket/my-repo
+
+# Verify credentials work:
+crab doctor
+```
+
+Expected output:
+
+```
+crab doctor
+
+  ✓ auth                     static (no crab-managed auth)
+  ✓ credentials              bucket 'my-bucket' reachable
+```
+
+## Step 4: Use crab normally
+
+```bash
+crab track '*.bin'
+crab add *.bin
+git commit -m "add models"
+git push
+```
+
+No `crab login` needed — credentials come from the environment.
+
+## Local testing with MinIO
+
+For local development without cloud access, use `provider = "none"`:
+
+```toml
+[auth]
+provider = "none"
+```
+
+```bash
+# Start MinIO:
+docker run -p 9000:9000 -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+
+# Point crab at MinIO:
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+export AWS_ENDPOINT_URL=http://localhost:9000
+
+crab init crab://test-bucket/my-repo
+```
+
+## Switching from static to federated auth
+
+When your organization adopts federated auth, update the config:
+
+```bash
+crab config set auth.provider aws-oidc
+crab config set auth.issuer_url https://login.corp.example.com
+crab config set auth.client_id crab-cli-prod
+crab login
+```
+
+See the [AWS OIDC guide](/docs/cli/authentication/aws-credentials) for full setup.
+
+## Related
+
+- [Enterprise Authentication](/docs/cli/authentication/enterprise-auth)
+- [Enterprise Authorization](/docs/cli/authentication/authorization)
+- [AWS OIDC](/docs/cli/authentication/aws-credentials)
+- [GCP Workload Identity](/docs/cli/authentication/gcp-credentials)
+- [Azure Entra ID](/docs/cli/authentication/azure-credentials)

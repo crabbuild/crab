@@ -1,0 +1,56 @@
+---
+title: "crab gc"
+description: "Remove unreachable objects from cloud storage to reclaim space."
+---
+
+# crab gc
+
+Remove unreachable objects from storage.
+
+## Synopsis
+
+```
+crab gc [OPTIONS]
+```
+
+## Description
+
+`crab gc` identifies and removes xorbs that are no longer referenced by any
+ref in the repository. It respects a grace period to avoid deleting objects
+that may be in use by concurrent operations.
+
+For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-collection).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dry-run` | `false` | Show what would be deleted without removing |
+| `--grace-period` | `24h` | Don't delete objects newer than this |
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+### Preview garbage collection
+
+```bash
+crab gc --dry-run
+```
+
+### Run garbage collection
+
+```bash
+crab gc
+```
+
+### With shorter grace period
+
+```bash
+crab gc --grace-period 1h
+```
+
+## Related Commands
+
+- [`crab prune`](/docs/cli/reference/crab-prune) — evict local cache objects.
+- [`crab repack`](/docs/cli/reference/crab-repack) — optimize remote layout.
+- [`crab fsck`](/docs/cli/reference/crab-fsck) — verify integrity before/after GC.

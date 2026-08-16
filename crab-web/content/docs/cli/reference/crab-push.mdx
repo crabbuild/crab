@@ -1,0 +1,103 @@
+---
+title: "crab push"
+description: "Push staged Crab content and Git refs with concurrent uploads and managed protected publication."
+---
+
+# crab push
+
+Push committed pointer blobs, backing objects, and Git refs. `crab push` uses
+the same repository outcome as `git push` through `git-remote-crab`, while its
+native pipeline can upload independent objects concurrently.
+
+## Synopsis
+
+```text
+crab push [OPTIONS] [REMOTE] [REFSPECS]...
+```
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `REMOTE` | No | Remote name or URL; defaults to the upstream remote or `origin` |
+| `REFSPECS` | No | Refspecs to push; defaults to the current branch |
+
+## Managed push
+
+When the remote is `crab://crab.build/acme/models` or another configured
+managed authority, Crab:
+
+1. Resolves the logical repository and current authorization.
+2. Prepares a durable push session and exact staging scope.
+3. Flushes and verifies every required staged xorb and bundle object.
+4. Asks the service to recompute policy-relevant paths and validate Git connectivity.
+5. Finalizes through service-owned canonical credentials and per-ref serialization.
+
+The client never receives canonical manifest/ref write or delete permission.
+Identical finalize retries return the recorded terminal result rather than
+committing twice.
+
+## Direct push
+
+Unconfigured non-`crab.build` authorities retain the existing direct BYOC push
+path. Crab does not switch between managed and direct behavior after a failure.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--upload-concurrency <N>` | Configured value | Maximum concurrent xorb uploads |
+| `--lock-wait-secs <SECONDS>` | Configured value | Time to wait for contested direct-push locks |
+| `--manifest-cas-retries <COUNT>` | Configured value | Maximum direct manifest-CAS retries |
+| `--rebase-on-non-fast-forward` | Disabled | Integrate the current branch and retry after a non-fast-forward or lock conflict |
+| `--rebase-retry-limit <COUNT>` | `256` | Maximum integration attempts with automatic rebase enabled |
+| `--dry-run` | Disabled | Show what would be pushed without uploading |
+| `-f, --force` | Disabled | Bypass client fast-forward checks; server policy still applies |
+| `-v, --verbose` | Disabled | Show per-step timing and per-file progress |
+| `--no-incremental` | Disabled | Force a full graph walk |
+| `--no-color` | Disabled | Disable ANSI color |
+| `--json` | Disabled | Emit one terminal JSON envelope |
+| `--jsonl` | Disabled | Stream JSONL progress and a terminal result |
+
+## Examples
+
+### Push the current branch
+
+```bash
+crab push
+```
+
+### Push a named branch
+
+```bash
+crab push origin feature-model
+```
+
+### Push directly to a canonical managed URL
+
+```bash
+crab push crab://crab.build/acme/models main
+```
+
+### Dry run with structured output
+
+```bash
+crab push --dry-run --json
+```
+
+### Stream progress for automation
+
+```bash
+crab push --jsonl
+```
+
+For `git push`, set `CRAB_PROGRESS_FORMAT=jsonl` to receive the equivalent
+remote-helper event stream on stderr because Git owns helper stdout.
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [Managed and Direct Storage](/docs/cli/managed-service/direct-storage)
+- [`crab add`](/docs/cli/reference/crab-add)
+- [`crab fetch`](/docs/cli/reference/crab-fetch)
+- [Structured Output](/docs/cli/reference/structured-output)

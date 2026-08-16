@@ -1,0 +1,13 @@
+{
+  "title": "Getting Started",
+  "pages": [
+    "index",
+    "installation",
+    "first-repository",
+    "cloning-a-repository",
+    "tracking-files",
+    "project-config",
+    "mirror-mode",
+    "importing-buckets"
+  ]
+}

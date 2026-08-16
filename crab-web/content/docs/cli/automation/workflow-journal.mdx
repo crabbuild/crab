@@ -1,0 +1,266 @@
+---
+title: "Workflow Journal"
+description: "Inspect, list, and garbage-collect workflow run journals stored in .crab/workflow/runs/."
+---
+
+# crab workflow journal
+
+Inspect and prune the SQLite journals that `crab run` creates for each
+workflow execution.
+
+## Synopsis
+
+```
+crab workflow journal show <RUN_ID> [--json]
+crab workflow journal ls [--json]
+crab workflow journal gc [--keep <N>] [--dry-run] [--json]
+```
+
+## Description
+
+Every workflow run executed by `crab run` writes a SQLite journal at
+`.crab/workflow/runs/<run_id>/journal.db`. The journal records each stage's
+state trajectory — start, transitions, exit codes, timeouts, and stderr
+tails — so operators can diagnose crashes, stuck resumes, or unexpected
+failures after the fact.
+
+`crab workflow journal` exposes three subcommands for working with these
+journals:
+
+- **`show`** — replay the full stage trajectory for a single run. Useful
+  after a crash to understand where execution stopped, or when diagnosing
+  why a resume picked up at a particular stage.
+- **`ls`** — list every journal under `.crab/workflow/runs/` with its start
+  time and outcome. Terminal runs are tagged `success`, `failure`, or
+  `aborted`; active runs are tagged `in_flight`.
+- **`gc`** — delete the oldest terminal journals, keeping the most recent N
+  (default 50). In-flight journals are never touched because the resume path
+  needs them intact.
+
+The `show` and `ls` subcommands are pure-read operations — they do not
+acquire the scheduler lock. The `gc` subcommand is safe against concurrent
+runners because it only removes terminal journals; an active run's journal
+is non-terminal by definition and thus protected.
+
+## Subcommands
+
+### show
+
+Print one journal's full stage trajectory.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `RUN_ID` | Yes | UUID of the run to inspect |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+### ls
+
+List every journal under `.crab/workflow/runs/`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+### gc
+
+Remove the oldest terminal journals beyond the keep count.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--keep <N>` | `50` | Number of most-recent terminal journals to keep |
+| `--dry-run` | `false` | Report what would be removed without touching the filesystem |
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+### List all workflow journals
+
+```bash
+crab workflow journal ls
+```
+
+Output:
+
+```
+RUN_ID                                OUTCOME       STARTED_AT
+a1b2c3d4-e5f6-7890-abcd-ef1234567890  success       1715356923
+f0e1d2c3-b4a5-6789-0abc-def123456789  in_flight     1715356800
+98765432-abcd-ef01-2345-6789abcdef01  failure       1715270400
+```
+
+### Inspect a specific run's stage trajectory
+
+```bash
+crab workflow journal show a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+Output:
+
+```
+run_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+outcome: success
+started_at: 1715356923
+ended_at: 1715357010
+stages:
+  build                          attempt=1 state=succeeded exit=0
+  test                           attempt=1 state=succeeded exit=0
+  deploy                         attempt=1 state=succeeded exit=0
+```
+
+### Preview what gc would remove (dry run)
+
+```bash
+crab workflow journal gc --dry-run --keep 10
+```
+
+Shows which journals would be deleted without actually removing them.
+
+### Garbage-collect old journals, keeping the 20 most recent
+
+```bash
+crab workflow journal gc --keep 20
+```
+
+Removes all terminal journals beyond the 20 most recent. In-flight journals
+are always preserved regardless of the keep count.
+
+### List journals as JSON for scripting
+
+```bash
+crab workflow journal ls --json
+```
+
+## JSON Output
+
+All three subcommands support `--json` for structured output.
+
+### workflow journal show --json
+
+```json
+{
+  "schema": "workflow.journal.show",
+  "version": "1.0",
+  "data": {
+    "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "started_at": 1715356923,
+    "ended_at": 1715357010,
+    "outcome": "success",
+    "stages": [
+      {
+        "stage": "build",
+        "attempt": 1,
+        "state": "succeeded",
+        "exit_code": 0,
+        "timed_out": false,
+        "updated_at": 1715356950
+      },
+      {
+        "stage": "test",
+        "attempt": 1,
+        "state": "succeeded",
+        "exit_code": 0,
+        "timed_out": false,
+        "updated_at": 1715356980
+      }
+    ]
+  }
+}
+```
+
+### workflow journal ls --json
+
+```json
+{
+  "schema": "workflow.journal.ls",
+  "version": "1.0",
+  "data": {
+    "journals": [
+      {
+        "run_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "started_at": 1715356923,
+        "outcome": "success"
+      },
+      {
+        "run_id": "f0e1d2c3-b4a5-6789-0abc-def123456789",
+        "started_at": 1715356800,
+        "outcome": "in_flight"
+      }
+    ]
+  }
+}
+```
+
+### workflow journal gc --json
+
+```json
+{
+  "schema": "workflow.journal.gc",
+  "version": "1.0",
+  "data": {
+    "keep": 20,
+    "dry_run": false,
+    "removed": [
+      "98765432-abcd-ef01-2345-6789abcdef01",
+      "11111111-2222-3333-4444-555555555555"
+    ],
+    "kept": [
+      "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    ],
+    "in_flight": [
+      "f0e1d2c3-b4a5-6789-0abc-def123456789"
+    ]
+  }
+}
+```
+
+### Schema Reference
+
+#### show payload
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_id` | string | UUID of the inspected run |
+| `started_at` | integer? | Unix epoch seconds when the run started |
+| `ended_at` | integer? | Unix epoch seconds when the run ended |
+| `outcome` | string | One of `success`, `failure`, `aborted`, `in_flight` |
+| `stages` | array | Stage rows ordered by `(stage_name, attempt)` |
+| `stages[].stage` | string | Stage name |
+| `stages[].attempt` | integer | Attempt number (starts at 1) |
+| `stages[].state` | string | Last recorded state for this attempt |
+| `stages[].exit_code` | integer? | Process exit code (present on completion) |
+| `stages[].signal` | integer? | Signal number (present if killed by signal) |
+| `stages[].timed_out` | boolean | Whether the stage timed out |
+| `stages[].updated_at` | integer | Unix epoch seconds of last state update |
+| `stages[].stderr_tail` | string? | Last 8 KiB of stderr on failure |
+
+#### ls payload
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `journals` | array | Journal summaries sorted newest-first |
+| `journals[].run_id` | string | UUID of the run |
+| `journals[].started_at` | integer? | Unix epoch seconds |
+| `journals[].outcome` | string | One of `success`, `failure`, `aborted`, `in_flight` |
+
+#### gc payload
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `keep` | integer | Retention count used |
+| `dry_run` | boolean | Whether this was a dry-run invocation |
+| `removed` | array | Run IDs that were (or would be) removed |
+| `kept` | array | Run IDs retained under the keep policy |
+| `in_flight` | array | Non-terminal run IDs skipped (never GC candidates) |
+
+See [Structured Output](/docs/cli/reference/structured-output) for envelope
+details and error handling conventions.
+
+## Related Commands
+
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — define and execute workflow pipelines.
+- [`crab workflow lockfile`](/docs/cli/automation/workflow-lockfile) — inspect workflow lockfiles.
+- [`crab run`](/docs/cli/automation/running-commands) — execute commands with workflow tracking.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track metrics across workflow runs.

@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PruneSummary",
+  "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
+  "type": "object",
+  "required": [
+    "bytes_freed",
+    "chunks_pruned",
+    "dry_run",
+    "objects_pruned",
+    "shards_pruned",
+    "xorbs_pruned"
+  ],
+  "properties": {
+    "bytes_freed": {
+      "description": "Total bytes freed (or would-be-freed in dry-run).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "chunks_pruned": {
+      "description": "Number of chunk cache objects pruned (or would-be-pruned).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dry_run": {
+      "description": "Whether this was a dry-run (no mutations).",
+      "type": "boolean"
+    },
+    "objects_pruned": {
+      "description": "Number of objects pruned (or would-be-pruned in dry-run).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "shards_pruned": {
+      "description": "Number of shard cache objects pruned (or would-be-pruned).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "xorbs_pruned": {
+      "description": "Number of xorb cache objects pruned (or would-be-pruned).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RestripeEstimate",
+  "description": "Result of a dry-run estimation.",
+  "type": "object",
+  "required": [
+    "archive_source_bytes",
+    "archive_source_count",
+    "estimated_cost_usd",
+    "estimated_dest_bytes",
+    "estimated_dest_count",
+    "estimated_wall_secs",
+    "profile",
+    "source_bytes",
+    "source_count"
+  ],
+  "properties": {
+    "archive_source_bytes": {
+      "description": "Bytes in archive-class source xorbs.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "archive_source_count": {
+      "description": "Number of source xorbs in archive classes (skipped if `--include-cold=false`).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "estimated_cost_usd": {
+      "description": "Estimated provider API cost in USD (6 decimal places).",
+      "type": "string"
+    },
+    "estimated_dest_bytes": {
+      "description": "Estimated bytes after recompression.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "estimated_dest_count": {
+      "description": "Estimated number of destination xorbs.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "estimated_wall_secs": {
+      "description": "Estimated wall-clock duration in seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "profile": {
+      "description": "Profile name used for the estimate.",
+      "type": "string"
+    },
+    "source_bytes": {
+      "description": "Total bytes across all source xorbs.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "source_count": {
+      "description": "Number of source xorbs that would be processed.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

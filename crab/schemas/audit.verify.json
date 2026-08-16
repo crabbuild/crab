@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditVerifyPayload",
+  "type": "object",
+  "required": [
+    "checked",
+    "invalid",
+    "issues",
+    "path",
+    "valid"
+  ],
+  "properties": {
+    "checked": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "invalid": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AuditIssue"
+      }
+    },
+    "path": {
+      "type": "string"
+    },
+    "valid": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "AuditIssue": {
+      "type": "object",
+      "required": [
+        "line",
+        "reason"
+      ],
+      "properties": {
+        "line": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

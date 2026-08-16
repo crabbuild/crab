@@ -1,0 +1,32 @@
+# Minimal enterprise cache-service config for a trusted TLS proxy or service mesh.
+#
+# Replace origin.url, cache.root, cache.max_bytes, and auth.psk_hash before
+# production. The sample hash matches the placeholder value in client.env.
+
+[server]
+listen_addr = "0.0.0.0:8443"
+drain_timeout_secs = 30
+mutable_path_mode = "strict"
+policy_path = "/etc/crab-cache-server/policy.yaml"
+
+[auth]
+mechanism = "psk"
+psk_hash = "1d058829a477dbd7adabb6d3427aaefb53a16bc288db88b4595ee6751e7a9268"
+
+[origin]
+url = "s3://crab"
+
+[cache]
+root = "/data/crab-cache"
+max_bytes = 1099511627776
+
+[dedup]
+scope = "all"
+
+[eviction]
+high_water_ratio = 0.95
+low_water_ratio = 0.90
+
+[logging]
+format = "json"
+level = "info"

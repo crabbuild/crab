@@ -1,0 +1,13 @@
+{
+  "title": "Storage Management",
+  "pages": [
+    "local-cache",
+    "staging-area",
+    "garbage-collection",
+    "pruning-objects",
+    "repacking-objects",
+    "compacting-data",
+    "storage-tiers",
+    "optimizing-xorbs"
+  ]
+}

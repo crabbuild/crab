@@ -1,0 +1,93 @@
+---
+title: "crab status"
+description: "Report hydration state of tracked files — which are hydrated, dehydrated, or modified."
+---
+
+# crab status
+
+Report hydration state of tracked files.
+
+## Synopsis
+
+```bash
+crab status [OPTIONS] [TARGET]...
+```
+
+## Description
+
+`crab status` shows the current state of Crab-tracked files in the working
+tree: which files are hydrated (full content), which are dehydrated (pointer
+blobs), and which have modifications. With `--workflow`, it reports stage
+state from `crab.lock` instead.
+
+For conceptual background on file states, see [Working with Files](/docs/cli/daily-workflow).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `TARGET` | No | Workflow stage names or declared output paths when inspecting workflow state |
+
+## Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--porcelain` | | `false` | Machine-readable hydration output (one file per line) |
+| `--workflow` | | `false` | Report workflow stage state instead of hydration state |
+| `--why <STAGE>` | | | Explain why one workflow stage is stale |
+| `-R, --recursive` | | `false` | Discover nested workflow files |
+| `--lockfile <PATH>` | | | Select a workflow lockfile |
+| `-d, --with-deps` | | `false` | Include upstream workflow stages |
+| `-c, --cloud` | | `false` | Compare local stage cache with the remote |
+| `-r, --remote <NAME>` | | | Select the Crab Git remote for cloud comparison |
+| `--json` | | `false` | Emit structured JSON output |
+
+## Examples
+
+### Show all tracked file states
+
+```bash
+crab status
+```
+
+### Inspect workflow targets
+
+```bash
+crab status --workflow train
+```
+
+### Machine-readable output
+
+```bash
+crab status --porcelain
+```
+
+Inspect workflow state instead of file hydration:
+
+```bash
+crab status --workflow --json
+crab status --workflow --why train
+```
+
+## Output
+
+```
+Tracked files (5 total):
+  H  models/weights.bin       1.2 GB  (hydrated)
+  H  models/embeddings.bin    800 MB  (hydrated)
+  P  data/eval.safetensors    300 MB  (pointer)
+  P  data/test.safetensors    150 MB  (pointer)
+  M  config/vocab.bin         2.1 MB  (modified)
+```
+
+State indicators:
+- `H` — Hydrated (full content on disk)
+- `P` — Pointer (dehydrated, content in cloud)
+- `M` — Modified (hydrated with uncommitted changes)
+
+## Related Commands
+
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate) — materialize pointer files.
+- [`crab dehydrate`](/docs/cli/reference/crab-dehydrate) — replace files with pointers.
+- [`crab ls-files`](/docs/cli/reference/crab-ls-files) — list all tracked files.
+- [`crab du`](/docs/cli/reference/crab-du) — disk usage breakdown.

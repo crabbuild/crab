@@ -1,0 +1,10 @@
+{
+  "title": "Inspecting Files",
+  "pages": [
+    "file-status",
+    "listing-tracked-files",
+    "disk-usage",
+    "file-statistics",
+    "workflow-status"
+  ]
+}

@@ -1,0 +1,47 @@
+---
+title: "crab mirror"
+description: "Mirror a Git remote into a Crab remote backed by object storage."
+---
+
+# crab mirror
+
+Mirror a Git repository into a Crab remote.
+
+## Synopsis
+
+```bash
+crab mirror [OPTIONS] <SOURCE> <DESTINATION>
+```
+
+`SOURCE` can be a Git remote URL or local repository path. `DESTINATION` is a
+Crab remote such as `crab://bucket/path`. The command preserves Git commits and
+refs; it does not rewrite history or convert files into Crab-native pointers.
+
+Mirroring is destructive for refs: destination refs that no longer exist in
+the source are deleted. Review the destination before the first run.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--cache-dir <DIR>` | Use this exact bare mirror cache directory |
+| `--no-atomic` | Push refs without Git's atomic push option |
+| `--skip-lfs` | Do not mirror Git LFS objects |
+| `--force-lfs-check` | Verify all LFS objects even when refs are already synchronized |
+| `--json` | Emit one structured JSON result |
+| `--jsonl` | Emit streaming JSONL output |
+
+When refs change, Crab mirrors changed LFS objects unless `--skip-lfs` is set,
+then publishes the Git refs. Use `--force-lfs-check` to verify LFS content on a
+no-op ref sync.
+
+## Examples
+
+```bash
+crab mirror https://github.com/org/repo.git crab://my-bucket/mirrors/org/repo
+crab mirror --skip-lfs git@gitlab.com:org/repo.git crab://my-bucket/org/repo
+crab mirror --force-lfs-check https://github.com/org/repo.git crab://my-bucket/org/repo
+```
+
+Use `crab init --mirror <REMOTE>` when you want a normal developer repository
+to keep a Git hosting remote for code review while Crab stores large-file data.

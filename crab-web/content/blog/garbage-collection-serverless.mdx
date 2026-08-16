@@ -1,0 +1,201 @@
+---
+title: "Garbage Collection in a Serverless World"
+description: "How Crab reclaims unused object storage safely without a daemon — mark reachable data, apply a grace window, then sweep only proven-orphaned objects."
+date: "2025-07-28"
+author: "Crab Team"
+category: "architecture"
+tags: ["garbage-collection", "xorb", "storage", "consistency"]
+excerpt: "Crab finds unused data, protects recent objects with a grace window, then deletes only proven-orphaned storage. No daemon required, and conservative failures keep data safe."
+level: "deep-dive"
+path: "advanced-operations"
+order: 3
+concepts: ["garbage collection", "mark sweep", "grace period", "object storage"]
+prerequisites: ["Distributed Locking and Consistency in Crab"]
+outcome: "Understand Crab's mark-sweep GC, 24-hour default grace window, and conservative deletion rules."
+diagramType: "GC lifecycle"
+---
+
+## Crab Cleans Up Old Data Automatically — and Safely
+
+Every push you make stores compressed file data in cloud storage. Over time, as you overwrite files and delete branches, some of that data becomes orphaned — nothing references it anymore, but it still costs you money sitting in S3.
+
+Most version control systems solve this with a long-running server that sweeps unused data in the background. Crab doesn't have a server. Each command is a short-lived CLI process that runs and exits.
+
+So how does cleanup work without a daemon? **Crab finds unused data, waits a safety period, then deletes it — like a recycle bin for your cloud bucket.** Items are not deleted the moment you "delete" them. By default, recent objects are protected for 24 hours so in-flight operations have time to publish their metadata.
+
+## TL;DR
+
+- **Recycle-bin model**: unused data is marked, held past the grace period, then permanently deleted
+- **No server needed**: GC runs as a regular CLI command (`crab gc`) — no daemon, no cron job required
+- **Safe by design**: in-flight pushes and clones can never have their data swept out from under them
+- **Worst case is wasted storage**: GC never deletes referenced data, even if interrupted mid-run
+
+---
+
+## How Crab Decides What's Garbage
+
+Think of your repository as a family tree. At the top sit your branches — refs like `main` and `release-1.2`. Each branch points to commits, which point to files, which point to chunks stored inside compressed archives called xorbs (think of a xorb as a small zip file holding many deduplicated chunks).
+
+A xorb is **live** if any branch still needs chunks inside it. GC's only job is to find xorbs nothing depends on anymore — orphans hanging off no branch. Deleted feature branches, force-pushed history, files removed in later commits: all common sources of orphan xorbs that quietly add up over months.
+
+Crab uses a classic two-pass algorithm called **mark-sweep**, the same approach used in language runtimes like Java and Go. The mark phase walks the reference graph from your branches outward, building a set of every xorb still in use. The sweep phase compares that set against what's actually in cloud storage. Anything not in the live set is a candidate for deletion — but only if it's old enough.
+
+<svg viewBox="0 0 760 360" width="100%" role="img" aria-label="Mark-sweep garbage collection with grace period: mark phase walks refs to build a live set, grace period check filters by age, sweep phase deletes only old orphans">
+  <defs>
+    <marker id="arrow-gc-flow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="380" y="32" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Mark, Wait, Sweep"}</text>
+
+  {/* Phase 1: Mark */}
+  <rect x="20" y="60" width="220" height="280" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="130" y="90" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"PHASE 1"}</text>
+  <text x="130" y="112" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Mark"}</text>
+
+  <rect x="40" y="130" width="180" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="130" y="155" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"List all branches"}</text>
+
+  <line x1="130" y1="172" x2="130" y2="190" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  <rect x="40" y="194" width="180" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="130" y="219" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Trace files → chunks"}</text>
+
+  <line x1="130" y1="236" x2="130" y2="254" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  <rect x="40" y="258" width="180" height="40" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="130" y="283" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Build live set"}</text>
+
+  {/* Arrow Phase 1 → Phase 2 */}
+  <line x1="240" y1="200" x2="278" y2="200" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  {/* Phase 2: Grace Period */}
+  <rect x="280" y="60" width="220" height="280" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="390" y="90" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"PHASE 2"}</text>
+  <text x="390" y="112" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Grace Period"}</text>
+
+  <rect x="300" y="130" width="180" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="390" y="153" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Not in live set?"}</text>
+  <text x="390" y="173" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"→ candidate"}</text>
+
+  <line x1="390" y1="192" x2="390" y2="210" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  <rect x="300" y="214" width="180" height="60" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="390" y="237" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Past grace window?"}</text>
+  <text x="390" y="257" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"→ eligible"}</text>
+
+  <rect x="300" y="290" width="180" height="36" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="390" y="313" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Too recent → keep"}</text>
+
+  {/* Arrow Phase 2 → Phase 3 */}
+  <line x1="500" y1="200" x2="538" y2="200" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  {/* Phase 3: Sweep */}
+  <rect x="540" y="60" width="200" height="280" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="640" y="90" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"PHASE 3"}</text>
+  <text x="640" y="112" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Sweep"}</text>
+
+  <rect x="560" y="130" width="160" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="640" y="155" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Delete xorbs"}</text>
+
+  <line x1="640" y1="172" x2="640" y2="190" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  <rect x="560" y="194" width="160" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="640" y="219" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Delete shards"}</text>
+
+  <line x1="640" y1="236" x2="640" y2="254" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-gc-flow)" />
+
+  <rect x="560" y="258" width="160" height="40" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="640" y="283" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Storage reclaimed"}</text>
+</svg>
+
+Imagine cleaning out a self-storage unit. First, you make a list of which boxes are still labeled and needed (mark). Then you check when the unlabeled boxes were last touched. If they are past the configured grace window, they are safe to toss (sweep). Anything recent stays because someone might still be in the middle of labeling it.
+
+---
+
+## Why the Wait Matters
+
+You might wonder: why not delete unused data immediately? The answer is concurrency.
+
+Multiple people and CI systems can work with the same repository simultaneously. Their operations overlap in ways that are hard to predict, especially when uploads take minutes or hours.
+
+Picture this race: you start a push. During that push, Crab discovers that a chunk it needs already lives in xorb X7. It plans to reference X7 in its new metadata. Meanwhile, on another machine, someone else's `crab gc` run sees X7 as unreferenced — your push hasn't finished writing its metadata yet — and deletes it. Your push completes, but now points to data that no longer exists. Hydration fails permanently.
+
+The grace period prevents this race. Every xorb is timestamped at upload time, and objects inside the grace window are retained regardless of whether they appear in the live set yet. The default is 24 hours, and custom non-force grace periods are clamped to a one-hour minimum.
+
+This covers every realistic concurrent operation:
+
+| Operation | Typical Duration | Safe? |
+|-----------|-----------------|-------|
+| Longest push | Minutes | ✓ 24 hours >> minutes |
+| Clone of massive repo | Hours | ✓ Covered by the default window |
+| Suspended laptop push | Longer than expected | ✓ Retained if still inside the configured grace window |
+
+The timestamp comes from S3's `Last-Modified` metadata, set by the storage backend at upload time. Clients can't spoof it.
+
+---
+
+## Running GC When You Need It
+
+You can trigger GC manually or let Crab handle it. The manual approach gives you full control — start with a dry run to see what would be cleaned up, then run it for real:
+
+```bash
+# See what would be deleted (safe preview)
+crab gc --dry-run
+
+# Actually collect garbage
+crab gc
+
+# Force mode bypasses the grace filter after confirmation.
+# Use only when you know no concurrent pushes are running.
+crab gc --force
+```
+
+For predictable cleanup, many teams run `crab gc --dry-run` before a scheduled `crab gc` in CI. The command stays explicit, which keeps deletion timing under your control.
+
+---
+
+## How Two People Don't Collide
+
+When multiple people share a repository, only one GC can run at a time. Crab uses a lock file in cloud storage (`.crab/locks/gc.lock`) with a one-hour expiry. The lock is acquired with a conditional write — create-if-not-exists — so two simultaneous GC attempts can't both succeed. If a process crashes, the lock expires automatically and the next run picks up safely.
+
+The elegant part: GC doesn't need to coordinate with pushes beyond the grace period. New xorbs from in-flight pushes are recent, so a normal GC run keeps them even if their final metadata has not appeared yet. The grace period decouples routine cleanup from push coordination.
+
+---
+
+## What Makes It Safe
+
+Crab's GC is designed so the worst possible outcome is wasted storage — never data loss. That guarantee comes from layering several conservative checks on top of the grace period:
+
+- **Grace period**: recent objects are retained even if they appear unreferenced right now
+- **Double-check**: each xorb targeted for deletion is verified against the live set one final time during the sweep
+- **Conservative on errors**: if listing storage objects fails partway through, GC only deletes what it can definitively prove is unreferenced — partial information means partial cleanup, not risky guesses
+- **Cancellation-safe**: you can Ctrl+C mid-sweep without worry — each deletion is independent and idempotent, so a partial run leaves the repository fully consistent
+- **Resumable**: running GC twice produces the same result, and interrupted runs can be re-run with no special recovery steps
+
+If anything looks off — a network blip, an unexpected response from cloud storage, a missing shard — GC stops. It never tries to "guess" whether something is safe to delete. The trade-off is straightforward: occasionally Crab keeps a bit of garbage longer than strictly necessary, in exchange for the certainty that referenced data never disappears.
+
+After a successful sweep, you get a summary report:
+
+```json
+{
+  "xorbs_deleted": 47,
+  "shards_deleted": 3,
+  "bytes_reclaimed": 3124019200,
+  "dry_run": false
+}
+```
+
+That's roughly 3 GB reclaimed in this run — without a server, without coordination overhead, without risk to anyone's in-flight work.
+
+---
+
+## What This Means for You
+
+GC is the final piece of Crab's storage lifecycle. When you push, data flows in — chunked, deduplicated, packed into xorbs. When data becomes obsolete (deleted branches, overwritten files, squashed history), GC flows it back out. Together these two forces keep your storage costs proportional to what you actually use.
+
+The key insight is that **time solves most of the coordination problem**. Instead of synchronizing GC with every normal operation, Crab waits past the grace window before deleting unreferenced objects. If an operation has not published its metadata by then, conservative checks still make the worst case wasted storage rather than guessed deletion.
+
+You get automatic cost control with zero operational overhead. No servers to maintain, no databases to tune, no coordination services to monitor. Just a CLI command that safely reclaims storage whenever you're ready — exactly like emptying a recycle bin you trust.

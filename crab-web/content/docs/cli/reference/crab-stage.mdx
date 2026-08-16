@@ -1,0 +1,26 @@
+---
+title: "crab stage"
+description: "Create and inspect workflow stages in crab.yaml."
+---
+
+# crab stage
+
+Use DVC-compatible helpers to edit and inspect workflow stages in `crab.yaml`.
+
+## Synopsis
+
+```bash
+crab stage [OPTIONS] <COMMAND>
+```
+
+| Command | Purpose |
+| --- | --- |
+| `crab stage add` | Create or update a workflow stage |
+| `crab stage list` | List stages declared in workflow files |
+
+```bash
+crab stage list
+crab stage add --help
+```
+
+Run [`crab run`](/docs/cli/reference/crab-run) after changing a stage.

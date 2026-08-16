@@ -1,0 +1,155 @@
+---
+title: "Access Management"
+description: "Manage organizations, repositories, member roles, revisions, and lifecycle state through the Crab CLI."
+---
+
+# Access Management
+
+Managed access is organization-scoped and evaluated against the current
+principal, role, repository state, and deny policy on every operation. Commands
+default to the active service profile; add `--service <authority>` to select
+another installed profile.
+
+## Roles
+
+| Role | Effective organization capabilities |
+|------|-------------------------------------|
+| `owner` | All organization actions, including ownership changes |
+| `admin` | Organization, repository, membership, service-account, audit, and job administration except ownership changes |
+| `writer` | Read the organization and repositories, create repositories, and push |
+| `reader` | Discover and read repositories |
+| `billing` | Read organization and usage information, but not repository data |
+
+Repository state and explicit deny policy can further restrict these broad
+capabilities. A repository-specific grant cannot elevate a billing-only member
+into repository access.
+
+## List and inspect organizations
+
+```bash
+crab organization list
+crab organization info acme
+```
+
+Collection commands use opaque cursor pagination. Page size is between 1 and
+100 and defaults to 50:
+
+```bash
+page=$(crab organization list --limit 50 --json)
+printf '%s\n' "$page" | jq '.data.organizations'
+printf '%s\n' "$page" | jq -r '.data.next_cursor // empty'
+```
+
+Pass the returned cursor unchanged to retrieve the next page:
+
+```bash
+crab organization list --cursor "$NEXT_CURSOR" --limit 50 --json
+```
+
+## Use revisions for mutations
+
+Mutable resources expose a numeric `revision`. Rename, role change, archive,
+delete, restore, rotate, and revoke commands require the current revision so a
+stale administrator cannot overwrite a concurrent change.
+
+```bash
+revision=$(crab organization info acme --json | jq -er '.data.revision')
+crab organization rename acme acme-labs --revision "$revision"
+```
+
+If another operation changed the resource first, the service rejects the stale
+revision. Read the resource again, review the new state, and retry only if your
+intended action is still valid.
+
+## Manage repositories
+
+```bash
+crab repo list acme
+crab repo info acme/models
+```
+
+Rename a repository without moving its data or changing its immutable ID:
+
+```bash
+revision=$(crab repo info acme/models --json | jq -er '.data.revision')
+crab repo rename acme/models foundation-models --revision "$revision"
+```
+
+Archive prevents writes while retaining the repository:
+
+```bash
+revision=$(crab repo info acme/foundation-models --json | jq -er '.data.revision')
+crab repo archive acme/foundation-models --revision "$revision"
+```
+
+Deletion is soft and recoverable during the configured retention window:
+
+```bash
+revision=$(crab repo info acme/foundation-models --json | jq -er '.data.revision')
+deleted=$(crab repo delete acme/foundation-models --revision "$revision" --json)
+deleted_revision=$(printf '%s\n' "$deleted" | jq -er '.data.revision')
+```
+
+Restore uses the revision returned by the deletion response:
+
+```bash
+crab repo restore acme/foundation-models --revision "$deleted_revision"
+```
+
+Lifecycle operations never accept a bucket, region, endpoint, or physical
+prefix. Placement remains service-owned across rename, archive, deletion, and
+restore.
+
+## Manage members
+
+Membership commands use the principal's immutable UUID, not email. Email and
+display name are mutable attributes and must not be used as authorization
+identities.
+
+```bash
+crab member list acme
+crab member add acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 --role writer
+```
+
+Obtain the principal ID from your organization's identity onboarding process
+or an existing membership listing. To change a role, read the member revision
+from `--json` output:
+
+```bash
+members=$(crab member list acme --json)
+revision=$(printf '%s\n' "$members" | jq -er \
+  '.data.members[] | select(.principal_id == "018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5") | .revision')
+
+crab member update acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 \
+  --role reader \
+  --revision "$revision"
+```
+
+Removal also requires the current revision:
+
+```bash
+crab member remove acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 \
+  --revision "$revision"
+```
+
+The service protects the last owner transactionally. Only an owner can add,
+downgrade, or remove an owner, and an operation that would leave the
+organization without an owner is rejected.
+
+## Delete an organization
+
+Organization deletion is a privileged soft-delete operation:
+
+```bash
+revision=$(crab organization info acme --json | jq -er '.data.revision')
+crab organization delete acme --revision "$revision"
+```
+
+Review repository retention and recovery requirements before deleting an
+organization. The command does not expose or perform bucket-wide deletion.
+
+## Command reference
+
+- [`crab organization`](/docs/cli/reference/crab-organization)
+- [`crab repo`](/docs/cli/reference/crab-repo)
+- [`crab member`](/docs/cli/reference/crab-member)

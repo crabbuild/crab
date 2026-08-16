@@ -1,0 +1,106 @@
+---
+title: "crab ship"
+description: "One-shot add + commit + push — stage, commit, and upload in a single command."
+---
+
+# crab ship
+
+Ship files to cloud storage in a single command.
+
+## Synopsis
+
+```bash
+crab ship [OPTIONS] --message <MESSAGE> [PATTERNS]...
+```
+
+## Description
+
+`crab ship` combines `crab add`, `git commit`, and `crab push` into a single
+command. It's designed for ML/data workflows where you want files staged,
+committed, and uploaded without running three separate commands.
+
+Under the hood, `crab ship` performs these steps:
+
+1. **Stage** — Runs `crab add` with the given patterns (parallel chunking + dedup)
+2. **Commit** — Creates a git commit with the provided message
+3. **Push** — Runs the native `crab push` pipeline (concurrent xorb uploads, faster than `git push`)
+
+If no tracking patterns exist in `.gitattributes`, `crab ship` auto-detects
+large file extensions and tracks them before staging — the same auto-track
+behavior as `crab add`.
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `[PATTERNS]` | No | Glob patterns to ship; defaults to `.` when omitted |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-m, --message` | (required) | Commit message |
+| `-j, --jobs` | `16` | Maximum concurrent file-processing tasks |
+| `--remote` | `origin` | Git remote to push to |
+| `-b, --branch` | current branch | Branch to push |
+| `--rebase-on-non-fast-forward` | `false` | Integrate the current branch and retry after a non-fast-forward or lock conflict |
+| `--rebase-retry-limit` | `256` | Maximum integration retries when rebasing is enabled |
+| `--no-push` | `false` | Skip the push step (just add + commit) |
+| `--dry-run` | `false` | Show what would be shipped without making changes |
+| `--json` | `false` | Structured JSON output |
+
+## Examples
+
+### Ship model files
+
+```bash
+crab ship '*.safetensors' -m "fine-tuned model v2"
+```
+
+### Ship everything
+
+```bash
+crab ship . -m "weekly checkpoint"
+```
+
+### Ship without pushing (local commit only)
+
+```bash
+crab ship '*.bin' -m "WIP: training in progress" --no-push
+```
+
+### Ship with higher parallelism
+
+```bash
+crab ship -j 16 'data/**' -m "updated training data"
+```
+
+## Performance
+
+`crab ship` uses the native `crab push` pipeline rather than `git push`. This
+means xorb uploads happen concurrently (default 16 parallel uploads) and the
+push bypasses git's serial remote helper protocol. For repositories with many
+large files, this can be significantly faster than the equivalent
+`crab add && git commit && git push` sequence.
+
+## When to Use `crab ship` vs Individual Commands
+
+| Scenario | Recommended |
+|----------|-------------|
+| Quick upload of model/data files | `crab ship` |
+| Selective staging across multiple commits | `crab add` + `git commit` |
+| Need to review changes before committing | `crab add` → `crab status` → `git commit` |
+| CI/CD pipelines with custom logic | Individual commands |
+| First-time setup with many file types | `crab ship . -m "init"` (auto-tracks everything) |
+
+## Error Handling
+
+- If `crab add` fails (no tracked patterns, no matching files), the command stops before committing
+- If there's nothing to commit (files already up to date), the command reports this and exits cleanly
+- If `crab push` fails (network error, auth issue), the local commit is preserved — re-run `crab push` to retry
+
+## Related Commands
+
+- [`crab add`](/docs/cli/reference/crab-add) — stage files without committing
+- [`crab push`](/docs/cli/reference/crab-push) — native concurrent push (standalone)
+- [`crab init`](/docs/cli/reference/crab-init) — initialize a repository

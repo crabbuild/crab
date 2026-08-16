@@ -1,0 +1,17 @@
+{
+  "title": "Authentication & Config",
+  "pages": [
+    "configuration",
+    "static-credentials",
+    "logging-in",
+    "logging-out",
+    "auth-status",
+    "environment-info",
+    "enterprise-auth",
+    "authorization",
+    "self-hosted-auth-server",
+    "aws-credentials",
+    "gcp-credentials",
+    "azure-credentials"
+  ]
+}

@@ -1,0 +1,518 @@
+//! Local Git pack consolidation with complete object-graph verification.
+
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use crate::pack::{PackError, install_pack_file_from_path};
+use crate::pack_locator::{PackLocationIter, PackLocatorError};
+
+/// A downloaded canonical pack selected by a pinned repository manifest.
+#[derive(Debug, Clone)]
+pub struct RepackSource {
+    /// Blake3 content identifier used by the canonical repository inventory.
+    pub canonical_id: String,
+    /// Local path containing the complete pack body.
+    pub path: PathBuf,
+    /// Size committed by the source manifest.
+    pub size: u64,
+    /// Object count committed by the source manifest.
+    pub object_count: u64,
+}
+
+/// A verified replacement pack and its Git indexes.
+#[derive(Debug)]
+pub struct RepackedRepository {
+    _workspace: tempfile::TempDir,
+    pack_path: PathBuf,
+    index_path: PathBuf,
+    reverse_index_path: PathBuf,
+    /// Blake3 content identifier of the replacement pack.
+    pub pack_id: String,
+    /// Raw Blake3 digest used by multipart integrity verification.
+    pub pack_hash: [u8; 32],
+    /// Replacement pack size.
+    pub pack_size: u64,
+    /// Raw Blake3 digest of the Git index.
+    pub index_hash: [u8; 32],
+    /// Git index size.
+    pub index_size: u64,
+    /// Raw Blake3 digest of the reverse index.
+    pub reverse_index_hash: [u8; 32],
+    /// Git reverse-index size.
+    pub reverse_index_size: u64,
+    /// Number of objects in the replacement pack.
+    pub object_count: u64,
+    /// Git-native SHA-1 checksum of the replacement pack.
+    pub git_sha1: String,
+}
+
+impl RepackedRepository {
+    /// Returns the verified replacement pack path.
+    #[must_use]
+    pub fn pack_path(&self) -> &Path {
+        &self.pack_path
+    }
+
+    /// Returns the verified replacement Git index path.
+    #[must_use]
+    pub fn index_path(&self) -> &Path {
+        &self.index_path
+    }
+
+    /// Returns the verified replacement Git reverse-index path.
+    #[must_use]
+    pub fn reverse_index_path(&self) -> &Path {
+        &self.reverse_index_path
+    }
+}
+
+/// Errors raised while consolidating a complete Git object database.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RepackError {
+    /// Filesystem work failed.
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: io::Error,
+    },
+    /// A source pack failed Git pack validation.
+    #[error(transparent)]
+    Pack {
+        #[from]
+        source: PackError,
+    },
+    /// A generated or installed pack index failed locator validation.
+    #[error(transparent)]
+    Locator {
+        #[from]
+        source: PackLocatorError,
+    },
+    /// A source pack no longer matches its manifest commitment.
+    #[error("source pack {pack_id} failed its manifest commitment: {reason}")]
+    SourceIntegrity { pack_id: String, reason: String },
+    /// Repacking an inventory without refs cannot prove repository reachability.
+    #[error("cannot repack a repository without refs")]
+    EmptyRefs,
+    /// A Git subprocess rejected the source or replacement repository.
+    #[error("{operation} failed with {status}")]
+    Git {
+        operation: &'static str,
+        status: std::process::ExitStatus,
+    },
+}
+
+/// Consolidates source packs and proves the replacement resolves the same ref tips.
+///
+/// Every source pack is checked against its manifest size, Blake3 identifier, and
+/// object count. The replacement is accepted only after `git fsck --strict` over
+/// a repository containing only that replacement pack and all pinned ref tips.
+pub fn repack_repository(
+    sources: &[RepackSource],
+    refs: &BTreeSet<String>,
+) -> Result<RepackedRepository, RepackError> {
+    if refs.is_empty() {
+        return Err(RepackError::EmptyRefs);
+    }
+    let workspace =
+        tempfile::tempdir().map_err(|source| io_error("create repack workspace", source))?;
+    let source_git = workspace.path().join("source.git");
+    initialize_bare_repository(&source_git)?;
+    let pack_dir = source_git.join("objects/pack");
+    for source in sources {
+        validate_source(source)?;
+        let installed = install_pack_file_from_path(
+            &pack_dir,
+            &source.path,
+            &source.canonical_id,
+            source.size,
+            false,
+        )?;
+        let locations =
+            PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
+        if locations.object_count() != source.object_count {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: format!(
+                    "index has {} objects but manifest records {}",
+                    locations.object_count(),
+                    source.object_count
+                ),
+            });
+        }
+    }
+    pin_refs_and_fsck(&source_git, refs, "validate source repository")?;
+
+    let output_dir = workspace.path().join("output");
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|source| io_error(format!("create {}", output_dir.display()), source))?;
+    let pack_path = output_dir.join("replacement.pack");
+    let index_path = output_dir.join("replacement.idx");
+    let reverse_index_path = output_dir.join("replacement.rev");
+    build_pack(&source_git, refs, &pack_path)?;
+    run_git(
+        Command::new("git")
+            .arg("index-pack")
+            .arg("--rev-index")
+            .arg("-o")
+            .arg(&index_path)
+            .arg(&pack_path)
+            .stdout(Stdio::null()),
+        "index replacement pack",
+    )?;
+    if !reverse_index_path.is_file() {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: "replacement".to_owned(),
+            reason: "git index-pack produced no reverse index".to_owned(),
+        });
+    }
+    run_git(
+        Command::new("git")
+            .arg("verify-pack")
+            .arg("-v")
+            .arg(&index_path)
+            .stdout(Stdio::null()),
+        "verify replacement pack",
+    )?;
+    validate_replacement(
+        workspace.path(),
+        refs,
+        &pack_path,
+        &index_path,
+        &reverse_index_path,
+    )?;
+
+    let (pack_hash, pack_size) = hash_file(&pack_path)?;
+    let (index_hash, index_size) = hash_file(&index_path)?;
+    let (reverse_index_hash, reverse_index_size) = hash_file(&reverse_index_path)?;
+    let locations = PackLocationIter::open(&index_path, &reverse_index_path, pack_size)?;
+    let object_count = locations.object_count();
+    let git_sha1 = locations.pack_checksum().to_string();
+    let pack_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
+    Ok(RepackedRepository {
+        _workspace: workspace,
+        pack_path,
+        index_path,
+        reverse_index_path,
+        pack_id,
+        pack_hash,
+        pack_size,
+        index_hash,
+        index_size,
+        reverse_index_hash,
+        reverse_index_size,
+        object_count,
+        git_sha1,
+    })
+}
+
+fn validate_source(source: &RepackSource) -> Result<(), RepackError> {
+    let (hash, size) = hash_file(&source.path)?;
+    if size != source.size {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: source.canonical_id.clone(),
+            reason: format!(
+                "download has {size} bytes but manifest records {}",
+                source.size
+            ),
+        });
+    }
+    let actual = blake3::Hash::from_bytes(hash).to_hex().to_string();
+    if actual != source.canonical_id {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: source.canonical_id.clone(),
+            reason: format!("Blake3 identifier is {actual}"),
+        });
+    }
+    Ok(())
+}
+
+fn build_pack(
+    source_git: &Path,
+    refs: &BTreeSet<String>,
+    pack_path: &Path,
+) -> Result<(), RepackError> {
+    let stdout = File::create(pack_path)
+        .map_err(|source| io_error(format!("create {}", pack_path.display()), source))?;
+    let mut child = Command::new("git")
+        .arg(format!("--git-dir={}", source_git.display()))
+        .arg("pack-objects")
+        .arg("--stdout")
+        .arg("--revs")
+        .arg("--delta-base-offset")
+        .arg("--window-memory=256m")
+        .arg("--depth=64")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(stdout))
+        .spawn()
+        .map_err(|source| io_error("spawn git pack-objects", source))?;
+    let stdin = child.stdin.as_mut().ok_or_else(|| {
+        io_error(
+            "open git pack-objects stdin",
+            io::Error::new(io::ErrorKind::BrokenPipe, "stdin unavailable"),
+        )
+    })?;
+    for oid in refs {
+        writeln!(stdin, "{oid}")
+            .map_err(|source| io_error("write git pack-objects refs", source))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|source| io_error("wait for git pack-objects", source))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(RepackError::Git {
+            operation: "build replacement pack",
+            status,
+        })
+    }
+}
+
+fn validate_replacement(
+    workspace: &Path,
+    refs: &BTreeSet<String>,
+    pack_path: &Path,
+    index_path: &Path,
+    reverse_index_path: &Path,
+) -> Result<(), RepackError> {
+    let repository = workspace.join("validation.git");
+    initialize_bare_repository(&repository)?;
+    let pack_dir = repository.join("objects/pack");
+    for (source, target) in [
+        (pack_path, pack_dir.join("pack-replacement.pack")),
+        (index_path, pack_dir.join("pack-replacement.idx")),
+        (reverse_index_path, pack_dir.join("pack-replacement.rev")),
+    ] {
+        std::fs::copy(source, &target)
+            .map_err(|error| io_error(format!("copy {}", source.display()), error))?;
+    }
+    pin_refs_and_fsck(&repository, refs, "validate replacement repository")
+}
+
+fn pin_refs_and_fsck(
+    repository: &Path,
+    refs: &BTreeSet<String>,
+    operation: &'static str,
+) -> Result<(), RepackError> {
+    for (index, oid) in refs.iter().enumerate() {
+        let name = format!("refs/heads/crab-repack-{index}");
+        run_git(
+            Command::new("git")
+                .arg(format!("--git-dir={}", repository.display()))
+                .arg("update-ref")
+                .arg(&name)
+                .arg(oid),
+            operation,
+        )?;
+        if index == 0 {
+            run_git(
+                Command::new("git")
+                    .arg(format!("--git-dir={}", repository.display()))
+                    .arg("symbolic-ref")
+                    .arg("HEAD")
+                    .arg(&name),
+                operation,
+            )?;
+        }
+    }
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", repository.display()))
+            .arg("fsck")
+            .arg("--strict")
+            .arg("--full")
+            .arg("--no-reflogs"),
+        operation,
+    )
+}
+
+fn initialize_bare_repository(path: &Path) -> Result<(), RepackError> {
+    run_git(
+        Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg("--quiet")
+            .arg(path),
+        "initialize temporary bare repository",
+    )
+}
+
+fn run_git(command: &mut Command, operation: &'static str) -> Result<(), RepackError> {
+    let status = command
+        .status()
+        .map_err(|source| io_error(format!("run {operation}"), source))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(RepackError::Git { operation, status })
+    }
+}
+
+fn hash_file(path: &Path) -> Result<([u8; 32], u64), RepackError> {
+    let mut file =
+        File::open(path).map_err(|source| io_error(format!("open {}", path.display()), source))?;
+    let size = file
+        .metadata()
+        .map_err(|source| io_error(format!("stat {}", path.display()), source))?
+        .len();
+    let mut hasher = blake3::Hasher::new();
+    io::copy(&mut file, &mut hasher)
+        .map_err(|source| io_error(format!("hash {}", path.display()), source))?;
+    Ok((*hasher.finalize().as_bytes(), size))
+}
+
+fn io_error(context: impl Into<String>, source: io::Error) -> RepackError {
+    RepackError::Io {
+        context: context.into(),
+        source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Output;
+
+    use super::*;
+
+    #[test]
+    fn replacement_pack_preserves_complete_ref_object_graph() -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let repository = root.path().join("repository");
+        run_git(
+            Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .arg(&repository),
+            "initialize test repository",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "config",
+                "user.name",
+                "Crab Test",
+            ]),
+            "configure test name",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "config",
+                "user.email",
+                "crab@example.invalid",
+            ]),
+            "configure test email",
+        )?;
+        std::fs::write(repository.join("first.txt"), b"first contents\n")
+            .map_err(|source| io_error("write first file", source))?;
+        commit_all(&repository, "first")?;
+        let first = snapshot_pack(&repository, root.path(), "first")?;
+        std::fs::write(repository.join("second.txt"), b"second contents\n")
+            .map_err(|source| io_error("write second file", source))?;
+        commit_all(&repository, "second")?;
+        let second = snapshot_pack(&repository, root.path(), "second")?;
+        let tip = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve test tip",
+        )?;
+        let refs = BTreeSet::from([tip]);
+        let sources = [source_descriptor(first)?, source_descriptor(second)?];
+
+        let replacement = repack_repository(&sources, &refs)?;
+
+        assert!(replacement.pack_size > 0);
+        assert!(replacement.object_count > 0);
+        assert_eq!(replacement.pack_id.len(), 64);
+        assert!(replacement.pack_path().is_file());
+        assert!(replacement.index_path().is_file());
+        assert!(replacement.reverse_index_path().is_file());
+        Ok(())
+    }
+
+    fn commit_all(repository: &Path, message: &str) -> Result<(), RepackError> {
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(["add", "."]),
+            "stage test commit",
+        )?;
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(["commit", "--quiet", "-m", message]),
+            "create test commit",
+        )
+    }
+
+    fn snapshot_pack(
+        repository: &Path,
+        destination: &Path,
+        name: &str,
+    ) -> Result<PathBuf, RepackError> {
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(["gc", "--quiet"]),
+            "pack test repository",
+        )?;
+        let source = std::fs::read_dir(repository.join(".git/objects/pack"))
+            .map_err(|error| io_error("read test pack directory", error))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .ok_or_else(|| {
+                io_error(
+                    "find test pack",
+                    io::Error::new(io::ErrorKind::NotFound, "no pack generated"),
+                )
+            })?;
+        let target = destination.join(format!("{name}.pack"));
+        std::fs::copy(source, &target).map_err(|error| io_error("copy test pack", error))?;
+        Ok(target)
+    }
+
+    fn source_descriptor(path: PathBuf) -> Result<RepackSource, RepackError> {
+        let (hash, size) = hash_file(&path)?;
+        let installed =
+            tempfile::tempdir().map_err(|error| io_error("create index root", error))?;
+        let canonical_id = blake3::Hash::from_bytes(hash).to_hex().to_string();
+        let pack =
+            install_pack_file_from_path(installed.path(), &path, &canonical_id, size, false)?;
+        let locations = PackLocationIter::open(&pack.idx_path, &pack.rev_path, size)?;
+        Ok(RepackSource {
+            canonical_id,
+            path,
+            size,
+            object_count: locations.object_count(),
+        })
+    }
+
+    fn git_output(command: &mut Command, operation: &'static str) -> Result<String, RepackError> {
+        let Output { status, stdout, .. } = command
+            .output()
+            .map_err(|source| io_error(format!("run {operation}"), source))?;
+        if !status.success() {
+            return Err(RepackError::Git { operation, status });
+        }
+        String::from_utf8(stdout)
+            .map(|value| value.trim().to_owned())
+            .map_err(|error| {
+                io_error(
+                    format!("decode {operation}"),
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })
+    }
+}

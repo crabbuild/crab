@@ -1,0 +1,47 @@
+---
+title: "crab export"
+description: "Export a Crab snapshot as materialized files into raw object storage."
+---
+
+# crab export
+
+Export one Crab snapshot as ordinary files into raw object storage. This is the
+inverse of [`crab import`](/docs/cli/reference/crab-import) and does not create
+Crab metadata in the target.
+
+## Synopsis
+
+```bash
+crab export [OPTIONS] --to <URL> [REPO_OR_PATH]...
+```
+
+Use a repository followed by optional exact paths or trailing-slash subtrees,
+or provide the repository with `--from` and use positional values only as path
+selectors.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--from <REPO>` | Source repository when positional values are path selectors |
+| `--to <URL>` | Required raw target: `s3://`, `gs://`, `az://`, `azure://`, or `file://` |
+| `--revision <REVISION>` | Branch, tag, ref, or full commit SHA |
+| `--include <GLOB>` | Include a glob; repeat as needed |
+| `--exclude <GLOB>` | Exclude a glob; repeat as needed |
+| `--cache-dir <DIR>` | Override the Crab cache root |
+| `-j, --jobs <N>` | File-level export concurrency |
+| `--dry-run` | Plan without writing target objects |
+| `--force` | Overwrite existing target objects |
+| `--quiet` | Suppress progress and summary while printing paths |
+| `--json` / `--jsonl` | Emit structured output |
+
+## Examples
+
+```bash
+crab export crab://bucket/models --to s3://raw-bucket/models --revision main
+crab export --from crab://bucket/models --to file:///tmp/models models/
+crab export crab://bucket/models --to gs://archive/models --include '*.json' --dry-run
+```
+
+Review the target and use `--force` only when overwriting existing objects is
+intentional.

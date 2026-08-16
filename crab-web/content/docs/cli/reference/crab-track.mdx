@@ -1,0 +1,73 @@
+---
+title: "crab track"
+description: "Register file patterns for Crab's content-addressed storage and filter driver."
+---
+
+# crab track
+
+Register file patterns for Crab tracking.
+
+## Synopsis
+
+```
+crab track [OPTIONS] [<GLOB>]
+crab untrack <GLOB>
+```
+
+## Description
+
+`crab track` manages which files are processed by Crab's filter driver. When
+you track a glob pattern, Crab adds a line to `.gitattributes` that routes
+matching files through the clean/smudge filter and diff driver.
+
+When invoked without arguments, lists all currently tracked patterns.
+
+`crab untrack` removes a pattern from `.gitattributes`.
+
+For conceptual background, see [Tracking Files](/docs/cli/getting-started/tracking-files).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `glob` | No | Glob pattern to track (e.g. `*.bin`, `data/**`). Omit to list. |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--list` | `false` | List currently tracked patterns |
+| `--json` | `false` | Emit structured JSON output (list mode only) |
+
+## Examples
+
+### Track file types
+
+```bash
+crab track '*.safetensors'
+crab track '*.bin'
+```
+
+### Track a directory
+
+```bash
+crab track 'data/models/**'
+```
+
+### List tracked patterns
+
+```bash
+crab track
+```
+
+### Untrack a pattern
+
+```bash
+crab untrack '*.onnx'
+```
+
+## Related Commands
+
+- [`crab add`](/docs/cli/reference/crab-add) — stage tracked files.
+- [`crab init`](/docs/cli/reference/crab-init) — initialize repository.
+- [`crab status`](/docs/cli/reference/crab-status) — see tracked file state.

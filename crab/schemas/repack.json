@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Terminal result payload for structured output.",
+  "properties": {
+    "bytes_after": {
+      "description": "Total bytes across all packs after repack.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "bytes_before": {
+      "description": "Total bytes across all packs before repack.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "elapsed_ms": {
+      "description": "Wall-clock duration in milliseconds.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "packs_after": {
+      "description": "Number of packs after repack.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "packs_before": {
+      "description": "Number of packs before repack.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "bytes_after",
+    "bytes_before",
+    "elapsed_ms",
+    "packs_after",
+    "packs_before"
+  ],
+  "title": "RepackSummary",
+  "type": "object"
+}

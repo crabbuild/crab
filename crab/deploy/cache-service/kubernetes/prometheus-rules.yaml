@@ -1,0 +1,98 @@
+# Prometheus Operator rules for crab-cache-server.
+#
+# Requires the PrometheusRule CRD from prometheus-operator/kube-prometheus.
+# Apply alongside the cache service manifests when your Prometheus instance
+# selects rules with app=crab-cache-server.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: crab-cache-server
+  labels:
+    app: crab-cache-server
+spec:
+  groups:
+    - name: crab-cache.rules
+      rules:
+        - alert: CrabCacheRuntimeIntegrityRepair
+          expr: sum(increase(cache_integrity_repair_total{phase="runtime"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crab cache repaired runtime metadata drift"
+            description: "The cache server repaired missing files, invalid cached objects, or missing metadata while serving traffic."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-runtime-integrity-repair"
+
+        - alert: CrabCacheStartupIntegrityRepair
+          expr: sum(increase(cache_integrity_repair_total{phase="startup"}[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crab cache repaired metadata at startup"
+            description: "The cache server found and repaired stale metadata, size drift, or unindexed cache files while opening the cache store."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-startup-integrity-repair"
+
+        - alert: CrabCacheOriginFallbackHigh
+          expr: |
+            (
+              sum(rate(origin_fetch_total[15m]))
+              /
+              clamp_min(sum(rate(origin_avoided_reads_total[15m])) + sum(rate(origin_fetch_total[15m])), 1)
+            ) > 0.20
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crab cache origin fallback rate is high"
+            description: "More than 20% of immutable cache reads are falling through to origin after the cache should be warm."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-origin-fallback-high"
+
+        - alert: CrabCacheHitRateLow
+          expr: |
+            (
+              sum(rate(cache_hit_total[30m]))
+              /
+              clamp_min(sum(rate(cache_hit_total[30m])) + sum(rate(cache_miss_total[30m])), 1)
+            ) < 0.80
+            and
+            (sum(rate(cache_hit_total[30m])) + sum(rate(cache_miss_total[30m]))) > 0.1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crab cache hit rate is low"
+            description: "The cache hit rate is below 80% while immutable cache read traffic is active."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-hit-rate-low"
+
+        - alert: CrabCacheEvictionPressure
+          expr: |
+            sum(rate(cache_eviction_total[30m])) > 0
+            and
+            max(cache_bytes_stored / clamp_min(cache_max_bytes, 1)) > 0.85
+            and
+            (
+              sum(rate(cache_hit_total[30m]))
+              /
+              clamp_min(sum(rate(cache_hit_total[30m])) + sum(rate(cache_miss_total[30m])), 1)
+            ) < 0.90
+            and
+            (sum(rate(cache_hit_total[30m])) + sum(rate(cache_miss_total[30m]))) > 0.1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crab cache is evicting under sustained pressure"
+            description: "The cache is near its configured byte budget and evicting while hit rate remains low, which usually means the working set is larger than the cache or route locality is unstable."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-eviction-pressure"
+
+        - alert: CrabCacheMutableProxyActive
+          expr: sum(rate(mutable_path_proxy_read_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: info
+          annotations:
+            summary: "Crab cache is proxying mutable paths"
+            description: "Mutable reads are passing through the cache service. Enterprise deployments should usually run strict mutable-path mode."
+            runbook_url: "https://crab.build/docs/cli/cache-service/runbooks#crab-cache-mutable-proxy-active"

@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditExportPayload",
+  "type": "object",
+  "required": [
+    "exported",
+    "output_path",
+    "source_path"
+  ],
+  "properties": {
+    "exported": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "source_path": {
+      "type": "string"
+    }
+  }
+}

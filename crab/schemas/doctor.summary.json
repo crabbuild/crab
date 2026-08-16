@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DoctorSummary",
+  "description": "Summary counts for the doctor report.",
+  "type": "object",
+  "required": [
+    "fail",
+    "ok",
+    "warn"
+  ],
+  "properties": {
+    "fail": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "ok": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "warn": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

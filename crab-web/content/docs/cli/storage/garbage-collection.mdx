@@ -1,0 +1,113 @@
+---
+title: "Garbage Collection"
+description: "How Crab identifies and removes unreachable objects from cloud storage to reclaim space and reduce costs."
+---
+
+# Garbage Collection
+
+Over time, your cloud bucket accumulates objects that are no longer referenced by any branch or tag — leftover chunks from deleted files, abandoned experiments, or force-pushed branches. Garbage collection identifies these unreachable objects and removes them, reclaiming storage space and reducing cloud costs.
+
+## What Becomes Garbage?
+
+Objects become unreachable when the refs that pointed to them are gone:
+
+```mermaid
+flowchart TD
+    subgraph Before["Before: All Referenced"]
+        A["main"] --> B["commit abc"]
+        B --> C["pointer → xorb-1"]
+        B --> D["pointer → xorb-2"]
+        E["feature"] --> F["commit def"]
+        F --> G["pointer → xorb-3"]
+    end
+    subgraph After["After: feature branch deleted"]
+        H["main"] --> I["commit abc"]
+        I --> J["pointer → xorb-1"]
+        I --> K["pointer → xorb-2"]
+        L["xorb-3"] -.->|unreachable| M["🗑️ Garbage"]
+    end
+```
+
+Common sources of garbage:
+- **Deleted branches** — Experiment branches that were cleaned up
+- **Force pushes** — Rewritten history leaves old objects behind
+- **Deleted files** — Files removed from tracking in newer commits
+- **Failed pushes** — Partially uploaded objects from interrupted operations
+
+## The Grace Period
+
+Garbage collection uses a **grace period** (default: 24 hours) to avoid deleting objects from in-progress operations. If someone is mid-push when you run GC, their newly uploaded xorbs might appear unreachable (not yet linked to a ref). The grace period protects them.
+
+```mermaid
+flowchart LR
+    A["Object created"] --> B["Grace period\n(24 hours)"]
+    B --> C{Still unreachable?}
+    C -->|Yes| D["Eligible for deletion"]
+    C -->|No| E["Keep (now referenced)"]
+```
+
+## Running Garbage Collection
+
+### Preview what would be collected
+
+```bash
+crab gc --dry-run
+```
+
+```
+GC dry run:
+  Unreachable xorbs:       42 (1.2 GB)
+  Unreachable shards:      8 (45 MB)
+  Unreachable file indices: 15 (2.1 MB)
+  Total reclaimable:       1.25 GB
+  (no objects deleted — dry run)
+```
+
+### Run GC
+
+```bash
+crab gc
+```
+
+### Force-collect recent objects
+
+```bash
+crab gc --force
+```
+
+This reduces the grace period to 1 hour (the minimum). Use only when you're certain no concurrent operations are running.
+
+## Safety Guarantees
+
+Crab's GC is designed to be safe by default:
+
+1. **Never deletes referenced objects** — Only objects unreachable from any ref are candidates.
+2. **Grace period** — Recently created objects are protected even if currently unreachable.
+3. **Minimum grace** — Even with `--force`, the minimum grace period is 1 hour.
+4. **Confirmation required** — `--force` prompts for confirmation unless `--yes` is also passed.
+5. **Atomic ref reads** — The reachability scan uses a consistent snapshot of refs.
+
+## When to Run GC
+
+| Scenario | Frequency |
+|----------|-----------|
+| Active development (many branches) | Weekly |
+| After major cleanup (deleted old branches) | Once after cleanup |
+| Cost optimization | Monthly |
+| After force-push rewrite | Once after rewrite |
+
+GC is not something you need to run constantly. Cloud storage is cheap, and the grace period means you can't accidentally delete in-use data. Run it when you want to reclaim space or reduce costs.
+
+## GC vs. Prune vs. Cache Clean
+
+| Command | What it removes | Where |
+|---------|----------------|-------|
+| `crab gc` | Unreachable objects | Remote (cloud storage) |
+| `crab prune` | Oldest cached chunks, xorbs, and shards beyond budget | Local cache |
+| `crab cache clean` | All cached objects | Local cache |
+
+These are complementary: `crab gc` cleans the remote, `crab prune` cleans the local cache.
+
+## CLI Reference
+
+For complete command syntax, all options, and JSON output format, see the [crab gc reference](/docs/cli/reference/crab-gc).

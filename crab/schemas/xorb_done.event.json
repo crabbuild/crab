@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "XorbDonePayload",
+  "description": "Completion event for a single xorb upload or download.",
+  "type": "object",
+  "required": [
+    "bytes",
+    "compressed_bytes",
+    "hash",
+    "status"
+  ],
+  "properties": {
+    "bytes": {
+      "description": "Uncompressed size in bytes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "compressed_bytes": {
+      "description": "Compressed (on-wire) size in bytes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "hash": {
+      "description": "Hex-encoded content hash of the xorb.",
+      "type": "string"
+    },
+    "status": {
+      "description": "Outcome: `\"ok\"`, `\"failed\"`, or `\"skipped\"`.",
+      "type": "string"
+    }
+  }
+}

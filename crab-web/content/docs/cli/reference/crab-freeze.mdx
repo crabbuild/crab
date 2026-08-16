@@ -1,0 +1,24 @@
+---
+title: "crab freeze"
+description: "Freeze or unfreeze workflow stages for cached execution."
+---
+
+# crab freeze and unfreeze
+
+Freeze workflow stages so `crab run` skips them until they are explicitly
+unfrozen.
+
+## Synopsis
+
+```bash
+crab freeze [OPTIONS] <TARGET>...
+crab unfreeze [OPTIONS] <TARGET>...
+```
+
+`<TARGET>` values are stage targets from `crab.yaml`.
+
+```bash
+crab freeze prepare-data train
+crab unfreeze train
+crab freeze --json prepare-data
+```

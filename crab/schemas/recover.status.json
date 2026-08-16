@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PlanApplyResult",
+  "type": "object",
+  "required": [
+    "command",
+    "idempotent_apply",
+    "message",
+    "mutates",
+    "operation",
+    "status"
+  ],
+  "properties": {
+    "command": {
+      "type": "string"
+    },
+    "idempotent_apply": {
+      "type": "boolean"
+    },
+    "message": {
+      "type": "string"
+    },
+    "mutates": {
+      "type": "boolean"
+    },
+    "operation": {
+      "$ref": "#/definitions/PlanApplyOperation"
+    },
+    "status": {
+      "$ref": "#/definitions/PlanApplyStatus"
+    }
+  },
+  "definitions": {
+    "PlanApplyOperation": {
+      "type": "string",
+      "enum": [
+        "preview",
+        "apply",
+        "inspect"
+      ]
+    },
+    "PlanApplyStatus": {
+      "type": "string",
+      "enum": [
+        "not_implemented"
+      ]
+    }
+  }
+}

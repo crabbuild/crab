@@ -1,0 +1,73 @@
+---
+title: "How It Works"
+description: "A user-facing overview of cache-service request flow and data safety."
+---
+
+# How It Works
+
+The cache service sits between Crab clients and the object store. It does not own repository state and does not replace the object store. It caches immutable data and answers dedup queries.
+
+## Read Flow
+
+For cacheable data, Crab reads in this order:
+
+1. Local machine cache.
+2. Shared cache service.
+3. Origin object store.
+
+If the shared cache is unavailable, Crab falls back to origin access.
+
+## Push Flow
+
+Crab uploads to the origin object store first. After origin upload succeeds, the client can warm the cache service with the uploaded data.
+
+Push warming is best effort. A cache warming failure logs a warning but does not fail the push.
+
+Before uploading new chunks, Crab can also ask the cache service which chunks are already known. Known chunks can be reused instead of uploaded again.
+
+## Cached Data
+
+| Object key pattern | Cached |
+|--------------------|--------|
+| `.crab/xorbs/{hash}` | Yes |
+| `.crab/shards/{hash}` | Yes |
+| `{repo}/packs/pack-{id}.pack` | Yes |
+| `{repo}/packs/pack-{id}.idx` | Yes |
+| `{repo}/file_index_db/compacted/*.sst` | Yes |
+| `{repo}/file_index_db/manifest/*.manifest` | Yes |
+| `{repo}/file_index_db/wal/*.sst` | Yes |
+| `{repo}/file_index_db/compactions/*.compactions` | Yes |
+| `.crab/chunk_index_db/compacted/*.sst` | Yes |
+| `.crab/chunk_index_db/manifest/*.manifest` | Yes |
+| `.crab/chunk_index_db/wal/*.sst` | Yes |
+| `.crab/chunk_index_db/compactions/*.compactions` | Yes |
+| `{repo}/refs/heads/*` | No |
+| `{repo}/HEAD` | No |
+| `{repo}/locks/*` | No |
+| `{repo}/packs/pack-{id}.meta` | No |
+| `{repo}/manifests/*` | No |
+| `{repo}/pack-list` | No |
+| `{repo}/shard-list` | No |
+| `{repo}/file_index_db/manifest/current` | No |
+| `.crab/chunk_index_db/manifest/current` | No |
+
+Mutable repository state is never cached. This prevents stale refs and stale metadata from breaking clone, fetch, and push behavior.
+Only versioned SlateDB metadata objects are cached. Discovery pointers such as `manifest/current` stay mutable, and file-index lookups go through Crab's metadata databases rather than standalone file-index object routes.
+The same taxonomy is exposed from `/v1/capabilities.routes` so `crab doctor`
+and onboarding probes can verify that a client and cache server agree before
+traffic starts.
+
+## Availability Model
+
+Treat the cache as an acceleration layer:
+
+- Cache failure should cause slower reads, not broken reads.
+- Origin access must remain configured for Crab clients.
+- Readiness checks should remove a cache instance from rotation when origin is unreachable.
+- Liveness checks should restart only a stuck cache process.
+
+## Isolation Model
+
+Use one cache service per trust domain. If teams, tenants, or environments must not share dedup visibility, run separate cache services.
+
+Authorization policies are useful for operational access control. They are not a substitute for separate cache instances in regulated multi-tenant deployments.

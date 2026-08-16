@@ -1,0 +1,16 @@
+{
+  "title": "Cache Service",
+  "pages": [
+    "index",
+    "quickstart",
+    "architecture",
+    "deployment",
+    "client-configuration",
+    "server-configuration",
+    "authentication",
+    "monitoring",
+    "runbooks",
+    "operations",
+    "troubleshooting"
+  ]
+}

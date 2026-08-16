@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 560" width="620" height="560">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="cmdGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="processGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="resultGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="errorGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444"/>
+      <stop offset="100%" stop-color="#DC2626"/>
+    </linearGradient>
+    <linearGradient id="decisionGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#CBD5E1"/>
+      <stop offset="100%" stop-color="#94A3B8"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="620" height="560" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+  </g>
+
+  <g id="nodes">
+    <!-- crab hydrate -->
+    <rect x="220" y="30" width="180" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <!-- HEAD request -->
+    <rect x="200" y="120" width="220" height="50" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+    <!-- Storage class? diamond -->
+    <polygon points="310,210 410,255 310,300 210,255" fill="url(#decisionGrad)" stroke="#64748B" stroke-width="1.5"/>
+    <!-- Read immediately (Warm) -->
+    <rect x="60" y="330" width="180" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <!-- auto_restore? diamond (Archive) -->
+    <polygon points="460,330 560,375 460,420 360,375" fill="url(#decisionGrad)" stroke="#64748B" stroke-width="1.5"/>
+    <!-- Issue restore request (Yes) -->
+    <rect x="360" y="450" width="200" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <!-- Error (No) -->
+    <rect x="100" y="450" width="220" height="50" rx="8" fill="url(#errorGrad)" stroke="#DC2626" stroke-width="1.5"/>
+    <!-- Poll until ready -->
+    <rect x="360" y="530" width="200" height="50" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <text x="310" y="60" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab hydrate</text>
+    <text x="310" y="150" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">HEAD request for xorb</text>
+    <text x="310" y="252" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#1E293B">Storage class?</text>
+
+    <!-- Branch labels -->
+    <text x="155" y="310" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">Warm</text>
+    <text x="430" y="310" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#64748B">Archive</text>
+
+    <text x="150" y="360" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">Read immediately</text>
+
+    <text x="460" y="372" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#1E293B">auto_restore?</text>
+
+    <!-- auto_restore branches -->
+    <text x="500" y="430" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">Yes</text>
+    <text x="330" y="430" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#DC2626">No</text>
+
+    <text x="460" y="480" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Issue restore request</text>
+    <text x="210" y="480" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">ArchiveRestoreRequired error</text>
+    <text x="460" y="560" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Poll until ready</text>
+  </g>
+
+  <g id="connections">
+    <!-- hydrate → HEAD -->
+    <line x1="310" y1="80" x2="310" y2="120" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- HEAD → Storage class? -->
+    <line x1="310" y1="170" x2="310" y2="210" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- Storage class → Read (Warm, left) -->
+    <path d="M 210 255 L 150 255 L 150 330" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- Storage class → auto_restore? (Archive, right) -->
+    <path d="M 410 255 L 460 255 L 460 330" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- auto_restore → Restore (Yes, down) -->
+    <line x1="460" y1="420" x2="460" y2="450" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- auto_restore → Error (No, left) -->
+    <path d="M 360 375 L 210 375 L 210 450" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- Restore → Poll -->
+    <line x1="460" y1="500" x2="460" y2="530" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <!-- Poll → Read -->
+    <path d="M 360 555 L 150 555 L 150 380" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

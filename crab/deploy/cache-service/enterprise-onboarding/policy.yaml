@@ -1,0 +1,10 @@
+# Minimal PSK policy for one enterprise cache-service instance.
+#
+# `psk-client` is the principal used by auth.mechanism = "psk". Keep `.crab`
+# for shared immutable objects and replace `org/example/*` with the repository
+# prefixes served by this cache instance.
+
+rules:
+  - principal: "psk-client"
+    repos: [".crab", "org/example/*"]
+    actions: ["read", "write", "dedup", "admin"]

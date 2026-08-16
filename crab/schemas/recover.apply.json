@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "RecoverApplyItem": {
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "remote_repaired": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/definitions/RecoverApplyState"
+        }
+      },
+      "required": [
+        "path",
+        "state"
+      ],
+      "type": "object"
+    },
+    "RecoverApplyState": {
+      "enum": [
+        "restored",
+        "already_present",
+        "failed",
+        "skipped",
+        "inventory_only",
+        "metadata_repaired",
+        "shard_repaired",
+        "xorb_repaired",
+        "pack_repaired"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "already_present": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "failed": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "inventory_only": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/definitions/RecoverApplyItem"
+      },
+      "type": "array"
+    },
+    "metadata_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "pack_bytes_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "packs_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "remote_bytes_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "remote_refspecs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "remote_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "restore_root": {
+      "type": "string"
+    },
+    "restored": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "shard_bytes_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "shards_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "xorb_bytes_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "xorbs_repaired": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "already_present",
+    "failed",
+    "inventory_only",
+    "items",
+    "metadata_repaired",
+    "pack_bytes_repaired",
+    "packs_repaired",
+    "plan_id",
+    "remote_bytes_repaired",
+    "remote_refspecs",
+    "remote_repaired",
+    "restore_root",
+    "restored",
+    "shard_bytes_repaired",
+    "shards_repaired",
+    "xorb_bytes_repaired",
+    "xorbs_repaired"
+  ],
+  "title": "RecoverApplyPayload",
+  "type": "object"
+}

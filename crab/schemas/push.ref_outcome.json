@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PushRefOutcome",
+  "description": "Serializable per-ref outcome for structured output.",
+  "type": "object",
+  "required": [
+    "dst",
+    "src",
+    "status"
+  ],
+  "properties": {
+    "dst": {
+      "description": "Destination refspec.",
+      "type": "string"
+    },
+    "error": {
+      "description": "Error message when status is `\"error\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retry_after_secs": {
+      "description": "Suggested delay before retrying, in seconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "retryable": {
+      "description": "Whether retrying can reasonably succeed without user edits.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "src": {
+      "description": "Source refspec (e.g. `refs/heads/main`).",
+      "type": "string"
+    },
+    "status": {
+      "description": "`\"ok\"` or `\"error\"`.",
+      "type": "string"
+    }
+  }
+}

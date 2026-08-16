@@ -1,0 +1,35 @@
+[package]
+name = "crab-read"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Read and hydration orchestration for Crab repositories."
+
+[lib]
+name = "crab_read"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+crab-cache = { workspace = true, features = ["local-cache"] }
+crab-cache-store = { workspace = true }
+crab-diff = { workspace = true }
+crab-metadata = { workspace = true, features = ["storage", "file-index-reader"] }
+crab-storage = { workspace = true }
+crab-types = { workspace = true }
+crab-xet = { workspace = true }
+globset = { workspace = true }
+object_store = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+xet-client = { workspace = true }
+xet-data = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

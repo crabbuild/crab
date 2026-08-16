@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ErrorEventEnvelope",
+  "description": "Terminal `\"result\"` event carrying a structured error instead of a success payload. Used when a streaming command fails (e.g. cancelled).",
+  "type": "object",
+  "required": [
+    "error",
+    "schema",
+    "timestamp",
+    "type",
+    "version"
+  ],
+  "properties": {
+    "error": {
+      "$ref": "#/definitions/ErrorInfo"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ErrorCategory": {
+      "description": "Broad classification bucket for Crab errors.\n\nSerializes to lowercase (`\"transient\"`, `\"conflict\"`, and so on) for structured machine-readable error envelopes.",
+      "type": "string",
+      "enum": [
+        "transient",
+        "conflict",
+        "integrity",
+        "permanent",
+        "config",
+        "transport",
+        "staging",
+        "lfs",
+        "internal",
+        "cancelled"
+      ]
+    },
+    "ErrorInfo": {
+      "description": "Structured error representation for the JSON error envelope.\n\nPopulated from a `&CrabError` via the `From` impl. Contains the stable error code, classification, human message, retry hint, variant-specific details, and the `std::error::Error::source()` chain.",
+      "type": "object",
+      "required": [
+        "category",
+        "code",
+        "details",
+        "message",
+        "retryable",
+        "source_chain"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/definitions/ErrorCategory"
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "source_chain": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ErrorSource"
+          }
+        }
+      }
+    },
+    "ErrorSource": {
+      "description": "One link in the `std::error::Error::source()` chain.",
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

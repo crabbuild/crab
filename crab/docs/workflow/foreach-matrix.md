@@ -1,0 +1,386 @@
+# foreach / matrix Reference
+
+Stage expansion lets you define a stage template once and expand it into
+multiple concrete stages — one per item (`foreach`) or one per
+combination (`matrix`). Expanded stages are regular DAG nodes: they
+participate in scheduling, caching, and the lockfile individually.
+
+## Table of Contents
+
+- [foreach syntax](#foreach-syntax)
+- [Available variables](#available-variables)
+- [Expanded stage naming](#expanded-stage-naming)
+- [matrix syntax](#matrix-syntax)
+- [matrix variables](#matrix-variables)
+- [Combining with templating](#combining-with-templating)
+- [Interaction with DAG, lockfile, and --validate](#interaction-with-dag-lockfile-and---validate)
+
+## foreach syntax
+
+A stage with `foreach:` and `do:` expands into one stage per item.
+Three forms are supported.
+
+### List of scalars
+
+```yaml
+stages:
+  preprocess:
+    foreach:
+      - raw_a
+      - raw_b
+      - raw_c
+    do:
+      cmd: "python clean.py ${item}"
+      deps:
+        - ${item}.csv
+      outs:
+        - ${item}_clean.csv
+```
+
+Produces three stages: `preprocess@raw_a`, `preprocess@raw_b`,
+`preprocess@raw_c`.
+
+### List of dicts
+
+```yaml
+stages:
+  train:
+    foreach:
+      - {name: small, lr: 0.01, epochs: 10}
+      - {name: large, lr: 0.001, epochs: 100}
+    do:
+      cmd: "python train.py --lr ${item.lr} --epochs ${item.epochs}"
+      deps:
+        - train.py
+      outs:
+        - models/${item.name}.pkl
+```
+
+Produces: `train@0`, `train@1`. Access fields via `${item.field}`.
+
+### Dict form
+
+```yaml
+stages:
+  build:
+    foreach:
+      uk:
+        region: eu-west-2
+        bucket: data-uk
+      us:
+        region: us-east-1
+        bucket: data-us
+    do:
+      cmd: "python build.py --region ${item.region} --bucket ${item.bucket}"
+      deps:
+        - build.py
+      outs:
+        - output/${key}/
+```
+
+Produces: `build@uk`, `build@us`. The dict key is available as `${key}`.
+
+## Available variables
+
+Inside the `do:` block, these variables are available for substitution:
+
+| Variable | Available when | Value |
+|----------|---------------|-------|
+| `${item}` | List of scalars | The scalar value itself |
+| `${item}` | Dict form | The value mapping for the current key |
+| `${item.field}` | List of dicts or dict form | Nested field access |
+| `${key}` | Dict form | The dict key (e.g., `uk`, `us`) |
+| `${index}` | All forms | Zero-based iteration index |
+
+### Examples
+
+```yaml
+# List of scalars: ${item} = "raw_a", ${index} = 0
+foreach: [raw_a, raw_b]
+
+# List of dicts: ${item.name} = "small", ${index} = 0
+foreach:
+  - {name: small, lr: 0.01}
+
+# Dict form: ${key} = "uk", ${item.region} = "eu-west-2", ${index} = 0
+foreach:
+  uk: {region: eu-west-2}
+  us: {region: us-east-1}
+```
+
+## Expanded stage naming
+
+Expanded stages follow the pattern `base@suffix`:
+
+| Source form | Suffix | Example names |
+|-------------|--------|---------------|
+| List of scalars | `@value` | `preprocess@raw_a`, `preprocess@raw_b` |
+| List of dicts | `@index` | `train@0`, `train@1` |
+| Dict form | `@key` | `build@uk`, `build@us` |
+| Matrix | `@val1-val2` | `train@resnet-imagenet` |
+
+The `@` separator is chosen because:
+- It's not valid in the base stage-name grammar (no collisions with
+  regular stages).
+- It's URL-safe and shell-safe.
+- DVC uses the same convention (familiar to migrating users).
+
+Both the base name and the suffix must individually satisfy the stage
+name grammar: `[a-zA-Z_][a-zA-Z0-9_-]{0,63}`. If an item value
+produces an invalid suffix (e.g., contains spaces), the parser rejects
+it with a clear error.
+
+### Name collisions
+
+If expansion produces a stage name that collides with another stage
+(expanded or not), the parser fails:
+
+```
+Error: WorkflowExpandedNameCollision
+  name: "train@resnet"
+  sources: ["train (foreach item 0)", "train_resnet (explicit stage)"]
+```
+
+## matrix syntax
+
+`matrix:` expands a stage over the Cartesian product of multiple
+variables. Use it for hyperparameter sweeps and multi-dimensional
+exploration.
+
+```yaml
+stages:
+  train:
+    matrix:
+      model: [resnet, vgg, efficientnet]
+      dataset: [imagenet, cifar10]
+    cmd: "python train.py --model ${item.model} --data ${item.dataset}"
+    deps:
+      - train.py
+      - data/${item.dataset}/
+    outs:
+      - models/${item.model}-${item.dataset}.pkl
+    params:
+      - model.lr
+    metrics:
+      - metrics/${item.model}-${item.dataset}.json
+```
+
+This produces 3 × 2 = 6 stages:
+- `train@resnet-imagenet`
+- `train@resnet-cifar10`
+- `train@vgg-imagenet`
+- `train@vgg-cifar10`
+- `train@efficientnet-imagenet`
+- `train@efficientnet-cifar10`
+
+### Matrix with more dimensions
+
+```yaml
+stages:
+  sweep:
+    matrix:
+      arch: [resnet, vgg]
+      optimizer: [adam, sgd]
+      scheduler: [cosine, step]
+    cmd: "python train.py --arch ${item.arch} --opt ${item.optimizer} --sched ${item.scheduler}"
+    outs:
+      - results/${item.arch}-${item.optimizer}-${item.scheduler}.json
+```
+
+Produces 2 × 2 × 2 = 8 stages. The suffix joins all values with
+hyphens: `sweep@resnet-adam-cosine`, `sweep@vgg-sgd-step`, etc.
+
+## matrix variables
+
+Inside a matrix stage, these variables are available:
+
+| Variable | Value |
+|----------|-------|
+| `${item.var}` | The value of matrix variable `var` for this combination |
+| `${key}` | Hyphen-joined combination (e.g., `resnet-imagenet`) |
+
+```yaml
+matrix:
+  model: [resnet, vgg]
+  dataset: [imagenet, cifar10]
+
+# ${item.model} = "resnet"
+# ${item.dataset} = "imagenet"
+# ${key} = "resnet-imagenet"
+```
+
+### Dynamic matrix values
+
+Matrix values can reference `${param}` expressions that resolve before
+expansion:
+
+```yaml
+vars:
+  - models_to_test: [resnet, vgg]
+
+stages:
+  train:
+    matrix:
+      model: ${models_to_test}
+      dataset: [imagenet, cifar10]
+    cmd: "python train.py --model ${item.model} --data ${item.dataset}"
+```
+
+The `${models_to_test}` reference is resolved first (from vars or
+params), then the matrix is expanded over the resulting list.
+
+## Combining with templating
+
+Global `vars:` and params are available inside `foreach` and `matrix`
+stage templates. All substitution sources combine:
+
+```yaml
+vars:
+  - script_dir: src/ml
+  - output_base: results
+
+stages:
+  train:
+    matrix:
+      model: [resnet, vgg]
+      dataset: [imagenet, cifar10]
+    cmd: "python ${script_dir}/train.py --model ${item.model} --data ${item.dataset}"
+    deps:
+      - ${script_dir}/train.py
+      - data/${item.dataset}/
+    params:
+      - model.lr
+      - model.epochs
+    outs:
+      - ${output_base}/${item.model}-${item.dataset}.pkl
+```
+
+Resolution order within an expanded stage:
+1. Item-local variables (`${item}`, `${key}`, `${index}`)
+2. Global `vars:`
+3. Params files
+4. Environment (`${env.VAR}`)
+
+Item-local variables take precedence. If your params file has a key
+named `item`, it's shadowed inside `foreach`/`matrix` templates.
+
+## Interaction with DAG, lockfile, and --validate
+
+### DAG
+
+Expanded stages appear as individual nodes in the DAG. Dependencies
+between expanded stages and other stages work normally:
+
+```yaml
+stages:
+  preprocess:
+    foreach: [raw_a, raw_b]
+    do:
+      cmd: "python clean.py ${item}"
+      outs:
+        - ${item}_clean.csv
+
+  merge:
+    cmd: "python merge.py"
+    deps:
+      - raw_a_clean.csv
+      - raw_b_clean.csv
+    outs:
+      - merged.csv
+```
+
+The DAG infers edges: `preprocess@raw_a` → `merge` and
+`preprocess@raw_b` → `merge` (via matching output/dep paths).
+
+View the expanded DAG:
+
+```bash
+crab dag
+# Shows: preprocess@raw_a, preprocess@raw_b, merge
+# with edges from both preprocess stages to merge
+```
+
+### Lockfile
+
+The lockfile records expanded stages individually. No `foreach` or
+`matrix` structure is preserved:
+
+```yaml
+# crab.lock (excerpt)
+stages:
+  preprocess@raw_a:
+    stage_hash: "b3:abc..."
+    cmd:
+      shell: "python clean.py raw_a"
+    deps:
+      - path: "raw_a.csv"
+        hash: "b3:..."
+    outs:
+      - path: "raw_a_clean.csv"
+        hash: "b3:..."
+
+  preprocess@raw_b:
+    stage_hash: "b3:def..."
+    cmd:
+      shell: "python clean.py raw_b"
+    # ...
+```
+
+Each expanded stage has its own hash and is cached independently.
+Changing one item's input only invalidates that item's stage.
+
+### --validate
+
+Validation expands all `foreach` and `matrix` stages and reports them
+individually:
+
+```bash
+$ crab run --validate
+Pipeline validated successfully.
+
+Stages (5):
+  preprocess@raw_a    ✓
+  preprocess@raw_b    ✓
+  preprocess@raw_c    ✓
+  merge               ✓
+  report              ✓
+
+No undefined references.
+No name collisions.
+```
+
+Validation catches:
+- Undefined `${item.field}` references (field doesn't exist on the item)
+- Name collisions between expanded stages
+- Empty `foreach` lists or `matrix` variables
+- Invalid suffixes that violate the stage name grammar
+
+### crab status
+
+Status reports expanded stages individually:
+
+```bash
+$ crab status
+  preprocess@raw_a:  up-to-date
+  preprocess@raw_b:  outdated
+    changed deps:
+      - raw_b.csv (content modified)
+  preprocess@raw_c:  up-to-date
+  merge:             outdated (upstream: preprocess@raw_b)
+```
+
+### Selective execution
+
+Run a single expanded stage by its full name:
+
+```bash
+crab run preprocess@raw_b
+```
+
+Or use glob patterns to target a subset:
+
+```bash
+crab run --stages 'preprocess@*'
+crab run --stages 'train@resnet-*'
+crab run --glob 'train@resnet-*'
+```

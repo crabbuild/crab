@@ -1,0 +1,31 @@
+[package]
+name = "crab-xet"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Xet-backed data-plane helpers for Crab."
+
+[lib]
+name = "crab_xet"
+path = "src/lib.rs"
+
+[features]
+default = []
+chunker = ["dep:xet-data"]
+upload-concurrency = ["dep:tokio", "dep:xet-client", "dep:xet-runtime"]
+
+[dependencies]
+blake3 = { workspace = true }
+bytes = { workspace = true }
+rayon = "1.10"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
+xet-data = { workspace = true, optional = true }
+xet-core-structures = { workspace = true }
+xet-client = { workspace = true, optional = true }
+xet-runtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = "1"

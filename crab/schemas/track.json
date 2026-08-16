@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrackPayload",
+  "description": "Payload emitted by `crab track --json` (list mode).",
+  "type": "object",
+  "required": [
+    "patterns"
+  ],
+  "properties": {
+    "patterns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TrackPattern"
+      }
+    }
+  },
+  "definitions": {
+    "TrackPattern": {
+      "description": "A single tracked pattern entry.",
+      "type": "object",
+      "required": [
+        "glob",
+        "source"
+      ],
+      "properties": {
+        "glob": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

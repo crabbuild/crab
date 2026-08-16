@@ -1,0 +1,316 @@
+---
+title: "Migrating from DVC"
+description: "Convert an existing DVC pipeline to Crab's workflow format with the automated migration tool."
+---
+
+# Migrating from DVC to Crab
+
+This guide covers converting an existing DVC pipeline (`dvc.yaml`) to
+Crab's workflow format (`crab.yaml`). The automated migration tool
+handles most of the work; this document explains what it does, what it
+can't do, and what you need to finish by hand.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Running the migration](#running-the-migration)
+- [Conversion rules](#conversion-rules)
+- [Unsupported features](#unsupported-features)
+- [Manual steps after migration](#manual-steps-after-migration)
+- [Example: 5-stage DVC pipeline](#example-5-stage-dvc-pipeline)
+
+## Overview
+
+Crab's workflow engine is a superset of DVC's pipeline capabilities.
+Most DVC concepts map directly:
+
+- Stages, deps, outs, params, metrics, plots — same semantics.
+- `foreach` and `matrix` — same syntax.
+- `vars:` and `${...}` templating — same syntax.
+- `wdir:` and `frozen:` — direct equivalents.
+
+The migration tool reads your `dvc.yaml`, applies conversion rules, emits
+a valid `crab.yaml`, and prints a report of anything that needs manual
+attention.
+
+## Running the migration
+
+```bash
+# From the repo root (where dvc.yaml lives):
+crab migrate from-dvc
+
+# From a different directory:
+crab migrate from-dvc --dir path/to/project
+
+# Print to stdout instead of writing crab.yaml:
+crab migrate from-dvc --stdout
+```
+
+The command:
+1. Locates `dvc.yaml` in the target directory.
+2. Parses the DVC pipeline definition.
+3. Converts each stage to crab format.
+4. Writes `crab.yaml` (or prints to stdout).
+5. Prints a migration report with stage count and warnings.
+
+After migration, validate the result:
+
+```bash
+crab run --validate
+```
+
+## Conversion rules
+
+| DVC field | Crab equivalent | Notes |
+|-----------|-------------------|-------|
+| `cmd:` (string) | `cmd:` (string) | Direct copy |
+| `cmd:` (list) | `cmd:` (string) | Joined with ` && ` |
+| `deps:` | `deps:` | Direct copy |
+| `outs:` | `outs:` | Subfields mapped (see below) |
+| `params:` | `params:` | Direct copy |
+| `metrics:` | `metrics:` | Direct copy |
+| `plots:` | `plots:` | Simplified (no rendering config) |
+| `wdir:` | `wdir:` | Direct copy |
+| `frozen:` | `frozen:` | Direct copy |
+| `always_changed:` | `nondeterministic:` | Renamed |
+| `foreach:` | `foreach:` | Syntax match |
+| `matrix:` | `matrix:` | Syntax match |
+| `vars:` | `vars:` | Direct copy |
+| `${...}` | `${...}` | Same syntax |
+| `desc:` | `desc:` | Direct copy |
+| `meta:` | `meta:` | Direct copy |
+
+### Output subfields
+
+| DVC output field | Crab equivalent |
+|------------------|-------------------|
+| `cache: true/false` | `cache: true/false` |
+| `persist: true` | `persist: true` |
+| `push: false` | **Removed** (warning emitted) |
+| `remote: <name>` | **Removed** (warning emitted) |
+
+### Command list conversion
+
+DVC allows `cmd:` as a list of strings. Crab expects a single string
+(or `argv` form). The migration tool joins list entries with ` && `:
+
+```yaml
+# DVC
+cmd:
+  - mkdir -p output
+  - python build.py
+  - python validate.py
+
+# Crab (after migration)
+cmd: "mkdir -p output && python build.py && python validate.py"
+```
+
+### `always_changed` → `nondeterministic`
+
+DVC's `always_changed: true` becomes `nondeterministic: true` in crab.
+Same semantics: the stage always re-executes regardless of input hashes.
+
+## Unsupported features
+
+These DVC features have no crab equivalent. The migration tool emits
+warnings but continues converting the rest of the pipeline.
+
+| DVC feature | Workaround |
+|-------------|------------|
+| `push: false` on outputs | Crab doesn't have per-output push control. All cached outputs are pushed together via `--cache-push`. |
+| `remote:` per output | Crab uses a single remote per repo. Configure the remote at the repo level with `crab config`. |
+| `live:` (DVCLive integration) | Use crab's metrics and plots directly. DVCLive callbacks write standard JSON/CSV that crab can track. |
+| `dvc import` / `dvc import-url` deps | Use crab's cross-repo deps: `{ crab: "bucket/repo", rev: "v1.0", path: "file" }` or `{ url: "https://...", digest: "b3:..." }`. |
+| Hydra composition (`dvc exp run` with Hydra) | Use `crab exp run --set key=value` for param overrides. For complex Hydra configs, run Hydra as part of your stage command. |
+
+## Manual steps after migration
+
+After running `crab migrate from-dvc`:
+
+1. **Review warnings.** The migration report lists anything that couldn't
+   be converted automatically. Address each warning.
+
+2. **Validate the pipeline.**
+   ```bash
+   crab run --validate
+   ```
+   Fix any schema errors or undefined template references.
+
+3. **Convert the lockfile.** The migration tool does NOT convert
+   `dvc.lock` to `crab.lock`. Run the pipeline once to generate a
+   fresh lockfile:
+   ```bash
+   crab run
+   ```
+   This re-executes all stages (no prior cache exists). If you want to
+   avoid re-execution, populate the cache first by running with existing
+   outputs present.
+
+4. **Update CI scripts.** Replace `dvc repro` with `crab run` and
+   `dvc push` with `crab run --cache-push`.
+
+5. **Update `.gitignore`.** DVC adds entries like `/model.pkl` for
+   tracked outputs. Crab uses the same pattern — your existing
+   `.gitignore` likely works as-is.
+
+6. **Remove DVC artifacts.** Once satisfied:
+   ```bash
+   rm dvc.yaml dvc.lock
+   rm -rf .dvc/
+   git rm .dvc/.gitignore  # if tracked
+   pip uninstall dvc        # optional
+   ```
+
+7. **Commit the migration.**
+   ```bash
+   git add crab.yaml crab.lock .gitignore
+   git commit -m "Migrate pipeline from DVC to crab"
+   ```
+
+## Example: 5-stage DVC pipeline
+
+### Before (`dvc.yaml`)
+
+```yaml
+vars:
+  - codedir: src
+  - datadir: data
+
+stages:
+  download:
+    cmd: "python ${codedir}/download.py --out ${datadir}/raw.csv"
+    deps:
+      - ${codedir}/download.py
+    outs:
+      - ${datadir}/raw.csv
+    always_changed: true
+
+  clean:
+    cmd: "python ${codedir}/clean.py"
+    deps:
+      - ${codedir}/clean.py
+      - ${datadir}/raw.csv
+    outs:
+      - ${datadir}/clean.parquet
+
+  featurize:
+    cmd: "python ${codedir}/featurize.py"
+    deps:
+      - ${codedir}/featurize.py
+      - ${datadir}/clean.parquet
+    params:
+      - features.window_size
+      - features.columns
+    outs:
+      - ${datadir}/features.parquet
+
+  train:
+    cmd:
+      - mkdir -p models
+      - python ${codedir}/train.py
+    deps:
+      - ${codedir}/train.py
+      - ${datadir}/features.parquet
+    params:
+      - model.lr
+      - model.epochs
+      - model.arch
+    outs:
+      - models/model.pkl:
+          persist: true
+      - models/checkpoints/:
+          push: false
+    metrics:
+      - metrics/train.json
+
+  evaluate:
+    cmd: "python ${codedir}/evaluate.py"
+    deps:
+      - ${codedir}/evaluate.py
+      - models/model.pkl
+      - ${datadir}/features.parquet
+    metrics:
+      - metrics/eval.json
+    plots:
+      - metrics/roc.csv
+```
+
+### After (`crab.yaml` — generated by `crab migrate from-dvc`)
+
+```yaml
+vars:
+  - codedir: src
+  - datadir: data
+
+stages:
+  download:
+    cmd: "python ${codedir}/download.py --out ${datadir}/raw.csv"
+    deps:
+      - ${codedir}/download.py
+    outs:
+      - ${datadir}/raw.csv
+    nondeterministic: true
+
+  clean:
+    cmd: "python ${codedir}/clean.py"
+    deps:
+      - ${codedir}/clean.py
+      - ${datadir}/raw.csv
+    outs:
+      - ${datadir}/clean.parquet
+
+  featurize:
+    cmd: "python ${codedir}/featurize.py"
+    deps:
+      - ${codedir}/featurize.py
+      - ${datadir}/clean.parquet
+    params:
+      - features.window_size
+      - features.columns
+    outs:
+      - ${datadir}/features.parquet
+
+  train:
+    cmd: "mkdir -p models && python ${codedir}/train.py"
+    deps:
+      - ${codedir}/train.py
+      - ${datadir}/features.parquet
+    params:
+      - model.lr
+      - model.epochs
+      - model.arch
+    outs:
+      - models/model.pkl:
+          persist: true
+      - models/checkpoints/
+    metrics:
+      - metrics/train.json
+
+  evaluate:
+    cmd: "python ${codedir}/evaluate.py"
+    deps:
+      - ${codedir}/evaluate.py
+      - models/model.pkl
+      - ${datadir}/features.parquet
+    metrics:
+      - metrics/eval.json
+    plots:
+      - metrics/roc.csv
+```
+
+### Migration report
+
+```
+Migration Report
+==================================================
+Stages converted: 5
+Output written to: crab.yaml
+Warnings (1):
+  [train] `push: false` on output is not supported in crab; removed
+==================================================
+```
+
+The `checkpoints/` output lost its `push: false` setting. In crab, all
+cached outputs are pushed together. If you don't want checkpoints pushed,
+exclude them from `outs:` and treat them as ephemeral build artifacts
+(add to `.gitignore` instead).

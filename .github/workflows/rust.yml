@@ -1,0 +1,37 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Check managed OpenAPI contract
+      run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check
+    - name: Reject breaking managed OpenAPI changes
+      shell: bash
+      run: |
+        baseline="$(mktemp)"
+        base_ref="${GITHUB_BASE_REF:-main}"
+        if git show "origin/${base_ref}:crates/crab-auth/openapi/managed-v1.json" > "${baseline}"; then
+          cargo run -p crab-auth --example check_managed_openapi_compatibility --locked -- \
+            "${baseline}" crates/crab-auth/openapi/managed-v1.json
+        else
+          echo "No managed OpenAPI baseline exists on ${base_ref}; accepting the initial contract."
+        fi

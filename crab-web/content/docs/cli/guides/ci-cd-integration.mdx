@@ -1,0 +1,281 @@
+---
+title: "CI/CD Integration"
+description: "Set up Crab in continuous integration pipelines to clone, hydrate, and push large-file repositories automatically."
+---
+
+# CI/CD Integration
+
+This guide walks through configuring Crab in CI/CD pipelines so your
+automation can clone repositories with large files, hydrate them for
+builds or training, and push results back to object storage — all without
+manual intervention.
+
+## Overview
+
+Crab works in CI the same way it works locally: a single binary handles
+the git remote protocol and large-file materialization. The main
+differences in CI are:
+
+- You install Crab as a build step rather than from a package manager
+- Credentials come from environment variables or OIDC federation
+- You typically hydrate only the files needed for the current job
+- Workflow caching (`crab run --cache-only`) can skip expensive stages
+
+## Prerequisites
+
+- A Crab-enabled repository (initialized with `crab init`)
+- Cloud credentials (AWS, GCP, or Azure) available in your CI environment
+- The `crab` binary accessible on `$PATH`
+
+## Installing Crab in CI
+
+Run the hosted installer and add its bin directory to `$PATH`. The binary is
+self-contained — no runtime dependencies beyond libc.
+
+```bash
+curl -fsSL https://crab.build/install.sh | bash
+export PATH="$HOME/.crab/bin:$PATH"
+crab version
+command -v git-remote-crab
+```
+
+The installer detects Linux and macOS on x86_64 or ARM64 and verifies the
+release checksum before replacing the binary.
+
+## Configuring Credentials
+
+Crab reads cloud credentials from standard environment variables. Set
+these as secrets in your CI platform.
+
+### AWS (S3)
+
+```bash
+export AWS_ACCESS_KEY_ID="$SECRET_AWS_KEY_ID"
+export AWS_SECRET_ACCESS_KEY="$SECRET_AWS_SECRET"
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+For OIDC-based authentication (recommended for GitHub Actions), use the
+`aws-actions/configure-aws-credentials` action to assume a role without
+long-lived keys.
+
+### GCP (GCS)
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+Or use Workload Identity Federation for keyless auth in GitHub Actions.
+
+### Azure (Blob Storage)
+
+```bash
+export AZURE_STORAGE_ACCOUNT="$SECRET_STORAGE_ACCOUNT"
+export AZURE_STORAGE_KEY="$SECRET_STORAGE_KEY"
+```
+
+See the [AWS credentials](/docs/cli/authentication/aws-credentials),
+[GCP credentials](/docs/cli/authentication/gcp-credentials), and
+[Azure credentials](/docs/cli/authentication/azure-credentials) pages
+for detailed provider setup.
+
+## Cloning and Hydrating
+
+A typical CI job clones the repository and hydrates the files needed for
+the build:
+
+```bash
+# Clone the repository (pointer files only — fast)
+git clone crab://my-bucket/my-repo .
+
+# Hydrate only the files this job needs
+crab hydrate 'data/inputs/**'
+crab hydrate 'models/base.pkl'
+```
+
+Selective hydration keeps CI fast by downloading only what the current
+job requires. For jobs that need everything:
+
+```bash
+crab hydrate --all
+```
+
+See [`crab clone`](/docs/cli/getting-started/cloning-a-repository) and
+[`crab hydrate`](/docs/cli/daily-workflow/hydrating-files) for all
+available options.
+
+## Pushing Results
+
+After a build or training run produces new artifacts, stage and push them:
+
+```bash
+# Stage new outputs
+crab add models/trained.pkl metrics/results.json
+
+# Commit
+git commit -m "CI: training run $(date -u +%Y%m%dT%H%M%S)"
+
+# Push to object storage
+git push
+```
+
+See [`crab add`](/docs/cli/daily-workflow/adding-files) and
+[`crab push`](/docs/cli/daily-workflow/pushing-changes) for detailed
+options.
+
+## Using Workflow Caching in CI
+
+If your repository uses `crab.yaml` pipelines, CI can replay cached
+stages instead of re-running expensive computations:
+
+```bash
+# Fail if any stage is not cached (reproducibility check)
+crab run --cache-only
+
+# Or run normally and push new cache entries for teammates
+crab run --cache-push
+```
+
+See [`crab run`](/docs/cli/automation/running-commands) for the full
+option reference.
+
+## Example: GitHub Actions
+
+```yaml
+name: Train and Push
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/ci-crab-role
+          aws-region: us-east-1
+
+      - name: Install Crab
+        run: |
+          curl -fsSL https://crab.build/install.sh | bash
+          export PATH="$HOME/.crab/bin:$PATH"
+          echo "$HOME/.crab/bin" >> "$GITHUB_PATH"
+          crab version
+
+      - name: Clone repository
+        run: git clone crab://my-bucket/my-repo .
+
+      - name: Hydrate training data
+        run: crab hydrate 'data/**' 'models/base.pkl'
+
+      - name: Run training pipeline
+        run: crab run --cache-push
+
+      - name: Push results
+        run: |
+          git config user.email "ci@example.com"
+          git config user.name "CI Bot"
+          crab add models/ metrics/
+          git commit -m "CI: training run ${{ github.sha }}"
+          git push
+```
+
+## Example: GitLab CI
+
+```yaml
+stages:
+  - train
+
+variables:
+  AWS_DEFAULT_REGION: us-east-1
+
+train:
+  stage: train
+  image: ubuntu:22.04
+
+  before_script:
+    # Install Crab
+    - apt-get update && apt-get install -y curl git
+    - curl -fsSL https://crab.build/install.sh | bash
+    - export PATH="$HOME/.crab/bin:$PATH"
+    - crab version
+    # Configure git
+    - git config --global user.email "ci@example.com"
+    - git config --global user.name "CI Bot"
+
+  script:
+    # Clone and hydrate
+    - git clone crab://$CRAB_BUCKET/$CRAB_REPO .
+    - crab hydrate 'data/**'
+
+    # Run pipeline with cache
+    - crab run --cache-push
+
+    # Push results
+    - crab add models/ metrics/
+    - git commit -m "CI training run $CI_COMMIT_SHORT_SHA"
+    - git push
+
+  variables:
+    AWS_ACCESS_KEY_ID: $CI_AWS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $CI_AWS_SECRET
+    CRAB_BUCKET: my-bucket
+    CRAB_REPO: my-repo
+```
+
+## Tips for CI Pipelines
+
+**Keep hydration selective.** Only hydrate the files your job actually
+needs. This reduces download time and egress costs.
+
+**Use `--cache-only` for reproducibility checks.** In PR pipelines, run
+`crab run --cache-only` to verify that all stages have cached results
+without re-executing anything. This catches cases where someone forgot
+to push their cache.
+
+**Set `--lock-timeout` for parallel jobs.** If multiple CI jobs push to
+the same repository concurrently, increase the lock timeout to avoid
+transient failures:
+
+```bash
+git push  # Crab handles ref CAS retries automatically
+```
+
+**Dehydrate before pushing.** If your job hydrated files that it did not
+modify, dehydrate them before committing to keep the git index clean:
+
+```bash
+crab dehydrate --all
+crab add models/output.pkl
+git commit -m "CI: new model"
+git push
+```
+
+**Cache the Crab binary.** On GitHub Actions, cache the downloaded binary
+to avoid re-downloading on every run:
+
+```yaml
+- name: Cache Crab binary
+  uses: actions/cache@v4
+  with:
+    path: ~/.crab/bin/crab
+    key: crab-${{ runner.os }}-latest
+```
+
+## Related Commands
+
+- [`crab clone`](/docs/cli/getting-started/cloning-a-repository) — clone a Crab repository
+- [`crab hydrate`](/docs/cli/daily-workflow/hydrating-files) — materialize file content from object storage
+- [`crab dehydrate`](/docs/cli/daily-workflow/dehydrating-files) — replace files with pointer blobs
+- [`crab add`](/docs/cli/daily-workflow/adding-files) — stage files for Crab tracking
+- [`crab push`](/docs/cli/daily-workflow/pushing-changes) — push objects to the remote
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages with caching
+- [`crab auth status`](/docs/cli/authentication/auth-status) — verify credential configuration

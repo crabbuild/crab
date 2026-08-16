@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AddSummary",
+  "description": "Summary of a completed add operation.",
+  "type": "object",
+  "required": [
+    "bytes_processed",
+    "chunks_staged",
+    "duration_ms",
+    "files_failed",
+    "files_skipped",
+    "files_staged",
+    "flushing_duration_ms",
+    "indexing_duration_ms",
+    "planning_duration_ms",
+    "staging_duration_ms"
+  ],
+  "properties": {
+    "bytes_processed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "chunks_staged": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files_failed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files_skipped": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files_staged": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "flushing_duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "indexing_duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "planning_duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "staging_duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

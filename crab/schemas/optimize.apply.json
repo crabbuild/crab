@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OptimizePayload",
+  "description": "Payload emitted by `crab optimize plan` and `crab optimize apply --json`.",
+  "type": "object",
+  "required": [
+    "assumptions",
+    "generated_at",
+    "mode",
+    "steps",
+    "summary"
+  ],
+  "properties": {
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/definitions/OptimizeWorkflowMode"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/OptimizeStep"
+      }
+    },
+    "summary": {
+      "$ref": "#/definitions/OptimizeSummary"
+    }
+  },
+  "definitions": {
+    "OptimizeStep": {
+      "description": "One step in the combined optimizer workflow.",
+      "type": "object",
+      "required": [
+        "command",
+        "detail",
+        "id",
+        "kind",
+        "mutates",
+        "status",
+        "title"
+      ],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/OptimizeStepKind"
+        },
+        "mutates": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/definitions/OptimizeStepStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "OptimizeStepKind": {
+      "description": "Step kind in the combined optimizer workflow.",
+      "type": "string",
+      "enum": [
+        "cost_report",
+        "safety_checks",
+        "lifecycle_tiering",
+        "xorb_restripe",
+        "cache_prune",
+        "replica_policy"
+      ]
+    },
+    "OptimizeStepStatus": {
+      "description": "Step execution or planning status.",
+      "type": "string",
+      "enum": [
+        "planned",
+        "skipped",
+        "running",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "OptimizeSummary": {
+      "description": "Counts for a plan or apply payload.",
+      "type": "object",
+      "required": [
+        "failed",
+        "mutating_steps",
+        "planned",
+        "running",
+        "skipped",
+        "succeeded"
+      ],
+      "properties": {
+        "failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "mutating_steps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "planned": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "running": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "skipped": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "succeeded": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "OptimizeWorkflowMode": {
+      "description": "Workflow mode represented by an optimizer payload.",
+      "type": "string",
+      "enum": [
+        "plan",
+        "apply"
+      ]
+    }
+  }
+}

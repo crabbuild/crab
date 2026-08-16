@@ -1,0 +1,60 @@
+---
+title: "crab reset"
+description: "Unstage files from the Crab staging area and optionally clean staging data."
+---
+
+# crab reset
+
+Unstage files from the Crab staging area.
+
+## Synopsis
+
+```
+crab reset [OPTIONS] [PATTERNS]...
+```
+
+## Description
+
+`crab reset` mirrors `git reset HEAD -- <paths>` and removes the corresponding
+chunk data from the local Crab staging area.
+
+For conceptual background, see [Resetting Staged Files](/docs/cli/daily-workflow/resetting-staged-files).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `PATTERNS` | No | Glob patterns to unstage. If omitted, unstages all. |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dry-run` | `false` | Preview what would be unstaged |
+| `--sync` | `false` | Clean orphaned staging data after external Git resets or removals |
+
+## Examples
+
+### Reset specific files
+
+```bash
+crab reset '*.bin'
+```
+
+### Reset everything
+
+```bash
+crab reset
+```
+
+Synchronize staging after a direct Git operation:
+
+```bash
+crab reset --sync
+```
+
+## Related Commands
+
+- [`crab add`](/docs/cli/reference/crab-add) — stage files.
+- [`crab staging`](/docs/cli/reference/crab-staging) — inspect staging area.
+- [`crab status`](/docs/cli/reference/crab-status) — check file state.

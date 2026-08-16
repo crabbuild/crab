@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ReleaseListEntry": {
+      "properties": {
+        "content_digest": {
+          "type": "string"
+        },
+        "manifest_digest": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_digest",
+        "manifest_digest",
+        "path",
+        "release_id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "releases": {
+      "items": {
+        "$ref": "#/definitions/ReleaseListEntry"
+      },
+      "type": "array"
+    },
+    "remote": {
+      "type": "boolean"
+    },
+    "remote_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "releases",
+    "remote"
+  ],
+  "title": "ReleaseListPayload",
+  "type": "object"
+}

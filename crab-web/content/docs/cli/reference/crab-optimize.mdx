@@ -1,0 +1,54 @@
+---
+title: "crab optimize"
+description: "Optimize Crab storage layout, caches, indexes, LFS state, workflow cache entries, replicas, and whole-repo cost posture."
+---
+
+# crab optimize
+
+Optimize Crab storage layout and operational state.
+
+## Synopsis
+
+```bash
+crab optimize [OPTIONS] <COMMAND>
+```
+
+## Subcommands
+
+| Subcommand | Purpose |
+|------------|---------|
+| `plan` | Build a combined cost optimization plan |
+| `apply` | Apply the combined cost optimization workflow |
+| `xorbs` | Rewrite content-addressed xorbs to a target size, grouping, compression, and storage-class profile |
+| `packs` | Consolidate remote Git pack files; grouped home for `crab repack` |
+| `shards` | Compact metadata shards; grouped home for `crab compact` |
+| `tiers` | Plan, apply, or roll back lifecycle tiering rules; grouped home for `crab tier` |
+| `cache` | Inspect, verify, prune, clean, or warm the local object cache |
+| `indexes` | Diagnose, rebuild, compact, clear, or warm metadata indexes |
+| `lfs` | Deduplicate, convert, or prune Git LFS compatibility storage |
+| `workflow-cache` | Upload missing stage cache entries or garbage-collect workflow journals |
+| `replicas` | Inspect, verify, backfill, repair, or certify replica health |
+| `repo` | Produce a repository-level optimization report and recommendations |
+
+## Examples
+
+```bash
+crab optimize plan --include-xorbs --profile ml --json
+crab optimize apply --skip-cache --skip-replicas
+crab optimize xorbs --profile ml --dry-run
+crab optimize packs --dry-run
+crab optimize shards --repo org/models --bucket my-bucket --dry-run
+crab optimize tiers plan
+crab optimize cache prune
+crab optimize indexes diagnose --deep
+crab optimize lfs dedup
+crab optimize workflow-cache journal-gc
+crab optimize replicas status
+crab optimize repo --json
+```
+
+## Related Commands
+
+- [`crab repack`](/docs/cli/reference/crab-repack) — legacy top-level entry for pack consolidation.
+- [`crab compact`](/docs/cli/reference/crab-compact) — legacy top-level entry for shard compaction.
+- [`crab tier`](/docs/cli/reference/crab-tier) — legacy top-level entry for lifecycle tiering.

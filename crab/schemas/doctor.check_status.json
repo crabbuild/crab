@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CheckStatus",
+  "description": "Outcome of a single diagnostic check.",
+  "type": "string",
+  "enum": [
+    "ok",
+    "warn",
+    "fail"
+  ]
+}

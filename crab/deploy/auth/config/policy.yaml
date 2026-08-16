@@ -1,0 +1,26 @@
+# Test policy for local Docker Compose e2e testing.
+# Works with the mock-idp that issues tokens for alice@corp.example.com.
+
+version: "1"
+default_provider: aws
+
+rules:
+  # Alice has full access to everything.
+  - identity: "alice@corp.example.com"
+    repos: ["*"]
+    operations: ["*"]
+
+  # ML team members can push/fetch to ml-models.
+  - group: "ml-team"
+    repos: ["ml-models/*", "datasets/*"]
+    operations: ["push", "fetch", "clone", "gc"]
+
+  # Everyone can read public repos.
+  - identity: "*"
+    repos: ["public/*"]
+    operations: ["fetch", "clone"]
+
+deny:
+  - identity: "banned@corp.example.com"
+    repos: ["*"]
+    operations: ["*"]

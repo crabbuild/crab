@@ -1,0 +1,43 @@
+---
+title: "crab compact"
+description: "Compact metadata and storage layers for improved performance."
+---
+
+# crab compact
+
+Compact small remote shards into larger shards.
+
+## Synopsis
+
+```bash
+crab compact [OPTIONS] --repo <REPO> --bucket <BUCKET>
+```
+
+## Description
+
+`crab compact` is a remote storage maintenance command. It merges small
+shards under the selected bucket and repository prefix. It does not replace
+`crab metadb compact`, which compacts local metadata databases.
+
+For conceptual background, see [Compacting Data](/docs/cli/storage/compacting-data).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--repo <REPO>` | required | Repository prefix, such as `org/models` |
+| `--bucket <BUCKET>` | required | S3 bucket containing the repository |
+| `--dry-run` | `false` | Report the plan without mutating remote storage |
+| `--max-shard-size <SIZE>` | `100MiB` | Maximum compacted shard size |
+
+## Examples
+
+```bash
+crab compact --repo org/models --bucket my-bucket --dry-run
+crab compact --repo org/models --bucket my-bucket
+```
+
+## Related Commands
+
+- [`crab repack`](/docs/cli/reference/crab-repack) — consolidate remote Git pack files.
+- [`crab gc`](/docs/cli/reference/crab-gc) — garbage collection.

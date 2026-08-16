@@ -1,0 +1,62 @@
+---
+title: "crab worktree"
+description: "Manage Git worktrees with Crab-aware hydration and cache state."
+---
+
+# crab worktree
+
+Manage Git linked worktrees while keeping Crab hydration state isolated per
+worktree.
+
+## Synopsis
+
+```bash
+crab worktree [OPTIONS] <COMMAND>
+```
+
+Subcommands are `add`, `list`, `lock`, `move`, `prune`, `remove`, `repair`, and
+`unlock`. Git-compatible worktree options are passed through where the installed
+Git supports them.
+
+## Add a worktree
+
+```bash
+crab worktree add ../experiment feature/data-cleanup
+crab worktree add -b experiment ../experiment main
+crab worktree add --detach ../scratch HEAD
+```
+
+`crab worktree add` also accepts Crab hydration controls:
+
+| Option | Description |
+| --- | --- |
+| `--hydrate <lazy\|pointer-only\|full>` | Set the new worktree's hydration policy |
+| `--hydrate-include <PATTERN>` | Hydrate selected patterns after creation |
+| `--hydrate-exclude <PATTERN>` | Exclude patterns from selective hydration |
+| `--hydrate-manifest <PATH>` | Use a newline-delimited hydration manifest |
+| `--hydrate-manifest-ref <REF>` | Read a manifest from Git |
+| `--hydrate-profile <NAME>` | Use a profile from `.crab/prefetch.toml` |
+| `--prefetch` | Warm selected content without materializing it |
+| `--no-checkout` | Create worktree metadata without populating files |
+
+If post-create hydration fails, Crab preserves the new worktree so you can
+retry from inside it with `crab hydrate`.
+
+## Inspect and repair
+
+```bash
+crab worktree list --json
+crab worktree list --json --with-crab-state
+crab worktree prune
+crab worktree repair
+crab worktree remove ../experiment
+```
+
+The normal listing is fast. `--with-crab-state` adds hydration, cache, pointer,
+and speculation summaries.
+
+## Related commands
+
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate) — materialize pointer files.
+- [`crab dehydrate`](/docs/cli/reference/crab-dehydrate) — replace content with pointers.
+- [`crab clone`](/docs/cli/reference/crab-clone) — clone with Crab setup and hydration defaults.

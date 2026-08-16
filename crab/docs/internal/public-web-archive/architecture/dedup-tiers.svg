@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 340" width="600" height="340">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="600" height="340" fill="#ffffff"/>
+  </g>
+
+  <g id="containers">
+    <!-- Overall classification container -->
+    <rect x="30" y="50" width="540" height="260" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  </g>
+
+  <g id="nodes">
+    <!-- Class A -->
+    <rect x="60" y="75" width="480" height="60" rx="8" fill="#dcfce7" stroke="#86efac" stroke-width="1.5"/>
+    <!-- Class B -->
+    <rect x="60" y="155" width="480" height="60" rx="8" fill="#fef9c3" stroke="#fde047" stroke-width="1.5"/>
+    <!-- Class C -->
+    <rect x="60" y="235" width="480" height="60" rx="8" fill="#fee2e2" stroke="#fca5a5" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Title -->
+    <text x="300" y="30" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="bold" fill="#0f172a">Three-Tier Dedup Classification</text>
+
+    <!-- Class A -->
+    <text x="80" y="100" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#166534">Class A — Existing</text>
+    <text x="80" y="120" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#166534">Chunk already on remote → skip entirely (no pack, no upload). Detected via ChunkIndex lookup.</text>
+
+    <!-- Class B -->
+    <text x="80" y="180" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#854d0e">Class B — Staged</text>
+    <text x="80" y="200" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#854d0e">Chunk in local staging, not remote → needs packing into xorb and upload. Detected via staging index.</text>
+
+    <!-- Class C -->
+    <text x="80" y="260" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#991b1b">Class C — New</text>
+    <text x="80" y="280" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#991b1b">Chunk not seen before → needs staging, packing, and upload. Default classification.</text>
+
+    <!-- Cascade note -->
+    <text x="300" y="325" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#64748b">Classification cascades: ChunkIndex (cheapest) → Staging index → New (default)</text>
+  </g>
+
+  <g id="connections">
+    <!-- Cascade arrows on the right side -->
+    <line x1="555" y1="135" x2="555" y2="155" stroke="#475569" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="555" y1="215" x2="555" y2="235" stroke="#475569" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

@@ -1,0 +1,447 @@
+name: NFS Mount Evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/nfs-mount.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/Makefile"
+      - "crab/benches/nfs_read_path_bench.rs"
+      - "crab/docs/architecture/nfs-mount-architecture.md"
+      - "crab/scripts/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
+      - "crab/scripts/nfs-evidence-summary.py"
+      - "crab/scripts/nfs-read-path-bench-report.py"
+      - "crab/scripts/run-mount-nfs-macos-smoke.sh"
+      - "crab/scripts/run-mount-nfs-windows-smoke.ps1"
+      - "crab/scripts/verify-nfs-smoke-report.py"
+      - "crab/src/bin/crab_nfs_mount.rs"
+      - "crab/src/cmd/mount.rs"
+      - "crab/src/vfs/**"
+      - "crab/tests/prop_coordinator.rs"
+  pull_request:
+    paths:
+      - ".github/workflows/nfs-mount.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/Makefile"
+      - "crab/benches/nfs_read_path_bench.rs"
+      - "crab/docs/architecture/nfs-mount-architecture.md"
+      - "crab/scripts/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
+      - "crab/scripts/nfs-evidence-summary.py"
+      - "crab/scripts/nfs-read-path-bench-report.py"
+      - "crab/scripts/run-mount-nfs-macos-smoke.sh"
+      - "crab/scripts/run-mount-nfs-windows-smoke.ps1"
+      - "crab/scripts/verify-nfs-smoke-report.py"
+      - "crab/src/bin/crab_nfs_mount.rs"
+      - "crab/src/cmd/mount.rs"
+      - "crab/src/vfs/**"
+      - "crab/tests/prop_coordinator.rs"
+  workflow_dispatch:
+    inputs:
+      nfs_read_path_benchmark_baseline_run_id:
+        description: "Workflow run id containing baseline NFS read-path benchmark evidence"
+        required: false
+        type: string
+      nfs_read_path_benchmark_verify_args:
+        description: "Optional args for make nfs-read-path-bench-report-verify"
+        required: false
+        type: string
+      nfs_read_path_benchmark_compare_args:
+        description: "Optional args for make nfs-read-path-bench-report-compare"
+        required: false
+        type: string
+      nfs_smoke_baseline_run_id:
+        description: "Workflow run id containing baseline retained native NFS smoke evidence"
+        required: false
+        type: string
+      nfs_smoke_verify_args:
+        description: "Optional args for make nfs-smoke-report-verify-dir"
+        required: false
+        type: string
+      nfs_smoke_compare_args:
+        description: "Optional args for make nfs-smoke-report-compare-dir"
+        required: false
+        type: string
+      nfs_threshold_min_benchmark_reports:
+        description: "Minimum retained benchmark reports required for threshold suggestions"
+        required: false
+        type: string
+      nfs_threshold_min_smoke_summaries:
+        description: "Minimum retained native smoke summaries required for threshold suggestions"
+        required: false
+        type: string
+      nfs_threshold_require_calibration_ready:
+        description: "Require threshold suggestions to have all platforms and enough retained runs for calibration"
+        required: false
+        type: boolean
+        default: false
+      nfs_threshold_require_release_grade:
+        description: "Require threshold suggestions to include exact retained Linux, macOS, and Windows smoke evidence"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NFS_READ_PATH_BENCH_BASELINE_RUN_ID: ${{ inputs.nfs_read_path_benchmark_baseline_run_id || vars.NFS_READ_PATH_BENCH_BASELINE_RUN_ID }}
+  NFS_READ_PATH_BENCH_VERIFY_ARGS: ${{ inputs.nfs_read_path_benchmark_verify_args || vars.NFS_READ_PATH_BENCH_VERIFY_ARGS }}
+  NFS_READ_PATH_BENCH_COMPARE_ARGS: ${{ inputs.nfs_read_path_benchmark_compare_args || vars.NFS_READ_PATH_BENCH_COMPARE_ARGS }}
+  NFS_SMOKE_BASELINE_RUN_ID: ${{ inputs.nfs_smoke_baseline_run_id || vars.NFS_SMOKE_BASELINE_RUN_ID }}
+  NFS_SMOKE_VERIFY_ARGS: ${{ inputs.nfs_smoke_verify_args || vars.NFS_SMOKE_VERIFY_ARGS }}
+  NFS_SMOKE_COMPARE_ARGS: ${{ inputs.nfs_smoke_compare_args || vars.NFS_SMOKE_COMPARE_ARGS }}
+  NFS_THRESHOLD_MIN_BENCHMARK_REPORTS: ${{ inputs.nfs_threshold_min_benchmark_reports || vars.NFS_THRESHOLD_MIN_BENCHMARK_REPORTS || '1' }}
+  NFS_THRESHOLD_MIN_SMOKE_SUMMARIES: ${{ inputs.nfs_threshold_min_smoke_summaries || vars.NFS_THRESHOLD_MIN_SMOKE_SUMMARIES || '1' }}
+  NFS_THRESHOLD_REQUIRE_CALIBRATION_READY: ${{ inputs.nfs_threshold_require_calibration_ready || vars.NFS_THRESHOLD_REQUIRE_CALIBRATION_READY || 'false' }}
+  NFS_THRESHOLD_REQUIRE_RELEASE_GRADE: ${{ inputs.nfs_threshold_require_release_grade || vars.NFS_THRESHOLD_REQUIRE_RELEASE_GRADE || 'false' }}
+
+jobs:
+  feature-gate:
+    name: NFS feature gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nfs-feature-gate
+          workspaces: ". -> target"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev
+
+      - name: Run NFS feature gate
+        working-directory: crab
+        run: make nfs-feature-gate
+
+  linux-native-smoke:
+    name: Native NFS smoke (Linux)
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: feature-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_RUN_ID: mount-nfs-linux-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run native Linux NFS smoke
+        working-directory: crab
+        run: make mount-nfs-linux-smoke
+
+      - name: Upload Linux NFS smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-smoke-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  read-path-benchmark:
+    name: NFS read-path benchmark evidence
+    needs: feature-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NFS_READ_PATH_BENCH_REPORT: ${{ runner.temp }}/nfs-read-path-bench-report.json
+      NFS_READ_PATH_BENCH_COMPARE_OUTPUT: ${{ runner.temp }}/nfs-read-path-bench-comparison.json
+      NFS_READ_PATH_BENCH_RUN_ID: nfs-read-path-bench-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nfs-read-path-benchmark
+          workspaces: ". -> target"
+
+      - name: Run NFS read-path benchmark report
+        working-directory: crab
+        run: make nfs-read-path-bench-report NFS_READ_PATH_BENCH_RUN_ID="${NFS_READ_PATH_BENCH_RUN_ID}"
+
+      - name: Verify NFS read-path benchmark report
+        working-directory: crab
+        run: |
+          make nfs-read-path-bench-report-verify \
+            NFS_READ_PATH_BENCH_EXPECTED_GIT_COMMIT=${{ github.sha }} \
+            NFS_READ_PATH_BENCH_EXPECTED_RUN_ID="${NFS_READ_PATH_BENCH_RUN_ID}"
+
+      - name: Download baseline NFS read-path benchmark evidence
+        if: ${{ env.NFS_READ_PATH_BENCH_BASELINE_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline_dir="$RUNNER_TEMP/nfs-read-path-benchmark-baseline"
+          mkdir -p "$baseline_dir"
+          gh run download "$NFS_READ_PATH_BENCH_BASELINE_RUN_ID" \
+            --pattern "nfs-read-path-benchmark-*" \
+            --dir "$baseline_dir"
+          baseline_report="$(find "$baseline_dir" -name nfs-read-path-bench-report.json -print -quit)"
+          if [ -z "$baseline_report" ]; then
+            echo "No nfs-read-path-bench-report.json found in baseline run $NFS_READ_PATH_BENCH_BASELINE_RUN_ID" >&2
+            exit 1
+          fi
+          echo "NFS_READ_PATH_BENCH_BASELINE_REPORT=$baseline_report" >> "$GITHUB_ENV"
+
+      - name: Compare NFS read-path benchmark trend
+        if: ${{ env.NFS_READ_PATH_BENCH_BASELINE_RUN_ID != '' }}
+        working-directory: crab
+        run: make nfs-read-path-bench-report-compare
+
+      - name: Summarize NFS read-path benchmark evidence
+        if: always()
+        working-directory: crab
+        run: |
+          python3 scripts/nfs-evidence-summary.py benchmark \
+            --report "$NFS_READ_PATH_BENCH_REPORT" \
+            --comparison "$NFS_READ_PATH_BENCH_COMPARE_OUTPUT" \
+            --output "$GITHUB_STEP_SUMMARY" \
+            --append \
+            --allow-missing
+
+      - name: Upload NFS read-path benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-read-path-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.NFS_READ_PATH_BENCH_REPORT }}
+            ${{ env.NFS_READ_PATH_BENCH_COMPARE_OUTPUT }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-native-smoke:
+    name: Native NFS smoke (macOS)
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: feature-gate
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_RUN_ID: mount-nfs-macos-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nfs-macos-smoke
+          workspaces: ". -> target"
+
+      - name: Run native macOS NFS smoke
+        working-directory: crab
+        run: make mount-nfs-macos-smoke
+
+      - name: Upload macOS NFS smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-smoke-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-native-smoke:
+    name: Native NFS smoke (Windows)
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: feature-gate
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_RUN_ID: mount-nfs-windows-${{ github.run_id }}-${{ github.run_attempt }}
+      CRAB_NFS_SMOKE_DRIVE: "Z:"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nfs-windows-smoke
+          workspaces: ". -> target"
+
+      - name: Enable Windows Client for NFS
+        shell: pwsh
+        run: |
+          if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
+            Install-WindowsFeature -Name NFS-Client -IncludeManagementTools
+          } else {
+            Enable-WindowsOptionalFeature `
+              -Online `
+              -FeatureName ServicesForNFS-ClientOnly `
+              -All `
+              -NoRestart
+          }
+          Get-Command "$env:WINDIR\System32\mount.exe" -ErrorAction Stop
+          Get-Command "$env:WINDIR\System32\umount.exe" -ErrorAction Stop
+
+      - name: Run native Windows NFS smoke
+        shell: pwsh
+        working-directory: crab
+        run: ./scripts/run-mount-nfs-windows-smoke.ps1
+
+      - name: Upload Windows NFS smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-smoke-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  retained-smoke-evidence:
+    name: Verify retained NFS smoke evidence
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    needs:
+      - read-path-benchmark
+      - linux-native-smoke
+      - macos-native-smoke
+      - windows-native-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NFS_SMOKE_COMPARE_SUMMARY: ../nfs-smoke-comparison-summary.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download retained NFS smoke evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nfs-smoke-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: nfs-smoke-retained
+          merge-multiple: false
+
+      - name: Download retained NFS read-path benchmark evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nfs-read-path-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: nfs-read-path-benchmark
+          merge-multiple: false
+
+      - name: Verify retained NFS smoke evidence
+        working-directory: crab
+        run: |
+          make nfs-smoke-report-verify-dir \
+            NFS_SMOKE_REPORT_DIR=../nfs-smoke-retained \
+            NFS_SMOKE_VERIFY_SUMMARY=../nfs-smoke-retained-summary.json \
+            NFS_SMOKE_EXPECTED_RUN_SUFFIX=${{ github.run_id }}-${{ github.run_attempt }} \
+            NFS_SMOKE_EXPECTED_GIT_COMMIT=${{ github.sha }}
+
+      - name: Download baseline retained NFS smoke evidence
+        if: ${{ env.NFS_SMOKE_BASELINE_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$NFS_SMOKE_BASELINE_RUN_ID" \
+            --pattern "nfs-smoke-*" \
+            --dir nfs-smoke-baseline
+
+      - name: Compare retained NFS smoke trend
+        if: ${{ env.NFS_SMOKE_BASELINE_RUN_ID != '' }}
+        working-directory: crab
+        run: |
+          make nfs-smoke-report-compare-dir \
+            NFS_SMOKE_BASELINE_REPORT_DIR=../nfs-smoke-baseline \
+            NFS_SMOKE_REPORT_DIR=../nfs-smoke-retained \
+            NFS_SMOKE_COMPARE_SUMMARY="${NFS_SMOKE_COMPARE_SUMMARY}"
+
+      - name: Summarize retained NFS smoke evidence
+        if: always()
+        working-directory: crab
+        run: |
+          python3 scripts/nfs-evidence-summary.py smoke \
+            --summary ../nfs-smoke-retained-summary.json \
+            --comparison "${NFS_SMOKE_COMPARE_SUMMARY}" \
+            --output "$GITHUB_STEP_SUMMARY" \
+            --append \
+            --allow-missing
+
+      - name: Suggest NFS threshold args
+        if: always()
+        working-directory: crab
+        run: |
+          set -euo pipefail
+          smoke_summary="../nfs-smoke-retained-summary.json"
+          args=()
+          if [ -d ../nfs-read-path-benchmark ]; then
+            args+=(--benchmark-dir ../nfs-read-path-benchmark)
+          fi
+          if [ -f "$smoke_summary" ]; then
+            args+=(--smoke-summary "$smoke_summary")
+          fi
+          if [ "${NFS_THRESHOLD_REQUIRE_RELEASE_GRADE:-false}" = "true" ] || [ "${NFS_THRESHOLD_REQUIRE_RELEASE_GRADE:-0}" = "1" ]; then
+            args+=(--require-release-grade)
+          fi
+          if [ "${NFS_THRESHOLD_REQUIRE_CALIBRATION_READY:-false}" = "true" ] || [ "${NFS_THRESHOLD_REQUIRE_CALIBRATION_READY:-0}" = "1" ]; then
+            args+=(--require-calibration-ready)
+          fi
+          if [ "${#args[@]}" -eq 0 ]; then
+            {
+              echo "## Suggested NFS threshold args"
+              echo ""
+              echo "No retained benchmark or native smoke summary was available."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 scripts/nfs-evidence-summary.py thresholds \
+            "${args[@]}" \
+            --min-benchmark-reports "${NFS_THRESHOLD_MIN_BENCHMARK_REPORTS:-1}" \
+            --min-smoke-summaries "${NFS_THRESHOLD_MIN_SMOKE_SUMMARIES:-1}" \
+            --output ../nfs-threshold-suggestions.env \
+            --json-output ../nfs-threshold-suggestions.json
+          cat ../nfs-threshold-suggestions.env >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload retained NFS smoke summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-smoke-retained-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            nfs-smoke-retained-summary.json
+            nfs-smoke-comparison-summary.json
+            nfs-threshold-suggestions.env
+            nfs-threshold-suggestions.json
+          if-no-files-found: ignore
+          retention-days: 14

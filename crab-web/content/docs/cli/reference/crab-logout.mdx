@@ -1,0 +1,74 @@
+---
+title: "crab logout"
+description: "Revoke when possible and remove managed-service or direct-provider tokens from the local cache."
+---
+
+# crab logout
+
+Clear cached credentials. Managed logout targets an exact installed authority;
+without an argument it uses the active managed profile when one exists.
+
+## Synopsis
+
+```text
+crab logout [OPTIONS] [SERVICE]
+```
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SERVICE` | No | Managed authority or HTTPS origin; defaults to the active profile |
+
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Delete tokens for every managed profile and configured direct provider |
+
+`--all` conflicts with a `SERVICE` argument.
+
+## Behavior
+
+For a managed profile, Crab attempts best-effort OIDC revocation using the
+profile's validated discovery metadata. It then deletes that profile's local
+encrypted tokens even if the identity provider is unreachable or has no
+revocation endpoint. Other profiles and direct-provider tokens are untouched.
+
+Logout removes tokens, not the non-secret service profile. Repository remotes
+also remain unchanged.
+
+## Examples
+
+### Active managed profile
+
+```bash
+crab logout
+```
+
+### Exact managed authority
+
+```bash
+crab logout crab.build
+```
+
+The HTTPS origin is also accepted:
+
+```bash
+crab logout https://crab.build
+```
+
+### Every token on the machine
+
+```bash
+crab logout --all
+```
+
+Use `--all` carefully: it removes unrelated managed and direct-provider token
+cache entries too.
+
+## Related
+
+- [Logging Out](/docs/cli/authentication/logging-out)
+- [`crab login`](/docs/cli/reference/crab-login)
+- [Managed Service Diagnostics](/docs/cli/managed-service/diagnostics)

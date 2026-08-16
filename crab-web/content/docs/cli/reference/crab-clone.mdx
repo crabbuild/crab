@@ -1,0 +1,86 @@
+---
+title: "crab clone"
+description: "Clone Git or crab:// repositories with managed profile resolution, filter setup, lazy checkout, and optional hydration."
+---
+
+# crab clone
+
+Clone a Git or `crab://` repository. Crab remotes receive filter setup and
+optional hydration after Git clone completes.
+
+## Synopsis
+
+```text
+crab clone [OPTIONS] <URL> [DIR]
+```
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `URL` | Yes | Git URL/path, direct `crab://bucket/prefix`, canonical managed URL, or managed `organization/repository` shorthand |
+| `DIR` | No | Target directory; defaults to the repository name derived from the URL |
+
+Managed shorthand is expanded only when an active service profile exists. It
+is a Crab CLI convenience and does not reinterpret arbitrary Git paths.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-b, --branch <BRANCH>` | Remote default | Branch to check out |
+| `--depth <DEPTH>` | Full history | Shallow clone depth |
+| `--lazy` | Enabled | Leave managed files as pointers |
+| `--no-lazy` | Disabled | Hydrate all managed files immediately |
+| `--eager` | Disabled | Alias for `--no-lazy` |
+| `--include <PATTERN>` | None | Glob to hydrate immediately; repeat for multiple patterns |
+| `--exclude <PATTERN>` | None | Glob to exclude from post-clone hydration; repeat as needed |
+| `--sync-chunk-index` | Disabled | Warm the local chunk-index cache after clone |
+| `--json` | Disabled | Emit one terminal JSON envelope |
+| `--jsonl` | Disabled | Stream JSONL events followed by the terminal result |
+
+## Managed examples
+
+### Canonical hosted URL
+
+```bash
+crab login https://crab.build
+crab clone crab://crab.build/acme/models
+```
+
+### Active-profile shorthand
+
+```bash
+crab clone acme/models
+```
+
+Both forms persist `crab://crab.build/acme/models` in `.git/config` and
+`.crab/remote`. Resolved placement and transfer credentials remain in memory.
+
+### Hydrate selected content
+
+```bash
+crab clone acme/models --include 'configs/**' --include '*.json'
+```
+
+### Hydrate everything
+
+```bash
+crab clone --no-lazy crab://crab.build/acme/models
+```
+
+## Direct BYOC example
+
+```bash
+crab clone crab://team-bucket/ml/models
+```
+
+An authority other than `crab.build` remains direct unless an exact managed
+service profile binds it.
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [Managed and Direct Storage](/docs/cli/managed-service/direct-storage)
+- [`crab fetch`](/docs/cli/reference/crab-fetch)
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate)

@@ -1,0 +1,297 @@
+---
+title: "Experiments"
+description: "Run reproducible experiments with parameter overrides, compare results, and manage experiment history."
+---
+
+# crab exp
+
+Run reproducible experiments against throwaway worktrees with parameter
+overrides, then inspect, compare, and manage experiment history.
+
+## Synopsis
+
+```
+crab exp run [OPTIONS]
+crab exp show <ID> [--json]
+crab exp diff <ID_A> <ID_B> [--json]
+crab exp ls [--limit <N>] [--json]
+crab exp promote <ID> --branch <BRANCH> [--json]
+crab exp gc [--keep <N>] [--dry-run] [--json]
+```
+
+## Description
+
+`crab exp` manages content-addressed experiment runs. Each experiment branches
+off `HEAD` into a throwaway worktree, applies optional `--set key=value`
+parameter overrides, executes the DAG defined in `crab.yaml`, and persists
+metadata locally under `.crab/workflow/exp/<uuid>.meta.json`.
+
+Experiments are keyed by UUIDv7 identifiers that sort chronologically, so
+listing and diffing operations work without relying on wall-clock timestamps.
+
+Six subcommands are available:
+
+- **`run`** — mint an experiment ID, create a temporary worktree from HEAD,
+  execute the workflow DAG with optional parameter overrides, and persist
+  metadata locally. The temporary worktree is cleaned up on completion.
+
+- **`show`** — display the full metadata record for a given experiment,
+  including parameter overrides, stage hashes, and collected metrics.
+
+- **`diff`** — compare two experiments side-by-side, showing differences in
+  parameter overrides, stage hashes, and metric values.
+
+- **`ls`** — list all local experiments in reverse chronological order
+  (newest first).
+
+- **`promote`** — create a git branch pointing at an experiment's base commit,
+  making it easy to share or build upon a successful experiment.
+
+- **`gc`** — prune old experiment metadata beyond a configurable retention
+  count. Orphan temporary directories are swept as well.
+
+## Subcommands
+
+### crab exp run
+
+Execute a new experiment.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--set <KEY=VALUE>` | | Parameter override as `key=value`. Repeatable. Dotted keys target nested structures in declared params files. |
+| `--keep-going` | `false` | Continue executing unrelated DAG branches after a stage failure. |
+| `--parallelism <N>` | | Maximum parallel stages (reserved for future use). |
+| `--name <NAME>` | | Human-readable experiment label stored in metadata. |
+| `--json` | `false` | Emit structured JSON output. |
+
+### crab exp show
+
+Display metadata for a specific experiment.
+
+| Argument | Description |
+|----------|-------------|
+| `<ID>` | Experiment ID in canonical hyphenated UUIDv7 form. |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output. |
+
+### crab exp diff
+
+Compare two experiments.
+
+| Argument | Description |
+|----------|-------------|
+| `<ID_A>` | First experiment ID (the "old" side). |
+| `<ID_B>` | Second experiment ID (the "new" side). |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output. |
+
+### crab exp ls
+
+List local experiments.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit <N>` | | Show only the N most recent experiments. |
+| `--json` | `false` | Emit structured JSON output. |
+
+### crab exp promote
+
+Create a git branch from an experiment's base commit.
+
+| Argument | Description |
+|----------|-------------|
+| `<ID>` | Experiment ID to promote. |
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--branch <BRANCH>` | `-b` | | Branch name to create. Required. |
+| `--json` | | `false` | Emit structured JSON output. |
+
+### crab exp gc
+
+Prune old experiment metadata.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--keep <N>` | `100` | Number of most-recent experiments to retain. |
+| `--dry-run` | `false` | Preview what would be removed without deleting anything. |
+| `--json` | `false` | Emit structured JSON output. |
+
+## Examples
+
+### Run an experiment with parameter overrides
+
+```bash
+crab exp run --set lr=0.01 --set epochs=50 --name "lower-lr-test"
+```
+
+Creates a throwaway worktree from HEAD, writes the parameter overrides into the
+declared params files, executes the full DAG, and persists the result metadata
+locally.
+
+### List recent experiments
+
+```bash
+crab exp ls --limit 5
+```
+
+Shows the five most recent experiments with their IDs, start times, stage
+counts, and base commits.
+
+### Compare two experiments
+
+```bash
+crab exp diff 019077a2-... 019077b3-...
+```
+
+Displays parameter, stage hash, and metric differences between the two
+experiments. Added, removed, and changed values are shown clearly.
+
+### Promote a successful experiment to a branch
+
+```bash
+crab exp promote 019077a2-... --branch feature/best-model
+```
+
+Creates a git branch `feature/best-model` pointing at the experiment's base
+commit, making it easy to share or continue work from that point.
+
+### Clean up old experiments
+
+```bash
+crab exp gc --keep 20
+```
+
+Removes metadata for all experiments beyond the 20 most recent. Orphan
+temporary directories are swept as well.
+
+### Preview garbage collection
+
+```bash
+crab exp gc --keep 10 --dry-run
+```
+
+Shows which experiments would be removed without actually deleting anything.
+
+## Prerequisites
+
+- Workflow feature enabled with `crab config set workflow.enabled true`.
+- A `crab.yaml` file at the repository root defining stages and metrics.
+- A clean git HEAD (the experiment worktree branches from the current commit).
+
+## JSON Output
+
+All subcommands support `--json` for structured output.
+
+### crab exp run --json
+
+```json
+{
+  "schema": "workflow.exp.run",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:15:42.000Z",
+  "data": {
+    "exp_id": "019077a2-1234-7000-8000-abcdef012345",
+    "base_commit": "a7f3b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+    "stages": {
+      "preprocess": "c4d5e6f7...",
+      "train": "a1b2c3d4..."
+    },
+    "metrics_files": ["metrics/train.json"],
+    "status": "success",
+    "duration_ms": 34200,
+    "started_at": "2026-06-01T10:15:08.000Z"
+  }
+}
+```
+
+### crab exp show --json
+
+```json
+{
+  "schema": "workflow.exp.show",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:16:00.000Z",
+  "data": {
+    "metadata": {
+      "exp_id": "019077a2-1234-7000-8000-abcdef012345",
+      "base_commit": "a7f3b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+      "param_overrides": { "lr": "0.01", "epochs": "50" },
+      "stages": { "preprocess": "c4d5e6f7...", "train": "a1b2c3d4..." },
+      "metrics": { "metrics/train.json": { "loss": 0.023, "accuracy": 0.97 } },
+      "started_at": "2026-06-01T10:15:08.000Z",
+      "ended_at": "2026-06-01T10:15:42.000Z",
+      "host_fingerprint": "macos-aarch64-crab-0.9.0"
+    }
+  }
+}
+```
+
+### crab exp diff --json
+
+```json
+{
+  "schema": "workflow.exp.diff",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:20:00.000Z",
+  "data": {
+    "id_a": "019077a2-...",
+    "id_b": "019077b3-...",
+    "params_added": { "warmup": "5" },
+    "params_removed": {},
+    "params_changed": { "lr": ["0.01", "0.001"] },
+    "stages_changed": { "train": ["a1b2c3d4...", "e5f6a7b8..."] },
+    "metrics_changed": { "metrics/train.json": [{ "loss": 0.023 }, { "loss": 0.019 }] }
+  }
+}
+```
+
+### crab exp ls --json
+
+```json
+{
+  "schema": "workflow.exp.ls",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:20:00.000Z",
+  "data": {
+    "experiments": [
+      {
+        "id": "019077b3-...",
+        "started_at": "2026-06-01T10:18:00.000Z",
+        "base_commit": "a7f3b2c4d5e6...",
+        "stages": 3,
+        "metrics_keys": ["metrics/train.json"]
+      }
+    ]
+  }
+}
+```
+
+### crab exp gc --json
+
+```json
+{
+  "schema": "workflow.exp.gc",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:25:00.000Z",
+  "data": {
+    "keep": 20,
+    "dry_run": false,
+    "removed": ["019070a1-...", "019070a0-..."],
+    "kept": ["019077b3-...", "019077a2-..."]
+  }
+}
+```
+
+## Related Commands
+
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages with content-addressed caching.
+- [`crab exp queue`](/docs/cli/automation/experiment-queue) — queue experiments for batch execution.
+- [`crab params`](/docs/cli/automation/parameters) — manage workflow parameters.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and query stage metrics.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — manage workflow definitions.
+- [`crab workflow dag`](/docs/cli/automation/dag-visualization) — visualize the stage dependency graph.

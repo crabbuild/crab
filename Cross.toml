@@ -1,0 +1,22 @@
+# Cross-compilation configuration for `cross`
+# https://github.com/cross-rs/cross
+#
+# Used by `crab/scripts/release.sh` to build Linux targets from macOS.
+# Cross auto-detects the workspace root (CrabBuild/) and mounts it.
+# Xet and Gitoxide crates resolve from crates.io.
+
+[build.env]
+# Forward these env vars into the cross container so build.rs can
+# resolve git sha and version overrides.
+passthrough = ["CRAB_BUILD_VERSION", "GIT_SHA"]
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+pre-build = ["apt-get update && apt-get install -y libfuse3-dev"]
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+pre-build = ["dpkg --add-architecture arm64 && apt-get update && apt-get install -y libfuse3-dev:arm64 libssl-dev:arm64"]
+
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:main"

@@ -1,0 +1,412 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1900 1340">
+  <defs>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M 44 0 L 0 0 0 44" fill="none" stroke="#1e293b" stroke-width="0.55"/>
+    </pattern>
+
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#fb923c"/>
+    </marker>
+    <marker id="arrow-slate" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#94a3b8"/>
+    </marker>
+
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+      text {
+        font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+        letter-spacing: 0;
+      }
+      .title { fill: #f8fafc; font-size: 24px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+      .region-label { font-size: 10px; font-weight: 700; }
+      .box-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .box-sub { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+      .tiny { fill: #94a3b8; font-size: 8px; font-weight: 400; }
+      .arrow-label { font-size: 8px; font-weight: 500; }
+      .mask { fill: #0f172a; }
+      .primary { fill: #083344; fill-opacity: 0.46; stroke: #22d3ee; stroke-width: 1.7; }
+      .secondary { fill: #064e3b; fill-opacity: 0.44; stroke: #34d399; stroke-width: 1.7; }
+      .tertiary { fill: #4c1d95; fill-opacity: 0.43; stroke: #a78bfa; stroke-width: 1.7; }
+      .accent { fill: #78350f; fill-opacity: 0.35; stroke: #fbbf24; stroke-width: 1.7; }
+      .alert { fill: #881337; fill-opacity: 0.42; stroke: #fb7185; stroke-width: 1.7; }
+      .connector { fill: #7c2d12; fill-opacity: 0.33; stroke: #fb923c; stroke-width: 1.7; }
+      .neutral { fill: #1e293b; fill-opacity: 0.58; stroke: #94a3b8; stroke-width: 1.7; }
+      .highlight { fill: #1d4ed8; fill-opacity: 0.35; stroke: #60a5fa; stroke-width: 1.7; }
+      .region-cyan { fill: none; stroke: #22d3ee; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-green { fill: none; stroke: #34d399; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-violet { fill: none; stroke: #a78bfa; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-amber { fill: none; stroke: #fb923c; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-rose { fill: none; stroke: #fb7185; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .line-cyan { fill: none; stroke: #22d3ee; stroke-width: 2.1; marker-end: url(#arrow-cyan); }
+      .line-green { fill: none; stroke: #34d399; stroke-width: 2.1; marker-end: url(#arrow-green); }
+      .line-violet { fill: none; stroke: #a78bfa; stroke-width: 2.1; marker-end: url(#arrow-violet); }
+      .line-rose { fill: none; stroke: #fb7185; stroke-width: 2.1; marker-end: url(#arrow-rose); }
+      .line-slate { fill: none; stroke: #94a3b8; stroke-width: 1.8; marker-end: url(#arrow-slate); }
+      .line-amber { fill: none; stroke: #fb923c; stroke-width: 2; marker-end: url(#arrow-amber); }
+      .line-amber-dashed { fill: none; stroke: #fb923c; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-amber); }
+      .line-green-dashed { fill: none; stroke: #34d399; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-green); }
+      .line-rose-dashed { fill: none; stroke: #fb7185; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-rose); }
+    </style>
+  </defs>
+
+  <rect width="1900" height="1340" rx="10" fill="#0f172a"/>
+  <rect width="1900" height="1340" rx="10" fill="url(#grid)" opacity="0.72"/>
+
+  <g id="regions">
+    <rect x="40" y="138" width="360" height="820" rx="14" class="region-cyan"/>
+    <text x="58" y="160" class="region-label" fill="#22d3ee">CLI inputs and repo context</text>
+
+    <rect x="430" y="138" width="640" height="580" rx="14" class="region-green"/>
+    <text x="448" y="160" class="region-label" fill="#34d399">Tier planning core: provider-neutral policy engine</text>
+
+    <rect x="430" y="728" width="640" height="230" rx="14" class="region-rose"/>
+    <text x="448" y="750" class="region-label" fill="#fb7185">Guarded apply, rollback, and audit trail</text>
+
+    <rect x="1100" y="138" width="760" height="360" rx="14" class="region-violet"/>
+    <text x="1118" y="160" class="region-label" fill="#a78bfa">Cloud lifecycle control planes</text>
+
+    <rect x="1100" y="528" width="760" height="430" rx="14" class="region-amber"/>
+    <text x="1118" y="550" class="region-label" fill="#fb923c">Bucket layout and provider-managed tier transitions</text>
+
+    <rect x="40" y="988" width="1820" height="190" rx="14" class="region-green"/>
+    <text x="58" y="1010" class="region-label" fill="#34d399">Runtime behavior after tiering is enabled</text>
+  </g>
+
+  <g id="connections">
+    <!-- CLI and config into planning -->
+    <path d="M 360 238 L 460 238" class="line-cyan"/>
+    <path d="M 360 358 L 418 358 L 418 238 L 460 238" class="line-cyan"/>
+    <path d="M 360 478 L 414 478 L 414 887 L 460 887" class="line-rose"/>
+    <path d="M 360 660 L 430 660 L 430 540 L 460 540" class="line-green"/>
+    <path d="M 360 815 L 430 815 L 430 278 L 460 278" class="line-cyan"/>
+
+    <!-- Planner pipeline -->
+    <path d="M 690 258 L 740 258" class="line-cyan"/>
+    <path d="M 870 298 L 870 350" class="line-violet"/>
+    <path d="M 575 300 L 575 350" class="line-violet"/>
+    <path d="M 690 395 L 740 395" class="line-violet"/>
+    <path d="M 870 440 L 870 505" class="line-green"/>
+    <path d="M 720 565 L 760 565" class="line-green"/>
+    <path d="M 590 615 L 590 640" class="line-green"/>
+    <path d="M 890 615 L 890 640" class="line-green"/>
+    <path d="M 720 675 L 760 675" class="line-slate"/>
+
+    <!-- Apply safety lane -->
+    <path d="M 590 710 L 590 765" class="line-rose"/>
+    <path d="M 700 805 L 760 805" class="line-rose"/>
+    <path d="M 890 845 L 890 865" class="line-rose"/>
+    <path d="M 760 908 L 700 908" class="line-rose"/>
+    <path d="M 1010 908 L 1080 908 L 1080 300 L 1130 300" class="line-violet"/>
+    <path d="M 700 882 L 760 882" class="line-rose-dashed"/>
+
+    <!-- Provider render/apply -->
+    <path d="M 1370 250 L 1430 220" class="line-violet"/>
+    <path d="M 1370 250 L 1430 318" class="line-violet"/>
+    <path d="M 1370 250 L 1430 416" class="line-violet"/>
+    <path d="M 1620 216 L 1640 216 L 1640 318 L 1660 318" class="line-violet"/>
+    <path d="M 1620 318 L 1660 318" class="line-violet"/>
+    <path d="M 1620 420 L 1640 420 L 1640 318 L 1660 318" class="line-violet"/>
+    <path d="M 1740 372 L 1740 510 L 1260 510 L 1260 575" class="line-violet"/>
+
+    <!-- Lifecycle effects on bucket tiers -->
+    <path d="M 1390 735 L 1435 615" class="line-amber-dashed"/>
+    <path d="M 1565 650 L 1565 695" class="line-amber-dashed"/>
+    <path d="M 1565 770 L 1565 815" class="line-amber-dashed"/>
+
+    <!-- Runtime feedback -->
+    <path d="M 1680 860 L 1680 975 L 300 975 L 300 1040" class="line-violet"/>
+    <path d="M 410 1085 L 470 1085" class="line-violet"/>
+    <path d="M 770 1085 L 830 1085" class="line-violet"/>
+    <path d="M 1130 1085 L 1190 1085" class="line-green"/>
+    <path d="M 1485 1085 L 1540 1085" class="line-green"/>
+  </g>
+
+  <g id="nodes">
+    <!-- CLI input boxes -->
+    <rect x="80" y="200" width="280" height="78" rx="8" class="mask"/>
+    <rect x="80" y="200" width="280" height="78" rx="8" class="primary"/>
+
+    <rect x="80" y="320" width="280" height="78" rx="8" class="mask"/>
+    <rect x="80" y="320" width="280" height="78" rx="8" class="primary"/>
+
+    <rect x="80" y="440" width="280" height="78" rx="8" class="mask"/>
+    <rect x="80" y="440" width="280" height="78" rx="8" class="primary"/>
+
+    <rect x="80" y="610" width="280" height="110" rx="8" class="mask"/>
+    <rect x="80" y="610" width="280" height="110" rx="8" class="secondary"/>
+
+    <rect x="80" y="770" width="280" height="90" rx="8" class="mask"/>
+    <rect x="80" y="770" width="280" height="90" rx="8" class="highlight"/>
+
+    <!-- Planner boxes -->
+    <rect x="460" y="220" width="230" height="80" rx="8" class="mask"/>
+    <rect x="460" y="220" width="230" height="80" rx="8" class="primary"/>
+
+    <rect x="740" y="220" width="260" height="80" rx="8" class="mask"/>
+    <rect x="740" y="220" width="260" height="80" rx="8" class="highlight"/>
+
+    <rect x="460" y="350" width="230" height="90" rx="8" class="mask"/>
+    <rect x="460" y="350" width="230" height="90" rx="8" class="tertiary"/>
+
+    <rect x="740" y="350" width="260" height="90" rx="8" class="mask"/>
+    <rect x="740" y="350" width="260" height="90" rx="8" class="tertiary"/>
+
+    <rect x="460" y="505" width="260" height="110" rx="8" class="mask"/>
+    <rect x="460" y="505" width="260" height="110" rx="8" class="secondary"/>
+
+    <rect x="760" y="505" width="260" height="110" rx="8" class="mask"/>
+    <rect x="760" y="505" width="260" height="110" rx="8" class="secondary"/>
+
+    <rect x="460" y="640" width="260" height="70" rx="8" class="mask"/>
+    <rect x="460" y="640" width="260" height="70" rx="8" class="connector"/>
+
+    <rect x="760" y="640" width="260" height="70" rx="8" class="mask"/>
+    <rect x="760" y="640" width="260" height="70" rx="8" class="neutral"/>
+
+    <!-- Safety boxes -->
+    <rect x="460" y="765" width="240" height="80" rx="8" class="mask"/>
+    <rect x="460" y="765" width="240" height="80" rx="8" class="alert"/>
+
+    <rect x="760" y="765" width="250" height="80" rx="8" class="mask"/>
+    <rect x="760" y="765" width="250" height="80" rx="8" class="alert"/>
+
+    <rect x="460" y="865" width="240" height="85" rx="8" class="mask"/>
+    <rect x="460" y="865" width="240" height="85" rx="8" class="connector"/>
+
+    <rect x="760" y="865" width="250" height="85" rx="8" class="mask"/>
+    <rect x="760" y="865" width="250" height="85" rx="8" class="alert"/>
+
+    <!-- Provider boxes -->
+    <rect x="1130" y="210" width="240" height="110" rx="8" class="mask"/>
+    <rect x="1130" y="210" width="240" height="110" rx="8" class="tertiary"/>
+
+    <rect x="1430" y="180" width="190" height="72" rx="8" class="mask"/>
+    <rect x="1430" y="180" width="190" height="72" rx="8" class="accent"/>
+
+    <rect x="1430" y="282" width="190" height="72" rx="8" class="mask"/>
+    <rect x="1430" y="282" width="190" height="72" rx="8" class="accent"/>
+
+    <rect x="1430" y="384" width="190" height="72" rx="8" class="mask"/>
+    <rect x="1430" y="384" width="190" height="72" rx="8" class="accent"/>
+
+    <rect x="1660" y="282" width="160" height="90" rx="8" class="mask"/>
+    <rect x="1660" y="282" width="160" height="90" rx="8" class="tertiary"/>
+
+    <!-- Bucket layout boxes -->
+    <rect x="1130" y="575" width="260" height="95" rx="8" class="mask"/>
+    <rect x="1130" y="575" width="260" height="95" rx="8" class="connector"/>
+
+    <rect x="1130" y="705" width="260" height="95" rx="8" class="mask"/>
+    <rect x="1130" y="705" width="260" height="95" rx="8" class="secondary"/>
+
+    <rect x="1130" y="835" width="260" height="85" rx="8" class="mask"/>
+    <rect x="1130" y="835" width="260" height="85" rx="8" class="tertiary"/>
+
+    <rect x="1435" y="575" width="260" height="75" rx="8" class="mask"/>
+    <rect x="1435" y="575" width="260" height="75" rx="8" class="primary"/>
+
+    <rect x="1435" y="695" width="260" height="75" rx="8" class="mask"/>
+    <rect x="1435" y="695" width="260" height="75" rx="8" class="secondary"/>
+
+    <rect x="1435" y="815" width="260" height="95" rx="8" class="mask"/>
+    <rect x="1435" y="815" width="260" height="95" rx="8" class="accent"/>
+
+    <!-- Runtime boxes -->
+    <rect x="120" y="1040" width="290" height="90" rx="8" class="mask"/>
+    <rect x="120" y="1040" width="290" height="90" rx="8" class="primary"/>
+
+    <rect x="470" y="1040" width="300" height="90" rx="8" class="mask"/>
+    <rect x="470" y="1040" width="300" height="90" rx="8" class="tertiary"/>
+
+    <rect x="830" y="1040" width="300" height="90" rx="8" class="mask"/>
+    <rect x="830" y="1040" width="300" height="90" rx="8" class="alert"/>
+
+    <rect x="1190" y="1040" width="295" height="90" rx="8" class="mask"/>
+    <rect x="1190" y="1040" width="295" height="90" rx="8" class="secondary"/>
+
+    <rect x="1540" y="1040" width="260" height="90" rx="8" class="mask"/>
+    <rect x="1540" y="1040" width="260" height="90" rx="8" class="highlight"/>
+  </g>
+
+  <g id="labels">
+    <!-- CLI labels -->
+    <text x="220" y="228" class="box-title" text-anchor="middle">crab tier plan</text>
+    <text x="220" y="250" class="box-sub" text-anchor="middle">preview lifecycle rules</text>
+    <text x="220" y="267" class="box-sub" text-anchor="middle">text, json, or jsonl output</text>
+
+    <text x="220" y="348" class="box-title" text-anchor="middle">crab tier plan --apply</text>
+    <text x="220" y="370" class="box-sub" text-anchor="middle">write lifecycle config</text>
+    <text x="220" y="387" class="box-sub" text-anchor="middle">optional --merge or --dry-run</text>
+
+    <text x="220" y="468" class="box-title" text-anchor="middle">crab tier rollback</text>
+    <text x="220" y="490" class="box-sub" text-anchor="middle">restore previous lifecycle</text>
+    <text x="220" y="507" class="box-sub" text-anchor="middle">from .crab/tier/backups</text>
+
+    <text x="220" y="641" class="box-title" text-anchor="middle">[tier] policy config</text>
+    <text x="220" y="665" class="box-sub" text-anchor="middle">enabled, to_ia_days</text>
+    <text x="220" y="682" class="box-sub" text-anchor="middle">to_deep_days, noncurrent</text>
+    <text x="220" y="699" class="box-sub" text-anchor="middle">restore tier + concurrency</text>
+
+    <text x="220" y="801" class="box-title" text-anchor="middle">Repo remote + auth</text>
+    <text x="220" y="824" class="box-sub" text-anchor="middle">crab:// URL, bucket</text>
+    <text x="220" y="841" class="box-sub" text-anchor="middle">AWS, GCP, or Azure mode</text>
+
+    <!-- Planner labels -->
+    <text x="575" y="250" class="box-title" text-anchor="middle">AppContext load</text>
+    <text x="575" y="272" class="box-sub" text-anchor="middle">config + env overrides</text>
+    <text x="575" y="289" class="box-sub" text-anchor="middle">output mode selection</text>
+
+    <text x="870" y="250" class="box-title" text-anchor="middle">Provider resolver</text>
+    <text x="870" y="272" class="box-sub" text-anchor="middle">auth/storage provider</text>
+    <text x="870" y="289" class="box-sub" text-anchor="middle">S3, GCS, or Azure</text>
+
+    <text x="575" y="381" class="box-title" text-anchor="middle">LifecycleProvider</text>
+    <text x="575" y="404" class="box-sub" text-anchor="middle">render/get/put</text>
+    <text x="575" y="421" class="box-sub" text-anchor="middle">CAS guard abstraction</text>
+
+    <text x="870" y="381" class="box-title" text-anchor="middle">Bucket probe</text>
+    <text x="870" y="404" class="box-sub" text-anchor="middle">existing rule IDs</text>
+    <text x="870" y="421" class="box-sub" text-anchor="middle">versioning + object lock</text>
+
+    <text x="590" y="535" class="box-title" text-anchor="middle">TierPlan builder</text>
+    <text x="590" y="559" class="box-sub" text-anchor="middle">pure deterministic rules</text>
+    <text x="590" y="576" class="box-sub" text-anchor="middle">only .crab/xorbs/ prefix</text>
+    <text x="590" y="593" class="box-sub" text-anchor="middle">crab-* rule namespace</text>
+
+    <text x="890" y="535" class="box-title" text-anchor="middle">Policy intelligence</text>
+    <text x="890" y="559" class="box-sub" text-anchor="middle">age thresholds</text>
+    <text x="890" y="576" class="box-sub" text-anchor="middle">provider class mapping</text>
+    <text x="890" y="593" class="box-sub" text-anchor="middle">min-size + retention facts</text>
+
+    <text x="590" y="667" class="box-title" text-anchor="middle">Rendered lifecycle</text>
+    <text x="590" y="690" class="box-sub" text-anchor="middle">S3 XML, GCS/Azure JSON</text>
+
+    <text x="890" y="667" class="box-title" text-anchor="middle">Plan preview output</text>
+    <text x="890" y="690" class="box-sub" text-anchor="middle">human text, JSON, JSONL</text>
+
+    <!-- Safety labels -->
+    <text x="580" y="795" class="box-title" text-anchor="middle">Maintenance gate</text>
+    <text x="580" y="818" class="box-sub" text-anchor="middle">active-active admission</text>
+    <text x="580" y="835" class="box-sub" text-anchor="middle">blocks unsafe mutation</text>
+
+    <text x="885" y="795" class="box-title" text-anchor="middle">Conflict + merge</text>
+    <text x="885" y="818" class="box-sub" text-anchor="middle">replace crab-* rules</text>
+    <text x="885" y="835" class="box-sub" text-anchor="middle">preserve user rules in merge</text>
+
+    <text x="580" y="894" class="box-title" text-anchor="middle">Backup + rollback</text>
+    <text x="580" y="918" class="box-sub" text-anchor="middle">pre-apply JSON backup</text>
+    <text x="580" y="935" class="box-sub" text-anchor="middle">restore previous document</text>
+
+    <text x="885" y="894" class="box-title" text-anchor="middle">CAS apply + retry</text>
+    <text x="885" y="918" class="box-sub" text-anchor="middle">put with guard token</text>
+    <text x="885" y="935" class="box-sub" text-anchor="middle">retry on concurrent update</text>
+
+    <!-- Provider labels -->
+    <text x="1250" y="245" class="box-title" text-anchor="middle">Provider adapter</text>
+    <text x="1250" y="268" class="box-sub" text-anchor="middle">LifecycleProvider trait</text>
+    <text x="1250" y="285" class="box-sub" text-anchor="middle">feature-gated backends</text>
+
+    <text x="1525" y="207" class="box-title" text-anchor="middle">S3 lifecycle</text>
+    <text x="1525" y="230" class="box-sub" text-anchor="middle">XML + ETag guard</text>
+
+    <text x="1525" y="309" class="box-title" text-anchor="middle">GCS lifecycle</text>
+    <text x="1525" y="332" class="box-sub" text-anchor="middle">JSON + generation</text>
+
+    <text x="1525" y="411" class="box-title" text-anchor="middle">Azure policy</text>
+    <text x="1525" y="434" class="box-sub" text-anchor="middle">JSON + management API</text>
+
+    <text x="1740" y="313" class="box-title" text-anchor="middle">Bucket API</text>
+    <text x="1740" y="337" class="box-sub" text-anchor="middle">get, put, guard</text>
+    <text x="1740" y="354" class="box-sub" text-anchor="middle">accepted lifecycle</text>
+
+    <!-- Bucket labels -->
+    <text x="1260" y="607" class="box-title" text-anchor="middle">Lifecycle engine</text>
+    <text x="1260" y="631" class="box-sub" text-anchor="middle">provider moves objects</text>
+    <text x="1260" y="648" class="box-sub" text-anchor="middle">by age + class policy</text>
+
+    <text x="1260" y="737" class="box-title" text-anchor="middle">Eligible object set</text>
+    <text x="1260" y="761" class="box-sub" text-anchor="middle">.crab/xorbs/{hash}</text>
+    <text x="1260" y="778" class="box-sub" text-anchor="middle">content-addressed blobs</text>
+
+    <text x="1260" y="866" class="box-title" text-anchor="middle">Metadata stays warm</text>
+    <text x="1260" y="889" class="box-sub" text-anchor="middle">shards, file-index, refs</text>
+    <text x="1260" y="906" class="box-sub" text-anchor="middle">packs, locks, audit logs</text>
+
+    <text x="1565" y="603" class="box-title" text-anchor="middle">Hot / standard</text>
+    <text x="1565" y="626" class="box-sub" text-anchor="middle">new xorbs, frequent reads</text>
+
+    <text x="1565" y="723" class="box-title" text-anchor="middle">Warm-cold tier</text>
+    <text x="1565" y="746" class="box-sub" text-anchor="middle">IA, Nearline, Cool</text>
+
+    <text x="1565" y="845" class="box-title" text-anchor="middle">Deep-cold / archive</text>
+    <text x="1565" y="869" class="box-sub" text-anchor="middle">Glacier, GCS Archive</text>
+    <text x="1565" y="886" class="box-sub" text-anchor="middle">Azure Archive restore path</text>
+
+    <!-- Runtime labels -->
+    <text x="265" y="1070" class="box-title" text-anchor="middle">Hydrate / read path</text>
+    <text x="265" y="1094" class="box-sub" text-anchor="middle">HEAD sees storage class</text>
+    <text x="265" y="1111" class="box-sub" text-anchor="middle">warm reads continue direct</text>
+
+    <text x="620" y="1070" class="box-title" text-anchor="middle">RestoreOrchestrator</text>
+    <text x="620" y="1094" class="box-sub" text-anchor="middle">restore, poll, retry</text>
+    <text x="620" y="1111" class="box-sub" text-anchor="middle">bounded concurrency</text>
+
+    <text x="980" y="1070" class="box-title" text-anchor="middle">GC retention guard</text>
+    <text x="980" y="1094" class="box-sub" text-anchor="middle">blocks early-delete costs</text>
+    <text x="980" y="1111" class="box-sub" text-anchor="middle">requires explicit force</text>
+
+    <text x="1338" y="1070" class="box-title" text-anchor="middle">Restripe writes</text>
+    <text x="1338" y="1094" class="box-sub" text-anchor="middle">new output class policy</text>
+    <text x="1338" y="1111" class="box-sub" text-anchor="middle">standard by default</text>
+
+    <text x="1670" y="1070" class="box-title" text-anchor="middle">Cost posture</text>
+    <text x="1670" y="1094" class="box-sub" text-anchor="middle">hot data stays fast</text>
+    <text x="1670" y="1111" class="box-sub" text-anchor="middle">cold tail gets cheaper</text>
+
+    <!-- Arrow labels -->
+    <text x="394" y="232" class="arrow-label" fill="#22d3ee" text-anchor="middle">preview</text>
+    <text x="405" y="350" class="arrow-label" fill="#22d3ee" text-anchor="middle">apply path</text>
+    <text x="414" y="882" class="arrow-label" fill="#fb7185" text-anchor="middle">rollback path</text>
+    <text x="722" y="382" class="arrow-label" fill="#a78bfa" text-anchor="middle">probe</text>
+    <text x="735" y="556" class="arrow-label" fill="#34d399" text-anchor="middle">rules</text>
+    <text x="1064" y="898" class="arrow-label" fill="#a78bfa" text-anchor="middle">guarded put</text>
+    <text x="1460" y="674" class="arrow-label" fill="#fb923c" text-anchor="middle">default 30d</text>
+    <text x="1460" y="795" class="arrow-label" fill="#fb923c" text-anchor="middle">default 180d</text>
+  </g>
+
+  <g id="legend">
+    <rect x="40" y="1220" width="1820" height="80" rx="10" fill="#111827" fill-opacity="0.82" stroke="#334155" stroke-width="1.2"/>
+    <line x1="80" y1="1254" x2="150" y2="1254" class="line-cyan"/>
+    <text x="165" y="1258" class="tiny">solid cyan: CLI control flow and repo context</text>
+
+    <line x1="435" y1="1254" x2="505" y2="1254" class="line-green"/>
+    <text x="520" y="1258" class="tiny">solid green: deterministic tier policy planning</text>
+
+    <line x1="800" y1="1254" x2="870" y2="1254" class="line-violet"/>
+    <text x="885" y="1258" class="tiny">solid violet: provider lifecycle API reads/writes and restore reads</text>
+
+    <line x1="1260" y1="1254" x2="1330" y2="1254" class="line-rose"/>
+    <text x="1345" y="1258" class="tiny">solid rose: safety gates, conflict handling, backup, rollback</text>
+
+    <line x1="80" y1="1280" x2="150" y2="1280" class="line-amber-dashed"/>
+    <text x="165" y="1284" class="tiny">dashed orange: provider-managed background transition between storage classes</text>
+  </g>
+
+  <g id="title">
+    <text x="50" y="54" class="title">Crab tiering CLI architecture</text>
+    <text x="50" y="82" class="subtitle">Focus: lifecycle planning, guarded apply/rollback, provider-native storage classes, cold-tail cost reduction, and tier-aware hydrate/GC behavior.</text>
+  </g>
+</svg>

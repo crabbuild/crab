@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ErrorDocPayload",
+  "description": "Payload for `crab errors <code> --json` (single-code lookup).",
+  "type": "object",
+  "required": [
+    "category",
+    "code",
+    "message_template",
+    "name",
+    "remediation",
+    "retryable"
+  ],
+  "properties": {
+    "category": {
+      "type": "string"
+    },
+    "code": {
+      "type": "string"
+    },
+    "message_template": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "remediation": {
+      "type": "string"
+    },
+    "retryable": {
+      "type": "boolean"
+    }
+  }
+}

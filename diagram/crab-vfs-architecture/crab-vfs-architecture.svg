@@ -1,0 +1,320 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1850 1280">
+  <defs>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M 44 0 L 0 0 0 44" fill="none" stroke="#1e293b" stroke-width="0.55"/>
+    </pattern>
+
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="8" markerHeight="5" refX="7.4" refY="2.5" orient="auto">
+      <polygon points="0 0, 8 2.5, 0 5" fill="#fb923c"/>
+    </marker>
+
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap');
+      text {
+        font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+        letter-spacing: 0;
+      }
+      .title { fill: #f8fafc; font-size: 24px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+      .region-label { font-size: 10px; font-weight: 700; }
+      .box-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .box-sub { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+      .tiny { fill: #94a3b8; font-size: 8px; font-weight: 400; }
+      .arrow-label { font-size: 8px; font-weight: 500; }
+      .mask { fill: #0f172a; }
+      .primary { fill: #083344; fill-opacity: 0.46; stroke: #22d3ee; stroke-width: 1.7; }
+      .secondary { fill: #064e3b; fill-opacity: 0.44; stroke: #34d399; stroke-width: 1.7; }
+      .tertiary { fill: #4c1d95; fill-opacity: 0.43; stroke: #a78bfa; stroke-width: 1.7; }
+      .accent { fill: #78350f; fill-opacity: 0.35; stroke: #fbbf24; stroke-width: 1.7; }
+      .alert { fill: #881337; fill-opacity: 0.42; stroke: #fb7185; stroke-width: 1.7; }
+      .connector { fill: #7c2d12; fill-opacity: 0.33; stroke: #fb923c; stroke-width: 1.7; }
+      .neutral { fill: #1e293b; fill-opacity: 0.58; stroke: #94a3b8; stroke-width: 1.7; }
+      .highlight { fill: #1d4ed8; fill-opacity: 0.35; stroke: #60a5fa; stroke-width: 1.7; }
+      .region-cyan { fill: none; stroke: #22d3ee; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-green { fill: none; stroke: #34d399; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-violet { fill: none; stroke: #a78bfa; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .region-amber { fill: none; stroke: #fb923c; stroke-width: 1.2; stroke-dasharray: 8 6; }
+      .line-cyan { fill: none; stroke: #22d3ee; stroke-width: 2.1; marker-end: url(#arrow-cyan); }
+      .line-green { fill: none; stroke: #34d399; stroke-width: 2.1; marker-end: url(#arrow-green); }
+      .line-violet { fill: none; stroke: #a78bfa; stroke-width: 2.1; marker-end: url(#arrow-violet); }
+      .line-rose { fill: none; stroke: #fb7185; stroke-width: 2.1; marker-end: url(#arrow-rose); }
+      .line-amber { fill: none; stroke: #fb923c; stroke-width: 2; marker-end: url(#arrow-amber); }
+      .line-amber-dashed { fill: none; stroke: #fb923c; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-amber); }
+      .line-violet-dashed { fill: none; stroke: #a78bfa; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-violet); }
+    </style>
+  </defs>
+
+  <rect width="1850" height="1280" rx="10" fill="#0f172a"/>
+  <rect width="1850" height="1280" rx="10" fill="url(#grid)" opacity="0.72"/>
+
+  <g id="regions">
+    <rect x="40" y="132" width="1770" height="238" rx="14" class="region-amber"/>
+    <text x="58" y="154" class="region-label" fill="#fb923c">Mount setup and coordinator lifecycle</text>
+
+    <rect x="40" y="410" width="1120" height="520" rx="14" class="region-green"/>
+    <text x="58" y="432" class="region-label" fill="#34d399">Mounted filesystem hot path</text>
+
+    <rect x="1190" y="410" width="620" height="520" rx="14" class="region-violet"/>
+    <text x="1208" y="432" class="region-label" fill="#a78bfa">Local state, caches, and cloud objects</text>
+
+    <rect x="1190" y="952" width="620" height="145" rx="14" class="region-cyan"/>
+    <text x="1208" y="974" class="region-label" fill="#22d3ee">Git-facing behavior exposed by the mount</text>
+  </g>
+
+  <g id="connections">
+    <!-- Mount setup -->
+    <path d="M 300 262 L 340 262" class="line-amber-dashed"/>
+    <path d="M 530 262 L 570 262" class="line-amber-dashed"/>
+    <path d="M 820 262 L 860 262" class="line-amber"/>
+    <path d="M 190 300 L 190 354 L 830 354 L 830 305 L 860 305" class="line-cyan"/>
+    <path d="M 1160 262 L 1210 262" class="line-cyan"/>
+    <path d="M 1430 262 L 1480 262" class="line-amber-dashed"/>
+    <path d="M 1010 330 L 1010 382 L 755 382 L 755 520" class="line-cyan"/>
+    <path d="M 1605 300 L 1605 390 L 1350 390 L 1350 500" class="line-amber-dashed"/>
+
+    <!-- FUSE hot path -->
+    <path d="M 300 600 L 350 600" class="line-cyan"/>
+    <path d="M 570 600 L 630 600" class="line-cyan"/>
+    <path d="M 880 540 L 930 540" class="line-green"/>
+    <path d="M 880 660 L 900 660 L 900 710 L 930 710" class="line-cyan"/>
+    <path d="M 755 680 L 755 760" class="line-amber-dashed"/>
+    <path d="M 1045 760 L 1045 785" class="line-violet"/>
+
+    <!-- Metadata resolution -->
+    <path d="M 1160 540 L 1230 540" class="line-green"/>
+    <path d="M 1160 570 L 1210 570 L 1210 670 L 1230 670" class="line-green"/>
+
+    <!-- Content and mutation paths -->
+    <path d="M 1160 690 L 1230 690" class="line-rose"/>
+    <path d="M 1160 735 L 1520 735" class="line-violet"/>
+    <path d="M 1160 840 L 1230 840" class="line-violet"/>
+    <path d="M 1470 840 L 1520 840" class="line-violet"/>
+
+    <!-- Refresh side effects are summarized in the behavior row below. -->
+  </g>
+
+  <g id="nodes">
+    <!-- Setup row -->
+    <rect x="80" y="225" width="220" height="75" rx="8" class="mask"/>
+    <rect x="80" y="225" width="220" height="75" rx="8" class="primary"/>
+
+    <rect x="340" y="225" width="190" height="75" rx="8" class="mask"/>
+    <rect x="340" y="225" width="190" height="75" rx="8" class="connector"/>
+
+    <rect x="570" y="205" width="250" height="115" rx="8" class="mask"/>
+    <rect x="570" y="205" width="250" height="115" rx="8" class="highlight"/>
+
+    <rect x="860" y="195" width="300" height="135" rx="8" class="mask"/>
+    <rect x="860" y="195" width="300" height="135" rx="8" class="secondary"/>
+
+    <rect x="1210" y="225" width="220" height="75" rx="8" class="mask"/>
+    <rect x="1210" y="225" width="220" height="75" rx="8" class="primary"/>
+
+    <rect x="1480" y="225" width="250" height="75" rx="8" class="mask"/>
+    <rect x="1480" y="225" width="250" height="75" rx="8" class="connector"/>
+
+    <!-- Hot path row -->
+    <rect x="80" y="560" width="220" height="80" rx="8" class="mask"/>
+    <rect x="80" y="560" width="220" height="80" rx="8" class="primary"/>
+
+    <rect x="350" y="560" width="220" height="80" rx="8" class="mask"/>
+    <rect x="350" y="560" width="220" height="80" rx="8" class="primary"/>
+
+    <rect x="630" y="520" width="250" height="160" rx="8" class="mask"/>
+    <rect x="630" y="520" width="250" height="160" rx="8" class="highlight"/>
+
+    <rect x="930" y="500" width="230" height="80" rx="8" class="mask"/>
+    <rect x="930" y="500" width="230" height="80" rx="8" class="secondary"/>
+
+    <rect x="930" y="650" width="230" height="110" rx="8" class="mask"/>
+    <rect x="930" y="650" width="230" height="110" rx="8" class="secondary"/>
+
+    <rect x="930" y="785" width="230" height="110" rx="8" class="mask"/>
+    <rect x="930" y="785" width="230" height="110" rx="8" class="tertiary"/>
+
+    <rect x="630" y="760" width="250" height="110" rx="8" class="mask"/>
+    <rect x="630" y="760" width="250" height="110" rx="8" class="accent"/>
+
+    <!-- State and storage -->
+    <rect x="1230" y="500" width="240" height="80" rx="8" class="mask"/>
+    <rect x="1230" y="500" width="240" height="80" rx="8" class="tertiary"/>
+
+    <rect x="1230" y="620" width="240" height="100" rx="8" class="mask"/>
+    <rect x="1230" y="620" width="240" height="100" rx="8" class="alert"/>
+
+    <rect x="1520" y="690" width="240" height="90" rx="8" class="mask"/>
+    <rect x="1520" y="690" width="240" height="90" rx="8" class="tertiary"/>
+
+    <rect x="1230" y="810" width="240" height="90" rx="8" class="mask"/>
+    <rect x="1230" y="810" width="240" height="90" rx="8" class="tertiary"/>
+
+    <rect x="1520" y="810" width="240" height="110" rx="8" class="mask"/>
+    <rect x="1520" y="810" width="240" height="110" rx="8" class="accent"/>
+
+    <!-- Git behavior row -->
+    <rect x="220" y="982" width="260" height="95" rx="8" class="mask"/>
+    <rect x="220" y="982" width="260" height="95" rx="8" class="primary"/>
+
+    <rect x="580" y="982" width="300" height="95" rx="8" class="mask"/>
+    <rect x="580" y="982" width="300" height="95" rx="8" class="tertiary"/>
+
+    <rect x="980" y="982" width="300" height="95" rx="8" class="mask"/>
+    <rect x="980" y="982" width="300" height="95" rx="8" class="alert"/>
+
+    <rect x="1370" y="982" width="260" height="95" rx="8" class="mask"/>
+    <rect x="1370" y="982" width="260" height="95" rx="8" class="secondary"/>
+  </g>
+
+  <g id="labels">
+    <!-- Setup labels -->
+    <text x="190" y="253" class="box-title" text-anchor="middle">crab mount CLI</text>
+    <text x="190" y="274" class="box-sub" text-anchor="middle">--repo, --mountpoint, ref</text>
+    <text x="190" y="291" class="box-sub" text-anchor="middle">foreground or daemon</text>
+
+    <text x="435" y="253" class="box-title" text-anchor="middle">IPC client</text>
+    <text x="435" y="274" class="box-sub" text-anchor="middle">connect-or-spawn</text>
+    <text x="435" y="291" class="box-sub" text-anchor="middle">JSON over Unix socket</text>
+
+    <text x="695" y="235" class="box-title" text-anchor="middle">Mount coordinator</text>
+    <text x="695" y="257" class="box-sub" text-anchor="middle">daemon.lock, daemon.sock</text>
+    <text x="695" y="274" class="box-sub" text-anchor="middle">active mount registry</text>
+    <text x="695" y="291" class="box-sub" text-anchor="middle">shared chunk cache</text>
+    <text x="695" y="308" class="box-sub" text-anchor="middle">teardown on last unmount</text>
+
+    <text x="1010" y="222" class="box-title" text-anchor="middle">MountPipelineBuilder</text>
+    <text x="1010" y="245" class="box-sub" text-anchor="middle">parse mount target, blobless clone</text>
+    <text x="1010" y="262" class="box-sub" text-anchor="middle">resolve HEAD, build snapshot</text>
+    <text x="1010" y="279" class="box-sub" text-anchor="middle">open overlay, start hydration</text>
+    <text x="1010" y="296" class="box-sub" text-anchor="middle">wire resolver + engine</text>
+
+    <text x="1320" y="253" class="box-title" text-anchor="middle">fuser Session</text>
+    <text x="1320" y="274" class="box-sub" text-anchor="middle">FUSE mount options</text>
+    <text x="1320" y="291" class="box-sub" text-anchor="middle">run on dedicated thread</text>
+
+    <text x="1605" y="253" class="box-title" text-anchor="middle">Refresh loop</text>
+    <text x="1605" y="274" class="box-sub" text-anchor="middle">poll HEAD and remote refs</text>
+    <text x="1605" y="291" class="box-sub" text-anchor="middle">publish + swap generation</text>
+
+    <!-- Hot path labels -->
+    <text x="190" y="590" class="box-title" text-anchor="middle">User processes</text>
+    <text x="190" y="611" class="box-sub" text-anchor="middle">shell, IDE, build tools</text>
+    <text x="190" y="628" class="box-sub" text-anchor="middle">ls, open, read, write</text>
+
+    <text x="460" y="590" class="box-title" text-anchor="middle">OS VFS / FUSE</text>
+    <text x="460" y="611" class="box-sub" text-anchor="middle">kernel callbacks</text>
+    <text x="460" y="628" class="box-sub" text-anchor="middle">lookup, getattr, read</text>
+
+    <text x="755" y="550" class="box-title" text-anchor="middle">CrabFs adapter</text>
+    <text x="755" y="573" class="box-sub" text-anchor="middle">implements fuser::Filesystem</text>
+    <text x="755" y="590" class="box-sub" text-anchor="middle">inode table + handle table</text>
+    <text x="755" y="607" class="box-sub" text-anchor="middle">sync callbacks bridge to tokio</text>
+    <text x="755" y="624" class="box-sub" text-anchor="middle">synthetic .git points at git_dir</text>
+
+    <text x="1045" y="530" class="box-title" text-anchor="middle">FuseResolver</text>
+    <text x="1045" y="551" class="box-sub" text-anchor="middle">overlay first</text>
+    <text x="1045" y="568" class="box-sub" text-anchor="middle">then base snapshot</text>
+
+    <text x="1045" y="680" class="box-title" text-anchor="middle">FuseEngine</text>
+    <text x="1045" y="702" class="box-sub" text-anchor="middle">read dispatch</text>
+    <text x="1045" y="719" class="box-sub" text-anchor="middle">copy-on-write promotion</text>
+    <text x="1045" y="736" class="box-sub" text-anchor="middle">create, unlink, rename, fsync</text>
+
+    <text x="1045" y="815" class="box-title" text-anchor="middle">HydrationService</text>
+    <text x="1045" y="837" class="box-sub" text-anchor="middle">chunk-level read_range</text>
+    <text x="1045" y="854" class="box-sub" text-anchor="middle">priority queue + inflight dedup</text>
+    <text x="1045" y="871" class="box-sub" text-anchor="middle">verify blake3 before cache</text>
+
+    <text x="755" y="790" class="box-title" text-anchor="middle">Speculative prefetch</text>
+    <text x="755" y="812" class="box-sub" text-anchor="middle">opendir classifies children</text>
+    <text x="755" y="829" class="box-sub" text-anchor="middle">manifest, code, nearby, binary</text>
+    <text x="755" y="846" class="box-sub" text-anchor="middle">background workers fill cache</text>
+
+    <!-- State labels -->
+    <text x="1350" y="530" class="box-title" text-anchor="middle">SnapshotStore</text>
+    <text x="1350" y="551" class="box-sub" text-anchor="middle">snapshot.sqlite</text>
+    <text x="1350" y="568" class="box-sub" text-anchor="middle">generation + base tree</text>
+
+    <text x="1350" y="648" class="box-title" text-anchor="middle">OverlayStore</text>
+    <text x="1350" y="670" class="box-sub" text-anchor="middle">overlay.db + upper/ files</text>
+    <text x="1350" y="687" class="box-sub" text-anchor="middle">create, modify, delete, rename</text>
+    <text x="1350" y="704" class="box-sub" text-anchor="middle">dirty paths survive refresh</text>
+
+    <text x="1640" y="720" class="box-title" text-anchor="middle">Git ODB reader</text>
+    <text x="1640" y="742" class="box-sub" text-anchor="middle">small blobs from packs</text>
+    <text x="1640" y="759" class="box-sub" text-anchor="middle">blob_cache by object id</text>
+
+    <text x="1350" y="840" class="box-title" text-anchor="middle">ChunkCache</text>
+    <text x="1350" y="862" class="box-sub" text-anchor="middle">xet-core DiskCache</text>
+    <text x="1350" y="879" class="box-sub" text-anchor="middle">verified chunk bytes</text>
+
+    <text x="1640" y="840" class="box-title" text-anchor="middle">Cloud object store</text>
+    <text x="1640" y="864" class="box-sub" text-anchor="middle">file index / shard list</text>
+    <text x="1640" y="881" class="box-sub" text-anchor="middle">shards -> xorb ranges</text>
+    <text x="1640" y="898" class="box-sub" text-anchor="middle">.crab/xorbs/{hash}</text>
+    <text x="1640" y="915" class="box-sub" text-anchor="middle">StoreLayout-backed reads</text>
+
+    <!-- Git behavior labels -->
+    <text x="350" y="1014" class="box-title" text-anchor="middle">Mounted worktree view</text>
+    <text x="350" y="1037" class="box-sub" text-anchor="middle">real paths, lazy content</text>
+    <text x="350" y="1054" class="box-sub" text-anchor="middle">no object-store server</text>
+
+    <text x="730" y="1014" class="box-title" text-anchor="middle">Git sees a normal repo</text>
+    <text x="730" y="1037" class="box-sub" text-anchor="middle">synthetic .git file</text>
+    <text x="730" y="1054" class="box-sub" text-anchor="middle">git status reads index/tree</text>
+
+    <text x="1130" y="1014" class="box-title" text-anchor="middle">Local edits are isolated</text>
+    <text x="1130" y="1037" class="box-sub" text-anchor="middle">overlay masks base snapshot</text>
+    <text x="1130" y="1054" class="box-sub" text-anchor="middle">CoW before first write</text>
+
+    <text x="1500" y="1014" class="box-title" text-anchor="middle">Refresh keeps base current</text>
+    <text x="1500" y="1037" class="box-sub" text-anchor="middle">new generation is atomic</text>
+    <text x="1500" y="1054" class="box-sub" text-anchor="middle">conflicts preserve overlay</text>
+
+    <!-- Arrow labels -->
+    <text x="318" y="250" class="arrow-label" fill="#fb923c" text-anchor="middle">daemon</text>
+    <text x="520" y="346" class="arrow-label" fill="#22d3ee" text-anchor="middle">foreground path</text>
+    <text x="600" y="587" class="arrow-label" fill="#22d3ee" text-anchor="middle">callbacks</text>
+    <text x="905" y="530" class="arrow-label" fill="#34d399" text-anchor="middle">lookup</text>
+    <text x="905" y="703" class="arrow-label" fill="#22d3ee" text-anchor="middle">I/O</text>
+    <text x="1200" y="684" class="arrow-label" fill="#fb7185" text-anchor="middle">CoW writes</text>
+    <text x="1340" y="728" class="arrow-label" fill="#a78bfa" text-anchor="middle">small blobs</text>
+    <text x="1180" y="830" class="arrow-label" fill="#a78bfa" text-anchor="middle">chunks</text>
+    <text x="1496" y="830" class="arrow-label" fill="#a78bfa" text-anchor="middle">miss</text>
+    <text x="1538" y="386" class="arrow-label" fill="#fb923c" text-anchor="middle">refresh publishes snapshot</text>
+  </g>
+
+  <g id="legend">
+    <rect x="40" y="1150" width="1770" height="80" rx="10" fill="#111827" fill-opacity="0.82" stroke="#334155" stroke-width="1.2"/>
+    <line x1="80" y1="1188" x2="150" y2="1188" class="line-cyan"/>
+    <text x="165" y="1192" class="tiny">solid cyan: synchronous FUSE setup and file operations</text>
+
+    <line x1="440" y1="1188" x2="510" y2="1188" class="line-green"/>
+    <text x="525" y="1192" class="tiny">solid green: metadata lookup and merged namespace resolution</text>
+
+    <line x1="875" y1="1188" x2="945" y2="1188" class="line-violet"/>
+    <text x="960" y="1192" class="tiny">solid violet: byte reads, cache checks, ODB, and object-store fetches</text>
+
+    <line x1="1350" y1="1188" x2="1420" y2="1188" class="line-rose"/>
+    <text x="1435" y="1192" class="tiny">solid rose: copy-on-write local mutations into overlay</text>
+
+    <line x1="80" y1="1214" x2="150" y2="1214" class="line-amber-dashed"/>
+    <text x="165" y="1218" class="tiny">dashed orange: optional daemon, refresh, and speculative background work</text>
+  </g>
+
+  <g id="title">
+    <text x="50" y="54" class="title">Crab VFS architecture</text>
+    <text x="50" y="82" class="subtitle">Focus: mount lifecycle, FUSE callbacks, snapshot + overlay resolution, lazy hydration, local caches, refresh, and daemon coordination.</text>
+  </g>
+</svg>

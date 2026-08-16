@@ -1,0 +1,129 @@
+---
+title: "What is Crab"
+description: "Serverless git for large files — store repositories in your own cloud bucket with no servers, no LFS endpoints, and full deduplication."
+---
+
+# What is Crab
+
+Crab is a serverless git extension that stores large files in cloud object storage (S3, GCS, Azure). It works as a drop-in enhancement to git — no servers to run, no databases to manage, no LFS endpoints to configure. Just your bucket and a single binary.
+
+## The Problem
+
+Git wasn't designed for large files. A 10 GB model file bloats your `.git` directory, slows clones to a crawl, and makes branch switching painful. Git LFS helps, but requires running a separate server or paying for hosted LFS storage.
+
+## How Crab Solves It
+
+Crab sits between git and your cloud bucket. When you commit a large file, git only stores a tiny pointer blob (~128 bytes). The actual content is split into content-defined chunks, deduplicated, compressed, and uploaded to your own object storage.
+
+The result:
+
+- **Instant clones** — Git only downloads pointers. You hydrate files on demand.
+- **Efficient storage** — Content-defined chunking means editing 1% of a file only stores 1% new data.
+- **Standard git UX** — `git clone`, `git push`, `git pull` all work normally. Crab is transparent.
+- **Your infrastructure** — Data lives in your S3/GCS/Azure bucket. No vendor lock-in, no per-seat pricing on storage.
+
+## Quick Start: New Repository
+
+```bash
+# 1. Install Crab
+curl -fsSL https://crab.build/install.sh | bash
+
+# 2. Initialize a repository with your bucket
+cd my-project
+crab init crab://my-bucket/my-repo
+
+# 3. Configure large-file tracking
+crab setup
+
+# 4. Ship your first commit
+crab ship . -m "initial commit"
+```
+
+`crab init` wires the repository to the remote and writes the project config.
+`crab setup` scans for large files, writes tracking rules, and stages the setup
+files. `crab ship` handles staging, committing, and pushing in one command.
+
+## Quick Start: Existing Repository (Collaborator)
+
+When joining a repo that already uses Crab:
+
+```bash
+# Clone from GitHub (or any git host)
+git clone git@github.com:team/project.git
+cd project
+
+# Re-apply Crab config from .crab.toml
+crab init
+
+# Files are dehydrated (pointers). Hydrate what you need:
+crab hydrate "*.py" "*.rs"
+```
+
+Running `crab init` with no URL reads the `.crab.toml` that's already in the repo and sets up everything locally — filter driver, remotes, and hooks.
+
+## Quick Start: Global Setup (Optional)
+
+For a "set it and forget it" experience across all repos:
+
+```bash
+crab install --global
+```
+
+After this, the global filter driver can auto-configure from `.crab.toml` when
+you clone a repo. Mirror repositories still need `crab init` to install their
+per-repository remotes and hooks.
+
+## Key Concepts
+
+### Pointer Blobs
+
+Every Crab-managed file in git is a pointer — a small text stub containing the file's hash and metadata. Git stores, diffs, and transfers these pointers. The actual content lives in cloud storage.
+
+### Content-Defined Chunking
+
+Files are split at content-determined boundaries using a rolling hash. This means small edits to large files produce minimal new data. Two versions of a 10 GB model that differ by 5% share 95% of their chunks.
+
+### Hydration and Dehydration
+
+- **Hydrate** — Download chunks from cloud storage and reconstruct the original file.
+- **Dehydrate** — Replace a file with its pointer to free disk space.
+
+You control which files are materialized on disk. Work on models? Hydrate just the model files. Done? Dehydrate them to reclaim space.
+
+### Lazy Checkout
+
+After cloning, your working tree has pointers — not full content. You choose what to hydrate and when. A 500 GB repository clones in seconds.
+
+### Project Configuration (`.crab.toml`)
+
+A `.crab.toml` file in the repo root declares the remote URL, tracking patterns, and hydration policy. It's committed to git so collaborators inherit the configuration automatically. See [Project Configuration](/docs/cli/getting-started/project-config) for the full reference.
+
+## Where To Go Next
+
+### Start Here
+
+- [Installation & Setup](/docs/cli/getting-started/installation) — Install the Crab binary
+- [Creating a Repository](/docs/cli/getting-started/first-repository) — Initialize a new Crab repo
+- [Cloning a Repository](/docs/cli/getting-started/cloning-a-repository) — Clone an existing repo
+- [Tracking Files](/docs/cli/getting-started/tracking-files) — Configure which files Crab manages
+- [Project Configuration](/docs/cli/getting-started/project-config) — `.crab.toml` reference
+- [Mirror Mode](/docs/cli/getting-started/mirror-mode) — Use GitHub or another git host alongside Crab storage
+- [Importing Existing Buckets](/docs/cli/getting-started/importing-buckets) — Import data from cloud storage
+
+### Tutorials and Guides
+
+- [Working with Files](/docs/cli/daily-workflow) — The ship → hydrate cycle
+- [Sharing Repositories](/docs/cli/guides/sharing-repositories) — Collaborate with your team
+- [Migrating from Git LFS](/docs/cli/guides/migrating-from-lfs) — Move from LFS to Crab
+- [CI/CD Integration](/docs/cli/guides/ci-cd-integration) — Use Crab in automated pipelines
+
+### Core Concepts
+
+- [Working with Files](/docs/cli/daily-workflow) — How Crab manages files through chunking, pointers, and hydration
+- [Local Cache](/docs/cli/storage/local-cache) — Caching, staging, garbage collection, and storage tiers
+- [Virtual Filesystem](/docs/cli/virtual-filesystem) — Mount Crab repositories for on-demand access
+- [Authentication & Config](/docs/cli/authentication/configuration) — Cloud credentials and configuration
+
+### Reference
+
+- [CLI Command Reference](/docs/cli/reference) — Current top-level command index and high-use command reference

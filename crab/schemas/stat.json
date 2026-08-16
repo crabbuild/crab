@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatPayload",
+  "description": "Payload emitted by `crab stat --json`.",
+  "type": "object",
+  "required": [
+    "chunk_count",
+    "current_segment_bytes",
+    "dead_bytes",
+    "dead_ratio",
+    "file_count",
+    "live_bytes",
+    "segments_sealed",
+    "total_staged_bytes"
+  ],
+  "properties": {
+    "chunk_count": {
+      "description": "Total number of staged chunks.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "current_segment_bytes": {
+      "description": "Bytes written to the current (unsealed) segment.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dead_bytes": {
+      "description": "Bytes occupied by dead (unreferenced) chunks.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dead_ratio": {
+      "description": "Ratio of dead bytes to total staged bytes.",
+      "type": "number",
+      "format": "double"
+    },
+    "file_count": {
+      "description": "Total number of registered files.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "live_bytes": {
+      "description": "Bytes occupied by live (referenced) chunks.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "segments_sealed": {
+      "description": "Number of sealed segments.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "total_staged_bytes": {
+      "description": "Total bytes across all segments (sealed + current).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

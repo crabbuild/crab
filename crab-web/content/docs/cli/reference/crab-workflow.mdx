@@ -1,0 +1,51 @@
+---
+title: "crab workflow"
+description: "Inspect and manage Crab workflow lockfiles, DAGs, journals, and stage caches."
+---
+
+# crab workflow
+
+Manage workflow-layer state for pipelines defined in `crab.yaml`.
+
+## Synopsis
+
+```bash
+crab workflow [OPTIONS] <COMMAND>
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `lockfile` | Manage `crab.lock` |
+| `status` | Report per-stage state against `crab.lock` |
+| `dag` | Render the workflow DAG as ASCII, Mermaid, DOT, or artifacts |
+| `journal` | Inspect and prune workflow run journals under `.crab/workflow/runs/` |
+| `push-cache` | Push local stage cache entries to the configured remote |
+
+## Examples
+
+### Inspect stage state
+
+```bash
+crab workflow status
+```
+
+### Render a DAG
+
+```bash
+crab workflow dag
+crab workflow dag --format mermaid
+```
+
+### Inspect journals and publish cache entries
+
+```bash
+crab workflow journal
+crab workflow push-cache --all
+```
+
+## Related Commands
+
+- [`crab run`](/docs/cli/reference/crab-run) — execute workflow stages with caching.
+- [`crab exp`](/docs/cli/reference/crab-exp) — manage experiment runs.

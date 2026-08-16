@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "grant_id": "01900000-0000-7000-8000-000000000003",
+  "repository_id": "01900000-0000-7000-8000-000000000001",
+  "operation": "push_upload",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "permissions": [
+    "create_immutable_object"
+  ],
+  "storage_scope": {
+    "repository_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001",
+    "staging": {
+      "push_id": "01900000-0000-7000-8000-000000000004",
+      "prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001/staging/01900000000070008000000000000004"
+    }
+  },
+  "transport": {
+    "transport": "gateway",
+    "gateway": {
+      "service_url": "https://gateway.crab.build/v1/objects",
+      "token": "fixture-gateway-token"
+    }
+  }
+}

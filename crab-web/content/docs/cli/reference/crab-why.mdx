@@ -1,0 +1,23 @@
+---
+title: "crab why"
+description: "Explain why a file is tracked and its current hydration state."
+---
+
+# crab why
+
+Explain why a file is tracked and whether its current working-tree state is a
+pointer or materialized content.
+
+## Synopsis
+
+```bash
+crab why [OPTIONS] <FILE>
+```
+
+```bash
+crab why models/checkpoint.safetensors
+crab why --json models/checkpoint.safetensors
+```
+
+The JSON form is useful for tooling that needs the resolved tracking pattern,
+pointer state, or hydration details without parsing human output.

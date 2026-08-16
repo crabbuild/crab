@@ -1,0 +1,26 @@
+---
+title: "crab queue"
+description: "Manage queued experiment tasks and their worker processes."
+---
+
+# crab queue
+
+Manage the DVC-style experiment task queue.
+
+## Synopsis
+
+```bash
+crab queue <COMMAND>
+```
+
+| Command | Purpose |
+| --- | --- |
+| `start` | Start processing queued experiments with parallel workers |
+| `status` | Show queue status |
+| `logs` | Show console output for a queued task |
+| `kill` | Interrupt running queued tasks |
+| `remove` | Remove queued or completed entries |
+| `stop` | Signal running workers to stop gracefully |
+
+Use `crab queue <command> --help` for task identifiers, worker counts, and
+output options.

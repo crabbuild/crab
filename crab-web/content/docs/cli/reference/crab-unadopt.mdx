@@ -1,0 +1,26 @@
+---
+title: "crab unadopt"
+description: "Restore staged Crab-adopted pointers to their original full files."
+---
+
+# crab unadopt
+
+Reverse a [`crab adopt`](/docs/cli/reference/crab-adopt) operation before the
+changes are committed. Crab reads the original bytes from the staging area,
+writes full files back to disk, and removes the files from the Git index.
+
+## Synopsis
+
+```bash
+crab unadopt [OPTIONS]
+```
+
+| Option | Description |
+| --- | --- |
+| `-p, --pattern <PATTERN>` | Restrict restoration to matching pointer files |
+| `--json` | Emit structured JSON output |
+
+```bash
+crab unadopt --pattern '*.bin'
+crab unadopt --json
+```

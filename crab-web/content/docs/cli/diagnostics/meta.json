@@ -1,0 +1,15 @@
+{
+  "title": "Diagnostics & Repair",
+  "pages": [
+    "index",
+    "health-check",
+    "error-codes",
+    "log-management",
+    "integrity-check",
+    "store-verification",
+    "recovery-operations",
+    "hydrate-restore",
+    "metadata-database",
+    "version-info"
+  ]
+}

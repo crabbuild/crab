@@ -1,0 +1,25 @@
+{
+  "skill_name": "crab-release-publish",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Can you bump patch, build the OS releases from my Mac, generate the changelog, and publish the artifacts to crab-release?",
+      "expected_output": "The agent should use the Crab release skill, inspect the release scripts including update-homebrew.sh, check prerequisites and worktree state, set CARGO_TARGET_DIR to /Volumes/Workspace/CrabBuild/target and publish release assets from a clean dist directory under that target tree, bump the patch version only if safe, generate release notes from source history, dry-run the full macOS matrix, ask for explicit confirmation before publishing, publish to crabbuild/crab-release, update notes, update crabbuild/homebrew-tap for the new tag, and verify release assets plus the Homebrew formula readback."
+    },
+    {
+      "id": 2,
+      "prompt": "Local x86 Linux Docker build is not possible on this Mac. Release v1.2.3 through CI and make sure crab-release has useful release notes.",
+      "expected_output": "The agent should choose the hosted workflow path, verify the version/tag contract, generate release notes from the source repo, dispatch release.yml via make release-ci or gh workflow run, monitor the workflow, confirm the workflow's Homebrew update ran or run the Homebrew-only path if it failed, then update and verify the crabbuild/crab-release release and crabbuild/homebrew-tap formula."
+    },
+    {
+      "id": 3,
+      "prompt": "I already have the release artifacts built under /Volumes/Workspace/CrabBuild/target. Please publish them to crab-release with a changelog.",
+      "expected_output": "The agent should verify the volume-backed target dist contains exactly the release artifact set, check SHA256SUMS.txt, generate release notes, ask for confirmation, set RELEASE_DIST_DIR to the target-backed release dist, run make release-publish-dist, update release notes, update Homebrew for the same tag, and verify the GitHub release plus tap formula."
+    },
+    {
+      "id": 4,
+      "prompt": "v1.0.4 is already published in crab-release. Please update Homebrew so users can install and upgrade it.",
+      "expected_output": "The agent should not rebuild or republish artifacts. It should verify v1.0.4 exists in crabbuild/crab-release with all archives and SHA256SUMS.txt, run crab/scripts/update-homebrew.sh v1.0.4, push Formula/crab.rb to crabbuild/homebrew-tap, then verify GitHub readback and Homebrew resolution with brew fetch/info when available."
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+---
+title: "Metrics Tracking"
+description: "Display, compare, and plot numeric metrics across git refs with absolute and percent deltas."
+---
+
+# crab metrics
+
+Read, diff, and plot numeric metrics files across git refs. Renders absolute
+and percent deltas for changed values, making it easy to track model accuracy,
+loss, or any numeric KPI over time.
+
+## Synopsis
+
+```
+crab metrics show [OPTIONS]
+crab metrics diff <REF_A> <REF_B> [OPTIONS]
+crab metrics plot [OPTIONS]
+```
+
+## Description
+
+`crab metrics` provides three subcommands for working with metrics files
+(typically `metrics.json`) stored in your repository:
+
+1. **show** — Read metrics at a given git ref and render them as a table,
+   Markdown, JSON, or PR comment. Defaults to reading `metrics.json` at `HEAD`.
+
+2. **diff** — Compare metrics between two git refs. Displays added, removed,
+   changed, and unchanged entries. Changed numeric values include both the
+   absolute delta and percent change. A `✓` / `✗` marker indicates whether
+   the change is an improvement based on the `--higher-is-better` flag.
+
+3. **plot** — Read plot configurations from `crab.yaml` and render tabular
+   summaries of the referenced data files (CSV or JSON). Useful for inspecting
+   time-series metrics without leaving the terminal.
+
+Metrics files are plain JSON objects with string keys and numeric (or string)
+values. The parser shares infrastructure with `crab params`, but the diff
+renderer operates in metrics mode — showing absolute + percent deltas instead
+of simple old/new values.
+
+## Options
+
+### crab metrics show
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--ref <REF>` | `HEAD` | Git ref to read metrics from. |
+| `--paths <PATH>` | `metrics.json` | Metrics file paths. Repeatable. Defaults to `metrics.json` at the repo root. |
+| `--format <FMT>` | `table` | Output format: `table`, `json`, `md`, or `pr-comment`. |
+| `--json` | `false` | Emit structured JSON envelope (schema `metrics.show`). |
+| `--higher-is-better` | `true` | Whether higher values are improvements. Drives `✓`/`✗` markers in `pr-comment` format. |
+
+### crab metrics diff
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<REF_A>` | *(required)* | Base git ref for comparison. |
+| `<REF_B>` | *(required)* | Target git ref for comparison. |
+| `--paths <PATH>` | `metrics.json` | Metrics file paths. Repeatable. |
+| `--format <FMT>` | `table` | Output format: `table`, `json`, `md`, or `pr-comment`. |
+| `--json` | `false` | Emit structured JSON envelope (schema `metrics.diff`). |
+| `--higher-is-better` | `true` | Whether higher values are improvements. |
+
+### crab metrics plot
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output <PATH>` | *(stdout)* | Write plot output to a file instead of stdout. |
+| `--json` | `false` | Emit structured JSON envelope (schema `metrics.plot`). |
+
+## Examples
+
+### Show metrics at HEAD
+
+```bash
+crab metrics show
+```
+
+Reads `metrics.json` from the current HEAD and prints a table of all
+key-value pairs.
+
+### Show metrics from a specific branch
+
+```bash
+crab metrics show --ref feature/train-v2 --format md
+```
+
+Renders metrics from the `feature/train-v2` branch as a Markdown table,
+suitable for pasting into issues or documentation.
+
+### Compare metrics between two refs
+
+```bash
+crab metrics diff main feature/train-v2
+```
+
+Displays a table showing which metrics were added, removed, or changed
+between `main` and `feature/train-v2`, with absolute and percent deltas
+for numeric values.
+
+### Generate a PR comment summary
+
+```bash
+crab metrics diff main HEAD --format pr-comment
+```
+
+Produces a formatted summary with `✓`/`✗` markers indicating whether each
+metric improved or regressed. Pipe this into your CI system to auto-comment
+on pull requests.
+
+### Plot metrics from crab.yaml
+
+```bash
+crab metrics plot
+```
+
+Reads plot configurations from `crab.yaml` and renders tabular summaries of
+the referenced data files (CSV or JSON), showing x-axis and y-axis values.
+
+### Export plot data to a file
+
+```bash
+crab metrics plot --output report.txt
+```
+
+Writes the plot summary to `report.txt` instead of printing to stdout.
+
+## JSON Output
+
+Supports `--json` on all three subcommands.
+
+### crab metrics show --json
+
+```json
+{
+  "schema": "metrics.show",
+  "version": "1.0",
+  "data": {
+    "git_ref": "HEAD",
+    "paths": ["metrics.json"],
+    "entries": {
+      "accuracy": 0.92,
+      "loss": 0.08,
+      "f1_score": 0.89
+    }
+  }
+}
+```
+
+### crab metrics diff --json
+
+```json
+{
+  "schema": "metrics.diff",
+  "version": "1.0",
+  "data": {
+    "ref_a": "main",
+    "ref_b": "feature/train-v2",
+    "added": {},
+    "removed": {},
+    "changed": {
+      "accuracy": { "old": 0.88, "new": 0.92 },
+      "loss": { "old": 0.12, "new": 0.08 }
+    }
+  }
+}
+```
+
+### crab metrics plot --json
+
+```json
+{
+  "schema": "metrics.plot",
+  "version": "1.0",
+  "data": [
+    {
+      "path": "metrics_history.csv",
+      "x": "epoch",
+      "y": ["accuracy", "loss"],
+      "title": "Training Progress",
+      "template": null,
+      "data_points": 50
+    }
+  ]
+}
+```
+
+## Related Commands
+
+- [`crab params`](/docs/cli/automation/parameters) — manage workflow parameters (non-numeric key-value pairs).
+- [`crab run`](/docs/cli/automation/running-commands) — execute stages that produce metrics.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — define and manage multi-stage pipelines.
+- [`crab workflow dag`](/docs/cli/automation/dag-visualization) — visualize stage dependency graphs.

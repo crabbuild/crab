@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 340" width="820" height="340">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="cmdGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="processGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="resultGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="820" height="340" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+    <!-- Clone phase background -->
+    <rect x="30" y="50" width="760" height="110" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+    <!-- Hydrate phase background -->
+    <rect x="30" y="190" width="760" height="110" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1"/>
+  </g>
+
+  <g id="nodes">
+    <!-- Row 1: Clone phase -->
+    <rect x="50" y="72" width="210" height="56" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="310" y="72" width="210" height="56" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="570" y="72" width="200" height="56" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+
+    <!-- Row 2: Hydrate phase -->
+    <rect x="50" y="212" width="210" height="56" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="310" y="212" width="210" height="56" rx="8" fill="url(#processGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="570" y="212" width="200" height="56" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Phase labels -->
+    <text x="50" y="42" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#64748B" letter-spacing="0.5">CLONE</text>
+    <text x="50" y="182" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#0284C7" letter-spacing="0.5">HYDRATE</text>
+
+    <!-- Row 1 labels -->
+    <text x="155" y="95" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">crab clone</text>
+    <text x="155" y="112" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">crab://bucket/repo</text>
+
+    <text x="415" y="95" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Download git objects</text>
+    <text x="415" y="112" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">commits, trees, pointers</text>
+
+    <text x="670" y="95" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">Working tree has</text>
+    <text x="670" y="112" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">pointer blobs only</text>
+
+    <!-- Row 2 labels -->
+    <text x="155" y="235" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">crab hydrate</text>
+    <text x="155" y="252" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">'*.bin'</text>
+
+    <text x="415" y="235" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Download chunks</text>
+    <text x="415" y="252" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">from cloud storage</text>
+
+    <text x="670" y="235" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">Reconstruct</text>
+    <text x="670" y="252" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">full files</text>
+  </g>
+
+  <g id="connections">
+    <!-- Row 1 arrows -->
+    <line x1="260" y1="100" x2="310" y2="100" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="520" y1="100" x2="570" y2="100" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Vertical connector from row 1 result to row 2 start -->
+    <path d="M 670 128 L 670 165 L 155 165 L 155 212" fill="none" stroke="#334155" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#arrowhead)"/>
+
+    <!-- Row 2 arrows -->
+    <line x1="260" y1="240" x2="310" y2="240" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="520" y1="240" x2="570" y2="240" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

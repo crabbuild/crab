@@ -1,0 +1,68 @@
+---
+title: "Version Info"
+description: "How to check your installed Crab version, build details, and supported schema versions for compatibility and bug reports."
+---
+
+## Checking Version Information
+
+Knowing which version of Crab you're running matters for compatibility checks, bug reports, and ensuring you have the latest features. `crab version` gives you the version string, git commit SHA, and build timestamp in one command.
+
+## Usage
+
+```bash
+crab version
+```
+
+```
+crab 1.0.14 (<build commit>)
+built at <UTC timestamp>
+```
+
+## When Version Matters
+
+| Scenario | Why |
+|----------|-----|
+| Filing a bug report | Maintainers need to know the exact build |
+| Compatibility check | Repository version guard may require a minimum version |
+| After upgrading | Confirm the new version is active |
+| CI pipelines | Log which version ran the job |
+
+## Including in Bug Reports
+
+Pair version info with environment details for a complete picture:
+
+```bash
+crab version
+crab env
+crab doctor
+```
+
+## Schema Registry
+
+The JSON output includes the schema registry — a list of all supported structured output schemas and their versions. This is useful for automation that needs to know which output formats are available:
+
+```bash
+crab version --json
+```
+
+```json
+{
+  "schema": "version",
+  "version": "1.0",
+  "data": {
+    "crab_version": "1.0.14",
+    "git_sha": "<build commit>",
+    "build_timestamp": "<UTC timestamp>",
+    "schemas": {
+      "add": "1.0",
+      "du": "1.1",
+      "hydrate": "1.0",
+      "status": "1.0"
+    }
+  }
+}
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab version reference](/docs/cli/reference/crab-version).

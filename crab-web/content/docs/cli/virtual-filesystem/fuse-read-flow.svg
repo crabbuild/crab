@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 780" width="720" height="780">
+
+  <defs>
+    <marker id="arrow-solid" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#0D9488"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <g id="background">
+    <rect x="0" y="0" width="720" height="780" fill="#F9FAFB"/>
+  </g>
+
+  <!-- Containers -->
+  <g id="containers">
+  </g>
+
+  <!-- Nodes -->
+  <g id="nodes">
+    <!-- A: Application reads -->
+    <rect x="220" y="60" width="280" height="56" rx="12" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+    <!-- B: Kernel FUSE driver -->
+    <rect x="230" y="170" width="260" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- C: Crab VFS engine -->
+    <rect x="230" y="274" width="260" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- D: Decision diamond -->
+    <polygon points="360,374 470,424 360,474 250,424" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <!-- E: Serve from local cache (left) -->
+    <rect x="80" y="530" width="210" height="56" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1.5"/>
+    <!-- F: Download chunks (right) -->
+    <rect x="430" y="530" width="220" height="56" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- G: Cache chunks -->
+    <rect x="430" y="636" width="220" height="56" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- H: Return data -->
+    <rect x="80" y="636" width="210" height="56" rx="12" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <!-- Title -->
+    <text x="360" y="36" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#0F172A">FUSE Read Flow</text>
+
+    <!-- A -->
+    <text x="360" y="84" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#0F172A">Application reads</text>
+    <text x="360" y="103" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">/mnt/models/weights.bin</text>
+    <!-- B -->
+    <text x="360" y="200" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Kernel FUSE driver</text>
+    <!-- C -->
+    <text x="360" y="304" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Crab VFS engine</text>
+    <!-- D -->
+    <text x="360" y="428" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">File in cache?</text>
+    <!-- Branch labels -->
+    <text x="200" y="498" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="700" fill="#0D9488">Yes</text>
+    <text x="520" y="498" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="700" fill="#64748B">No</text>
+    <!-- E -->
+    <text x="185" y="554" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Serve from cache</text>
+    <text x="185" y="572" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">instant response</text>
+    <!-- F -->
+    <text x="540" y="554" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Download chunks</text>
+    <text x="540" y="572" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">from cloud storage</text>
+    <!-- G -->
+    <text x="540" y="660" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Cache chunks</text>
+    <text x="540" y="678" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">for next access</text>
+    <!-- H -->
+    <text x="185" y="660" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Return data</text>
+    <text x="185" y="678" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">to application</text>
+  </g>
+
+  <!-- Connections -->
+  <g id="connections">
+    <!-- A → B -->
+    <line x1="360" y1="116" x2="360" y2="170" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- B → C -->
+    <line x1="360" y1="220" x2="360" y2="274" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- C → D -->
+    <line x1="360" y1="324" x2="360" y2="374" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- D → E (Yes, left branch) -->
+    <path d="M 250,424 L 185,424 L 185,530" fill="none" stroke="#0D9488" stroke-width="1.5" marker-end="url(#arrow-teal)"/>
+    <!-- D → F (No, right branch) -->
+    <path d="M 470,424 L 540,424 L 540,530" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- F → G -->
+    <line x1="540" y1="586" x2="540" y2="636" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- G → H (cache then return) -->
+    <path d="M 430,664 L 290,664" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- E → H -->
+    <line x1="185" y1="586" x2="185" y2="636" stroke="#0D9488" stroke-width="1.5" marker-end="url(#arrow-teal)"/>
+  </g>
+
+  <!-- Info callout -->
+  <g id="callout">
+    <rect x="60" y="730" width="600" height="36" rx="10" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
+    <circle cx="84" cy="748" r="10" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1"/>
+    <text x="84" y="752" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#2563EB">i</text>
+    <text x="106" y="752" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#334155">Cache hits are served instantly. Misses download chunks on demand and cache them for subsequent reads.</text>
+  </g>
+
+</svg>

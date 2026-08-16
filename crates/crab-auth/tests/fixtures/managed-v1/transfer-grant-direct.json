@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "grant_id": "01900000-0000-7000-8000-000000000003",
+  "repository_id": "01900000-0000-7000-8000-000000000001",
+  "operation": "clone",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "permissions": [
+    "read_object",
+    "read_metadata",
+    "list_prefix"
+  ],
+  "storage_scope": {
+    "repository_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001"
+  },
+  "transport": {
+    "transport": "direct",
+    "direct": {
+      "endpoint": "https://s3.us-west-2.amazonaws.com",
+      "region": "us-west-2",
+      "container": "crab-managed-prod",
+      "object_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001",
+      "credentials": {
+        "provider": "aws",
+        "access_key_id": "fixture-access-key-id",
+        "secret_access_key": "fixture-secret-access-key",
+        "session_token": "fixture-session-token"
+      }
+    }
+  }
+}

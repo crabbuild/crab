@@ -1,0 +1,83 @@
+---
+title: "crab member"
+description: "List, add, update, and remove managed organization memberships."
+---
+
+# crab member
+
+Manage organization memberships using immutable principal UUIDs and the roles
+`owner`, `admin`, `writer`, `reader`, and `billing`.
+
+## Synopsis
+
+```text
+crab member [OPTIONS] <COMMAND>
+```
+
+## Common options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--service <AUTHORITY>` | Active profile | Target an exact installed managed-service authority |
+| `--json` | `false` | Emit one structured JSON envelope |
+
+## Commands
+
+### list
+
+```text
+crab member list [OPTIONS] <ORGANIZATION>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--cursor <CURSOR>` | None | Opaque cursor returned by the preceding page |
+| `--limit <LIMIT>` | `50` | Page size from 1 through 100 |
+
+```bash
+crab member list acme --json
+```
+
+### add
+
+```text
+crab member add [OPTIONS] --role <ROLE> <ORGANIZATION> <PRINCIPAL_ID>
+```
+
+```bash
+crab member add acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 --role writer
+```
+
+### update
+
+```text
+crab member update [OPTIONS] --role <ROLE> --revision <REVISION> <ORGANIZATION> <PRINCIPAL_ID>
+```
+
+```bash
+crab member update acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 \
+  --role reader \
+  --revision 2
+```
+
+### remove
+
+```text
+crab member remove [OPTIONS] --revision <REVISION> <ORGANIZATION> <PRINCIPAL_ID>
+```
+
+```bash
+crab member remove acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 --revision 3
+```
+
+## Ownership safety
+
+Only owners can change owner memberships. The service rejects removal or
+downgrade of the last active owner. Membership update and removal require the
+revision shown by `crab member list --json`.
+
+## Related
+
+- [Access Management](/docs/cli/managed-service/access-management)
+- [`crab organization`](/docs/cli/reference/crab-organization)
+- [`crab service-account`](/docs/cli/reference/crab-service-account)

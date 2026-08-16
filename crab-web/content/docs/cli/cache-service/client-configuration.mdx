@@ -1,0 +1,125 @@
+---
+title: "Client Configuration"
+description: "Configure Crab clients and CI runners to use the cache service."
+---
+
+# Client Configuration
+
+Crab clients use the `[cache]` section in Crab config. Configure the service URL once, then provide secrets through user config or environment variables.
+
+## Minimal Configuration
+
+```toml
+[cache]
+service_url = "https://crab-cache.example.com:8443"
+service_mode = "cache+dedup"
+service_auth = "psk"
+push_warming = true
+```
+
+Provide the PSK separately:
+
+```bash
+export CRAB_CACHE_PSK="replace-with-shared-secret"
+```
+
+## Configuration Locations
+
+Crab resolves cache settings from:
+
+1. User config: `~/.crab/config.toml`
+2. Repository config: `.crab/config.toml`
+3. Environment overrides for cache secrets
+
+Use repository config for the cache URL when every checkout of a repository should use the same service. Use user config or environment variables for secrets.
+
+## Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `service_url` | unset | Base URL of the cache service. When unset, the service is disabled. |
+| `service_mode` | `cache+dedup` | `cache`, `dedup`, or `cache+dedup`. |
+| `service_auth` | `none` | `psk`, `bearer`, `mtls`, or `none`. |
+| `service_psk` | unset | Shared secret for PSK auth. Prefer `CRAB_CACHE_PSK` for CI and user machines. |
+| `service_token_path` | unset | File containing a bearer token. |
+| `service_ca_cert` | system trust | PEM CA bundle for private TLS certificates. |
+| `service_client_cert` | unset | PEM client certificate chain for native mTLS. |
+| `service_client_key` | unset | PEM private key for native mTLS. |
+| `push_warming` | `true` | Warm the cache after successful pushes. |
+
+## Modes
+
+| Mode | Reads through cache | Dedup queries | Push warming |
+|------|---------------------|---------------|--------------|
+| `cache` | Yes | No | No |
+| `dedup` | No | Yes | No |
+| `cache+dedup` | Yes | Yes | Yes, when `push_warming = true` |
+
+Use `cache+dedup` for normal team deployments.
+
+## Environment Overrides
+
+| Variable | Effect |
+|----------|--------|
+| `CRAB_CACHE_SERVICE_URL` | Overrides `cache.service_url` for this process. Empty values are ignored. |
+| `CRAB_CACHE_PSK` | Uses this value as the PSK secret. |
+| `CRAB_CACHE_TOKEN` | Uses this value as the bearer token. |
+
+Set `service_url` in TOML when every checkout should use the same cache
+endpoint. Use `CRAB_CACHE_SERVICE_URL` for CI runners, canaries, or regional
+jobs that need a different endpoint without rewriting repository config.
+
+## Native mTLS
+
+For native mTLS, configure the cache-service CA plus the client certificate and key:
+
+```toml
+[cache]
+service_url = "https://crab-cache.example.com:8443"
+service_mode = "cache+dedup"
+service_auth = "mtls"
+service_ca_cert = "/etc/crab/cache-ca.pem"
+service_client_cert = "/etc/crab/cache-client.pem"
+service_client_key = "/etc/crab/cache-client-key.pem"
+```
+
+`service_client_cert` may include the leaf certificate followed by any intermediate certificates. The private key can be RSA, SEC1 EC, or PKCS#8 PEM. Set both client identity fields together.
+
+## CI Example
+
+```yaml
+- name: Configure Crab cache
+  run: |
+    mkdir -p ~/.crab
+    cat > ~/.crab/config.toml <<EOF
+    [cache]
+    service_mode = "cache+dedup"
+    service_auth = "psk"
+    push_warming = true
+    EOF
+
+- name: Push
+  run: crab push origin HEAD:refs/heads/main
+  env:
+    CRAB_CACHE_SERVICE_URL: https://crab-cache-ci.example.com:8443
+    CRAB_CACHE_PSK: ${{ secrets.CRAB_CACHE_PSK }}
+```
+
+Set `CRAB_CACHE_SERVICE_URL` and `CRAB_CACHE_PSK` on every CI step that runs
+`crab`.
+
+## Verification
+
+Run a command with cache logging enabled:
+
+```bash
+RUST_LOG=info,crab::cache=debug crab fetch
+```
+
+If the cache service is healthy, the client enables remote cache behavior. If the service is unhealthy, Crab continues with local cache and origin access.
+
+For native mTLS onboarding, run `crab doctor --json` after setting
+`service_ca_cert`, `service_client_cert`, and `service_client_key`. The cache
+service checks should report health, object-route auth, and admin readiness
+using `mtls client cert configured`, `custom CA`, and `client cert configured`
+details.

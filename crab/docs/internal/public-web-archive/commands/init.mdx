@@ -1,0 +1,170 @@
+---
+title: "crab init"
+description: "Bootstrap a Crab repository — configure remotes, filter driver, tracking patterns, and credentials in one command."
+---
+
+# crab init
+
+Initialize or re-configure a Crab repository.
+
+## Synopsis
+
+```bash
+crab init [OPTIONS] [URL]
+```
+
+## Description
+
+`crab init` is the single entry point for setting up Crab in any directory. It handles git initialization, remote configuration, filter driver installation, large-file detection, credential validation, and project config generation.
+
+## Modes
+
+### New repository: `crab init <url>`
+
+```bash
+cd my-project
+crab init crab://my-bucket/my-repo
+```
+
+This performs:
+1. Runs `git init` if no `.git` directory exists
+2. Generates `.crab.toml` with the remote URL
+3. Auto-detects and tracks large file patterns in `.gitattributes`
+4. Installs the filter driver in local git config
+5. Adds a git remote (`origin` or `crab`)
+6. Runs credential discovery and prints the result
+7. Stages `.crab.toml` for commit
+
+### Re-apply mode: `crab init` (no URL)
+
+```bash
+# After cloning a repo that has .crab.toml
+git clone git@github.com:team/project.git
+cd project
+crab init
+```
+
+When no URL is provided, reads `.crab.toml` from the repo root and re-applies the configuration:
+- Installs the filter driver
+- Syncs `.gitattributes` with `[track]` patterns
+- Adds/updates the crab remote
+- If `[mirror]` section exists: installs mirror hooks and configures the crab remote
+- Validates credentials
+
+This is the collaborator onboarding command — one step to get fully configured.
+
+### Mirror mode: `crab init --mirror=<remote> <url>`
+
+```bash
+crab init --mirror=origin crab://my-bucket/my-repo
+```
+
+Configures GitHub + Crab coexistence:
+- Validates that the specified remote (e.g. `origin`) exists
+- Adds a `crab` remote with the provided URL
+- Installs `pre-push`, `post-checkout`, and `post-merge` hooks
+- Writes `[mirror]` section to `.crab.toml`
+
+See [Mirror Mode](/docs/cli/getting-started/mirror-mode) for the full guide.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mirror <remote>` | — | Enable mirror mode with the specified git remote as origin |
+| `--no-auto-track` | `false` | Skip auto-detection of large file patterns |
+| `--log-level <level>` | — | Set log verbosity |
+
+## Credential Discovery
+
+During initialization, Crab probes for valid credentials in this order:
+
+1. `.crab.toml` `[auth]` section (explicit project config)
+2. Environment variables (`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `GOOGLE_APPLICATION_CREDENTIALS`, etc.)
+3. Cloud SDK configs (`~/.aws/config`, `~/.config/gcloud/`, `~/.azure/`)
+4. Instance metadata (EC2/GCE/Azure IMDS)
+
+The result is printed:
+```
+✓ Credentials: AWS profile 'default' from ~/.aws/config
+```
+
+If no credentials are found:
+```
+⚠ No credentials found. Run: aws configure
+```
+
+## Remote Configuration
+
+`crab init` adds a git remote for the Crab URL:
+- If no `origin` remote exists: adds as `origin` (familiar for git users)
+- If `origin` already exists: adds as `crab`
+- In mirror mode: always adds as `crab` regardless of existing remotes
+
+If the remote already exists with the same URL, it's a no-op. If it exists with a different URL, it's updated.
+
+## Examples
+
+### Initialize a new project
+
+```bash
+mkdir my-ml-project
+cd my-ml-project
+crab init crab://ml-team/my-model
+# Initialized git repository
+# Detected large files — tracking: *.safetensors, *.bin
+# Remote 'origin' → crab://ml-team/my-model
+# ✓ Credentials: AWS profile 'default' from ~/.aws/config
+#
+# Next: crab ship -m 'initial commit'
+```
+
+### Collaborator setup
+
+```bash
+git clone git@github.com:team/project.git
+cd project
+crab init
+# Re-applied configuration from .crab.toml
+# Remote 'crab' → crab://team-bucket/project
+# ✓ Credentials: AWS profile 'ml-team' from ~/.aws/config
+```
+
+### Mirror mode setup
+
+```bash
+cd existing-github-repo
+crab init --mirror=origin crab://my-bucket/my-repo
+# Mirror mode: git push origin will sync large files to Crab transparently.
+# Remote 'crab' → crab://my-bucket/my-repo
+# Installed hooks: pre-push, post-checkout, post-merge
+#
+# Next: crab ship -m 'enable crab'
+```
+
+### Re-initialize (idempotent)
+
+```bash
+crab init crab://my-bucket/my-repo  # first time
+crab init crab://my-bucket/my-repo  # safe to repeat
+```
+
+## Files Created/Modified
+
+| File | Action |
+|------|--------|
+| `.git/` | Created if missing |
+| `.crab/config.toml` | Internal state (created) |
+| `.crab/remote` | Remote URL (created) |
+| `.crab.toml` | Project config (created/updated) |
+| `.gitattributes` | Tracking patterns (updated) |
+| `.git/config` | Filter driver (modified) |
+| `.git/hooks/*` | Mirror hooks (mirror mode only) |
+
+## Related
+
+- [`crab install`](/docs/cli/commands/install) — global machine setup
+- [`crab ship`](/docs/cli/commands/ship) — commit and push after init
+- [`crab adopt`](/docs/cli/commands/adopt) — migrate existing large files
+- [Project Configuration](/docs/cli/getting-started/project-config) — `.crab.toml` reference
+- [Mirror Mode](/docs/cli/getting-started/mirror-mode) — GitHub + Crab coexistence

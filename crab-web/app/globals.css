@@ -1,0 +1,479 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "fumadocs-ui/css/shadcn.css";
+@import "fumadocs-ui/css/preset.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: var(--font-sans);
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+
+    /* Brand color extensions — Tailwind v4 --color-* keyspace generates
+       utilities like bg-primary-hover, text-primary-muted, border-primary-hover */
+    --color-primary-hover: var(--primary-hover);
+    --color-primary-muted: var(--primary-muted);
+
+    /* Border radius — generates rounded-card */
+    --radius-card: var(--card-radius);
+
+    /* Spacing — Tailwind v4 --spacing-* generates p-section, m-section,
+       gap-section, etc. (--spacing-card mirrors --card-padding) */
+    --spacing-section: var(--section-padding);
+    --spacing-card: var(--card-padding);
+
+    /* Box shadows — generates shadow-card, shadow-card-hover */
+    --shadow-card: var(--card-shadow);
+    --shadow-card-hover: var(--card-shadow-hover);
+
+    /* Easing — Tailwind v4 generates ease-out-app utility.
+       Note: Tailwind v4 does not auto-generate utilities for --duration-*,
+       so duration tokens stay as plain custom properties consumed via
+       var() in transition-duration declarations. */
+    --ease-out-app: var(--ease-out);
+
+    /* Font sizes — Tailwind v4 --text-* keyspace generates font-size
+       utilities. Body sizes (text-xs/sm/base/lg) map to existing tokens;
+       heading sizes get the text-heading-* prefix so utilities like
+       text-heading-hero, text-heading-2xl, etc. are available. */
+    --text-xs: var(--text-xs);
+    --text-sm: var(--text-sm);
+    --text-base: var(--text-base);
+    --text-lg: var(--text-lg);
+    --text-heading-sm: var(--heading-sm);
+    --text-heading-md: var(--heading-md);
+    --text-heading-lg: var(--heading-lg);
+    --text-heading-xl: var(--heading-xl);
+    --text-heading-2xl: var(--heading-2xl);
+    --text-heading-hero: var(--heading-hero);
+}
+
+:root {
+    /* Surfaces — slate palette */
+    --background: oklch(1 0 0); /* white */
+    --foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+    --card: oklch(1 0 0); /* white */
+    --card-foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.208 0.042 265.755);
+
+    /* Brand — sky palette */
+    --primary: oklch(0.685 0.169 237.323); /* sky-500 #0ea5e9 */
+    --primary-foreground: oklch(1 0 0); /* white */
+    --primary-hover: oklch(0.588 0.158 241.966); /* sky-600 */
+    --primary-muted: oklch(0.977 0.013 236.62); /* sky-50 */
+
+    --secondary: oklch(0.968 0.007 247.896); /* slate-100 */
+    --secondary-foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+    --muted: oklch(0.968 0.007 247.896); /* slate-100 */
+    --muted-foreground: oklch(0.554 0.046 257.417); /* slate-500 */
+    --accent: oklch(0.968 0.007 247.896); /* slate-100 */
+    --accent-foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+    --destructive: oklch(0.577 0.245 27.325);
+
+    /* Borders & inputs */
+    --border: oklch(0.929 0.013 255.508); /* slate-200 */
+    --input: oklch(0.929 0.013 255.508); /* slate-200 */
+    --ring: oklch(0.685 0.169 237.323); /* sky-500 */
+
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.208 0.042 265.755);
+    --sidebar-primary: oklch(0.685 0.169 237.323); /* sky-500 */
+    --sidebar-primary-foreground: oklch(1 0 0);
+    --sidebar-accent: oklch(0.968 0.007 247.896); /* slate-100 */
+    --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
+    --sidebar-border: oklch(0.929 0.013 255.508); /* slate-200 */
+    --sidebar-ring: oklch(0.685 0.169 237.323); /* sky-500 */
+
+    /* Spacing tokens */
+    --section-padding: 80px;
+    --card-padding: 24px;
+    --card-radius: 12px;
+    --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    --card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.12);
+
+    /* Animation tokens */
+    --duration-fast: 150ms;
+    --duration-normal: 300ms;
+    --duration-slow: 500ms;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Typography scale */
+    --heading-hero: clamp(36px, 5vw, 60px);
+    --heading-2xl: 48px;
+    --heading-xl: 36px;
+    --heading-lg: 30px;
+    --heading-md: 24px;
+    --heading-sm: 20px;
+    --text-lg: 18px;
+    --text-base: 16px;
+    --text-sm: 14px;
+    --text-xs: 12px;
+}
+
+@media (max-width: 768px) {
+    :root {
+        --section-padding: 56px;
+    }
+}
+
+.dark {
+    --background: oklch(0.129 0.042 264.695); /* slate-950 */
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.208 0.042 265.755); /* slate-900 */
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.208 0.042 265.755); /* slate-900 */
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.746 0.16 232.661); /* sky-400 #38bdf8 */
+    --primary-foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+    --primary-hover: oklch(0.828 0.111 230.318); /* sky-300 */
+    --primary-muted: oklch(0.293 0.066 243.157); /* sky-950 */
+    --secondary: oklch(0.279 0.041 260.031); /* slate-800 */
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.279 0.041 260.031); /* slate-800 */
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.279 0.041 260.031); /* slate-800 */
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(0.279 0.041 260.031); /* slate-800 */
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.746 0.16 232.661); /* sky-400 */
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+
+/* Smooth in-page anchor scrolling for users who haven't requested
+   reduced motion. Anchors via #ids (e.g. the use-cases scenario nav)
+   ease into view instead of jumping. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* Reset code block styling when nested inside <pre> structures */
+pre code {
+  background-color: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+}
+
+/* Ensure monospace code blocks use a font with full Unicode box-drawing
+   glyph coverage so ASCII diagrams align correctly (matching VS Code). */
+pre, code {
+  font-family: var(--font-mono, 'Geist Mono'), 'Cascadia Code', 'Fira Code',
+    'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-variant-ligatures: none;
+}
+
+/* Typing-cursor blink for the marketing TypingCode terminal demo */
+@keyframes typing-cursor-blink {
+  50% { opacity: 0; }
+}
+
+
+/* Marketing page transition fade — opacity 0 → 1 over 300ms.
+   Used by route-level `loading.tsx` placeholders during streaming. */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fade-in var(--duration-normal, 300ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in {
+    animation: none;
+  }
+}
+
+/* ─── Shimmer headline effect — moving gradient highlight ─── */
+@keyframes shimmer {
+  0% { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
+.animate-shimmer {
+  background-size: 200% auto;
+  animation: shimmer 4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-shimmer { animation: none; }
+}
+
+/* ─── Infinite-scroll marquee for logo strips ─── */
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  animation: marquee 30s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee { animation: none; }
+}
+
+/* ─── Floating particle dots (CSS-only, used in hero) ─── */
+@keyframes float-particle {
+  0%, 100% { transform: translateY(0) scale(1); opacity: 0.3; }
+  50% { transform: translateY(-20px) scale(1.2); opacity: 0.6; }
+}
+
+/* ─── Glassmorphism utility ─── */
+.glass {
+  background: color-mix(in oklch, var(--card) 60%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+/* ─── Glow-on-hover for feature cards ─── */
+.glow-on-hover {
+  transition: box-shadow var(--duration-normal) var(--ease-out),
+              transform var(--duration-normal) var(--ease-out);
+}
+
+.glow-on-hover:hover {
+  box-shadow: 0 0 20px color-mix(in oklch, var(--primary) 20%, transparent),
+              0 4px 12px rgba(0, 0, 0, 0.08);
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow-on-hover:hover { transform: none; }
+}
+
+/* ─── FAQ accordion expand/collapse ─── */
+details.faq-item summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+details.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+details.faq-item .faq-content {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height var(--duration-normal) var(--ease-out),
+              opacity var(--duration-normal) var(--ease-out),
+              padding var(--duration-normal) var(--ease-out);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+details.faq-item[open] .faq-content {
+  max-height: 500px;
+  opacity: 1;
+  padding-top: 2px;
+  padding-bottom: 18px;
+}
+
+/* Chevron rotation for FAQ */
+details.faq-item .faq-chevron {
+  transition: transform var(--duration-normal) var(--ease-out);
+}
+
+details.faq-item[open] .faq-chevron {
+  transform: rotate(180deg);
+}
+
+
+/* Responsive table wrapper — shows a trailing gradient fade on the right edge
+   when the table content overflows horizontally (mobile viewports). */
+.table-scroll-wrapper {
+  position: relative;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.table-scroll-wrapper::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 32px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--background, #fff));
+  opacity: 0;
+  transition: opacity var(--duration-fast, 150ms);
+}
+
+/* Show the fade only when the container is scrollable (JS adds this class) */
+.table-scroll-wrapper.is-overflowing::after {
+  opacity: 1;
+}
+
+/* Hide the fade when scrolled to the end */
+.table-scroll-wrapper.is-scrolled-end::after {
+  opacity: 0;
+}
+
+/* Mobile touch target enforcement — ensures interactive elements meet
+   the 44×44px minimum on mobile viewports per WCAG 2.5.5. */
+@media (max-width: 767px) {
+  /* Marketing CTA buttons and nav links get minimum touch target */
+  [data-slot="button"],
+  .lp-btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* ─── Mermaid Diagram Styling ─────────────────────────────── */
+
+/* Node shapes — rounded corners and subtle fill */
+[role="img"] .node rect,
+[role="img"] .node polygon,
+[role="img"] .node circle {
+  rx: 8px;
+  ry: 8px;
+  stroke-width: 1.5px;
+}
+
+/* Cluster (subgraph) containers */
+[role="img"] .cluster rect {
+  rx: 12px;
+  ry: 12px;
+  stroke-width: 1px;
+  stroke-dasharray: none;
+}
+
+/* Edge lines — slightly thicker for readability */
+[role="img"] .flowchart-link,
+[role="img"] .messageLine0,
+[role="img"] .messageLine1 {
+  stroke-width: 1.5px;
+}
+
+/* Arrowheads */
+[role="img"] marker path {
+  stroke-width: 1px;
+}
+
+/* Edge labels — clean and readable */
+[role="img"] .edgeLabel {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Sequence diagram actors */
+[role="img"] .actor {
+  rx: 8px;
+  ry: 8px;
+  stroke-width: 1.5px;
+}
+
+/* Sequence diagram lifelines */
+[role="img"] .actor-line {
+  stroke-width: 1px;
+  stroke-dasharray: 4 4;
+}
+
+/* Decision diamonds — keep sharp but with softer stroke */
+[role="img"] .node polygon {
+  stroke-width: 1.5px;
+}
+
+/* Note boxes in sequence diagrams */
+[role="img"] .note {
+  rx: 6px;
+  ry: 6px;
+  stroke-width: 1px;
+}
+
+/* Label text — consistent weight */
+[role="img"] .nodeLabel,
+[role="img"] .label {
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+
+/* Cluster/subgraph titles */
+[role="img"] .cluster-label .nodeLabel {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}

@@ -1,0 +1,178 @@
+# Crab embedded pricing data — 2026-03-01
+#
+# Source: public cloud pricing pages (approximate list prices, USD).
+# Refreshed by scripts/refresh_pricing.sh; CI fails if > 90 days stale.
+#
+# Required fields per (provider, region, class):
+#   gb_month_usd, put_per_k_ops_usd, get_per_k_ops_usd,
+#   list_per_k_ops_usd, head_per_k_ops_usd, retrieval_per_gb_usd,
+#   min_retention_days, min_object_size_bytes, egress_per_gb_usd
+
+version: "2026-03-01"
+
+providers:
+  aws:
+    regions:
+      us-east-1:
+        classes:
+          Standard:
+            gb_month_usd: "0.023"
+            put_per_k_ops_usd: "0.005"
+            get_per_k_ops_usd: "0.0004"
+            list_per_k_ops_usd: "0.005"
+            head_per_k_ops_usd: "0.0004"
+            retrieval_per_gb_usd: "0"
+            min_retention_days: 0
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.09"
+
+          Standard-IA:
+            gb_month_usd: "0.0125"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.001"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.001"
+            retrieval_per_gb_usd: "0.01"
+            min_retention_days: 30
+            min_object_size_bytes: 128000
+            egress_per_gb_usd: "0.09"
+
+          One-Zone-IA:
+            gb_month_usd: "0.01"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.001"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.001"
+            retrieval_per_gb_usd: "0.01"
+            min_retention_days: 30
+            min_object_size_bytes: 128000
+            egress_per_gb_usd: "0.09"
+
+          Glacier-Instant-Retrieval:
+            gb_month_usd: "0.004"
+            put_per_k_ops_usd: "0.02"
+            get_per_k_ops_usd: "0.01"
+            list_per_k_ops_usd: "0.02"
+            head_per_k_ops_usd: "0.01"
+            retrieval_per_gb_usd: "0.03"
+            min_retention_days: 90
+            min_object_size_bytes: 128000
+            egress_per_gb_usd: "0.09"
+
+          Glacier-Flexible-Retrieval:
+            gb_month_usd: "0.0036"
+            put_per_k_ops_usd: "0.03"
+            get_per_k_ops_usd: "0.01"
+            list_per_k_ops_usd: "0.03"
+            head_per_k_ops_usd: "0.01"
+            retrieval_per_gb_usd: "0.03"
+            min_retention_days: 90
+            min_object_size_bytes: 40960
+            egress_per_gb_usd: "0.09"
+
+          Glacier-Deep-Archive:
+            gb_month_usd: "0.00099"
+            put_per_k_ops_usd: "0.05"
+            get_per_k_ops_usd: "0.01"
+            list_per_k_ops_usd: "0.05"
+            head_per_k_ops_usd: "0.01"
+            retrieval_per_gb_usd: "0.02"
+            min_retention_days: 180
+            min_object_size_bytes: 40960
+            egress_per_gb_usd: "0.09"
+
+  gcs:
+    regions:
+      us-central1:
+        classes:
+          Standard:
+            gb_month_usd: "0.020"
+            put_per_k_ops_usd: "0.005"
+            get_per_k_ops_usd: "0.0004"
+            list_per_k_ops_usd: "0.005"
+            head_per_k_ops_usd: "0.0004"
+            retrieval_per_gb_usd: "0"
+            min_retention_days: 0
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.12"
+
+          Nearline:
+            gb_month_usd: "0.010"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.001"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.001"
+            retrieval_per_gb_usd: "0.01"
+            min_retention_days: 30
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.12"
+
+          Coldline:
+            gb_month_usd: "0.004"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.01"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.01"
+            retrieval_per_gb_usd: "0.02"
+            min_retention_days: 90
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.12"
+
+          Archive:
+            gb_month_usd: "0.0012"
+            put_per_k_ops_usd: "0.05"
+            get_per_k_ops_usd: "0.05"
+            list_per_k_ops_usd: "0.05"
+            head_per_k_ops_usd: "0.05"
+            retrieval_per_gb_usd: "0.05"
+            min_retention_days: 365
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.12"
+
+  azure:
+    regions:
+      eastus:
+        classes:
+          Hot:
+            gb_month_usd: "0.018"
+            put_per_k_ops_usd: "0.005"
+            get_per_k_ops_usd: "0.0004"
+            list_per_k_ops_usd: "0.005"
+            head_per_k_ops_usd: "0.0004"
+            retrieval_per_gb_usd: "0"
+            min_retention_days: 0
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.087"
+
+          Cool:
+            gb_month_usd: "0.01"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.001"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.001"
+            retrieval_per_gb_usd: "0.01"
+            min_retention_days: 30
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.087"
+
+          Cold:
+            gb_month_usd: "0.0036"
+            put_per_k_ops_usd: "0.018"
+            get_per_k_ops_usd: "0.01"
+            list_per_k_ops_usd: "0.018"
+            head_per_k_ops_usd: "0.01"
+            retrieval_per_gb_usd: "0.02"
+            min_retention_days: 90
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.087"
+
+          Archive:
+            gb_month_usd: "0.002"
+            put_per_k_ops_usd: "0.01"
+            get_per_k_ops_usd: "0.005"
+            list_per_k_ops_usd: "0.01"
+            head_per_k_ops_usd: "0.005"
+            retrieval_per_gb_usd: "0.02"
+            min_retention_days: 180
+            min_object_size_bytes: 0
+            egress_per_gb_usd: "0.087"

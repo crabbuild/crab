@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditIssue",
+  "type": "object",
+  "required": [
+    "line",
+    "reason"
+  ],
+  "properties": {
+    "line": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

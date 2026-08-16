@@ -1,0 +1,251 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvidenceVerifyPayload",
+  "type": "object",
+  "required": [
+    "directory",
+    "files",
+    "profile",
+    "require_redacted",
+    "summary",
+    "verified"
+  ],
+  "properties": {
+    "directory": {
+      "type": "string"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EvidenceFileStatus"
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EvidenceVerifyGate"
+      }
+    },
+    "profile": {
+      "$ref": "#/definitions/EvidenceVerifyProfile"
+    },
+    "require_redacted": {
+      "type": "boolean"
+    },
+    "summary": {
+      "$ref": "#/definitions/EvidenceVerifySummary"
+    },
+    "verified": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "CertificationGateState": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "EvidenceFileState": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "failed"
+      ]
+    },
+    "EvidenceFileStatus": {
+      "type": "object",
+      "required": [
+        "path",
+        "state"
+      ],
+      "properties": {
+        "collected_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "coordinator_provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EvidenceKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redacted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "state": {
+          "$ref": "#/definitions/EvidenceFileState"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "EvidenceKind": {
+      "type": "string",
+      "enum": [
+        "live-control-plane",
+        "live-smoke"
+      ]
+    },
+    "EvidenceVerifyGate": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/CertificationGateState"
+        }
+      }
+    },
+    "EvidenceVerifyProfile": {
+      "type": "string",
+      "enum": [
+        "artifacts",
+        "control-plane-status",
+        "control-plane-mutate",
+        "provider-hydrate",
+        "active-active-smoke",
+        "enterprise"
+      ]
+    },
+    "EvidenceVerifySummary": {
+      "type": "object",
+      "required": [
+        "control_plane_evidence",
+        "files_failed",
+        "files_seen",
+        "files_verified",
+        "redacted",
+        "smoke_evidence",
+        "unredacted"
+      ],
+      "properties": {
+        "control_plane_evidence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_seen": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_verified": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "redacted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "smoke_evidence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unredacted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

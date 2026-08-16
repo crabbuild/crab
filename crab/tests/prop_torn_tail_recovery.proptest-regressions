@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 981ccb14e9edafc3e4e610f9efd013773e433eb4693c9fd9e76fdb672c834ff3 # shrinks to (chunks, commit_frac) = ([[0], [61, 129, 72, 67, 152, 148, 219, 128, 170, 244, 71, 222, 253, 166, 41, 14, 52, 76, 126, 74, 176, 39, 145, 108, 16, 89, 4, 204, 179, 181, 80, 220, 220, 216, 157, 228, 123, 67, 124, 184, 15, 114, 188, 84, 233, 82, 168, 247, 5, 107, 39, 211, 48, 52, 76, 155, 214, 159, 125, 56, 179, 96, 70, 168, 86, 79, 44, 253, 197, 21, 63, 183, 249, 75, 223, 226, 16, 65, 178, 126, 91, 150, 2, 132, 250, 15, 101, 32, 83, 114]], 0.6615333464923246)

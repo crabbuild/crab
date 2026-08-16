@@ -1,0 +1,51 @@
+---
+title: "crab release"
+description: "Create, verify, list, and export dataset release manifests."
+---
+
+# crab release
+
+Create and verify immutable dataset release manifests for a Git revision and its
+Crab pointer inventory.
+
+## Synopsis
+
+```bash
+crab release <SUBCOMMAND> [OPTIONS]
+```
+
+## Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `create` | Create a release manifest |
+| `verify` | Verify a local or published manifest |
+| `export` | Export a portable manifest bundle |
+| `list` | List local manifests and, with `--remote`, published releases |
+
+## Examples
+
+Create a clean-worktree manifest and publish it:
+
+```bash
+crab release create --name model-v1 --rev HEAD --output release.json
+crab release create --name model-v1 --rev refs/tags/v1 --publish --json
+```
+
+Verify locally or against the configured repository:
+
+```bash
+crab release verify --manifest release.json
+crab release verify --name model-v1 --deep
+```
+
+List and export releases:
+
+```bash
+crab release list --remote
+crab release export --name model-v1 --output portable-release.json
+```
+
+`release create` refuses a dirty worktree unless `--allow-dirty` is supplied.
+`release verify` supports detached Ed25519 signatures with `--signature` and
+`--public-key`.

@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 700" width="820" height="700">
+
+  <defs>
+    <marker id="arrow-solid" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#334155"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#0D9488"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <g id="background">
+    <rect x="0" y="0" width="820" height="700" fill="#F9FAFB"/>
+  </g>
+
+  <!-- Containers -->
+  <g id="containers">
+    <!-- CLI Processes group (top, outside coordinator) -->
+    <rect x="110" y="70" width="600" height="90" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+
+    <!-- Coordinator Process (main body below) -->
+    <rect x="110" y="210" width="600" height="410" rx="12" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+
+    <!-- Shared Resources subgroup -->
+    <rect x="140" y="340" width="540" height="100" rx="10" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1"/>
+
+    <!-- Active Mounts subgroup -->
+    <rect x="140" y="500" width="540" height="100" rx="10" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1"/>
+  </g>
+
+  <!-- Nodes -->
+  <g id="nodes">
+    <!-- CLI process pills (3 evenly spaced) -->
+    <rect x="140" y="100" width="160" height="40" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+    <rect x="330" y="100" width="160" height="40" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+    <rect x="520" y="100" width="160" height="40" rx="8" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+
+    <!-- IPC Server node (centered in coordinator) -->
+    <rect x="260" y="245" width="300" height="56" rx="12" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.5"/>
+
+    <!-- Shared resource nodes (centered, equal width) -->
+    <rect x="165" y="360" width="240" height="60" rx="10" fill="#FFFFFF" stroke="#14B8A6" stroke-width="1.5"/>
+    <rect x="415" y="360" width="240" height="60" rx="10" fill="#FFFFFF" stroke="#14B8A6" stroke-width="1.5"/>
+
+    <!-- Active mount nodes (centered, equal width) -->
+    <rect x="165" y="518" width="240" height="64" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <rect x="415" y="518" width="240" height="64" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <!-- Title (centered) -->
+    <text x="410" y="42" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#0F172A">VFS Coordinator Architecture</text>
+
+    <!-- Group labels -->
+    <text x="410" y="92" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" font-weight="700" fill="#64748B" letter-spacing="0.5">CLI PROCESSES</text>
+
+    <text x="410" y="232" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#2563EB" letter-spacing="0.5">COORDINATOR PROCESS</text>
+
+    <text x="165" y="355" font-family="Inter, -apple-system, sans-serif" font-size="10" font-weight="700" fill="#0D9488" letter-spacing="0.5">SHARED RESOURCES</text>
+
+    <text x="165" y="513" font-family="Inter, -apple-system, sans-serif" font-size="10" font-weight="700" fill="#0D9488" letter-spacing="0.5">ACTIVE MOUNTS</text>
+
+    <!-- CLI labels -->
+    <text x="220" y="124" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">crab mount -A</text>
+    <text x="410" y="124" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">crab mount -B</text>
+    <text x="600" y="124" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">crab mount list</text>
+
+    <!-- IPC Server labels -->
+    <text x="410" y="270" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#0F172A">IPC Server</text>
+    <text x="410" y="289" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">~/.crab/mounts/daemon.sock</text>
+
+    <!-- Shared resource labels -->
+    <text x="285" y="386" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Chunk Cache</text>
+    <text x="285" y="405" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">LRU · 10 GB default</text>
+
+    <text x="535" y="386" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Hydration Service</text>
+    <text x="535" y="405" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">8 workers · priority queue</text>
+
+    <!-- Mount labels -->
+    <text x="285" y="546" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Mount A</text>
+    <text x="285" y="564" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">Snapshot · Overlay · Resolver · FUSE</text>
+
+    <text x="535" y="546" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Mount B</text>
+    <text x="535" y="564" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">Snapshot · Overlay · Resolver · FUSE</text>
+
+    <!-- Connection labels -->
+    <text x="410" y="178" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">Unix socket</text>
+    <text x="285" y="468" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#0D9488">reads chunks</text>
+    <text x="535" y="468" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#0D9488">requests hydration</text>
+  </g>
+
+  <!-- Connections (MUST be last) -->
+  <g id="connections">
+    <!-- CLI to IPC Server (downward arrows converging to IPC) -->
+    <path d="M 220,140 L 220,185 L 350,185 L 350,245"
+          fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <line x1="410" y1="140" x2="410" y2="245" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <path d="M 600,140 L 600,185 L 470,185 L 470,245"
+          fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+
+    <!-- IPC Server to Shared Resources (blue, direct management) -->
+    <path d="M 350,301 L 350,325 L 285,325 L 285,360"
+          fill="none" stroke="#2563EB" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+    <path d="M 470,301 L 470,325 L 535,325 L 535,360"
+          fill="none" stroke="#2563EB" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+    <!-- Mounts to Shared Resources (dashed teal, upward access) -->
+    <line x1="285" y1="518" x2="285" y2="420" stroke="#0D9488" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#arrow-teal)"/>
+    <line x1="535" y1="518" x2="535" y2="420" stroke="#0D9488" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#arrow-teal)"/>
+  </g>
+
+  <!-- Info callout -->
+  <g id="callout">
+    <rect x="110" y="640" width="600" height="44" rx="10" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
+    <circle cx="136" cy="662" r="12" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1"/>
+    <text x="136" y="666" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" fill="#2563EB">i</text>
+    <text x="162" y="657" font-family="Inter, -apple-system, sans-serif" font-size="12" fill="#334155">
+      <tspan x="162" dy="0">A single coordinator manages all mounts, sharing cache and hydration resources.</tspan>
+      <tspan x="162" dy="16">CLI commands connect via Unix socket — no per-mount daemon overhead.</tspan>
+    </text>
+  </g>
+
+</svg>

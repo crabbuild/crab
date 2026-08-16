@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "repository_not_found",
+    "message": "repository was not found or is not accessible",
+    "request_id": "req_01J00000000000000000000000",
+    "retryable": false,
+    "details": {}
+  }
+}

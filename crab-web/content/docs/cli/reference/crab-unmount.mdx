@@ -1,0 +1,30 @@
+---
+title: "crab unmount"
+description: "Unmount one or all active Crab virtual filesystem mounts."
+---
+
+# crab unmount
+
+Unmount a Crab virtual filesystem mount.
+
+## Synopsis
+
+```bash
+crab unmount [OPTIONS]
+```
+
+| Option | Description |
+| --- | --- |
+| `-m, --mountpoint <PATH>` | Unmount the filesystem at this path |
+| `--all` | Unmount all active Crab mounts |
+
+Examples:
+
+```bash
+crab unmount --mountpoint /mnt/models
+crab unmount -m /tmp/view
+crab unmount --all
+```
+
+Use [`crab mount`](/docs/cli/reference/crab-mount) to inspect and manage a
+mount before unmounting it.

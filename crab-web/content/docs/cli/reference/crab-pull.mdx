@@ -1,0 +1,39 @@
+---
+title: "crab pull"
+description: "Pull Git changes and hydrate newly fetched Crab pointer files."
+---
+
+# crab pull
+
+Run `git pull` and optionally hydrate newly fetched Crab pointer files.
+
+## Synopsis
+
+```bash
+crab pull [OPTIONS]
+```
+
+`crab pull` is the counterpart to [`crab ship`](/docs/cli/reference/crab-ship)
+for receiving changes. It pulls from the selected Git remote and hydrates new
+pointer files that match the repository's hydration filter.
+
+## Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--remote <REMOTE>` | `origin` | Git remote to pull from |
+| `--branch <BRANCH>` | Current branch | Branch to pull |
+| `--no-hydrate` | Off | Skip automatic hydration after pulling |
+| `--json` | Off | Emit structured JSON output |
+| `--jsonl` | Off | Emit streaming JSONL output |
+
+## Examples
+
+```bash
+crab pull
+crab pull --remote upstream --branch main
+crab pull --no-hydrate --json
+```
+
+Use [`crab hydrate`](/docs/cli/reference/crab-hydrate) afterward when you skip
+automatic hydration.

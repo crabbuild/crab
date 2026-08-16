@@ -1,0 +1,56 @@
+---
+title: "crab logs"
+description: "View and manage diagnostic logs for troubleshooting."
+---
+
+# crab logs
+
+View and manage diagnostic logs.
+
+## Synopsis
+
+```bash
+crab logs <COMMAND>
+```
+
+## Description
+
+`crab logs` manages diagnostic log files. Use `last` or `show` to read a log,
+`list` to discover names, and `clear` to delete all log files.
+
+For conceptual background, see [Log Management](/docs/cli/diagnostics/log-management).
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `list` | List all log files |
+| `last` | Show the most recent log file |
+| `show <NAME>` | Show a specific log file |
+| `clear` | Delete all log files |
+
+## Examples
+
+### View recent logs
+
+```bash
+crab logs list
+crab logs last
+```
+
+### Show a named log file
+
+```bash
+crab logs show <NAME>
+```
+
+### Delete log files
+
+```bash
+crab logs clear
+```
+
+## Related Commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.
+- [`crab errors`](/docs/cli/reference/crab-errors) — error code lookup.

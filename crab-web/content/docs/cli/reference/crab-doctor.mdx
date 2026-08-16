@@ -1,0 +1,82 @@
+---
+title: "crab doctor"
+description: "Run health checks on the repository to diagnose common issues."
+---
+
+# crab doctor
+
+Run health checks on the repository.
+
+## Synopsis
+
+```
+crab doctor [OPTIONS]
+```
+
+## Description
+
+`crab doctor` runs a series of diagnostic checks on your Crab repository:
+filter driver registration, credential validity, remote connectivity, staging
+area health, and metadata consistency.
+
+When a cache service is configured, `crab doctor` also verifies health, object
+route auth, authenticated capabilities, repo-scoped authorization, and admin
+stats. The capabilities check confirms the client can read cache-service
+limits such as `max_object_bytes`, which Crab uses to avoid unsupported
+push-warming uploads. The authorization check confirms the current credential
+has the `read`, `write`, and `dedup` actions required by the configured cache
+mode, and warns when `admin` is missing for support-bundle or active-probe
+workflows. Use `--support-bundle` during cache-service incidents to collect
+one redacted JSON artifact for support or CI rollout gates.
+
+`--cache-service-active-probe` adds an opt-in data-path probe: Crab writes a
+tiny disposable pack object through the cache service, reads it back as a cache
+hit, verifies a range hit, and removes exactly that probe object. Use it during
+rollout with an admin-capable cache credential; normal `crab doctor` remains
+read-only.
+
+For conceptual background, see [Health Check](/docs/cli/diagnostics/health-check).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+| `--cost` | `false` | Run the cost optimizer report instead of standard checks |
+| `--metadb` | `false` | Report SlateDB metadata state instead of standard checks |
+| `--support-bundle` | `false` | Collect a redacted cache-service support bundle |
+| `--cache-service-active-probe` | `false` | Run an opt-in cache-service write/read/range/cleanup probe |
+| `--output <PATH>` | | Write the support bundle as pretty JSON |
+
+## Examples
+
+### Run all checks
+
+```bash
+crab doctor
+```
+
+### Emit JSON
+
+```bash
+crab doctor --json
+```
+
+### Collect cache-service support evidence
+
+```bash
+crab doctor --support-bundle --output cache-service-support.json
+```
+
+### Prove the cache-service data path
+
+```bash
+crab doctor --cache-service-active-probe --json
+```
+
+## Related Commands
+
+- [`Cache Service Troubleshooting`](/docs/cli/cache-service/troubleshooting) — cache-service incident workflow.
+- [`crab fsck`](/docs/cli/reference/crab-fsck) — deep integrity verification.
+- [`crab errors`](/docs/cli/reference/crab-errors) — look up error codes.
+- [`crab env`](/docs/cli/reference/crab-env) — environment info.

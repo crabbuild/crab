@@ -1,0 +1,56 @@
+---
+title: "LFS Compatibility"
+description: "Use Crab with repositories and tooling that still expect Git LFS."
+---
+
+# LFS Compatibility
+
+Use `crab lfs` when you need to interoperate with Git LFS pointers, hooks, or
+transfer-agent tooling while storing objects through Crab.
+
+## When to Use It
+
+| Situation | Use |
+| --- | --- |
+| A repository already has LFS pointers | `crab lfs fetch`, `pull`, `checkout` |
+| Git should call Crab for LFS transfers | `crab lfs install` |
+| You need LFS-style tracking rules | `crab lfs track <pattern>` |
+| You are migrating history | `crab lfs migrate import` or `export` |
+| You need lock compatibility | `crab lfs lock`, `unlock`, `locks` |
+
+For new Crab-native repositories, prefer `crab track`, `crab add`, and
+`crab hydrate`. Use the LFS layer for compatibility rather than as the primary
+Crab workflow.
+
+## Common Commands
+
+```bash
+crab lfs install
+crab lfs track '*.psd'
+crab lfs fetch --include 'assets/**'
+crab lfs pull
+crab lfs status
+crab lfs fsck
+```
+
+## Migration Choices
+
+- Use `crab lfs migrate import --include '<pattern>'` to convert regular files
+  in history to LFS pointers.
+- Use `crab lfs migrate import --include '<pattern>' --from-crab` to convert
+  Crab pointers to LFS pointers.
+- Use `crab lfs migrate export --include '<pattern>' --to-crab` to move LFS
+  pointers into Crab-native storage.
+
+History rewrites should happen on a branch with team coordination. After the
+rewrite, verify with `crab lfs fsck` and a fresh clone.
+
+## Pitfalls
+
+- LFS compatibility does not replace the normal Crab workflow for new files.
+- Tracking rules live in `.gitattributes`; commit those changes.
+- Transfer-agent setup is Git config, so CI and collaborators may need
+  `crab lfs install`.
+- Run `crab lfs <subcommand> --help` for exact flags before migration work.
+
+For the current command list, see the [crab lfs reference](/docs/cli/reference/crab-lfs).

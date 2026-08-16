@@ -1,0 +1,47 @@
+---
+title: "crab adopt"
+description: "Convert existing large files to Crab pointers in the working tree."
+---
+
+# crab adopt
+
+Convert existing large files in the working tree to Crab pointer blobs.
+
+`crab adopt` replaces matching files with pointers and stages the original
+bytes in Crab's staging area. It changes the working tree and index, but does
+not commit or push. Review the result before running `git commit` or
+[`crab ship`](/docs/cli/reference/crab-ship).
+
+## Synopsis
+
+```bash
+crab adopt [OPTIONS]
+```
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `-p, --pattern <PATTERN>` | Glob to adopt; repeat for multiple patterns |
+| `--dry-run` | Show candidates without changing files |
+| `--interactive` | Confirm candidates before conversion |
+| `-j, --jobs <JOBS>` | Maximum concurrent file-processing tasks; default `16` |
+| `--rewrite-history` | Reserved history-rewrite mode; currently not implemented |
+| `--force` | Required with `--rewrite-history` |
+| `--json` | Emit structured JSON output |
+
+When no `--pattern` is given, Crab resolves patterns from the project tracking
+configuration. Use `--dry-run` before adopting a large existing repository.
+
+## Examples
+
+```bash
+crab adopt --dry-run --pattern '*.bin' --pattern '*.safetensors'
+crab adopt --interactive --pattern 'datasets/**'
+crab adopt --pattern '*.bin'
+crab ship . -m "Adopt large files"
+```
+
+Before committing, [`crab unadopt`](/docs/cli/reference/crab-unadopt) restores
+the staged original bytes and [`crab undo`](/docs/cli/reference/crab-undo)
+reverses the last detected `adopt` or `add` operation.

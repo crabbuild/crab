@@ -1,0 +1,46 @@
+---
+title: "Pushing Changes"
+description: "Upload staged Crab chunks and Git refs to a Crab remote."
+---
+
+# Pushing Changes
+
+Use `crab push` after committing pointer files. It uploads missing chunk data
+from the local staging area to object storage, then pushes the Git ref.
+
+```bash
+crab add models/v2.safetensors
+git commit -m "Add v2 checkpoint"
+crab push origin main
+```
+
+For `crab://` remotes, `git push` can also invoke Crab's remote helper. Prefer
+`crab push` when you want Crab-specific progress, structured output, or native
+concurrent upload behavior.
+
+## Common Commands
+
+| Goal | Command |
+| --- | --- |
+| Push current branch | `crab push origin main` |
+| Push with progress events | `crab push --jsonl origin main` |
+| Push a feature branch | `crab push origin feature/model-v2` |
+| Upload after one-shot workflow | `crab ship . -m "Update model"` |
+
+## What Happens
+
+1. Crab finds pointer blobs in the commits being pushed.
+2. It checks which chunks already exist remotely.
+3. Missing chunks are packed into xorbs and uploaded.
+4. The remote ref is updated only after required data is available.
+
+## Failure Recovery
+
+- If upload fails, fix the cause and run `crab push` again. Already uploaded
+  chunks are skipped.
+- If a teammate cannot hydrate a file, run `crab fsck` locally and confirm the
+  producing machine completed `crab push`.
+- Use `crab logs` for detailed diagnostics when a push fails in CI.
+
+For refspec handling, options, JSON/JSONL output, and edge cases, see the
+[crab push reference](/docs/cli/reference/crab-push).

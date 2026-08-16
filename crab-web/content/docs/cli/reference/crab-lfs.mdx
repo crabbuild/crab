@@ -1,0 +1,52 @@
+---
+title: "crab lfs"
+description: "Git LFS compatibility commands backed by Crab storage."
+---
+
+# crab lfs
+
+Manage Git LFS compatibility for repositories that still use LFS pointers,
+hooks, or transfer-agent workflows.
+
+## Synopsis
+
+```
+crab lfs <SUBCOMMAND>
+```
+
+## Common Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `crab lfs install` | Configure Git to use Crab as the LFS transfer agent. |
+| `crab lfs uninstall` | Remove Crab LFS transfer-agent configuration. |
+| `crab lfs update` | Refresh hooks and filter configuration. |
+| `crab lfs track [pattern]` | Add or list LFS tracking patterns. |
+| `crab lfs untrack <pattern>` | Stop tracking an LFS pattern. |
+| `crab lfs fetch` | Download LFS objects from remote storage. |
+| `crab lfs pull` | Fetch objects and replace pointers in the working tree. |
+| `crab lfs push` | Upload LFS objects to remote storage. |
+| `crab lfs checkout` | Replace LFS pointers with local object content. |
+| `crab lfs lock`, `unlock`, `locks` | Manage advisory LFS file locks. |
+| `crab lfs ls-files`, `status`, `fsck`, `prune` | Inspect and maintain LFS state. |
+| `crab lfs migrate` | Rewrite history to import/export LFS pointers. |
+| `crab lfs pointer` | Generate, parse, or validate LFS pointers. |
+| `crab lfs env`, `version`, `dedup`, `logs` | Diagnostics and maintenance. |
+
+## Examples
+
+```bash
+crab lfs install
+crab lfs track '*.psd'
+crab lfs fetch --include 'assets/**'
+crab lfs pull
+crab lfs status
+```
+
+For exact options, run `crab lfs <subcommand> --help`.
+
+## Related Commands
+
+- [`crab mount`](/docs/cli/reference/crab-mount) - mount repositories for on-demand reads.
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate) - materialize Crab pointer files.
+- [`crab import`](/docs/cli/reference/crab-import) - import existing object-storage prefixes.

@@ -1,0 +1,29 @@
+---
+title: "crab update"
+description: "Check for and install the latest Crab GitHub release."
+---
+
+# crab update
+
+Update the Crab binary from the latest GitHub release.
+
+## Synopsis
+
+```bash
+crab update [OPTIONS]
+```
+
+| Option | Description |
+| --- | --- |
+| `--check` | Check for an available update without installing it |
+| `-y, --yes` | Skip the confirmation prompt |
+| `--force` | Reinstall even when the installed and latest versions match |
+| `--json` | Emit structured JSON output |
+
+```bash
+crab update --check
+crab update --yes
+```
+
+Use the package manager or release installer that owns a managed installation
+when your environment does not permit self-updates.

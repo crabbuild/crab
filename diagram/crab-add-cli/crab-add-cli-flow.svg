@@ -1,0 +1,253 @@
+<svg viewBox="0 0 1600 2060" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    text, tspan {
+      font-family: Arial, Helvetica, sans-serif;
+      fill-opacity: 1;
+      text-rendering: geometricPrecision;
+    }
+    .title { fill: #f8fafc; font-size: 28px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 13px; font-weight: 400; }
+    .phase { font-size: 11px; font-weight: 700; }
+    .label { fill: #f8fafc; font-size: 16px; font-weight: 700; text-anchor: middle; }
+    .sub { fill: #94a3b8; font-size: 11px; font-weight: 400; text-anchor: middle; }
+    .note-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+    .note { fill: #cbd5e1; font-size: 11px; font-weight: 400; }
+    .tiny { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+    .yes { fill: #34d399; font-size: 10px; font-weight: 700; }
+    .no { fill: #fb7185; font-size: 10px; font-weight: 700; }
+    .arrow { fill: none; stroke: #64748b; stroke-width: 1.6; marker-end: url(#arrow); }
+    .happy { fill: none; stroke: #60a5fa; stroke-width: 2; marker-end: url(#arrow-blue); }
+    .branch { fill: none; stroke: #94a3b8; stroke-width: 1.5; marker-end: url(#arrow-slate); }
+    .error { fill: none; stroke: #fb7185; stroke-width: 1.8; stroke-dasharray: 7,5; marker-end: url(#arrow-rose); }
+    .hint { fill: none; stroke: #fbbf24; stroke-width: 1.5; stroke-dasharray: 6,5; marker-end: url(#arrow-amber); }
+  </style>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#60a5fa"/>
+    </marker>
+    <marker id="arrow-slate" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+
+  <text x="56" y="54" class="title">crab add CLI flow</text>
+  <text x="56" y="78" class="subtitle">Source-backed view of how tracked working-tree bytes become local staged chunks and Git pointer blobs.</text>
+
+  <rect x="70" y="112" width="1460" height="700" rx="14" fill="none" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="10,5"/>
+  <text x="90" y="142" class="phase" fill="#fbbf24">1. Discover candidates</text>
+
+  <rect x="70" y="845" width="1460" height="555" rx="14" fill="none" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="10,5"/>
+  <text x="90" y="875" class="phase" fill="#22d3ee">2. Stream and stage files</text>
+
+  <rect x="70" y="1435" width="1460" height="520" rx="14" fill="none" stroke="#34d399" stroke-width="1.2" stroke-dasharray="10,5"/>
+  <text x="90" y="1465" class="phase" fill="#34d399">3. Publish commit-ready metadata</text>
+
+  <!-- Main path connections -->
+  <path class="happy" d="M 800 205 L 800 232"/>
+  <path class="happy" d="M 800 297 L 800 322"/>
+  <path class="happy" d="M 800 387 L 800 416"/>
+  <path class="happy" d="M 800 506 L 800 535"/>
+  <path class="happy" d="M 800 600 L 800 627"/>
+  <path class="happy" d="M 800 692 L 800 717"/>
+  <path class="happy" d="M 800 807 L 800 858"/>
+  <path class="happy" d="M 800 948 L 800 978"/>
+  <path class="happy" d="M 800 1042 L 800 1076"/>
+  <path class="happy" d="M 800 1140 L 800 1178"/>
+  <path class="happy" d="M 800 1262 L 800 1294"/>
+  <path class="happy" d="M 800 1384 L 800 1462"/>
+  <path class="happy" d="M 800 1532 L 800 1564"/>
+  <path class="happy" d="M 800 1628 L 800 1656"/>
+  <path class="happy" d="M 800 1746 L 800 1776"/>
+  <path class="happy" d="M 800 1846 L 800 1880"/>
+
+  <!-- Branch connections -->
+  <path class="branch" d="M 880 461 L 1050 461"/>
+  <path class="branch" d="M 1240 498 L 1240 520 L 800 520 L 800 535"/>
+  <path class="branch" d="M 880 762 L 1050 762"/>
+  <path class="branch" d="M 720 903 L 550 903"/>
+  <path class="error" d="M 880 1339 L 1050 1339"/>
+  <path class="branch" d="M 880 1701 L 1050 1701"/>
+
+  <!-- Callout connectors -->
+  <path class="hint" d="M 610 1218 L 515 1218"/>
+  <path class="hint" d="M 990 1498 L 1050 1498"/>
+
+  <!-- Opaque masks for nodes and callouts -->
+  <rect x="610" y="145" width="380" height="60" rx="30" fill="#0f172a"/>
+  <rect x="610" y="232" width="380" height="65" rx="7" fill="#0f172a"/>
+  <rect x="610" y="322" width="380" height="65" rx="7" fill="#0f172a"/>
+  <polygon points="800,416 880,461 800,506 720,461" fill="#0f172a"/>
+  <rect x="1050" y="423" width="380" height="76" rx="7" fill="#0f172a"/>
+  <rect x="610" y="535" width="380" height="65" rx="7" fill="#0f172a"/>
+  <rect x="610" y="627" width="380" height="65" rx="7" fill="#0f172a"/>
+  <polygon points="800,717 880,762 800,807 720,762" fill="#0f172a"/>
+  <rect x="1050" y="727" width="380" height="70" rx="30" fill="#0f172a"/>
+  <polygon points="800,858 880,903 800,948 720,903" fill="#0f172a"/>
+  <rect x="170" y="898" width="380" height="70" rx="30" fill="#0f172a"/>
+  <rect x="610" y="978" width="380" height="64" rx="7" fill="#0f172a"/>
+  <rect x="610" y="1076" width="380" height="64" rx="7" fill="#0f172a"/>
+  <rect x="610" y="1178" width="380" height="84" rx="7" fill="#0f172a"/>
+  <rect x="170" y="1148" width="345" height="150" rx="8" fill="#0f172a"/>
+  <polygon points="800,1294 880,1339 800,1384 720,1339" fill="#0f172a"/>
+  <rect x="1050" y="1304" width="380" height="70" rx="30" fill="#0f172a"/>
+  <rect x="610" y="1462" width="380" height="70" rx="7" fill="#0f172a"/>
+  <rect x="1050" y="1450" width="380" height="150" rx="8" fill="#0f172a"/>
+  <rect x="610" y="1564" width="380" height="64" rx="7" fill="#0f172a"/>
+  <polygon points="800,1656 880,1701 800,1746 720,1701" fill="#0f172a"/>
+  <rect x="1050" y="1666" width="380" height="70" rx="30" fill="#0f172a"/>
+  <rect x="610" y="1776" width="380" height="70" rx="7" fill="#0f172a"/>
+  <rect x="610" y="1880" width="380" height="60" rx="30" fill="#0f172a"/>
+  <rect x="70" y="1970" width="1460" height="62" rx="8" fill="#0f172a"/>
+
+  <!-- Phase 1 nodes -->
+  <rect x="610" y="145" width="380" height="60" rx="30" fill="rgba(59,130,246,0.3)" stroke="#60a5fa" stroke-width="1.8"/>
+  <text x="800" y="171" class="label">User runs `crab add`</text>
+  <text x="800" y="190" class="sub">patterns, --jobs, --dry-run, --skip-git-add</text>
+
+  <rect x="610" y="232" width="380" height="65" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.8"/>
+  <text x="800" y="260" class="label">Resolve worktree</text>
+  <text x="800" y="281" class="sub">current root and shared staging directory</text>
+
+  <rect x="610" y="322" width="380" height="65" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.8"/>
+  <text x="800" y="350" class="label">Open TrackedClassifier</text>
+  <text x="800" y="371" class="sub">root and nested .gitattributes filter=crab</text>
+
+  <g transform="translate(800,461)">
+    <polygon points="0,-45 80,0 0,45 -80,0" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+    <text y="-6" class="label">tracked</text>
+    <text y="15" class="sub">patterns?</text>
+  </g>
+  <text x="813" y="523" class="yes">Yes</text>
+  <text x="900" y="451" class="no">No</text>
+
+  <rect x="1050" y="423" width="380" height="76" rx="7" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+  <text x="1240" y="452" class="label">Auto-track large files</text>
+  <text x="1240" y="473" class="sub">re-open classifier; otherwise return cleanly</text>
+
+  <rect x="610" y="535" width="380" height="65" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.8"/>
+  <text x="800" y="563" class="label">Build PatternFilter</text>
+  <text x="800" y="584" class="sub">git pathspec semantics from user patterns</text>
+
+  <rect x="610" y="627" width="380" height="65" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.8"/>
+  <text x="800" y="655" class="label">Walk working tree</text>
+  <text x="800" y="676" class="sub">skip .git/.crab, ignored paths, pointer files</text>
+
+  <g transform="translate(800,762)">
+    <polygon points="0,-45 80,0 0,45 -80,0" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+    <text y="-6" class="label">candidates</text>
+    <text y="15" class="sub">found?</text>
+  </g>
+  <text x="813" y="826" class="yes">Yes</text>
+  <text x="900" y="752" class="no">No</text>
+
+  <rect x="1050" y="727" width="380" height="70" rx="30" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="1240" y="756" class="label">Explain empty match</text>
+  <text x="1240" y="778" class="sub">maybe auto-track extension; ask user to re-run</text>
+
+  <!-- Phase 2 nodes -->
+  <g transform="translate(800,903)">
+    <polygon points="0,-45 80,0 0,45 -80,0" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+    <text y="-6" class="label">dry run?</text>
+    <text y="15" class="sub">preview only</text>
+  </g>
+  <text x="813" y="968" class="yes">No</text>
+  <text x="684" y="893" class="no">Yes</text>
+
+  <rect x="170" y="898" width="380" height="70" rx="30" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="360" y="927" class="label">Print candidate list</text>
+  <text x="360" y="949" class="sub">no staging and no Git index mutation</text>
+
+  <rect x="610" y="978" width="380" height="64" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.8"/>
+  <text x="800" y="1006" class="label">Skip clean indexed files</text>
+  <text x="800" y="1027" class="sub">pointer already staged and stat-clean</text>
+
+  <rect x="610" y="1076" width="380" height="64" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="800" y="1104" class="label">Open staging and workers</text>
+  <text x="800" y="1125" class="sub">jobs maxes at 1+; each file gets progress</text>
+
+  <rect x="610" y="1178" width="380" height="84" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="800" y="1209" class="label">Stream file into staging</text>
+  <text x="800" y="1231" class="sub">128 KiB reads, Blake3 hash, Gear CDC</text>
+  <text x="800" y="1250" class="sub">flush chunk batches of 64</text>
+
+  <rect x="170" y="1148" width="345" height="150" rx="8" fill="rgba(8,51,68,0.35)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="192" y="1178" class="note-title">Per-file stream-stage details</text>
+  <text x="192" y="1206" class="note">1. write chunks under provisional key</text>
+  <text x="192" y="1226" class="note">2. verify stat did not change mid-read</text>
+  <text x="192" y="1246" class="note">3. adopt rows under final Blake3 hash</text>
+  <text x="192" y="1266" class="note">4. return chunk hash/size sequence</text>
+
+  <g transform="translate(800,1339)">
+    <polygon points="0,-45 80,0 0,45 -80,0" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+    <text y="-6" class="label">all files</text>
+    <text y="15" class="sub">ok?</text>
+  </g>
+  <text x="813" y="1404" class="yes">Yes</text>
+  <text x="900" y="1329" class="no">No/cancel</text>
+
+  <rect x="1050" y="1304" width="380" height="70" rx="30" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.8"/>
+  <text x="1240" y="1333" class="label">Rollback unpublished rows</text>
+  <text x="1240" y="1355" class="sub">retire staged entries, then report error</text>
+
+  <!-- Phase 3 nodes -->
+  <rect x="610" y="1462" width="380" height="70" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="800" y="1491" class="label">Prepare add-time push plans</text>
+  <text x="800" y="1513" class="sub">validate chunks, reuse cache, pack missing</text>
+
+  <rect x="1050" y="1450" width="380" height="150" rx="8" fill="rgba(76,29,149,0.35)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="1072" y="1480" class="note-title">Not a push</text>
+  <text x="1072" y="1510" class="note">Remote chunk lookup is opportunistic.</text>
+  <text x="1072" y="1530" class="note">This prepares local plans and cache reuse.</text>
+  <text x="1072" y="1550" class="note">It does not upload xorbs or move refs.</text>
+  <text x="1072" y="1570" class="note">`crab push` publishes repository data later.</text>
+
+  <rect x="610" y="1564" width="380" height="64" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.8"/>
+  <text x="800" y="1592" class="label">Flush and close staging</text>
+  <text x="800" y="1613" class="sub">segment rows durable before Git index writes</text>
+
+  <g transform="translate(800,1701)">
+    <polygon points="0,-45 80,0 0,45 -80,0" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.8"/>
+    <text y="-6" class="label">publish</text>
+    <text y="15" class="sub">Git index?</text>
+  </g>
+  <text x="813" y="1766" class="yes">Yes</text>
+  <text x="900" y="1691" class="no">--skip-git-add</text>
+
+  <rect x="1050" y="1666" width="380" height="70" rx="30" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="1240" y="1695" class="label">Leave chunks staged only</text>
+  <text x="1240" y="1717" class="sub">caller can index pointer later if desired</text>
+
+  <rect x="610" y="1776" width="380" height="70" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.8"/>
+  <text x="800" y="1805" class="label">Write pointer blobs</text>
+  <text x="800" y="1827" class="sub">gix write_blob, git update-index -z, stat cache</text>
+
+  <rect x="610" y="1880" width="380" height="60" rx="30" fill="rgba(59,130,246,0.3)" stroke="#60a5fa" stroke-width="1.8"/>
+  <text x="800" y="1906" class="label">Ready for commit</text>
+  <text x="800" y="1926" class="sub">worktree keeps real bytes; Git tracks pointer</text>
+
+  <!-- Legend -->
+  <rect x="70" y="1970" width="1460" height="62" rx="8" fill="rgba(30,41,59,0.5)" stroke="#334155" stroke-width="1.2"/>
+  <text x="92" y="2003" class="note-title">Source anchors</text>
+  <circle cx="230" cy="1998" r="6" fill="#22d3ee"/>
+  <text x="248" y="2002" class="tiny">crab/src/cmd/add.rs:790 run_add orchestration</text>
+  <circle cx="590" cy="1998" r="6" fill="#34d399"/>
+  <text x="608" y="2002" class="tiny">crab/src/cmd/stream_stage.rs:65 bounded streaming</text>
+  <circle cx="982" cy="1998" r="6" fill="#a78bfa"/>
+  <text x="1000" y="2002" class="tiny">crab/src/cmd/add_push_plan.rs:27 push-plan preparation</text>
+  <text x="92" y="2023" class="tiny">Proof points: crab/tests/e2e_add_commit_push.rs:234 add-commit-push smoke; crab/src/cmd/add.rs:2659 partial-index guard tests.</text>
+</svg>

@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrackPattern",
+  "description": "A single tracked pattern entry.",
+  "type": "object",
+  "required": [
+    "glob",
+    "source"
+  ],
+  "properties": {
+    "glob": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    }
+  }
+}

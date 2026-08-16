@@ -1,0 +1,70 @@
+---
+title: "crab lock"
+description: "Lock files to prevent concurrent edits on binary files that cannot be merged."
+---
+
+# crab lock
+
+Lock files to prevent concurrent edits.
+
+## Synopsis
+
+```bash
+crab lock [OPTIONS] <PATHS>...
+crab unlock [OPTIONS] <PATHS>...
+crab locks [OPTIONS]
+```
+
+## Description
+
+`crab lock` acquires an advisory lock on one or more files, preventing other
+users from pushing changes to them. This is useful for binary files where a
+Git merge would not produce a meaningful result.
+
+Locks are stored in the remote object store alongside your data, making them
+visible to all collaborators.
+
+For conceptual background, see [File Locking](/docs/cli/daily-workflow/file-locking).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `PATHS` | Yes | One or more paths to lock |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-j, --json` | `false` | Emit machine-readable JSON output |
+
+## Examples
+
+### Lock a file
+
+```bash
+crab lock models/character.fbx models/material.bin
+```
+
+### Unlock a file
+
+```bash
+crab unlock models/character.fbx
+```
+
+### List all locks
+
+```bash
+crab locks
+```
+
+### Force-break a stale lock
+
+```bash
+crab unlock --force models/character.fbx
+```
+
+## Related Commands
+
+- [`crab push`](/docs/cli/reference/crab-push) — push respects locks.
+- [`crab status`](/docs/cli/reference/crab-status) — shows locked files.

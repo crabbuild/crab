@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 300" width="740" height="300">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <marker id="arrowhead-dashed" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#94A3B8"/>
+    </marker>
+    <linearGradient id="pointerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="hydratedGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="modifiedGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="740" height="300" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+  </g>
+
+  <g id="nodes">
+    <!-- Pointer state (left) -->
+    <rect x="40" y="110" width="170" height="70" rx="8" fill="url(#pointerGrad)" stroke="#334155" stroke-width="1.5"/>
+    <!-- Hydrated state (center) -->
+    <rect x="290" y="110" width="170" height="70" rx="8" fill="url(#hydratedGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <!-- Modified state (right) -->
+    <rect x="540" y="110" width="170" height="70" rx="8" fill="url(#modifiedGrad)" stroke="#0F172A" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Pointer label -->
+    <text x="125" y="140" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">Pointer</text>
+    <text x="125" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(128 bytes)</text>
+
+    <!-- Hydrated label -->
+    <text x="375" y="140" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">Hydrated</text>
+    <text x="375" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">(full content)</text>
+
+    <!-- Modified label -->
+    <text x="625" y="140" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#F1F5F9">Modified</text>
+    <text x="625" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">(uncommitted changes)</text>
+
+    <!-- Arrow labels -->
+    <text x="245" y="108" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">crab hydrate</text>
+    <text x="245" y="200" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#64748B">crab dehydrate</text>
+    <text x="490" y="108" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#475569">edit file</text>
+    <text x="490" y="200" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">crab add + commit</text>
+
+    <!-- Self-loop label -->
+    <text x="625" y="260" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">dehydrate blocked</text>
+  </g>
+
+  <g id="connections">
+    <!-- Pointer → Hydrated (top arrow, right) -->
+    <line x1="210" y1="125" x2="290" y2="125" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Hydrated → Pointer (bottom arrow, left) -->
+    <line x1="290" y1="165" x2="210" y2="165" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Hydrated → Modified (top arrow, right) -->
+    <line x1="460" y1="125" x2="540" y2="125" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Modified → Hydrated (bottom arrow, left) -->
+    <line x1="540" y1="165" x2="460" y2="165" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Modified → Modified (self-loop, dashed) -->
+    <path d="M 660 180 L 660 235 L 590 235 L 590 180" fill="none" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+
+</svg>

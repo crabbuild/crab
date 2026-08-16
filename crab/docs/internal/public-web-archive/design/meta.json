@@ -1,0 +1,15 @@
+{
+  "title": "Design Documents",
+  "pages": [
+    "Gitiox",
+    "Gitiox-overview",
+    "Gitiox-add",
+    "Gitiox-push",
+    "Gitiox-cache",
+    "Gitiox-lfs",
+    "Gitiox-prolly-rope",
+    "Gitiox-xet",
+    "gitiox-vs-dvc-workflow",
+    "xet-core-git-integration"
+  ]
+}

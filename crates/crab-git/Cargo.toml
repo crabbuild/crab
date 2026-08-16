@@ -1,0 +1,39 @@
+[package]
+name = "crab-git"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Low-dependency Git contracts and repository mechanics for Crab."
+
+[lib]
+name = "crab_git"
+path = "src/lib.rs"
+
+[features]
+facade = ["dep:gix"]
+
+[dependencies]
+blake3 = { workspace = true }
+bstr = { version = "1", default-features = false, features = ["std"] }
+bytes = { workspace = true }
+crab-types = { workspace = true }
+gix = { workspace = true, optional = true }
+gix-discover = { workspace = true }
+gix-features = { workspace = true, features = ["progress"] }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true }
+gix-odb = { workspace = true, features = ["sha1"] }
+gix-pack = { workspace = true, features = ["sha1"] }
+gix-ref = { workspace = true, features = ["sha1"] }
+gix-traverse = { workspace = true }
+gix-url = { workspace = true }
+gix-validate = { workspace = true }
+lru = "0.12"
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = "0.10"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

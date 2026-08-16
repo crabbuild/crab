@@ -1,0 +1,252 @@
+---
+title: "Deployment"
+description: "Deploy crab-cache-server with Docker, Kubernetes, or systemd."
+---
+
+# Deployment
+
+Deploy the cache service close to the object-store region and give it fast local storage. The cache is rebuildable, but a warm cache is valuable operationally, so use persistent SSD or NVMe storage.
+
+## Sizing
+
+Start with:
+
+| Resource | Starting point |
+|----------|----------------|
+| CPU | 4 vCPU |
+| Memory | 8 GiB |
+| Cache disk | 1 TiB SSD or NVMe |
+| Network | Same region as object store |
+
+Scale disk first. Most low hit-rate problems are caused by a cache that is smaller than the active working set.
+
+## Enterprise Onboarding Bundle
+
+Start from `crab/deploy/cache-service/enterprise-onboarding/` when wiring a
+new enterprise cache-service deployment. The bundle contains:
+
+- `server-config.toml` with strict mutable-path mode and policy enforcement.
+- `policy.yaml` for the PSK principal, `.crab`, and one org repo prefix.
+- `client-config.toml` with `service_mode = "cache+dedup"` and push warming.
+- `client.env` with the exact `CRAB_CACHE_SERVICE_URL` and `CRAB_CACHE_PSK`
+  environment shape for Crab clients and CI steps.
+
+Generate a customized copy with the cache-server CLI:
+
+```bash
+crab-cache-server onboarding render \
+  --output-dir ./cache-service-enterprise-onboarding \
+  --origin-url s3://crab \
+  --cache-service-url https://crab-cache.example.com:8443 \
+  --repo-prefix 'org/example/*' \
+  --psk-hash "$(printf '%s' "$CRAB_CACHE_PSK" | b3sum | cut -d' ' -f1)"
+```
+
+Then run the static bundle check before installing the files:
+
+```bash
+crab-cache-server onboarding check \
+  --bundle-dir ./cache-service-enterprise-onboarding \
+  --json > onboarding-check.json
+```
+
+The JSON report uses stable `checks[].code` values for CI routing:
+
+| Code | Meaning |
+|------|---------|
+| `onboarding_file_missing` | Required bundle file is missing. |
+| `onboarding_server_config_invalid` | `server-config.toml` could not be parsed. |
+| `onboarding_mutable_paths_not_strict` | `server.mutable_path_mode` is not strict. |
+| `onboarding_auth_not_enforced` | Enterprise auth is not PSK or mTLS. |
+| `onboarding_policy_path_missing` | `server.policy_path` is not configured. |
+| `onboarding_cache_budget_invalid` | `cache.max_bytes` is not positive. |
+| `onboarding_policy_invalid` | `policy.yaml` could not be loaded. |
+| `onboarding_policy_action_missing` | `policy.yaml` lacks read, write, dedup, or admin coverage. |
+| `onboarding_policy_crab_missing` | The onboarding principal cannot read `.crab`. |
+| `onboarding_client_config_unreadable` | `client-config.toml` could not be read. |
+| `onboarding_client_config_invalid` | `client-config.toml` could not be parsed. |
+| `onboarding_client_service_url_missing` | `client-config.toml` has no cache service URL. |
+| `onboarding_client_mode_invalid` | `service_mode` is not `cache+dedup`. |
+| `onboarding_client_auth_invalid` | `service_auth` is not `psk`. |
+| `onboarding_client_push_warming_disabled` | `push_warming` is not enabled. |
+| `onboarding_client_env_unreadable` | `client.env` could not be read. |
+| `onboarding_client_env_missing` | `client.env` is missing required variables. |
+| `onboarding_secret_hash_leaked` | Client-facing files contain the server PSK hash. |
+| `onboarding_client_probe_config_invalid` | The active probe cannot use `client-config.toml` or the repo path. |
+| `onboarding_client_probe_secret_missing` | `CRAB_CACHE_PSK` is not set to the real PSK. |
+| `onboarding_client_probe_health_failed` | The active probe cannot reach `/v1/health`. |
+| `onboarding_client_probe_capabilities_failed` | `/v1/capabilities` did not return the expected schema, limits, and route contract. |
+| `onboarding_client_probe_authz_failed` | `/v1/authz/check` did not authorize the probed repo. |
+| `onboarding_client_probe_cache_failed` | Cache write/read/range/cleanup did not complete through the server. |
+
+When origin credentials are available and `policy_path` points at a readable
+policy file, run the live probe. It performs the static bundle check and the
+same enterprise server preflight that `crab-cache-server check` uses:
+
+```bash
+crab-cache-server onboarding probe \
+  --bundle-dir ./cache-service-enterprise-onboarding \
+  --json --trusted-proxy-boundary > onboarding-probe.json
+```
+
+After editing origin, cache size, repo prefixes, and secret values, preflight
+the server:
+
+```bash
+crab-cache-server --config /etc/crab-cache-server/config.toml check \
+  --json --profile enterprise --trusted-proxy-boundary
+```
+
+Then run `crab doctor --json` and
+`crab doctor --cache-service-active-probe --json` from one configured test
+repository before broader rollout.
+
+After the server is listening, also prove the generated client bundle itself
+against one authorized repository:
+
+```bash
+export CRAB_CACHE_PSK="<secret-from-secret-manager>"
+crab-cache-server onboarding probe \
+  --bundle-dir ./cache-service-enterprise-onboarding \
+  --json --trusted-proxy-boundary \
+  --client-probe --client-probe-repo org/example/repo \
+  > onboarding-client-probe.json
+```
+
+Use `--policy-path` when your installed policy path differs from
+`/etc/crab-cache-server/policy.yaml`. The release smoke now uses the same
+renderer and client config through `make cache-service-onboarding-rustfs-smoke`,
+then verifies the retained evidence with `make cache-service-release-gate`.
+
+## Docker
+
+Build:
+
+```bash
+docker build -f crab/deploy/cache-service/Dockerfile -t crab-cache-server:latest .
+```
+
+Run:
+
+```bash
+docker run -d \
+  --name crab-cache \
+  -p 8443:8443 \
+  -v /data/crab-cache:/data/crab-cache \
+  -v /etc/crab-cache-server:/etc/crab-cache-server:ro \
+  --restart=unless-stopped \
+  crab-cache-server:latest
+```
+
+Mount `config.toml` at `/etc/crab-cache-server/config.toml`.
+
+Preflight before the first start, and after config or secret rotation:
+
+```bash
+docker run --rm \
+  -v /data/crab-cache:/data/crab-cache \
+  -v /etc/crab-cache-server:/etc/crab-cache-server:ro \
+  crab-cache-server:latest \
+  --config /etc/crab-cache-server/config.toml check --json --profile enterprise
+```
+
+When the gate fails, inspect `checks[].code` in the JSON output for the stable
+issue identifier and `checks[].remediation` for the operator action.
+
+## Kubernetes
+
+Use one pod per cache volume. A typical deployment uses:
+
+- A `Deployment` with `strategy.type = Recreate`.
+- A `ReadWriteOnce` persistent volume.
+- A `ClusterIP` service or private load balancer.
+- Readiness probe: `/v1/health`.
+- Liveness probe: `/v1/health/live`.
+
+Example probe configuration:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /v1/health/live
+    port: 8443
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /v1/health
+    port: 8443
+  periodSeconds: 5
+```
+
+Use HTTP probes when TLS terminates before the pod. Use HTTPS probes when TLS terminates at the cache server.
+
+Run `crab-cache-server --config /etc/crab-cache-server/config.toml check --json --profile enterprise` as an init container or rollout gate when the cache volume and origin credentials are available before serving traffic. Export `checks[].code` into rollout events or alerts so teams can route failures without parsing human text.
+
+If you use Prometheus Operator, apply the bundled scrape and alert manifests
+after adjusting your selectors:
+
+```bash
+cd crab
+make cache-service-validate-manifests
+cd ..
+kubectl apply -f crab/deploy/cache-service/kubernetes/service-monitor.yaml
+kubectl apply -f crab/deploy/cache-service/kubernetes/prometheus-rules.yaml
+```
+
+For proxy-terminated TLS or proxy-terminated mTLS, add
+`--trusted-proxy-boundary` only after verifying that the proxy or mesh is the
+only path to the cache service and strips client-supplied identity headers.
+
+## systemd
+
+For a VM or bare-metal host:
+
+```bash
+useradd -r -s /sbin/nologin -d /data/crab-cache crab-cache
+mkdir -p /data/crab-cache /etc/crab-cache-server
+chown -R crab-cache:crab-cache /data/crab-cache
+install -m 0755 crab-cache-server /usr/local/bin/
+install -m 0640 config.toml /etc/crab-cache-server/config.toml
+install -m 0644 crab/deploy/cache-service/crab-cache-server.service /etc/systemd/system/
+sudo -u crab-cache crab-cache-server --config /etc/crab-cache-server/config.toml check --profile enterprise
+systemctl daemon-reload
+systemctl enable --now crab-cache-server
+```
+
+Check status:
+
+```bash
+systemctl status crab-cache-server
+journalctl -u crab-cache-server -f
+```
+
+## TLS And Proxies
+
+Recommended production patterns:
+
+- Terminate TLS at a load balancer, ingress, or service mesh.
+- Keep the cache service on a private network.
+- For native mTLS, configure `tls.client_ca_path`; for proxy-terminated mTLS, validate certificates at the proxy or mesh and forward the validated identity.
+- Do not expose bearer mode or plaintext PSK traffic to untrusted networks.
+
+## Smoke Test
+
+```bash
+curl -fsS http://localhost:8443/v1/health/live
+curl -fsS http://localhost:8443/v1/health
+curl -fsS http://localhost:8443/v1/metrics | head
+curl -i http://localhost:8443/v1/admin/stats
+curl -i -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  http://localhost:8443/v1/admin/stats
+```
+
+Expected:
+
+- Liveness returns `ok`.
+- Readiness returns `ok` when origin is reachable.
+- Metrics are available.
+- Admin endpoints reject missing auth.
+- Admin endpoints accept valid auth.
+
+Then configure one Crab client and run a real push or hydrate.

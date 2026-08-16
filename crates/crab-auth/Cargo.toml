@@ -1,0 +1,46 @@
+[package]
+name = "crab-auth"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Auth client contracts and token handling for Crab."
+
+[lib]
+name = "crab_auth"
+path = "src/lib.rs"
+
+[features]
+default = []
+aws-oidc-client = ["oidc-client", "dep:sha2", "dep:tokio"]
+azure-entra-client = ["oidc-client", "dep:tokio"]
+crab-auth-client = ["oidc-client", "dep:tokio"]
+gcp-workload-identity-client = ["oidc-client", "dep:tokio"]
+oidc-client = ["dep:reqwest", "dep:tokio"]
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+bstr = { version = "1", default-features = false, features = ["std"] }
+chacha20poly1305 = "0.10.1"
+crab-coordination = { workspace = true }
+crab-git = { workspace = true }
+crab-types = { workspace = true }
+gix-validate = { workspace = true }
+libc = "0.2"
+rand = "0.9"
+reqwest = { workspace = true, features = ["rustls-tls", "json"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { version = "0.10", optional = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"], optional = true }
+url = "2.5"
+utoipa = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

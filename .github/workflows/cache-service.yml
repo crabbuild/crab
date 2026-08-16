@@ -1,0 +1,221 @@
+name: Cache Service Tests
+
+# Build and test the cache service on pushes to main and PRs that touch
+# cache service source, client code, or deployment configs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cache-service.yml"
+      - "crates/crab-cache/**"
+      - "crates/crab-cache-server/**"
+      - "crates/crab-cache-store/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-staging/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-xet/**"
+      - "crab/Makefile"
+      - "crab/src/cache/**"
+      - "crab/src/git/**"
+      - "crab/src/metadata/**"
+      - "crab/src/storage/**"
+      - "crab/src/cmd/add.rs"
+      - "crab/src/cmd/clone.rs"
+      - "crab/src/cmd/doctor.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/coordination/**"
+      - "crab/deploy/cache-service/**"
+      - "crab/scripts/validate-cache-service-manifests.sh"
+      - "crab/scripts/verify-cache-service-smoke-report.py"
+      - "crab/scripts/test_verify_cache_service_smoke_report.py"
+      - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
+      - "crab-web/content/docs/cli/cache-service/**"
+  pull_request:
+    paths:
+      - ".github/workflows/cache-service.yml"
+      - "crates/crab-cache/**"
+      - "crates/crab-cache-server/**"
+      - "crates/crab-cache-store/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-staging/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-xet/**"
+      - "crab/Makefile"
+      - "crab/src/cache/**"
+      - "crab/src/git/**"
+      - "crab/src/metadata/**"
+      - "crab/src/storage/**"
+      - "crab/src/cmd/add.rs"
+      - "crab/src/cmd/clone.rs"
+      - "crab/src/cmd/doctor.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/coordination/**"
+      - "crab/deploy/cache-service/**"
+      - "crab/scripts/validate-cache-service-manifests.sh"
+      - "crab/scripts/verify-cache-service-smoke-report.py"
+      - "crab/scripts/test_verify_cache_service_smoke_report.py"
+      - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
+      - "crab-web/content/docs/cli/cache-service/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build & test cache service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libfuse3-dev \
+            prometheus
+
+      - name: Validate cache service manifests
+        working-directory: crab
+        run: make cache-service-validate-manifests
+
+      - name: Test smoke report verifier
+        working-directory: crab
+        run: make cache-service-verify-smoke-report-self-test
+
+      - name: Build crab-cache-server
+        run: cargo build --release -p crab-cache-server --bin crab-cache-server
+
+      - name: Run cache service tests
+        run: |
+          cargo test -p crab-cache-server --lib
+          cargo test -p crab --lib cache_service
+          cargo test -p crab-cache-server --test cache_service_integration
+          cargo test -p crab-cache-server --test cache_server_preflight_cli
+
+  rustfs-smoke:
+    name: RustFS cache-service smoke
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 45
+    env:
+      CACHE_SERVICE_RUSTFS_ACCESS_KEY: crab
+      CACHE_SERVICE_RUSTFS_BUCKET: crab
+      CACHE_SERVICE_RUSTFS_ENDPOINT: http://127.0.0.1:9000
+      CACHE_SERVICE_RUSTFS_REGION: us-east-1
+      CACHE_SERVICE_RUSTFS_ROOT: /tmp/crab-cache-service-smoke
+      CACHE_SERVICE_RUSTFS_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      CACHE_SERVICE_RUSTFS_SECRET_KEY: crab
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            curl \
+            libfuse3-dev \
+            pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/aws" --version
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${CACHE_SERVICE_RUSTFS_ROOT}" "${RUNNER_TEMP}/rustfs-data"
+          docker run --rm -d \
+            --name crab-cache-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY \
+            -e RUSTFS_SECRET_KEY \
+            -v "${RUNNER_TEMP}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" \
+            server /data --address :9000
+
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "${CACHE_SERVICE_RUSTFS_ENDPOINT}" || true)"
+            if [ "${status:-000}" != "000" ] && [ "${status}" -lt 500 ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs crab-cache-rustfs >&2 || true
+          echo "::error::RustFS did not become reachable at ${CACHE_SERVICE_RUSTFS_ENDPOINT}" >&2
+          exit 1
+        env:
+          RUSTFS_ACCESS_KEY: ${{ env.CACHE_SERVICE_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ env.CACHE_SERVICE_RUSTFS_SECRET_KEY }}
+
+      - name: Run cache-service RustFS smoke
+        working-directory: crab
+        run: make cache-service-rustfs-smoke
+        env:
+          CACHE_SERVICE_RUSTFS_EXTRA_ARGS: >-
+            --run-id ${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}
+            --object-kib 128
+            --cli-file-kib 512
+            --max-cache-bytes 16777216
+
+      - name: Verify smoke report evidence
+        working-directory: crab
+        run: make cache-service-verify-smoke-report
+        env:
+          CACHE_SERVICE_RUSTFS_REPORT: ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/report.json
+          CACHE_SERVICE_RUSTFS_VERIFY_OUTPUT: ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/report-verification.json
+
+      - name: Verify smoke evidence with cache-server CLI
+        run: |
+          target/debug/crab-cache-server evidence verify \
+            --report "${CACHE_SERVICE_RUSTFS_ROOT}/${CACHE_SERVICE_RUSTFS_RUN_ID}/artifacts/report.json" \
+            --json \
+            > "${CACHE_SERVICE_RUSTFS_ROOT}/${CACHE_SERVICE_RUSTFS_RUN_ID}/artifacts/report-verification-cache-server.json"
+          target/debug/crab-cache-server evidence summarize \
+            --report "${CACHE_SERVICE_RUSTFS_ROOT}/${CACHE_SERVICE_RUSTFS_RUN_ID}/artifacts/report.json" \
+            --json \
+            > "${CACHE_SERVICE_RUSTFS_ROOT}/${CACHE_SERVICE_RUSTFS_RUN_ID}/artifacts/report-summary-cache-server.json"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CACHE_SERVICE_RUSTFS_ROOT}"
+          docker logs crab-cache-rustfs > "${CACHE_SERVICE_RUSTFS_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-cache-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-service-rustfs-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/*.json
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/*.py
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/*.toml
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/artifacts/*.yaml
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/${{ env.CACHE_SERVICE_RUSTFS_RUN_ID }}/logs/*.log
+            ${{ env.CACHE_SERVICE_RUSTFS_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14

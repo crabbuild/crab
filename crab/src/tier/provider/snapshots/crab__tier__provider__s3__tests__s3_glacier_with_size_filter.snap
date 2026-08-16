@@ -1,0 +1,21 @@
+---
+source: crab/src/tier/provider/s3.rs
+expression: xml
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule>
+    <ID>crab-xorbs-to-glacier</ID>
+    <Filter>
+      <And>
+        <Prefix>.crab/xorbs/</Prefix>
+        <ObjectSizeGreaterThan>40960</ObjectSizeGreaterThan>
+      </And>
+    </Filter>
+    <Status>Enabled</Status>
+    <Transition>
+      <Days>180</Days>
+      <StorageClass>GLACIER</StorageClass>
+    </Transition>
+  </Rule>
+</LifecycleConfiguration>

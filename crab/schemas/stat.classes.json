@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatClassesPayload",
+  "description": "Payload emitted by `crab stat classes --json`.",
+  "type": "object",
+  "required": [
+    "classes",
+    "total_bytes",
+    "total_objects"
+  ],
+  "properties": {
+    "classes": {
+      "description": "Per-class breakdown.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ClassEntry"
+      }
+    },
+    "total_bytes": {
+      "description": "Total bytes across all classes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "total_objects": {
+      "description": "Total objects across all classes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ClassEntry": {
+      "description": "A single class entry in the stat classes output.",
+      "type": "object",
+      "required": [
+        "bytes",
+        "class",
+        "objects",
+        "share"
+      ],
+      "properties": {
+        "bytes": {
+          "description": "Total bytes in this class.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "class": {
+          "description": "Storage class name.",
+          "type": "string"
+        },
+        "objects": {
+          "description": "Number of objects in this class.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "share": {
+          "description": "Share of total bytes as a fraction (0.0-1.0).",
+          "type": "number",
+          "format": "double"
+        }
+      }
+    }
+  }
+}

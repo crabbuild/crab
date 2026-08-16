@@ -1,0 +1,847 @@
+name: Release — Build + Publish + Homebrew
+
+# Triggered by pushing a version tag (e.g. `git tag v1.0.2 && git push origin v1.0.2`)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.2)"
+        required: true
+      require_enterprise_evidence:
+        description: "Run enterprise evidence gates before building CLI artifacts"
+        type: boolean
+        required: false
+        default: false
+      require_nfs_evidence:
+        description: "Require retained native NFS mount evidence before building CLI artifacts"
+        type: boolean
+        required: false
+        default: true
+      replica_evidence_run_id:
+        description: "Run ID from the Replica Live Evidence enterprise workflow"
+        required: false
+      replica_evidence_artifact:
+        description: "Artifact name from the live evidence run; defaults to replica-live-evidence-<run-id>-<attempt>"
+        required: false
+        default: ""
+      cache_service_evidence_run_id:
+        description: "Run ID from the Cache Service Tests workflow"
+        required: false
+      cache_service_evidence_artifact:
+        description: "Artifact name from the cache-service smoke run; defaults to cache-service-rustfs-smoke-<run-id>-<attempt>"
+        required: false
+        default: ""
+      nfs_evidence_run_id:
+        description: "Run ID from the NFS Mount Evidence workflow"
+        required: false
+      nfs_release_verify_args:
+        description: "Optional args for make nfs-release-gate, usually promoted from retained NFS threshold suggestions"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_REPO: crabbuild/crab-release
+  TAP_REPO: crabbuild/homebrew-tap
+  CARGO_TERM_COLOR: always
+  REPLICA_RELEASE_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.replica_evidence_run_id || vars.CRAB_REPLICA_RELEASE_EVIDENCE_RUN_ID }}
+  REPLICA_RELEASE_EVIDENCE_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.replica_evidence_artifact || vars.CRAB_REPLICA_RELEASE_EVIDENCE_ARTIFACT }}
+  CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_service_evidence_run_id || vars.CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID }}
+  CACHE_SERVICE_RELEASE_EVIDENCE_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.cache_service_evidence_artifact || vars.CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_ARTIFACT }}
+  NFS_RELEASE_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.nfs_evidence_run_id || vars.CRAB_NFS_RELEASE_EVIDENCE_RUN_ID }}
+  NFS_RELEASE_VERIFY_ARGS: ${{ github.event_name == 'workflow_dispatch' && inputs.nfs_release_verify_args || vars.CRAB_NFS_RELEASE_VERIFY_ARGS }}
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      source_short_sha: ${{ steps.release.outputs.source_short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Validate release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::Release tag must look like v1.2.3, got '$tag'."
+              exit 1
+              ;;
+          esac
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' crab/Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read crab/Cargo.toml package version."
+            exit 1
+          fi
+
+          if [ "v${version}" != "$tag" ]; then
+            echo "::error::Release tag $tag does not match crab/Cargo.toml version ${version}."
+            exit 1
+          fi
+
+          source_sha="$(git rev-parse HEAD)"
+          source_short_sha="$(git rev-parse --short HEAD)"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "source_sha=$source_sha"
+            echo "source_short_sha=$source_short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  replica-enterprise-gate:
+    name: Replica enterprise gate
+    needs: prepare
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.require_enterprise_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_ENTERPRISE_EVIDENCE == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Run locked replica feature matrix
+        working-directory: crab
+        run: make replica-feature-matrix-all-locked
+
+      - name: Validate replica evidence schemas
+        run: cargo test --manifest-path crab/Cargo.toml --test schema_validate replica
+
+      - name: Validate retained evidence recorder contracts
+        run: |
+          cargo test --manifest-path crab/Cargo.toml --test replica_live_control_plane evidence_recorder
+          cargo test --manifest-path crab/Cargo.toml --test replica_binary_hydrate_live evidence_recorder
+          cargo test --manifest-path crab/Cargo.toml --test replica_live_cross_region evidence_recorder
+
+      - name: Download retained enterprise live evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_id="${REPLICA_RELEASE_EVIDENCE_RUN_ID:-}"
+          artifact="${REPLICA_RELEASE_EVIDENCE_ARTIFACT:-}"
+          if [ -z "$run_id" ]; then
+            {
+              echo "::error::Replica enterprise releases require retained live evidence."
+              echo "Run .github/workflows/replica-live-evidence.yml with suite=enterprise, storage_provider=all, coordinator=all, hydrate_provider=all, mutate=true, and evidence_profile=enterprise."
+              echo "Then rerun release.yml with replica_evidence_run_id set, or set repository variable CRAB_REPLICA_RELEASE_EVIDENCE_RUN_ID for tag-triggered releases."
+            } >&2
+            exit 1
+          fi
+
+          release_sha="$(git rev-parse HEAD)"
+          run_metadata="$(gh run view "$run_id" \
+            --json workflowName,status,conclusion,event,databaseId,url,headSha,attempt \
+            --jq '[.workflowName, .status, .conclusion, .event, (.databaseId | tostring), .url, .headSha, (.attempt | tostring)] | @tsv')"
+          old_ifs="$IFS"
+          IFS=$'\t' read -r workflow_name status conclusion event database_id run_url evidence_sha attempt <<< "$run_metadata"
+          IFS="$old_ifs"
+          if [ "$workflow_name" != "Replica Live Evidence" ]; then
+            {
+              echo "::error::Replica evidence run $run_id came from workflow '$workflow_name', not 'Replica Live Evidence'."
+              echo "Run .github/workflows/replica-live-evidence.yml and pass that run ID to release.yml."
+            } >&2
+            exit 1
+          fi
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            {
+              echo "::error::Replica evidence run $run_id is not a successful completed run."
+              echo "status=$status conclusion=$conclusion url=$run_url"
+            } >&2
+            exit 1
+          fi
+          if [ "$event" != "workflow_dispatch" ]; then
+            {
+              echo "::error::Replica evidence run $run_id used event '$event', expected workflow_dispatch."
+              echo "Use the protected manual live evidence workflow so credentials and topology are explicit."
+            } >&2
+            exit 1
+          fi
+          if [ "$database_id" != "$run_id" ]; then
+            {
+              echo "::error::Replica evidence run metadata mismatch: requested $run_id but GitHub returned $database_id."
+              echo "Refusing to download ambiguous retained evidence."
+            } >&2
+            exit 1
+          fi
+          if [ "$evidence_sha" != "$release_sha" ]; then
+            {
+              echo "::error::Replica evidence run $run_id was collected from commit $evidence_sha, but this release is building $release_sha."
+              echo "Rerun .github/workflows/replica-live-evidence.yml on the exact release commit before publishing."
+            } >&2
+            exit 1
+          fi
+          if [ -z "$attempt" ] || [ "$attempt" = "null" ]; then
+            {
+              echo "::error::Replica evidence run $run_id did not expose a run attempt."
+              echo "Refusing to verify retained evidence without an exact run-attempt binding."
+            } >&2
+            exit 1
+          fi
+          if [ -z "$artifact" ]; then
+            artifact="replica-live-evidence-${run_id}-${attempt}"
+          fi
+          echo "REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID=replica-live-${run_id}-${attempt}" >> "$GITHUB_ENV"
+
+          mkdir -p replica-release-evidence
+          gh run download "$run_id" \
+            --name "$artifact" \
+            --dir replica-release-evidence
+
+          mapfile -t evidence_dirs < <(find replica-release-evidence -type d -name replica-live-evidence | sort)
+          if [ "${#evidence_dirs[@]}" -ne 1 ]; then
+            {
+              echo "::error::Downloaded artifact must contain exactly one replica-live-evidence directory from .github/workflows/replica-live-evidence.yml."
+              echo "Found ${#evidence_dirs[@]} candidate directories."
+            } >&2
+            exit 1
+          fi
+          echo "REPLICA_RELEASE_EVIDENCE_DIR=${evidence_dirs[0]}" >> "$GITHUB_ENV"
+
+      - name: Verify retained enterprise live evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          crab/scripts/verify-replica-release-evidence.sh \
+            "$REPLICA_RELEASE_EVIDENCE_DIR" \
+            replica-release-evidence-verify.json \
+            "$REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID"
+
+  cache-service-enterprise-gate:
+    name: Cache service enterprise gate
+    needs: prepare
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.require_enterprise_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_ENTERPRISE_EVIDENCE == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Download retained cache-service RustFS smoke evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_id="${CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID:-}"
+          artifact="${CACHE_SERVICE_RELEASE_EVIDENCE_ARTIFACT:-}"
+          if [ -z "$run_id" ]; then
+            {
+              echo "::error::Cache-service enterprise releases require retained RustFS smoke evidence."
+              echo "Run .github/workflows/cache-service.yml manually on the exact release commit."
+              echo "Then rerun release.yml with cache_service_evidence_run_id set, or set repository variable CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID for tag-triggered releases."
+            } >&2
+            exit 1
+          fi
+
+          release_sha="$(git rev-parse HEAD)"
+          run_metadata="$(gh run view "$run_id" \
+            --json workflowName,status,conclusion,event,databaseId,url,headSha,attempt \
+            --jq '[.workflowName, .status, .conclusion, .event, (.databaseId | tostring), .url, .headSha, (.attempt | tostring)] | @tsv')"
+          old_ifs="$IFS"
+          IFS=$'\t' read -r workflow_name status conclusion event database_id run_url evidence_sha attempt <<< "$run_metadata"
+          IFS="$old_ifs"
+          if [ "$workflow_name" != "Cache Service Tests" ]; then
+            {
+              echo "::error::Cache-service evidence run $run_id came from workflow '$workflow_name', not 'Cache Service Tests'."
+              echo "Run .github/workflows/cache-service.yml and pass that run ID to release.yml."
+            } >&2
+            exit 1
+          fi
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            {
+              echo "::error::Cache-service evidence run $run_id is not a successful completed run."
+              echo "status=$status conclusion=$conclusion url=$run_url"
+            } >&2
+            exit 1
+          fi
+          if [ "$event" != "workflow_dispatch" ]; then
+            {
+              echo "::error::Cache-service evidence run $run_id used event '$event', expected workflow_dispatch."
+              echo "Use the protected manual cache-service smoke workflow so the release evidence is explicit."
+            } >&2
+            exit 1
+          fi
+          if [ "$database_id" != "$run_id" ]; then
+            {
+              echo "::error::Cache-service evidence run metadata mismatch: requested $run_id but GitHub returned $database_id."
+              echo "Refusing to download ambiguous retained evidence."
+            } >&2
+            exit 1
+          fi
+          if [ "$evidence_sha" != "$release_sha" ]; then
+            {
+              echo "::error::Cache-service evidence run $run_id was collected from commit $evidence_sha, but this release is building $release_sha."
+              echo "Rerun .github/workflows/cache-service.yml on the exact release commit before publishing."
+            } >&2
+            exit 1
+          fi
+          if [ -z "$attempt" ] || [ "$attempt" = "null" ]; then
+            {
+              echo "::error::Cache-service evidence run $run_id did not expose a run attempt."
+              echo "Refusing to verify retained evidence without an exact run-attempt binding."
+            } >&2
+            exit 1
+          fi
+          if [ -z "$artifact" ]; then
+            artifact="cache-service-rustfs-smoke-${run_id}-${attempt}"
+          fi
+          expected_report_run_id="gha-${run_id}-${attempt}"
+          echo "CACHE_SERVICE_RELEASE_EXPECTED_RUN_ID=${expected_report_run_id}" >> "$GITHUB_ENV"
+
+          mkdir -p cache-service-release-evidence
+          gh run download "$run_id" \
+            --name "$artifact" \
+            --dir cache-service-release-evidence
+
+      - name: Verify retained cache-service smoke evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo build --manifest-path Cargo.toml -p crab-cache-server --bin crab-cache-server
+
+          set +e
+          target/debug/crab-cache-server evidence gate \
+            --evidence-dir cache-service-release-evidence \
+            --expected-run-id "$CACHE_SERVICE_RELEASE_EXPECTED_RUN_ID" \
+            --output cache-service-release-evidence-verify.json \
+            --summary-output cache-service-release-evidence-summary.json \
+            --doctor-output cache-service-release-evidence-doctor.json \
+            --doctor-text-output cache-service-release-evidence-doctor.txt
+          gate_status=$?
+          set -e
+
+          if [ "$gate_status" -ne 0 ]; then
+            {
+              echo "### Cache-service release evidence doctor"
+              echo
+              echo '```text'
+              if [ -s cache-service-release-evidence-doctor.txt ]; then
+                cat cache-service-release-evidence-doctor.txt
+              else
+                echo "cache-service evidence doctor output was not generated"
+              fi
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          exit "$gate_status"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cache-service-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            cache-service-release-evidence-verify.json
+            cache-service-release-evidence-summary.json
+            cache-service-release-evidence-doctor.json
+            cache-service-release-evidence-doctor.txt
+          if-no-files-found: ignore
+
+  nfs-native-evidence-gate:
+    name: NFS native evidence gate
+    needs: prepare
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.require_nfs_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_NFS_EVIDENCE != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download retained native NFS mount evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_id="${NFS_RELEASE_EVIDENCE_RUN_ID:-}"
+          if [ -z "$run_id" ]; then
+            {
+              echo "::error::Crab releases require retained native NFS mount evidence."
+              echo "Run .github/workflows/nfs-mount.yml on the exact release commit and pass that run ID to release.yml."
+              echo "For tag-triggered releases, set repository variable CRAB_NFS_RELEASE_EVIDENCE_RUN_ID."
+            } >&2
+            exit 1
+          fi
+
+          release_sha="$(git rev-parse HEAD)"
+          run_metadata="$(gh run view "$run_id" \
+            --json workflowName,status,conclusion,event,databaseId,url,headSha,attempt \
+            --jq '[.workflowName, .status, .conclusion, .event, (.databaseId | tostring), .url, .headSha, (.attempt | tostring)] | @tsv')"
+          old_ifs="$IFS"
+          IFS=$'\t' read -r workflow_name status conclusion event database_id run_url evidence_sha attempt <<< "$run_metadata"
+          IFS="$old_ifs"
+          if [ "$workflow_name" != "NFS Mount Evidence" ]; then
+            {
+              echo "::error::NFS evidence run $run_id came from workflow '$workflow_name', not 'NFS Mount Evidence'."
+              echo "Run .github/workflows/nfs-mount.yml and pass that run ID to release.yml."
+            } >&2
+            exit 1
+          fi
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            {
+              echo "::error::NFS evidence run $run_id is not a successful completed run."
+              echo "status=$status conclusion=$conclusion url=$run_url"
+            } >&2
+            exit 1
+          fi
+          case "$event" in
+            workflow_dispatch|push) ;;
+            *)
+              {
+                echo "::error::NFS evidence run $run_id used event '$event', expected workflow_dispatch or push."
+                echo "Use the NFS Mount Evidence workflow on the exact release commit before publishing."
+              } >&2
+              exit 1
+              ;;
+          esac
+          if [ "$database_id" != "$run_id" ]; then
+            {
+              echo "::error::NFS evidence run metadata mismatch: requested $run_id but GitHub returned $database_id."
+              echo "Refusing to download ambiguous retained evidence."
+            } >&2
+            exit 1
+          fi
+          if [ "$evidence_sha" != "$release_sha" ]; then
+            {
+              echo "::error::NFS evidence run $run_id was collected from commit $evidence_sha, but this release is building $release_sha."
+              echo "Rerun .github/workflows/nfs-mount.yml on the exact release commit before publishing."
+            } >&2
+            exit 1
+          fi
+          if [ -z "$attempt" ] || [ "$attempt" = "null" ]; then
+            {
+              echo "::error::NFS evidence run $run_id did not expose a run attempt."
+              echo "Refusing to verify retained evidence without an exact run-attempt binding."
+            } >&2
+            exit 1
+          fi
+
+          echo "NFS_RELEASE_EXPECTED_RUN_SUFFIX=${run_id}-${attempt}" >> "$GITHUB_ENV"
+          echo "NFS_RELEASE_EXPECTED_GIT_COMMIT=${release_sha}" >> "$GITHUB_ENV"
+          mkdir -p nfs-release-evidence
+          gh run download "$run_id" \
+            --pattern "nfs-smoke-*-${run_id}-${attempt}" \
+            --dir nfs-release-evidence
+
+      - name: Verify retained native NFS mount evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C crab nfs-release-gate \
+            NFS_RELEASE_EVIDENCE_DIR=../nfs-release-evidence \
+            NFS_RELEASE_EXPECTED_RUN_SUFFIX="${NFS_RELEASE_EXPECTED_RUN_SUFFIX}" \
+            NFS_RELEASE_EXPECTED_GIT_COMMIT="${NFS_RELEASE_EXPECTED_GIT_COMMIT}" \
+            NFS_RELEASE_SUMMARY_OUTPUT=../nfs-release-smoke-summary.json \
+            NFS_RELEASE_VERIFY_ARGS="${NFS_RELEASE_VERIFY_ARGS}"
+
+      - name: Summarize retained native NFS release evidence
+        if: always()
+        run: |
+          python3 crab/scripts/nfs-evidence-summary.py smoke \
+            --summary nfs-release-smoke-summary.json \
+            --output "$GITHUB_STEP_SUMMARY" \
+            --append \
+            --allow-missing
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nfs-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            nfs-release-smoke-summary.json
+          if-no-files-found: ignore
+
+  nfs-feature-gate:
+    name: NFS feature gate
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-nfs-feature-gate
+
+      - name: Run NFS feature gate
+        working-directory: crab
+        run: make nfs-feature-gate
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [prepare, replica-enterprise-gate, cache-service-enterprise-gate, nfs-native-evidence-gate, nfs-feature-gate]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.nfs-feature-gate.result == 'success' && (needs.nfs-native-evidence-gate.result == 'success' || needs.nfs-native-evidence-gate.result == 'skipped') && (needs.replica-enterprise-gate.result == 'success' || needs.replica-enterprise-gate.result == 'skipped') && (needs.cache-service-enterprise-gate.result == 'success' || needs.cache-service-enterprise-gate.result == 'skipped') }}
+    runs-on: ${{ matrix.os }}
+    env:
+      CRAB_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
+      GIT_SHA: ${{ needs.prepare.outputs.source_short_sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-aarch64
+            target: aarch64-apple-darwin
+            os: macos-15
+          - name: darwin-x86_64
+            target: x86_64-apple-darwin
+            os: macos-15-intel
+          - name: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - name: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - name: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            os: macos-15
+            windows: true
+          - name: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            os: macos-15
+            windows: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Install cargo-xwin
+        if: matrix.windows
+        run: cargo install cargo-xwin --locked
+
+      - name: Install LLVM tools for cargo-xwin
+        if: matrix.windows && runner.os == 'macOS'
+        run: brew install llvm
+
+      - name: Install FUSE dev headers (Linux native)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - name: Install macFUSE (macOS)
+        if: runner.os == 'macOS' && !matrix.windows
+        run: brew install --cask macfuse
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"
+          with_fuse_features="${no_fuse_features},fuse"
+          if [ "${{ matrix.windows }}" = "true" ]; then
+            export PATH="/opt/homebrew/opt/llvm/bin:/usr/local/opt/llvm/bin:$PATH"
+            wrapper_dir=""
+            if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
+              clang_cl="$(command -v clang-cl)"
+              wrapper_dir="$(mktemp -d)"
+              trap 'rm -rf "$wrapper_dir"' EXIT
+              {
+                printf '#!/usr/bin/env bash\n'
+                printf 'exec "%s" "$@"\n' "$clang_cl"
+              } > "$wrapper_dir/clang"
+              chmod +x "$wrapper_dir/clang"
+              export PATH="$wrapper_dir:$PATH"
+            fi
+            cargo xwin build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features simd-accel,tier,watch,nfs
+            cargo xwin build --release --locked --target ${{ matrix.target }} -p crab --bin crab-nfs-mount \
+              --no-default-features
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$with_fuse_features"
+            cp target/${{ matrix.target }}/release/crab target/${{ matrix.target }}/release/crab-fuse-mount
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$no_fuse_features"
+            ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount
+          elif [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$with_fuse_features"
+            cp target/${{ matrix.target }}/release/crab target/${{ matrix.target }}/release/crab-fuse-mount
+            cross build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$no_fuse_features"
+            ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount
+          else
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$with_fuse_features"
+            cp target/${{ matrix.target }}/release/crab target/${{ matrix.target }}/release/crab-fuse-mount
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+              --no-default-features --features "$no_fuse_features"
+            ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount
+          fi
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${{ matrix.windows }}" = "true" ]; then
+            cp target/${{ matrix.target }}/release/crab.exe dist/
+            cp target/${{ matrix.target }}/release/crab-nfs-mount.exe dist/
+            (cd dist && zip -q "crab-${{ matrix.name }}.zip" crab.exe crab-nfs-mount.exe)
+            rm dist/crab.exe dist/crab-nfs-mount.exe
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cp target/${{ matrix.target }}/release/crab dist/
+            cp target/${{ matrix.target }}/release/crab-fuse-mount dist/
+            (cd dist && ln -sf crab crab-nfs-mount)
+            tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount
+            rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount
+          else
+            cp target/${{ matrix.target }}/release/crab dist/
+            cp target/${{ matrix.target }}/release/crab-fuse-mount dist/
+            (cd dist && ln -sf crab crab-nfs-mount)
+            tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount
+            rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount
+          fi
+
+      - name: Verify archive layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="dist/crab-${{ matrix.name }}.${{ matrix.windows && 'zip' || 'tar.gz' }}"
+
+          if [ ! -s "$asset" ]; then
+            echo "::error::Release archive is missing or empty: $asset"
+            exit 1
+          fi
+
+          if [ "${{ matrix.windows }}" = "true" ]; then
+            entries="$(unzip -Z1 "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab-nfs-mount.exe crab.exe " ]; then
+              echo "::error::Unexpected Windows archive layout: $entries"
+              exit 1
+            fi
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
+              echo "::error::Unexpected macOS archive layout: $entries"
+              exit 1
+            fi
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$asset" -C "$extract_dir"
+            if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
+              echo "::error::macOS archive crab-nfs-mount must be a symlink to crab"
+              exit 1
+            fi
+          else
+            entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
+              echo "::error::Unexpected Linux archive layout: $entries"
+              exit 1
+            fi
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$asset" -C "$extract_dir"
+            if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
+              echo "::error::Linux archive crab-nfs-mount must be a symlink to crab"
+              exit 1
+            fi
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crab-${{ matrix.name }}
+          path: dist/crab-${{ matrix.name }}.*
+
+  # ---------------------------------------------------------------------------
+  # Publish — collect artifacts, create GitHub release, update Homebrew tap
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: crab-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            crab-darwin-aarch64.tar.gz
+            crab-darwin-x86_64.tar.gz
+            crab-linux-aarch64.tar.gz
+            crab-linux-x86_64.tar.gz
+            crab-windows-aarch64.zip
+            crab-windows-x86_64.zip
+          )
+
+          mapfile -t actual < <(find . -maxdepth 1 -type f \( -name 'crab-*.tar.gz' -o -name 'crab-*.zip' \) -printf '%f\n' | sort)
+          actual_joined="${actual[*]}"
+          expected_joined="${expected[*]}"
+          if [ "$actual_joined" != "$expected_joined" ]; then
+            echo "::error::Release artifact set mismatch."
+            printf 'expected: %s\n' "$expected_joined"
+            printf 'actual:   %s\n' "$actual_joined"
+            exit 1
+          fi
+
+          for asset in crab-darwin-aarch64.tar.gz crab-darwin-x86_64.tar.gz; do
+            entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
+              echo "::error::Unexpected macOS archive layout in $asset: $entries"
+              exit 1
+            fi
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$asset" -C "$extract_dir"
+            if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
+              echo "::error::macOS archive $asset crab-nfs-mount must be a symlink to crab"
+              exit 1
+            fi
+          done
+
+          for asset in crab-linux-aarch64.tar.gz crab-linux-x86_64.tar.gz; do
+            entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
+              echo "::error::Unexpected Linux archive layout in $asset: $entries"
+              exit 1
+            fi
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$asset" -C "$extract_dir"
+            if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
+              echo "::error::Linux archive $asset crab-nfs-mount must be a symlink to crab"
+              exit 1
+            fi
+          done
+
+          for asset in crab-windows-aarch64.zip crab-windows-x86_64.zip; do
+            entries="$(unzip -Z1 "$asset" | sort | tr '\n' ' ')"
+            if [ "$entries" != "crab-nfs-mount.exe crab.exe " ]; then
+              echo "::error::Unexpected Windows archive layout in $asset: $entries"
+              exit 1
+            fi
+          done
+
+          sha256sum crab-*.* > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Validate release repository token
+        env:
+          GH_TOKEN: ${{ secrets.CRAB_RELEASE_GITHUB_TOKEN || secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            {
+              echo "::error::Set CRAB_RELEASE_GITHUB_TOKEN with contents:write access to ${RELEASE_REPO}."
+              echo "The workflow cannot use the source repository GITHUB_TOKEN to publish to a separate release repository."
+            } >&2
+            exit 1
+          fi
+
+          gh repo view "$RELEASE_REPO" >/dev/null
+
+      - name: Create release on crab-release repo
+        env:
+          GH_TOKEN: ${{ secrets.CRAB_RELEASE_GITHUB_TOKEN || secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          SOURCE_SHA="${{ needs.prepare.outputs.source_sha }}"
+          FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)
+          notes_file="$(mktemp)"
+          trap 'rm -f "$notes_file"' EXIT
+          {
+            echo "Crab CLI ${TAG} release artifacts for macOS, Linux, and Windows on ARM64 and x86_64."
+            echo
+            echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${TAG}"
+            echo "Commit: ${SOURCE_SHA}"
+          } > "$notes_file"
+
+          if gh release view "$TAG" --repo "$RELEASE_REPO" &>/dev/null; then
+            echo "Release $TAG exists — uploading assets (clobber)."
+            gh release upload "$TAG" "${FILES[@]}" \
+              --repo "$RELEASE_REPO" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --repo "$RELEASE_REPO" \
+              --title "Crab CLI ${TAG}" \
+              --notes-file "$notes_file"
+          fi
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "TAP_GITHUB_TOKEN is not configured; skipping Homebrew tap update."
+            exit 0
+          fi
+          TAG="${{ needs.prepare.outputs.tag }}"
+          DIST_DIR="$PWD/dist" crab/scripts/update-homebrew.sh --local "$TAG"

@@ -1,0 +1,140 @@
+---
+title: "Split Workflows and Lockfiles"
+description: "Use recursive workflow discovery and split lockfiles for monorepos and multi-team pipelines."
+---
+
+# Split Workflows and Lockfiles
+
+Small repos can keep one `crab.yaml` and one `crab.lock`. Larger repos often
+need multiple workflow files so teams can own different pipeline surfaces.
+
+## Discovery Modes
+
+Root mode is the default:
+
+```bash
+crab run
+```
+
+It reads the repo-root `crab.yaml` and root-level named workflow files.
+
+Recursive mode discovers workflow files under the repository:
+
+```bash
+crab run --recursive
+crab workflow dag --recursive
+```
+
+Set the default:
+
+```bash
+crab config set workflow.discover recursive
+```
+
+## File Layout
+
+```text
+crab.yaml
+crab.lock
+data.workflow.yaml
+data.workflow.lock
+train.workflow.yaml
+train.workflow.lock
+eval.workflow.yaml
+eval.workflow.lock
+pipelines/
+  deploy.workflow.yaml
+  deploy.workflow.lock
+```
+
+Stages in `train.workflow.yaml` are prefixed with `train.`. Nested workflow
+files include directory prefixes.
+
+## Cross-File Dependencies
+
+Use normal path deps and outs:
+
+```yaml
+# train.workflow.yaml
+stages:
+  fit:
+    cmd: python train.py
+    deps:
+      - data/features.parquet
+    outs:
+      - models/model.pkl
+```
+
+```yaml
+# eval.workflow.yaml
+stages:
+  score:
+    cmd: python score.py
+    deps:
+      - models/model.pkl
+    metrics:
+      - metrics/eval.json
+```
+
+Crab infers producer-to-consumer edges from output paths across the merged DAG.
+
+## Lockfile Modes
+
+Single lockfile:
+
+```bash
+crab config set workflow.lockfile single
+```
+
+Split lockfiles:
+
+```bash
+crab config set workflow.lockfile split
+```
+
+Use split mode when multiple teams frequently update different workflow files.
+Each `<name>.workflow.yaml` gets a matching `<name>.workflow.lock`.
+
+## Migrate to Split Lockfiles
+
+Preview:
+
+```bash
+crab workflow lockfile split --dry-run
+```
+
+Apply:
+
+```bash
+crab workflow lockfile split --update-config
+```
+
+Review the generated lockfiles, then commit the workflow files, lockfiles, and
+config change together.
+
+## Resolve Lockfile Conflicts
+
+When git merge leaves conflict markers in a workflow lockfile:
+
+```bash
+crab workflow lockfile resolve crab.lock
+```
+
+The resolver keeps identical resolved stages and drops divergent stale entries
+so the next run can recompute them safely.
+
+## Monorepo Ownership Pattern
+
+- Keep shared params, defaults, and top-level orchestration in `crab.yaml`.
+- Give each team a named `*.workflow.yaml`.
+- Use split lockfiles to reduce merge conflicts.
+- Use `crab workflow dag --recursive` in CI to prove the merged graph is valid.
+- Use `crab run --workflow <name>` or `crab run --stages <glob>` for targeted
+  jobs.
+
+## When to Stay Single-File
+
+Stay with one `crab.yaml` and one `crab.lock` if the workflow is under a few
+hundred lines, one team owns most stages, or merge conflicts are rare. Split
+workflows add naming and ownership rules; use them when that structure pays for
+it.

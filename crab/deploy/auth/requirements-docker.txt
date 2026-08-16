@@ -1,0 +1,15 @@
+# Minimal dependencies for the Docker image.
+# Only includes what's needed to run the auth endpoint with AWS.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pyyaml==6.0.2
+pyjwt[crypto]==2.10.1
+cryptography==44.0.0
+boto3==1.36.4
+google-auth==2.37.0
+azure-identity==1.19.0
+azure-storage-blob==12.24.0
+structlog==24.4.0
+httpx==0.28.1

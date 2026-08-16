@@ -1,0 +1,36 @@
+# Keep release-builder Docker contexts small. The crab CLI build needs the
+# root Cargo workspace, workspace member manifests, and gitoxide path
+# dependencies; it does not need docs caches, local build
+# output, or repo metadata.
+*
+
+!Cargo.toml
+!Cargo.lock
+!Cross.toml
+!.cargo/
+!.cargo/**
+
+!crab/
+!crab/**
+!crates/
+!crates/**
+!deploy/
+!deploy/crab-service/
+!deploy/crab-service/compose/
+!deploy/crab-service/compose/managed-read-e2e.sh
+!beyond-desktop/
+!beyond-desktop/agent/
+!beyond-desktop/agent/**
+!gitoxide/
+!gitoxide/**
+
+.git/
+.crab/
+.kiro/
+.tmp-cache-e2e/
+target/
+**/target/
+crab/dist/
+node_modules/
+**/node_modules/
+*.DS_Store

@@ -1,0 +1,64 @@
+---
+title: "crab download"
+description: "Download selected files from a Crab repository without cloning it."
+---
+
+# crab download
+
+Download selected files from a Crab repository without creating a Git clone.
+`crab get` is an alias.
+
+## Synopsis
+
+```bash
+crab download [OPTIONS] <REPO> [PATHS]...
+crab get [OPTIONS] <REPO> [PATHS]...
+```
+
+`<REPO>` can be a Crab remote URL or local repository path. Positional paths
+select exact repository-relative files or subtrees ending in `/`. Use
+`--include` and `--exclude` for glob selection.
+
+By default, files are written under Crab's revision-scoped download cache. Use
+`--local-dir` to materialize them under a directory you choose.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--revision <REVISION>` | Read a branch, tag, ref, or full commit SHA |
+| `--include <PATTERN>` | Include a glob; repeat as needed |
+| `--exclude <PATTERN>` | Exclude a glob; repeat as needed |
+| `--cache-dir <DIR>` | Override the Crab cache root |
+| `--local-dir <DIR>` | Write selected files under this directory |
+| `--force-download` | Download even when a destination is fresh |
+| `--dry-run` | Preview the selection without writing files or metadata |
+| `--max-workers <N>` | Set file-level download concurrency |
+| `--quiet` | Suppress progress and summaries while printing final paths |
+| `--json` | Emit one structured JSON result |
+| `--jsonl` | Emit streaming JSONL output |
+
+## Examples
+
+Download two exact files into a local directory:
+
+```bash
+crab download crab://bucket/models README.md config.json --local-dir ./export
+```
+
+Select a subtree at a specific revision:
+
+```bash
+crab get crab://bucket/models models/ --revision refs/tags/v1 --local-dir ./models
+```
+
+Preview a glob selection:
+
+```bash
+crab download crab://bucket/models --include '*.safetensors' --dry-run --json
+```
+
+## Related commands
+
+- [`crab clone`](/docs/cli/reference/crab-clone) — create a Git checkout.
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate) — materialize pointers in an existing checkout.

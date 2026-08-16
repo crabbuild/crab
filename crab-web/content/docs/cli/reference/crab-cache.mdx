@@ -1,0 +1,82 @@
+---
+title: "crab cache"
+description: "Manage the local chunk cache for faster hydration."
+---
+
+# crab cache
+
+Manage the local chunk cache.
+
+## Synopsis
+
+```
+crab cache stats
+crab cache clean
+```
+
+## Description
+
+`crab cache` manages the local chunk cache that stores previously downloaded
+xorb data. The cache speeds up repeated hydrations by avoiding redundant
+downloads from cloud storage.
+
+For conceptual background, see [Local Cache](/docs/cli/storage/local-cache).
+
+## Subcommands
+
+### stats
+
+Show cache size, hit rate, and entry count.
+
+```bash
+crab cache stats
+```
+
+### clean
+
+Remove cached data to free disk space.
+
+```bash
+crab cache clean
+```
+
+The current cache subcommands do not add command-specific selection flags;
+use `crab cache <command> --help` for global logging options.
+
+## Remote Cache Service
+
+The `crab cache` command manages your **local** disk cache — a per-machine store of previously downloaded chunks. For teams, Crab also supports an optional **remote cache service** (`crab-cache-server`) that shares cached objects across all developers and CI runners.
+
+### How They Relate
+
+| | Local Cache | Remote Cache Service |
+|---|---|---|
+| **Scope** | Single machine | Entire team / org |
+| **Storage** | Your local disk (`~/.cache/crab/`) | Dedicated server with NVMe |
+| **Population** | Filled on fetch/hydrate | Filled on fetch + push warming |
+| **Eviction** | LRU when over `max_size` | Background evictor with high/low watermarks |
+| **Setup** | Zero config (automatic) | Requires server deployment |
+
+When both are configured, Crab checks the local cache first. On a local miss, it queries the remote cache service before falling back to cloud storage. This means the first developer to fetch a file warms the remote cache, and every subsequent fetch across the team is served at network-local speed.
+
+### Enabling the Remote Cache
+
+Add the cache service URL to your Crab config:
+
+```toml
+[cache]
+service_url = "https://crab-cache.internal:8443"
+service_auth = "psk"
+service_psk = "my-secret-key"
+push_warming = true
+```
+
+With `push_warming = true`, newly pushed xorbs are sent to the remote cache immediately — teammates can hydrate without waiting for a cold-start download from S3.
+
+For full deployment instructions, server configuration, and authentication setup, see the [Cache Service](/docs/cli/cache-service) guide.
+
+## Related Commands
+
+- [`crab hydrate`](/docs/cli/reference/crab-hydrate) — uses the cache during reconstruction.
+- [`crab fetch`](/docs/cli/reference/crab-fetch) — pre-fetch remote objects into the cache.
+- [`crab du`](/docs/cli/reference/crab-du) — includes cache in disk usage report.

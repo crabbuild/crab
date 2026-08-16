@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExportSummary",
+  "description": "Summary of a completed export invocation.",
+  "type": "object",
+  "required": [
+    "bytes_exported",
+    "bytes_planned",
+    "dry_run",
+    "duration_ms",
+    "files",
+    "files_conflicted",
+    "files_exported",
+    "files_planned",
+    "repo",
+    "requested_revision",
+    "resolved_revision",
+    "target_url"
+  ],
+  "properties": {
+    "bytes_exported": {
+      "description": "Bytes exported in this run.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "bytes_planned": {
+      "description": "Logical bytes across all selected files.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dry_run": {
+      "description": "Whether this was a dry run.",
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files": {
+      "description": "Per-file outcomes.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExportFileResult"
+      }
+    },
+    "files_conflicted": {
+      "description": "Number of files that would conflict with existing target objects.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files_exported": {
+      "description": "Number of files exported in this run.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "files_planned": {
+      "description": "Number of selected files.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "repo": {
+      "description": "Repository input string.",
+      "type": "string"
+    },
+    "requested_revision": {
+      "description": "Revision requested by the user.",
+      "type": "string"
+    },
+    "resolved_revision": {
+      "description": "Resolved commit SHA.",
+      "type": "string"
+    },
+    "target_url": {
+      "description": "Raw target URL.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ExportFileResult": {
+      "description": "Result for one planned export file.",
+      "type": "object",
+      "required": [
+        "bytes",
+        "object_path",
+        "repo_path",
+        "status"
+      ],
+      "properties": {
+        "bytes": {
+          "description": "Logical file size.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "object_path": {
+          "description": "Raw object path under the target bucket/container/root.",
+          "type": "string"
+        },
+        "repo_path": {
+          "description": "Repo-relative forward-slash path.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Outcome status.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ExportFileStatus"
+            }
+          ]
+        }
+      }
+    },
+    "ExportFileStatus": {
+      "description": "Per-file export outcome.",
+      "oneOf": [
+        {
+          "description": "File was exported.",
+          "type": "string",
+          "enum": [
+            "exported"
+          ]
+        },
+        {
+          "description": "Dry-run: file would be exported.",
+          "type": "string",
+          "enum": [
+            "would_export"
+          ]
+        },
+        {
+          "description": "Dry-run or preflight: target already exists.",
+          "type": "string",
+          "enum": [
+            "would_conflict"
+          ]
+        }
+      ]
+    }
+  }
+}

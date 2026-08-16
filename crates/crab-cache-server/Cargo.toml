@@ -1,0 +1,52 @@
+[package]
+name = "crab-cache-server"
+version = "1.0.12"
+edition = "2024"
+license = "Apache-2.0"
+description = "Cache server runtime contracts for Crab."
+
+[lib]
+name = "crab_cache_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crab-cache-server"
+path = "src/bin/crab_cache.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "matched-path"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+crab-cache = { workspace = true, features = ["active-probe"] }
+crab-storage = { workspace = true }
+crab-xet = { workspace = true }
+futures-util = { workspace = true }
+http-body-util = "0.1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+object_store = { workspace = true }
+rusqlite = { workspace = true }
+rustls = "0.23"
+rustls-pemfile = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = "0.10"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-util = { workspace = true, features = ["io"] }
+toml = { workspace = true }
+tower = { version = "0.5", features = ["timeout", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+crab-cache = { workspace = true, features = ["remote-client"] }

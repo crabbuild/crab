@@ -1,0 +1,229 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseManifest",
+  "description": "Deterministic release manifest binding a Git revision to Crab content.",
+  "type": "object",
+  "required": [
+    "crab",
+    "release_id",
+    "revision",
+    "schema_version",
+    "selected_refs",
+    "signature",
+    "workflow"
+  ],
+  "properties": {
+    "crab": {
+      "$ref": "#/definitions/ReleaseCrabInventory"
+    },
+    "release_id": {
+      "type": "string"
+    },
+    "revision": {
+      "$ref": "#/definitions/ReleaseRevision"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "selected_refs": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ReleaseRefTarget"
+      }
+    },
+    "signature": {
+      "$ref": "#/definitions/ReleaseSignature"
+    },
+    "workflow": {
+      "$ref": "#/definitions/ReleaseWorkflowMetadata"
+    }
+  },
+  "definitions": {
+    "ReleaseCrabInventory": {
+      "description": "Crab-managed large-file inventory included in a release manifest.",
+      "type": "object",
+      "required": [
+        "large_files"
+      ],
+      "properties": {
+        "large_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReleaseLargeFile"
+          }
+        }
+      }
+    },
+    "ReleaseLargeFile": {
+      "description": "One Crab pointer-backed file recorded by a release manifest.",
+      "type": "object",
+      "required": [
+        "file_hash",
+        "path",
+        "size"
+      ],
+      "properties": {
+        "file_hash": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "shard_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ReleaseRefTarget": {
+      "description": "Selected Git ref target included in a release manifest.",
+      "type": "object",
+      "required": [
+        "oid"
+      ],
+      "properties": {
+        "oid": {
+          "type": "string"
+        },
+        "peeled_oid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ReleaseRevision": {
+      "description": "Git revision selected for the release.",
+      "type": "object",
+      "required": [
+        "commit",
+        "requested"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "requested": {
+          "type": "string"
+        }
+      }
+    },
+    "ReleaseSignature": {
+      "description": "Detached signature metadata for a release manifest.",
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "key_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/ReleaseSignatureState"
+        }
+      }
+    },
+    "ReleaseSignatureState": {
+      "description": "Signature state reported by release verification.",
+      "type": "string",
+      "enum": [
+        "unsigned",
+        "signed",
+        "unsupported"
+      ]
+    },
+    "ReleaseWorkflowMetadata": {
+      "description": "Workflow metadata captured alongside repository content.",
+      "type": "object",
+      "required": [
+        "metrics",
+        "params",
+        "stages"
+      ],
+      "properties": {
+        "metrics": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReleaseWorkflowStage"
+          }
+        }
+      }
+    },
+    "ReleaseWorkflowOutput": {
+      "description": "One workflow output included in a release manifest stage.",
+      "type": "object",
+      "required": [
+        "file_hash",
+        "path",
+        "size"
+      ],
+      "properties": {
+        "file_hash": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ReleaseWorkflowStage": {
+      "description": "Workflow stage identity included in a release manifest.",
+      "type": "object",
+      "required": [
+        "name",
+        "outs",
+        "stage_hash"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "outs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReleaseWorkflowOutput"
+          }
+        },
+        "stage_hash": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

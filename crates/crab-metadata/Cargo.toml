@@ -1,0 +1,37 @@
+[package]
+name = "crab-metadata"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Metadata schema and graph contracts for Crab."
+
+[lib]
+name = "crab_metadata"
+path = "src/lib.rs"
+
+[features]
+default = []
+file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
+local-index = ["dep:rusqlite"]
+remote-index = ["dep:futures-util", "dep:object_store", "dep:slatedb"]
+storage = ["dep:crab-storage", "dep:object_store"]
+
+[dependencies]
+blake3 = { workspace = true }
+bytes = { workspace = true }
+crab-storage = { workspace = true, optional = true }
+crab-xet = { workspace = true }
+futures-util = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+slatedb = { version = "=0.14.1", optional = true, features = ["wal_disable", "zstd"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

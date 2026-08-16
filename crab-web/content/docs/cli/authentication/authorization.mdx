@@ -1,0 +1,260 @@
+---
+title: "Enterprise Authorization"
+description: "How to control who can read, write, and administer Crab repositories with policy-based Crab Auth."
+---
+
+# Enterprise Authorization
+
+Authentication answers "who is this developer?" Authorization answers "what can
+this developer do to this Crab repository?" Crab keeps those concerns separate:
+the CLI authenticates with your OIDC identity provider, then the enterprise auth
+service evaluates your policy and vends short-lived cloud credentials for the
+specific repository and operation.
+
+For most enterprises, the recommended authorization model is:
+
+1. Developers run `crab login` against your IdP.
+2. Read and maintenance operations call `/v1/credentials` with
+   `{ id_token, repo_url, operation, client_version }`.
+3. Push calls `/v1/push/prepare`, uploads staged immutable data, then calls
+   `/v1/push/finalize`.
+4. The auth service verifies the JWT, evaluates policy, and returns scoped
+   AWS, Azure, or GCP credentials. For push, it also verifies changed paths
+   server-side and commits the manifest with service-owned credentials.
+
+## Authorization Options
+
+| Approach | Best For | How Authorization Works |
+|----------|----------|-------------------------|
+| Static credentials | CI, small teams, break-glass admin use | Cloud IAM or environment credentials decide access |
+| Direct cloud OIDC | Single-cloud teams with cloud-native IAM rules | AWS/GCP/Azure trust policies and IAM decide access |
+| Crab Auth | Enterprise RBAC, ABAC, audit, multi-cloud | Your policy service decides access per repo and operation |
+
+Use `crab-auth` when you need per-repository permissions, group-based
+access, deny rules, audit logs, or a custom authorization system such as OPA,
+Cedar, LDAP, SCIM, Okta groups, or an internal entitlement service.
+
+## Request Contract
+
+For `/v1/credentials`, the Crab CLI keeps the authorization contract
+intentionally small:
+
+```json
+{
+  "id_token": "<oidc-id-token>",
+  "repo_url": "crab://ml-bucket/models/gpt4",
+  "operation": "fetch",
+  "client_version": "1.0.1"
+}
+```
+
+The `operation` field must be a concrete Crab operation. Requesting `"*"` is
+rejected. `/v1/credentials` also rejects `push`; Crab-auth push must use
+`/v1/push/prepare` and `/v1/push/finalize`.
+
+Successful `/v1/credentials` responses return a cloud provider, credentials,
+expiry, and effective permissions:
+
+```json
+{
+  "provider": "aws",
+  "credentials": {
+    "access_key_id": "ASIAXXX...",
+    "secret_access_key": "...",
+    "session_token": "...",
+    "region": "us-west-2"
+  },
+  "expires_at": "2026-06-07T18:00:00Z",
+  "permissions": ["read"]
+}
+```
+
+Protected push prepare responses instead return `push_id`, `upload_prefix`, and
+staging-only immutable-write credentials. Finalize verifies the staged bundle,
+computes changed paths from Git objects, rechecks policy against those verified
+paths, and performs the manifest CAS from the auth service.
+
+## Policy Model
+
+The reference auth service uses a YAML policy file. Rules match identity or
+group claims from the ID token, repository path globs, requested operations, and
+an optional cloud provider override.
+
+```yaml
+version: "1"
+default_provider: aws
+
+deny:
+  - group: "contractors"
+    repos: ["releases/*"]
+    operations: ["push", "gc", "workflow-push-cache"]
+
+rules:
+  - group: "platform-admins"
+    repos: ["*"]
+    operations: ["*"]
+
+  - group: "ml-team"
+    repos:
+      - "ml-models/*"
+      - "datasets/*"
+    operations:
+      - "fetch"
+      - "clone"
+      - "pull"
+      - "push"
+      - "workflow-cache-pull"
+      - "workflow-push-cache"
+
+  - identity: "alice@corp.example.com"
+    repos: ["experiments/alice/*"]
+    operations: ["*"]
+    provider: aws
+```
+
+Rules are evaluated fail-closed:
+
+- If no policy file exists, no credentials are issued.
+- Deny rules are evaluated before allow rules.
+- The first matching allow rule wins.
+- Unknown operations are rejected.
+- `"*"` can match repos, identities, groups, or operations in policy rules.
+
+## Operation Permissions
+
+Crab maps each allowed operation to storage permissions before asking the cloud
+provider for scoped credentials.
+
+| Permission path | Operations |
+|-----------------|------------|
+| Protected push receive flow | `push` |
+| Direct read + write credentials | `gc`, `repack`, `compact`, `lock`, `lfs`, `metadb`, `optimize-xorbs`, `tier`, `workflow-push-cache` |
+| Read credentials | `fetch`, `clone`, `clone:shard-sync`, `diff`, `hydrate`, `pull`, `mount`, `fsck`, `du`, `doctor`, `smudge`, `ship:manifest-check`, `prune`, `workflow-cache-pull` |
+
+Start with the smallest set of operations a team needs. For example, a consumer
+team usually needs `fetch`, `clone`, `pull`, and `hydrate`; a producer team also
+needs `push`; platform operators may need `gc`, `repack`, `compact`, `fsck`,
+`optimize-xorbs`, and `tier`.
+
+## Provider Scoping
+
+Authorization only matters if the returned credentials are scoped correctly.
+The reference service uses provider-specific controls:
+
+| Provider | Enforcement Model |
+|----------|-------------------|
+| AWS | Inline STS session policies scope object access to the requested bucket prefix. Bucket-root repos are rejected. |
+| Azure | Directory-scoped SAS (`sr=d` with `sdd`) scopes object access to the requested container prefix. Container-root repos are rejected. |
+| GCP | Cloud Storage Credential Access Boundaries downscope issued credentials to the requested repo prefix and protected-push staging prefix. |
+
+Repo URLs must include a non-empty repo prefix such as
+`crab://bucket/team/repo`; bucket-root and container-root repo URLs are rejected
+because they cannot be safely scoped as an enterprise repo boundary.
+
+## Rollout Steps
+
+### 1. Choose identity claims
+
+Decide which claim is authoritative for users and groups. The reference service
+uses `email` as the preferred identity and falls back to `sub`; groups are read
+from a `groups` array claim.
+
+### 2. Create the CLI OIDC app
+
+Register a public client for the Crab CLI with authorization-code + PKCE and
+device-code grants. Set `CRAB_AUTH_ISSUER`, `CRAB_AUTH_AUDIENCE`, and
+`CRAB_AUTH_JWKS_URL` on the auth service to match that app.
+
+### 3. Define repository namespaces
+
+Make repo paths map cleanly to ownership boundaries:
+
+```text
+crab://ml-bucket/ml-models/*
+crab://ml-bucket/datasets/*
+crab://ml-bucket/releases/*
+crab://ml-bucket/experiments/alice/*
+```
+
+This makes policy review and cloud prefix scoping much easier.
+
+### 4. Write allow and deny rules
+
+Begin with read-only access, then add write operations where needed. Use deny
+rules for explicit emergency blocks, not as your main policy structure.
+
+### 5. Deploy the auth service
+
+Use the [Self-Hosted Auth Server](self-hosted-auth-server) guide to deploy the
+reference implementation, or implement the same `/v1/credentials` and
+`/v1/push/*` contracts in your own service.
+
+### 6. Configure developers
+
+```toml
+[auth]
+provider = "crab-auth"
+issuer_url = "https://login.corp.example.com"
+client_id = "crab-cli-prod"
+auth_endpoint = "https://crab-auth.corp.example.com/v1/credentials"
+scopes = "openid email profile offline_access"
+```
+
+Developers then run:
+
+```bash
+crab login
+crab auth status
+```
+
+### 7. Validate with real operations
+
+Test both allowed and denied actions:
+
+```bash
+crab clone crab://ml-bucket/datasets/public
+crab push
+crab fsck
+crab auth status --json
+```
+
+The auth service should log identity, repo URL, operation, decision, provider,
+and credential expiry. It must never log token values or cloud secrets.
+
+## Custom Authorization Services
+
+You do not have to use the YAML policy engine. Enterprises can replace the
+reference authorization layer while keeping the CLI unchanged. A custom service
+can:
+
+- Verify JWTs with your existing identity middleware.
+- Read groups from Okta, Entra ID, Google Workspace, LDAP, SCIM, or HR systems.
+- Evaluate policies with OPA, Cedar, Zanzibar-style tuples, or an internal
+  entitlement API.
+- Require approvals for write or destructive operations.
+- Emit audit events to SIEM, data governance, or incident response systems.
+
+Keep the `/v1/credentials` request and response schema compatible for read and
+maintenance operations. For push, implement `/v1/push/prepare` and
+`/v1/push/finalize`; Crab does not fall back to direct push credentials.
+
+## Failure Behavior
+
+The auth service should fail closed:
+
+| Condition | HTTP Status | CLI Behavior |
+|-----------|-------------|--------------|
+| Invalid or expired ID token | `401` | Refresh token and retry once |
+| Authorized identity lacks access | `403` | Stop and show an auth failure |
+| Request is rate limited | `429` | Respect `Retry-After` |
+| Cloud credential generation fails | `5xx` | Retry transient failures |
+
+For high-security deployments, combine the built-in per-instance rate limiter
+with API Gateway, Cloud Run, load balancer, or service mesh throttling.
+
+## Related
+
+- [Enterprise Authentication](enterprise-auth) - supported auth providers
+- [Self-Hosted Auth Server](self-hosted-auth-server) - deploy the reference service
+- [Logging In](logging-in) - developer login flow
+- [Auth Status](auth-status) - verify local auth state

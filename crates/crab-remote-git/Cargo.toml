@@ -1,0 +1,39 @@
+[package]
+name = "crab-remote-git"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Bounded Git object reads from Crab object storage."
+
+[lib]
+name = "crab_remote_git"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+bytes = { workspace = true }
+crab-git = { workspace = true }
+crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
+crab-storage = { workspace = true }
+crab-xet = { workspace = true }
+gix-features = { workspace = true, features = ["crc32", "zlib"] }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true }
+gix-pack = { workspace = true, features = ["sha1"] }
+futures-util = { workspace = true }
+sha1 = "0.10"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
+object_store = { workspace = true }
+proptest = "1"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing-subscriber = "0.3"

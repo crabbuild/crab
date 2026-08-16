@@ -1,0 +1,55 @@
+# Kubernetes ConfigMap with a sample crab-cache-server config.
+#
+# Edit the values below to match your environment, then apply:
+#   kubectl apply -f configmap.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crab-cache-config
+  labels:
+    app: crab-cache-server
+data:
+  config.toml: |
+    # crab-cache-server configuration.
+    # Replace bucket, auth, and cache sizing before production use.
+
+    [server]
+    listen_addr = "0.0.0.0:8443"
+    drain_timeout_secs = 30
+
+    # TLS — uncomment and mount certs for native server TLS.
+    # [tls]
+    # cert_path = "/etc/crab-cache-server/tls/server.crt"
+    # key_path  = "/etc/crab-cache-server/tls/server.key"
+    # client_ca_path is parsed but native client-cert validation is not
+    # wired yet. Use a trusted proxy/service mesh for mTLS and X-Client-CN.
+    # client_ca_path = "/etc/crab-cache-server/tls/ca.crt"
+
+    [auth]
+    mechanism = "psk"
+    # blake3 hash of the shared cache PSK:
+    #   echo -n "your-shared-secret" | b3sum | cut -d' ' -f1
+    # Render this value from a Secret in production; CRAB_CACHE_PSK_HASH
+    # is not a supported env override.
+    # Sample value is the blake3 hash of "my-secret-key".
+    psk_hash = "523d85e3b55699290849a9ba68eb22ef2780749508af9962d1f103fdc610a80b"
+
+    [origin]
+    # Object store URL. Credentials from env (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, etc.)
+    url = "s3://my-bucket"
+
+    [cache]
+    root = "/data/crab-cache"
+    max_bytes = 1099511627776  # 1 TiB
+
+    [dedup]
+    scope = "all"
+
+    [eviction]
+    high_water_ratio = 0.95
+    low_water_ratio = 0.90
+
+    [logging]
+    format = "json"
+    level = "info"

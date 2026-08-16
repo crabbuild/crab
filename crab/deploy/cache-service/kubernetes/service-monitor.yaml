@@ -1,0 +1,21 @@
+# Prometheus Operator scrape config for crab-cache-server.
+#
+# Requires the ServiceMonitor CRD from prometheus-operator/kube-prometheus.
+# The endpoint uses the Service port name because ServiceMonitor endpoints
+# resolve `port` against Service ports.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: crab-cache-server
+  labels:
+    app: crab-cache-server
+spec:
+  selector:
+    matchLabels:
+      app: crab-cache-server
+  endpoints:
+    - port: https
+      path: /v1/metrics
+      interval: 30s
+      scrapeTimeout: 10s

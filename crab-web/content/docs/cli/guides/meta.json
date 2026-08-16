@@ -1,0 +1,10 @@
+{
+  "title": "Tutorials & Guides",
+  "pages": [
+    "index",
+    "sharing-repositories",
+    "migrating-from-lfs",
+    "ci-cd-integration",
+    "migrating-from-dvc"
+  ]
+}

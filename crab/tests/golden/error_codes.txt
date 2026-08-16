@@ -1,0 +1,97 @@
+CRAB-E0001: Network transient error
+CRAB-E0002: Request throttled by the object store
+CRAB-E0010: CAS (compare-and-swap) conflict
+CRAB-E0011: Ref already exists
+CRAB-E0012: Push lock held by another push
+CRAB-E0017: Non-fast-forward push rejected
+CRAB-E0020: Corrupt object detected
+CRAB-E0021: Chunk not found in storage
+CRAB-E0030: Object not found in storage
+CRAB-E0031: Access forbidden
+CRAB-E0040: No credentials available
+CRAB-E0041: Insufficient local disk space
+CRAB-E0042: Authentication failed
+CRAB-E0043: Credentials expired
+CRAB-E0050: Configuration error
+CRAB-E0051: Incompatible format version
+CRAB-E0052: Invalid glob pattern
+CRAB-E0060: Remote helper protocol error
+CRAB-E0070: I/O error
+CRAB-E0071: Object store error
+CRAB-E0080: Staging area corrupt
+CRAB-E0081: Staging area locked by another process
+CRAB-E0082: Chunk hash mismatch
+CRAB-E0083: Segment CRC mismatch
+CRAB-E0084: Pack integrity check failed
+CRAB-E0085: Shard reconstruction incomplete
+CRAB-E0086: Pointer has no staged chunks
+CRAB-E0087: Push connectivity check failed
+CRAB-E0088: Push pipeline failed with partial outcomes
+CRAB-E0089: File changed during staging
+CRAB-E0090: Operation cancelled
+CRAB-E0091: Commit beyond shallow boundary
+CRAB-E0092: Pack too large
+CRAB-E0093: Malformed object rejected by push fsck
+CRAB-E0094: Fetch not allowed
+CRAB-E0095: Fetch too large
+CRAB-E0096: Fetched manifest inventory is incomplete
+CRAB-E0097: Push integration rebase failed
+CRAB-E0099: Internal error (bug)
+CRAB-E0106: LFS command is not yet safely supported
+CRAB-E0110: Cache service error
+CRAB-E0111: Import target repo already has an origin remote
+CRAB-E0112: Import source prefix is already a Crab repo
+CRAB-E0113: Import source uses Git LFS format
+CRAB-E0114: Import plan mismatch
+CRAB-E0115: Import journal missing
+CRAB-E0116: Git identity not configured for import
+CRAB-E0117: Import source prefix collides with target layout
+CRAB-E0118: Import source must be a raw cloud URL
+CRAB-E0119: Import source and target schemes disagree
+CRAB-E0120: Import versioning unavailable
+CRAB-E0121: Import commit ceiling exceeded
+CRAB-E0122: Import history range is invalid
+CRAB-E0123: Import target directory is not empty
+CRAB-E0130: Git pull encountered merge conflicts
+CRAB-E0131: Remote unreachable during pull
+CRAB-E0132: Unadopt chunks missing from staging
+CRAB-E0133: Nothing to undo
+CRAB-E0134: Invalid config key
+CRAB-E0135: Unsupported shell for completions
+CRAB-E0239: Stage on_cache_hit hook failed
+CRAB-E0240: Remote cache entry corrupt
+CRAB-E0241: Remote cache entry hash mismatch
+CRAB-E0242: Remote cache is read-only
+CRAB-E0243: Workflow validation error: invalid field value
+CRAB-E0244: Workflow self-loop: a stage dep is also one of its own outs
+CRAB-E0245: Journal disk full during write
+CRAB-E0248: Matrix expansion has an empty value list for a variable
+CRAB-E0300: Lifecycle rule conflict
+CRAB-E0301: Not authorized to apply lifecycle rules
+CRAB-E0302: Provider not supported for tiering
+CRAB-E0310: Archive restore required before read
+CRAB-E0311: Archive restore timed out
+CRAB-E0312: Restore tier not supported for storage class
+CRAB-E0320: GC early delete blocked by minimum retention
+CRAB-E0321: Object locked by retention policy
+CRAB-E0330: Xorb optimization profile target size out of range
+CRAB-E0331: Xorb optimization source xorb is corrupt
+CRAB-E0332: Xorb optimization already in progress
+CRAB-E0333: Concurrent maintenance operation detected
+CRAB-E0340: Pricing data missing for provider/region
+CRAB-E0341: Inventory report is stale
+CRAB-E0400: Manifest parse error
+CRAB-E0401: Prefetch config error
+CRAB-E0402: Prefetch profile not found
+CRAB-E0410: Speculation database error
+CRAB-E0500: MetaDB open failed
+CRAB-E0501: MetaDB close failed
+CRAB-E0502: MetaDB read failed
+CRAB-E0503: MetaDB write failed
+CRAB-E0505: MetaDB format version unsupported
+CRAB-E0506: File hash not found in file_index_db
+CRAB-E0507: MetaDB corrupt value
+CRAB-E0508: MetaDB already closed
+CRAB-E0509: MetaDB handle is read-only
+CRAB-E050A: MetaDB read-only open against uninitialized database
+CRAB-E050B: MetaDB operation and close both failed

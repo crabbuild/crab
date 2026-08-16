@@ -1,0 +1,115 @@
+---
+title: "crab add"
+description: "Stage files for crab using parallel chunking, bypassing git's serial filter protocol."
+---
+
+# crab add
+
+Stage files for crab, bypassing git's serial filter protocol.
+
+## Synopsis
+
+```
+crab add [OPTIONS] <PATTERNS>...
+```
+
+## Description
+
+`crab add` processes files matching the given glob patterns in parallel:
+hashing, content-defined chunking (CDC), staging chunks locally, and writing
+pointer files. It is significantly faster than `git add` for many large files
+because it bypasses git's serial filter-process protocol and processes files
+concurrently.
+
+After chunking and staging, `crab add` runs `git add` on the resulting
+pointer files so they appear in git's index ready for commit — unless
+`--skip-git-add` is specified.
+
+For conceptual background on adding files and content-defined chunking, see [Adding Files](/docs/cli/daily-workflow/adding-files).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `patterns` | Yes | One or more glob patterns to match files (e.g. `*.safetensors`, `models/`) |
+
+## Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--jobs` | `-j` | `16` | Maximum number of concurrent file-processing tasks |
+| `--dry-run` | | `false` | Show what would be added without staging or writing pointers |
+| `--skip-git-add` | | `false` | Skip the final `git add` step (stage chunks only) |
+| `--json` | | `false` | Emit a single JSON envelope with the result |
+| `--jsonl` | | `false` | Stream JSONL output (one event per line) |
+
+## Examples
+
+### Add all safetensors files
+
+```bash
+crab add '*.safetensors'
+```
+
+### Add files from a specific directory
+
+```bash
+crab add 'models/*'
+```
+
+### Add with higher parallelism
+
+```bash
+crab add -j 16 '*.bin' '*.safetensors'
+```
+
+### Dry run to preview what would be staged
+
+```bash
+crab add --dry-run '*.bin'
+```
+
+### Stage chunks without running git add
+
+```bash
+crab add --skip-git-add '*.bin'
+git add models/weights.bin  # manually add later
+```
+
+## Output
+
+```
+Added 5 files (2.3 GB total, 847 chunks)
+  models/weights.bin       1.2 GB  423 chunks
+  models/embeddings.bin    800 MB  312 chunks
+  data/train.safetensors   300 MB  112 chunks
+  ...
+```
+
+In dry-run mode, the output is prefixed with `(dry run)` and no files are
+modified.
+
+## Pattern Syntax
+
+`crab add` uses git's pathspec syntax (`gix-pathspec`):
+
+- `*.bin` — matches files ending in `.bin` anywhere in the tree
+- `models/**` — matches every path under `models/`
+- `:(exclude)*.tmp` — excludes `.tmp` files from the result
+- `:(glob)models/**.bin` — force glob semantics
+- `:(icase)README.md` — case-insensitive match
+
+Multiple patterns compose: `crab add 'models/**' ':(exclude)models/archive/**'`
+
+## JSON Output
+
+`--json` emits one terminal result envelope. `--jsonl` streams progress events
+and ends with a result event. See [Structured Output](/docs/cli/reference/structured-output)
+for envelope details, event types, and error handling.
+
+## Related Commands
+
+- [`crab track`](/docs/cli/reference/crab-track) — register file patterns for crab tracking.
+- [`crab reset`](/docs/cli/reference/crab-reset) — unstage files and clean staging data.
+- [`crab status`](/docs/cli/reference/crab-status) — see hydration state of tracked files.
+- [`crab staging`](/docs/cli/reference/crab-staging) — inspect the staging area.

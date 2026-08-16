@@ -1,0 +1,149 @@
+---
+title: "crab hydrate"
+description: "Materialize pointer files into full content by downloading and reconstructing from the remote store."
+---
+
+# crab hydrate
+
+Materialize pointer files into full content.
+
+## Synopsis
+
+```
+crab hydrate [OPTIONS] [GLOBS]...
+```
+
+## Description
+
+`crab hydrate` downloads chunk data from the remote store and reconstructs
+the original file content, replacing pointer stubs with the actual files. This
+is the primary way to "check out" large files after a lazy clone or after
+switching branches.
+
+Hydration is selective: you can hydrate specific files by glob pattern, or use
+`--all` to hydrate everything. Files that are already hydrated (full content on
+disk matching the expected size) are skipped automatically.
+
+For conceptual background on hydration and lazy checkout, see [Hydrating Files](/docs/cli/daily-workflow/hydrating-files).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `GLOBS` | No | Positional glob patterns to hydrate (e.g. `*.safetensors`) |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--include` | | Additional include patterns (composable with positional globs) |
+| `--exclude` | | Exclude patterns (subtract from includes) |
+| `--all` | `false` | Hydrate all tracked pointer files |
+| `--manifest <path>` | | Hydrate files listed in a manifest file |
+| `--manifest-ref <ref>` | | Read manifest from a committed file (git revision syntax) |
+| `--profile <name>` | | Use a named prefetch profile from `.crab/prefetch.toml` |
+| `--ignore-sparse` | `false` | Ignore sparse-checkout rules during hydration |
+| `--recover-from <path>` | | Recover matching files from a local file or directory before fetching remotely |
+| `--restore` | `false` | Restore archived xorbs before downloading them |
+| `--no-restore` | `false` | Fail instead of restoring archived xorbs |
+| `--restore-tier <tier>` | | Storage tier for archived xorb restoration |
+| `--restore-duration-days <days>` | | Number of days restored copies remain readable |
+| `--clear-speculation` | `false` | Clear the speculation database and exit |
+| `--json` | `false` | Emit a single JSON envelope with the result |
+| `--jsonl` | `false` | Stream JSONL output (one event per line) |
+
+## Examples
+
+### Hydrate specific file types
+
+```bash
+crab hydrate '*.safetensors'
+```
+
+### Hydrate multiple patterns
+
+```bash
+crab hydrate '*.bin' '*.safetensors'
+```
+
+### Hydrate with include/exclude
+
+```bash
+crab hydrate --include '*.bin' --exclude 'archive/*'
+```
+
+### Hydrate everything
+
+```bash
+crab hydrate --all
+```
+
+### Hydrate from a manifest
+
+```bash
+crab hydrate --manifest .crab/manifests/ci.txt
+```
+
+### Hydrate from stdin
+
+```bash
+git diff --name-only HEAD~1 | crab hydrate --manifest -
+```
+
+### Hydrate from a committed manifest
+
+```bash
+crab hydrate --manifest-ref HEAD:.crab/manifests/ci.txt
+```
+
+## Output
+
+```
+Hydrating 5 files...
+  models/weights.bin       1.2 GB  ✓
+  models/embeddings.bin    800 MB  ✓
+  data/eval.safetensors    300 MB  ✓
+  data/test.safetensors    150 MB  ✓
+  config/vocab.bin         2.1 MB  ✓
+
+Hydrated 5 files (2.5 GB) in 12.3s
+  Skipped: 3 files (already hydrated)
+```
+
+## Pattern Resolution
+
+Patterns are resolved in this order of precedence:
+
+1. Positional glob arguments (`crab hydrate '*.bin'`)
+2. `--include` / `--exclude` flags
+3. `--all` flag (overrides all patterns)
+4. If none specified, falls back to `hydrate.include` / `hydrate.exclude` from
+   `.crab/config.toml`
+5. If still nothing, prints help and exits
+
+## Manifest Format
+
+A manifest is a newline-delimited text file listing paths and globs relative
+to the repo root. Blank lines and lines starting with `#` are ignored:
+
+```
+# CI manifest
+src/main.rs
+src/**/*.rs
+*.toml
+Cargo.lock
+tests/fixtures/small/**
+```
+
+## JSON Output
+
+`--json` emits one terminal result envelope. `--jsonl` streams progress and
+per-file events before the result event. See [Structured Output](/docs/cli/reference/structured-output)
+for envelope details, event types, and error handling.
+
+## Related Commands
+
+- [`crab dehydrate`](/docs/cli/reference/crab-dehydrate) — replace hydrated files with pointers.
+- [`crab clone`](/docs/cli/reference/crab-clone) — clone with optional selective hydration.
+- [`crab fetch`](/docs/cli/reference/crab-fetch) — pre-fetch objects into the local cache.
+- [`crab status`](/docs/cli/reference/crab-status) — see which files are hydrated vs. pointers.

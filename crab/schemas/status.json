@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatusPayload",
+  "description": "JSON payload for `crab status --json`.",
+  "type": "object",
+  "required": [
+    "files",
+    "hydrated",
+    "modified",
+    "pointer",
+    "total_tracked"
+  ],
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/StatusEntry"
+      }
+    },
+    "hydrated": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "modified": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "pointer": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "total_tracked": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "StatusEntry": {
+      "description": "One file in the `StatusPayload.files` array.",
+      "type": "object",
+      "required": [
+        "bytes",
+        "path",
+        "state"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

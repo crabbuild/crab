@@ -1,0 +1,62 @@
+---
+title: "Cache Service"
+description: "Enterprise guide to deploying and operating the Crab cache service."
+---
+
+# Cache Service
+
+The Crab cache service is a self-hosted acceleration layer for teams that work with large repositories, repeated hydrations, CI fleets, and shared binary data.
+
+It helps reduce:
+
+- Repeated object-store reads.
+- Object-store request volume.
+- Upload churn when pushed content overlaps with data already known by the organization.
+
+The origin object store remains authoritative. If the cache service is unavailable, Crab falls back to normal origin reads and uploads.
+
+## When To Use It
+
+Deploy the cache service when:
+
+- Multiple developers clone, fetch, or hydrate the same large repositories.
+- CI jobs repeatedly fetch the same data.
+- Multiple repositories share datasets, model checkpoints, media, or build outputs.
+- You want pushed content to become warm for the rest of the team immediately.
+- You want a central operational point for cache metrics and capacity planning.
+
+You usually do not need it for single-user workflows or small repositories.
+
+## What Users Get
+
+| Capability | Outcome |
+|------------|---------|
+| Read-through cache | Repeated clones, fetches, and hydrates avoid repeated origin reads. |
+| Push warming | Newly pushed data can be served from the cache immediately. |
+| Shared dedup knowledge | Pushes can skip chunks the cache service already knows about. |
+| Central metrics | Operators can track cache hit rate, bytes served, and origin miss behavior. |
+
+## Recommended Rollout
+
+1. Copy `crab/deploy/cache-service/enterprise-onboarding/` and edit origin,
+   policy, cache sizing, and secrets.
+2. Deploy one cache service near the object-store region.
+3. Use PSK authentication on a private network for the first rollout.
+4. Configure one test repository with `[cache].service_url` or `CRAB_CACHE_SERVICE_URL`.
+5. Push data and verify cache warming.
+6. Clear a client local cache and verify hydrate or fetch reads through the service.
+7. Roll the config out to CI and developer machines.
+8. Use separate cache instances for environments or tenants that must not share dedup visibility.
+
+## Documentation Map
+
+- [Deployment](/docs/cli/cache-service/deployment): Docker, Kubernetes, and systemd deployment.
+- [Quickstart](/docs/cli/cache-service/quickstart): start one service and connect one client.
+- [How It Works](/docs/cli/cache-service/architecture): request flow, data safety, and isolation model.
+- [Server Configuration](/docs/cli/cache-service/server-configuration): TOML reference.
+- [Client Configuration](/docs/cli/cache-service/client-configuration): Crab and CI configuration.
+- [Authentication](/docs/cli/cache-service/authentication): PSK, bearer, and proxy-terminated mTLS.
+- [Monitoring](/docs/cli/cache-service/monitoring): health checks, metrics, dashboards, and alerts.
+- [Runbooks](/docs/cli/cache-service/runbooks): alert response procedures.
+- [Operations](/docs/cli/cache-service/operations): sizing, scaling, upgrades, and recovery.
+- [Troubleshooting](/docs/cli/cache-service/troubleshooting): symptom-first diagnostics.

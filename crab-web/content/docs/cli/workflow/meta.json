@@ -1,0 +1,18 @@
+{
+  "title": "Workflow",
+  "pages": [
+    "index",
+    "quickstart",
+    "concepts",
+    "authoring-stages",
+    "running-pipelines",
+    "params-metrics-plots",
+    "experiments",
+    "hydra",
+    "queues",
+    "remote-cache-ci",
+    "split-workflows-lockfiles",
+    "operations-troubleshooting",
+    "dvc-migration"
+  ]
+}

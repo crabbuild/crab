@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 500" width="820" height="500">
+
+  <defs>
+    <marker id="arrow-solid" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <g id="background">
+    <rect x="0" y="0" width="820" height="500" fill="#F9FAFB"/>
+  </g>
+
+  <!-- Containers -->
+  <g id="containers">
+    <!-- Coordinator container (left) -->
+    <rect x="60" y="70" width="300" height="370" rx="12" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+    <!-- Mounts container (right) -->
+    <rect x="460" y="70" width="300" height="370" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1"/>
+  </g>
+
+  <!-- Nodes -->
+  <g id="nodes">
+    <!-- Coordinator components -->
+    <rect x="90" y="120" width="240" height="64" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="90" y="220" width="240" height="64" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="90" y="320" width="240" height="56" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+
+    <!-- Shared bus (vertical backbone) -->
+    <rect x="398" y="120" width="4" height="280" rx="2" fill="#CBD5E1"/>
+
+    <!-- Active mounts -->
+    <rect x="490" y="120" width="240" height="60" rx="10" fill="#FFFFFF" stroke="#14B8A6" stroke-width="1.5"/>
+    <rect x="490" y="220" width="240" height="60" rx="10" fill="#FFFFFF" stroke="#14B8A6" stroke-width="1.5"/>
+    <rect x="490" y="320" width="240" height="60" rx="10" fill="#FFFFFF" stroke="#14B8A6" stroke-width="1.5"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <!-- Title -->
+    <text x="410" y="40" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#0F172A">FUSE Architecture</text>
+
+    <!-- Container titles -->
+    <text x="90" y="100" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#2563EB" letter-spacing="0.5">COORDINATOR PROCESS</text>
+    <text x="490" y="100" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#0D9488" letter-spacing="0.5">ACTIVE MOUNTS</text>
+
+    <!-- Coordinator labels -->
+    <text x="210" y="147" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#0F172A">Chunk Cache</text>
+    <text x="210" y="167" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">shared · LRU · 10 GB default</text>
+
+    <text x="210" y="247" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#0F172A">Hydration Pool</text>
+    <text x="210" y="267" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">8 workers · priority queue</text>
+
+    <text x="210" y="352" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="14" font-weight="600" fill="#0F172A">Mount Registry</text>
+
+    <!-- Mount labels -->
+    <text x="610" y="145" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">/mnt/models</text>
+    <text x="610" y="163" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">remote</text>
+
+    <text x="610" y="245" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">/mnt/data</text>
+    <text x="610" y="263" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">remote</text>
+
+    <text x="610" y="345" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">/tmp/branch-view</text>
+    <text x="610" y="363" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#64748B">local</text>
+
+    <!-- Bus label -->
+    <text x="400" y="420" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#94A3B8">shared bus</text>
+  </g>
+
+  <!-- Connections -->
+  <g id="connections">
+    <!-- Row 1: Chunk Cache ↔ /mnt/models -->
+    <line x1="330" y1="150" x2="398" y2="150" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <line x1="402" y1="150" x2="490" y2="150" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+
+    <!-- Row 2: Hydration Pool ↔ /mnt/data -->
+    <line x1="330" y1="250" x2="398" y2="250" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <line x1="402" y1="250" x2="490" y2="250" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+
+    <!-- Row 3: Mount Registry ↔ /tmp/branch-view -->
+    <line x1="330" y1="348" x2="398" y2="348" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <line x1="402" y1="348" x2="490" y2="348" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  </g>
+
+  <!-- Info callout -->
+  <g id="callout">
+    <rect x="60" y="455" width="700" height="36" rx="10" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
+    <circle cx="84" cy="473" r="10" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1"/>
+    <text x="84" y="477" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#2563EB">i</text>
+    <text x="106" y="477" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#334155">All mounts share a single coordinator process — cache and hydration resources are pooled, not duplicated per mount.</text>
+  </g>
+
+</svg>

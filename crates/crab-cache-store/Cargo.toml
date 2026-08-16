@@ -1,0 +1,36 @@
+[package]
+name = "crab-cache-store"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Read-through cache adapter over Crab storage."
+
+[lib]
+name = "crab_cache_store"
+path = "src/lib.rs"
+
+[features]
+default = []
+remote-client = ["crab-cache/remote-client"]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+crab-cache = { workspace = true, features = ["local-cache"] }
+crab-storage = { workspace = true }
+crab-xet = { workspace = true }
+futures-util = { workspace = true }
+object_store = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json", "matched-path"] }
+blake3 = { workspace = true }
+crab-cache-server = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }

@@ -1,0 +1,787 @@
+//! Shallow boundary computation and `.git/shallow` file management.
+//!
+//! Provides BFS-based boundary computation over a [`CommitGraphSummary`],
+//! pack filtering by depth, and helpers for writing/removing the
+//! `.git/shallow` sentinel file.
+
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
+
+use tokio::fs;
+use tracing::{Instrument, debug};
+
+use crate::core::error::{CrabError, Result};
+use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::manifests::PackList;
+
+/// Compute the shallow boundary for a given depth and ref set.
+///
+/// Walks the [`CommitGraphSummary`] from each ref tip via BFS, stopping
+/// at depth `depth`. Commits at exactly depth N form the boundary.
+///
+/// Returns borrowed references into the summary's OID strings to avoid
+/// per-boundary-commit allocation.
+///
+/// Special cases:
+/// - `depth == 0`: the boundary equals the ref tips themselves (no commits
+///   are fetched).
+/// - `depth` exceeds the graph height: the boundary is empty (full clone).
+/// - Empty graph or no matching tips: the boundary is empty.
+pub fn compute_shallow_boundary<'a>(
+    summary: &'a CommitGraphSummary,
+    ref_tips: &[String],
+    depth: u32,
+) -> Vec<Cow<'a, str>> {
+    if ref_tips.is_empty() || summary.commits.is_empty() {
+        return Vec::new();
+    }
+
+    // depth=0 means "no commits fetched" — the tips themselves are the boundary.
+    if depth == 0 {
+        // Only return tips that actually exist in the graph.
+        let known: HashMap<&str, &str> = summary
+            .commits
+            .iter()
+            .map(|c| (c.oid.as_str(), c.oid.as_str()))
+            .collect();
+        return ref_tips
+            .iter()
+            .filter_map(|t| known.get(t.as_str()).map(|&oid| Cow::Borrowed(oid)))
+            .collect();
+    }
+
+    // Build OID → CommitEntry lookup.
+    let by_oid: HashMap<&str, &crab_metadata::commit_graph::CommitEntry> = summary
+        .commits
+        .iter()
+        .map(|c| (c.oid.as_str(), c))
+        .collect();
+
+    // BFS from each ref tip, tracking depth per commit.
+    let mut visited: HashMap<&str, u32> = HashMap::new();
+    let mut queue: VecDeque<(&str, u32)> = VecDeque::new();
+
+    for tip in ref_tips {
+        if by_oid.contains_key(tip.as_str()) && !visited.contains_key(tip.as_str()) {
+            visited.insert(tip.as_str(), 1);
+            queue.push_back((tip.as_str(), 1));
+        }
+    }
+
+    let mut boundary: Vec<Cow<'a, str>> = Vec::new();
+
+    while let Some((oid, current_depth)) = queue.pop_front() {
+        if current_depth == depth {
+            // Borrow the OID from the summary's CommitEntry to avoid allocation.
+            if let Some(entry) = by_oid.get(oid) {
+                boundary.push(Cow::Borrowed(entry.oid.as_str()));
+            }
+            continue;
+        }
+
+        if let Some(entry) = by_oid.get(oid) {
+            if !entry.parents.is_empty()
+                && entry
+                    .parents
+                    .iter()
+                    .any(|parent| !by_oid.contains_key(parent.as_str()))
+            {
+                // A retained commit whose parent is absent marks compaction's
+                // edge. Keep it shallow instead of treating an incomplete
+                // summary as proof that the repository root was reached.
+                boundary.push(Cow::Borrowed(entry.oid.as_str()));
+                continue;
+            }
+            for parent_oid in &entry.parents {
+                if let Some(&prev_depth) = visited.get(parent_oid.as_str())
+                    && prev_depth <= current_depth + 1
+                {
+                    continue;
+                }
+                if by_oid.contains_key(parent_oid.as_str()) {
+                    visited.insert(parent_oid.as_str(), current_depth + 1);
+                    queue.push_back((parent_oid.as_str(), current_depth + 1));
+                }
+            }
+        }
+    }
+
+    boundary.sort();
+    boundary.dedup();
+
+    debug!(
+        boundary_len = boundary.len(),
+        depth,
+        tips = ref_tips.len(),
+        "computed shallow boundary"
+    );
+
+    boundary
+}
+
+/// Compute the set of commit OIDs reachable from `ref_tips` via BFS,
+/// stopping at commits in the `boundary` set.
+///
+/// The boundary commits themselves are included in the reachable set —
+/// they mark the edge of the shallow clone but are still needed for
+/// pack filtering.
+fn compute_reachable_set(
+    summary: &CommitGraphSummary,
+    ref_tips: &[String],
+    boundary: &[impl AsRef<str>],
+) -> HashSet<String> {
+    let by_oid: HashMap<&str, &crab_metadata::commit_graph::CommitEntry> = summary
+        .commits
+        .iter()
+        .map(|c| (c.oid.as_str(), c))
+        .collect();
+
+    let boundary_set: HashSet<&str> = boundary.iter().map(std::convert::AsRef::as_ref).collect();
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+
+    for tip in ref_tips {
+        if by_oid.contains_key(tip.as_str()) && !visited.contains(tip.as_str()) {
+            visited.insert(tip.clone());
+            queue.push_back(tip.as_str());
+        }
+    }
+
+    while let Some(oid) = queue.pop_front() {
+        // Don't expand past the boundary — the commit is reachable but
+        // its parents are outside the shallow window.
+        if boundary_set.contains(oid) {
+            continue;
+        }
+
+        if let Some(entry) = by_oid.get(oid) {
+            for parent_oid in &entry.parents {
+                if by_oid.contains_key(parent_oid.as_str())
+                    && !visited.contains(parent_oid.as_str())
+                {
+                    visited.insert(parent_oid.clone());
+                    queue.push_back(parent_oid.as_str());
+                }
+            }
+        }
+    }
+
+    visited
+}
+
+/// Filter packs to only those containing objects within the shallow boundary.
+///
+/// Uses BFS from `ref_tips` through the commit graph (bounded by `boundary`)
+/// to determine which commits are reachable. Packs whose `ref_tips` metadata
+/// intersects the reachable set are included. Legacy packs without metadata
+/// are always included to preserve the superset guarantee.
+pub fn filter_packs_by_depth(
+    pack_list: &PackList,
+    summary: &CommitGraphSummary,
+    boundary: &[impl AsRef<str>],
+    ref_tips: &[String],
+) -> Vec<String> {
+    let reachable = compute_reachable_set(summary, ref_tips, boundary);
+
+    let mut result = Vec::new();
+    for entry in &pack_list.entries {
+        match &entry.ref_tips {
+            None => {
+                // Legacy pack without metadata — include unconditionally.
+                result.push(entry.pack_id.clone());
+            }
+            Some(tips) => {
+                if tips.iter().any(|t| reachable.contains(t.as_str())) {
+                    result.push(entry.pack_id.clone());
+                }
+            }
+        }
+    }
+
+    if !result.is_empty() {
+        debug!(
+            total = pack_list.entries.len(),
+            filtered = result.len(),
+            reachable_commits = reachable.len(),
+            "filtered packs by depth"
+        );
+    }
+
+    result
+}
+
+/// Write the `.git/shallow` file with boundary commit OIDs.
+///
+/// Each OID is written on its own line. If the boundary is empty the file
+/// is not created (an empty shallow file is meaningless to git).
+///
+/// Accepts any slice whose elements implement `AsRef<str>`, so it works
+/// with both `String` and `Cow<str>`.
+///
+/// ## `gix-shallow` adoption
+///
+/// `gix-shallow` provides `read()` and `write()` APIs. The read API
+/// decodes each non-empty line as a `gix_hash::ObjectId`; the write
+/// API takes a `gix_lock::File` plus a delta list of
+/// `Update::Shallow(oid)` / `Update::Unshallow(oid)` — it's structured
+/// around fetch-time shallow-boundary updates rather than whole-file
+/// replacement, which is crab's current shape.
+///
+/// Scope: at this stage this site wraps I/O in `gix_boundary!` spans
+/// so flamegraphs attribute shallow-file time to the gitoxide side of
+/// the adoption boundary. Full `gix_shallow::write` adoption would
+/// require restructuring shallow-file production around delta
+/// [`gix_shallow::Update`] values plus a `gix_lock::File`, which is
+/// more code than crab currently has for the plain-text path. The
+/// LOC target "shrink git/shallow.rs" is documented in the task
+/// summary as "minimal add — boundary tracing only — because
+/// `gix-shallow` is a parser/delta writer, not a whole-file store
+/// abstraction."
+pub async fn write_shallow_file(git_dir: &Path, boundary: &[impl AsRef<str>]) -> Result<()> {
+    if boundary.is_empty() {
+        debug!("empty boundary — skipping .git/shallow write");
+        return Ok(());
+    }
+
+    let content: String = boundary
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let shallow_path = git_dir.join("shallow");
+    let write_path = shallow_path.clone();
+    let temp_dir = git_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+
+        let mut temp = tempfile::NamedTempFile::new_in(temp_dir)?;
+        temp.write_all(content.as_bytes())?;
+        temp.as_file().sync_all()?;
+        temp.persist(write_path).map_err(|error| error.error)?;
+        Ok::<(), std::io::Error>(())
+    })
+    .instrument(crate::gix_boundary!("shallow", "write"))
+    .await
+    .map_err(|error| CrabError::Internal(format!("shallow write join error: {error}")))??;
+
+    debug!(
+        path = %shallow_path.display(),
+        entries = boundary.len(),
+        "wrote .git/shallow"
+    );
+
+    Ok(())
+}
+
+/// Remove the `.git/shallow` file (for `--unshallow`).
+///
+/// Silently succeeds if the file does not exist.
+pub async fn remove_shallow_file(git_dir: &Path) -> Result<()> {
+    let shallow_path = git_dir.join("shallow");
+    match fs::remove_file(&shallow_path)
+        .instrument(crate::gix_boundary!("shallow", "remove"))
+        .await
+    {
+        Ok(()) => {
+            debug!(path = %shallow_path.display(), "removed .git/shallow");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!(path = %shallow_path.display(), "no .git/shallow to remove");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Read the `.git/shallow` file and return boundary OIDs as lowercase
+/// hex strings.
+///
+/// Under `--features gix-revwalk` this delegates to
+/// [`gix_shallow::read`], which parses every non-empty line as a
+/// `gix_hash::ObjectId`. Outside the feature, falls back to a plain
+/// tokio line-reader. Returns `Ok(vec![])` for a missing file (git's
+/// semantics — no shallow file means not a shallow clone).
+pub async fn read_shallow_file(git_dir: &Path) -> Result<Vec<String>> {
+    let shallow_path = git_dir.join("shallow");
+
+    #[cfg(feature = "gix-revwalk")]
+    {
+        // `gix_shallow::read` is a sync API; hop to blocking pool
+        // to keep the async caller non-blocking. The file is small
+        // (tens of OIDs in practice) so the hop is negligible.
+        let path = shallow_path.clone();
+        let boundary = tokio::task::spawn_blocking(move || gix_shallow::read(&path))
+            .instrument(crate::gix_boundary!("shallow", "read"))
+            .await
+            .map_err(|e| {
+                crate::core::error::CrabError::Internal(format!("shallow read join error: {e}"))
+            })?
+            .map_err(|e| {
+                crate::core::error::CrabError::Internal(format!("gix_shallow::read failed: {e}"))
+            })?;
+
+        return Ok(match boundary {
+            None => Vec::new(),
+            Some(nonempty) => nonempty
+                .into_iter()
+                .map(|oid| oid.to_hex().to_string())
+                .collect(),
+        });
+    }
+
+    #[cfg(not(feature = "gix-revwalk"))]
+    {
+        match fs::read_to_string(&shallow_path)
+            .instrument(crate::gix_boundary!("shallow", "read"))
+            .await
+        {
+            Ok(content) => Ok(content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_ascii_lowercase())
+                .collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crab_metadata::commit_graph::{CommitEntry, CommitGraphSummary};
+    use crab_metadata::manifests::{PackEntry, PackList};
+
+    fn make_summary(commits: Vec<CommitEntry>) -> CommitGraphSummary {
+        CommitGraphSummary {
+            generation: 1,
+            commits,
+        }
+    }
+
+    fn linear_chain(len: usize) -> (CommitGraphSummary, String) {
+        // c0 (root) <- c1 <- c2 <- ... <- c{len-1} (tip)
+        let mut commits = Vec::with_capacity(len);
+        for i in 0..len {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("c{}", i - 1)]
+            };
+            commits.push(CommitEntry {
+                oid: format!("c{i}"),
+                gen_number: i as u64,
+                parents,
+            });
+        }
+        let tip = format!("c{}", len - 1);
+        (make_summary(commits), tip)
+    }
+
+    // --- compute_shallow_boundary ---
+
+    #[test]
+    fn empty_graph_returns_empty_boundary() {
+        let summary = make_summary(vec![]);
+        let boundary = compute_shallow_boundary(&summary, &["tip".into()], 5);
+        assert!(boundary.is_empty());
+    }
+
+    #[test]
+    fn empty_tips_returns_empty_boundary() {
+        let (summary, _tip) = linear_chain(5);
+        let boundary = compute_shallow_boundary(&summary, &[], 3);
+        assert!(boundary.is_empty());
+    }
+
+    #[test]
+    fn depth_zero_returns_tips_as_boundary() {
+        let (summary, tip) = linear_chain(5);
+        let boundary = compute_shallow_boundary(&summary, &[tip.clone()], 0);
+        assert_eq!(boundary, vec![tip]);
+    }
+
+    #[test]
+    fn depth_zero_filters_unknown_tips() {
+        let (summary, _tip) = linear_chain(3);
+        let boundary = compute_shallow_boundary(&summary, &["c2".into(), "unknown".into()], 0);
+        assert_eq!(boundary, vec!["c2".to_string()]);
+    }
+
+    #[test]
+    fn depth_one_boundary_is_tip_itself() {
+        // depth=1 means only the tip commit; the boundary is the tip.
+        let (summary, tip) = linear_chain(5);
+        let boundary = compute_shallow_boundary(&summary, &[tip], 1);
+        assert_eq!(boundary, vec!["c4".to_string()]);
+    }
+
+    #[test]
+    fn depth_two_boundary_is_parent_of_tip() {
+        let (summary, tip) = linear_chain(5);
+        let boundary = compute_shallow_boundary(&summary, &[tip], 2);
+        assert_eq!(boundary, vec!["c3".to_string()]);
+    }
+
+    #[test]
+    fn depth_exceeds_graph_height_returns_empty() {
+        let (summary, tip) = linear_chain(3); // c0 <- c1 <- c2
+        // depth=10 exceeds the 3-commit chain — no boundary.
+        let boundary = compute_shallow_boundary(&summary, &[tip], 10);
+        assert!(boundary.is_empty());
+    }
+
+    #[test]
+    fn compacted_graph_preserves_relative_deepen_and_its_shallow_edge() {
+        let (mut summary, tip) = linear_chain(5);
+        summary.compact_to_limit(4);
+
+        let initial = compute_shallow_boundary(&summary, &[tip], 1);
+        let deepened = compute_shallow_boundary(
+            &summary,
+            &initial.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            3,
+        );
+        let beyond_retained_history = compute_shallow_boundary(
+            &summary,
+            &deepened.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            10,
+        );
+
+        assert_eq!(initial, ["c4"]);
+        assert_eq!(deepened, ["c2"]);
+        assert_eq!(beyond_retained_history, ["c1"]);
+    }
+
+    #[test]
+    fn branching_graph_boundary() {
+        //   c0 <- c1 <- c2 (tip_a)
+        //          \--- c3 (tip_b)
+        let summary = make_summary(vec![
+            CommitEntry {
+                oid: "c0".into(),
+                gen_number: 0,
+                parents: vec![],
+            },
+            CommitEntry {
+                oid: "c1".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c2".into(),
+                gen_number: 2,
+                parents: vec!["c1".into()],
+            },
+            CommitEntry {
+                oid: "c3".into(),
+                gen_number: 2,
+                parents: vec!["c1".into()],
+            },
+        ]);
+        let boundary = compute_shallow_boundary(&summary, &["c2".into(), "c3".into()], 2);
+        // At depth 2 from both tips, c1 is the boundary.
+        assert_eq!(boundary, vec!["c1".to_string()]);
+    }
+
+    #[test]
+    fn merge_commit_boundary() {
+        //   c0 <- c1 \
+        //              c3 (merge, tip)
+        //   c0 <- c2 /
+        let summary = make_summary(vec![
+            CommitEntry {
+                oid: "c0".into(),
+                gen_number: 0,
+                parents: vec![],
+            },
+            CommitEntry {
+                oid: "c1".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c2".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c3".into(),
+                gen_number: 2,
+                parents: vec!["c1".into(), "c2".into()],
+            },
+        ]);
+        let boundary = compute_shallow_boundary(&summary, &["c3".into()], 2);
+        // depth 2 from c3: c3 is depth 1, c1 and c2 are depth 2 (boundary).
+        assert_eq!(boundary, vec!["c1".to_string(), "c2".to_string()]);
+    }
+
+    #[test]
+    fn octopus_merge_boundary() {
+        // Octopus merge: c4 has three parents c1, c2, c3.
+        //   c0 <- c1 \
+        //   c0 <- c2  }- c4 (tip, octopus merge)
+        //   c0 <- c3 /
+        //
+        // At depth=2 from c4, all three parents should be in the
+        // boundary. This mirrors git's own --depth semantics, which
+        // treats every parent as one hop. See finding CR6-F2.
+        let summary = make_summary(vec![
+            CommitEntry {
+                oid: "c0".into(),
+                gen_number: 0,
+                parents: vec![],
+            },
+            CommitEntry {
+                oid: "c1".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c2".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c3".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c4".into(),
+                gen_number: 2,
+                parents: vec!["c1".into(), "c2".into(), "c3".into()],
+            },
+        ]);
+        let boundary = compute_shallow_boundary(&summary, &["c4".into()], 2);
+        // All three parents are at depth 2 and form the boundary.
+        let mut boundary_sorted = boundary;
+        boundary_sorted.sort();
+        assert_eq!(
+            boundary_sorted,
+            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()]
+        );
+    }
+
+    #[test]
+    fn octopus_merge_depth_three_reaches_common_root() {
+        // Same octopus graph, but depth=3 reaches c0.
+        let summary = make_summary(vec![
+            CommitEntry {
+                oid: "c0".into(),
+                gen_number: 0,
+                parents: vec![],
+            },
+            CommitEntry {
+                oid: "c1".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c2".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c3".into(),
+                gen_number: 1,
+                parents: vec!["c0".into()],
+            },
+            CommitEntry {
+                oid: "c4".into(),
+                gen_number: 2,
+                parents: vec!["c1".into(), "c2".into(), "c3".into()],
+            },
+        ]);
+        let boundary = compute_shallow_boundary(&summary, &["c4".into()], 3);
+        assert_eq!(boundary, vec!["c0".to_string()]);
+    }
+
+    // --- filter_packs_by_depth ---
+
+    #[test]
+    fn filter_packs_includes_legacy_packs_unconditionally() {
+        // Legacy packs (no ref_tips) are always included regardless of
+        // the commit graph or boundary — preserves the superset guarantee.
+        let pack_list = PackList {
+            generation: 1,
+            entries: vec![
+                PackEntry::legacy("pack_a", 100),
+                PackEntry::legacy("pack_b", 200),
+            ],
+        };
+        let summary = make_summary(vec![]);
+        let ids = filter_packs_by_depth(&pack_list, &summary, &[] as &[String], &[]);
+        assert_eq!(ids, vec!["pack_a".to_string(), "pack_b".to_string()]);
+    }
+
+    #[test]
+    fn filter_packs_empty_list_returns_empty() {
+        let pack_list = PackList {
+            generation: 0,
+            entries: vec![],
+        };
+        let summary = make_summary(vec![]);
+        let ids = filter_packs_by_depth(&pack_list, &summary, &[] as &[String], &[]);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn filter_packs_excludes_unreachable_metadata_packs() {
+        // c0 <- c1 <- c2 (tip). With boundary at c1, reachable = {c2, c1}.
+        // A pack whose ref_tips are only "c0" should be excluded.
+        let (summary, _) = linear_chain(3);
+        let ref_tips = vec!["c2".to_string()];
+        let boundary = vec!["c1".to_string()];
+
+        let pack_list = PackList {
+            generation: 1,
+            entries: vec![
+                PackEntry::with_ref_tips("reachable_pack", 100, vec!["c2".to_string()]),
+                PackEntry::with_ref_tips("unreachable_pack", 200, vec!["c0".to_string()]),
+                PackEntry::legacy("legacy_pack", 300),
+            ],
+        };
+
+        let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
+        assert_eq!(
+            ids,
+            vec!["reachable_pack".to_string(), "legacy_pack".to_string()]
+        );
+    }
+
+    #[test]
+    fn filter_packs_includes_pack_with_boundary_commit_tip() {
+        // Boundary commits are reachable — packs referencing them should be included.
+        let (summary, _) = linear_chain(3);
+        let ref_tips = vec!["c2".to_string()];
+        let boundary = vec!["c1".to_string()];
+
+        let pack_list = PackList {
+            generation: 1,
+            entries: vec![PackEntry::with_ref_tips(
+                "boundary_pack",
+                100,
+                vec!["c1".to_string()],
+            )],
+        };
+
+        let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
+        assert_eq!(ids, vec!["boundary_pack".to_string()]);
+    }
+
+    #[test]
+    fn filter_packs_no_matching_ref_tips_excludes_metadata_packs() {
+        // When no ref_tips match the graph, only legacy packs survive.
+        let (summary, _) = linear_chain(3);
+        let ref_tips = vec!["unknown_tip".to_string()];
+        let boundary: Vec<String> = vec![];
+
+        let pack_list = PackList {
+            generation: 1,
+            entries: vec![
+                PackEntry::with_ref_tips("metadata_pack", 100, vec!["c0".to_string()]),
+                PackEntry::legacy("legacy_pack", 200),
+            ],
+        };
+
+        let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
+        assert_eq!(ids, vec!["legacy_pack".to_string()]);
+    }
+
+    // --- write_shallow_file / remove_shallow_file ---
+
+    #[tokio::test]
+    async fn write_and_read_shallow_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let boundary = vec!["abc123".to_string(), "def456".to_string()];
+        write_shallow_file(dir.path(), &boundary).await.unwrap();
+
+        let content = tokio::fs::read_to_string(dir.path().join("shallow"))
+            .await
+            .unwrap();
+        assert_eq!(content, "abc123\ndef456\n");
+    }
+
+    #[tokio::test]
+    async fn write_shallow_file_accepts_cow_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let boundary: Vec<Cow<'_, str>> =
+            vec![Cow::Borrowed("aaa111"), Cow::Owned("bbb222".to_string())];
+        write_shallow_file(dir.path(), &boundary).await.unwrap();
+
+        let content = tokio::fs::read_to_string(dir.path().join("shallow"))
+            .await
+            .unwrap();
+        assert_eq!(content, "aaa111\nbbb222\n");
+    }
+
+    #[tokio::test]
+    async fn write_shallow_file_atomically_replaces_existing_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("shallow"), b"old\n")
+            .await
+            .unwrap();
+
+        write_shallow_file(dir.path(), &["new"]).await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join("shallow"))
+                .await
+                .unwrap(),
+            "new\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_shallow_write_preserves_existing_boundary() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shallow_path = dir.path().join("shallow");
+        tokio::fs::write(&shallow_path, b"old\n").await.unwrap();
+        let original_permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = write_shallow_file(dir.path(), &["new"]).await;
+
+        std::fs::set_permissions(dir.path(), original_permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(shallow_path).await.unwrap(),
+            "old\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_empty_boundary_does_not_create_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_shallow_file(dir.path(), &[] as &[String])
+            .await
+            .unwrap();
+        assert!(!dir.path().join("shallow").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_shallow_file_deletes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("shallow"), b"abc\n")
+            .await
+            .unwrap();
+        remove_shallow_file(dir.path()).await.unwrap();
+        assert!(!dir.path().join("shallow").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_shallow_file_succeeds_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No shallow file exists — should succeed silently.
+        remove_shallow_file(dir.path()).await.unwrap();
+    }
+}

@@ -1,0 +1,235 @@
+---
+title: "Experiment Queue"
+description: "Queue, execute, monitor, and stop batches of experiments with parameter sweeps and parallel workers."
+---
+
+# crab exp queue
+
+Queue experiments with parameter overrides, execute them in parallel worker
+processes, monitor queue status, and gracefully stop running workers.
+
+## Synopsis
+
+```
+crab exp queue --set-param <KEY=VALUE>... [--json]
+crab exp start [--jobs <N>] [--json]
+crab exp status [--json]
+crab exp stop [--json]
+```
+
+## Description
+
+The experiment queue commands manage batch execution of experiments with
+different parameter configurations. This is the core mechanism for running
+parameter sweeps — you queue experiments with varying parameters, then start
+workers to process them in parallel.
+
+The workflow is:
+
+1. **Queue** — `crab exp queue` enqueues one or more experiments. Each
+   `--set-param` flag specifies a parameter override. Values can be single
+   values, comma-separated lists, or `range(start,stop,step)` expressions.
+   When multiple `--set-param` flags are provided, Crab computes the Cartesian
+   product of all values, creating one experiment per combination.
+
+2. **Start** — `crab exp start` picks up pending experiments and runs them
+   with bounded parallelism. Each experiment gets its own git worktree at the
+   queued base commit, applies parameter overrides to `params.yaml`, then
+   executes `crab run` inside the worktree. Worktrees are cleaned up after
+   each experiment completes.
+
+3. **Status** — `crab exp status` reports how many experiments are pending,
+   running, done, or failed.
+
+4. **Stop** — `crab exp stop` writes a stop signal file. Running experiments
+   finish their current work, but no new experiments are started from the queue.
+
+Experiments are stored in `.crab/exp-queue/` and each is assigned a unique ID.
+The base commit is captured at queue time so all experiments in a batch share
+the same code snapshot.
+
+## Subcommands
+
+### crab exp queue
+
+Enqueue experiments with parameter overrides.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--set-param <KEY=VALUE>` | | Parameter override. Repeatable. Values support `range(start,stop,step)` and comma-separated lists. Multiple flags produce the Cartesian product. |
+| `--json` | `false` | Emit structured JSON output. |
+
+At least one `--set-param` is required. The key must be non-empty and the
+entry must contain an `=` separator.
+
+### crab exp start
+
+Process pending experiments from the queue with parallel workers.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--jobs <N>` | `1` | Maximum number of parallel experiment workers. |
+| `--json` | `false` | Emit structured JSON output. |
+
+If `--jobs` exceeds available CPU cores, a warning is emitted. Each worker
+creates a temporary git worktree, applies parameter overrides, runs `crab run`,
+and cleans up the worktree on completion.
+
+### crab exp status
+
+Display the current state of the experiment queue.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output. |
+
+### crab exp stop
+
+Send a graceful stop signal to running workers.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output. |
+
+The stop signal is a file written to `.crab/exp-queue/.stop`. Workers check
+this file between experiments and will not start new ones once it exists. The
+file is automatically removed after workers finish.
+
+## Examples
+
+### Queue a parameter sweep with a range expression
+
+```bash
+crab exp queue \
+  --set-param learning_rate=range(0.001,0.01,0.003) \
+  --set-param batch_size=32,64,128
+```
+
+This creates experiments for the Cartesian product of learning rates
+`[0.001, 0.004, 0.007, 0.01]` and batch sizes `[32, 64, 128]` — 12
+experiments total, all pinned to the current HEAD commit.
+
+### Start processing with parallel workers
+
+```bash
+crab exp start --jobs 4
+```
+
+Launches up to 4 parallel workers to process pending experiments. Each worker
+creates an isolated worktree, applies its parameter overrides to `params.yaml`,
+and runs `crab run`.
+
+### Check queue progress
+
+```bash
+crab exp status
+```
+
+Output:
+```
+Experiment queue (12 total):
+  Pending:  5
+  Running:  4
+  Done:     2
+  Failed:   1
+```
+
+### Gracefully stop all workers
+
+```bash
+crab exp stop
+```
+
+Running experiments finish their current stage, but no new experiments are
+picked up from the queue.
+
+## JSON Output
+
+All subcommands support `--json` for structured output.
+
+### crab exp queue --json
+
+```json
+{
+  "schema": "workflow.exp.queue",
+  "version": "1.0",
+  "timestamp": "2026-06-01T10:15:42.000Z",
+  "data": {
+    "queued_count": 12,
+    "experiment_ids": ["exp-a1b2c3", "exp-d4e5f6", "..."],
+    "base_commit": "9f3a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a"
+  }
+}
+```
+
+### crab exp start --json
+
+```json
+{
+  "schema": "workflow.exp.start",
+  "version": "1.0",
+  "timestamp": "2026-06-01T11:30:00.000Z",
+  "data": {
+    "processed": 12,
+    "succeeded": 11,
+    "failed": 1,
+    "succeeded_ids": ["exp-a1b2c3", "exp-d4e5f6"],
+    "failed_ids": ["exp-g7h8i9"]
+  }
+}
+```
+
+### crab exp status --json
+
+```json
+{
+  "schema": "workflow.exp.status",
+  "version": "1.0",
+  "timestamp": "2026-06-01T11:00:00.000Z",
+  "data": {
+    "pending": 5,
+    "running": 4,
+    "done": 2,
+    "failed": 1,
+    "total": 12
+  }
+}
+```
+
+### crab exp stop --json
+
+```json
+{
+  "schema": "workflow.exp.stop",
+  "version": "1.0",
+  "timestamp": "2026-06-01T11:35:00.000Z",
+  "data": {
+    "signaled": true
+  }
+}
+```
+
+## Prerequisites
+
+- A Crab-managed repository (initialized with `crab init`).
+- Workflow feature enabled with `crab config set workflow.enabled true`.
+- A `params.yaml` or `crab.yaml` file at the repository root for parameter
+  overrides to apply.
+- A valid `crab.yaml` workflow definition for `crab run` to execute inside
+  each experiment worktree.
+
+## Related Commands
+
+- [`crab exp`](/docs/cli/automation/experiments) — create and inspect individual experiments.
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages (used internally by each experiment).
+- [`crab params`](/docs/cli/automation/parameters) — manage workflow parameters.
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and query experiment metrics.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — manage workflow definitions.

@@ -1,0 +1,92 @@
+---
+title: Architecture
+description: Detailed architecture and design documents for the Crab codebase — how the system works internally, design decisions, and how components fit together.
+---
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+
+# Crab Architecture Documentation
+
+Detailed architecture and design documents for the Crab codebase. These
+documents explain how the system works internally, the design decisions behind
+each subsystem, and how the components fit together.
+
+## Core Systems
+
+<Cards>
+  <Card
+    title="System Overview"
+    description="High-level architecture, component diagram, data flow"
+    href="/docs/cli/architecture/system-overview"
+  />
+  <Card
+    title="Engine: Chunking & Dedup"
+    description="CDC algorithm, dedup tiers, xorb packing, staging area"
+    href="/docs/cli/architecture/engine-chunking-dedup"
+  />
+  <Card
+    title="Storage Layer"
+    description="Object store abstraction, S3 layout, xorb format, retry/multipart"
+    href="/docs/cli/architecture/storage-layer"
+  />
+  <Card
+    title="Metadata Subsystem"
+    description="Shards, file-index, chunk-index, bloom filters, pack metadata"
+    href="/docs/cli/architecture/metadata-subsystem"
+  />
+</Cards>
+
+## Integration & Coordination
+
+<Cards>
+  <Card
+    title="Git Integration"
+    description="Remote helper protocol, filter driver, clean/smudge, push/fetch pipelines"
+    href="/docs/cli/architecture/git-integration"
+  />
+  <Card
+    title="Coordination & Consistency"
+    description="Push locks, CAS loops, heartbeat, pipelined commit"
+    href="/docs/cli/architecture/coordination-consistency"
+  />
+  <Card
+    title="LFS Compatibility Layer"
+    description="Dual pointer system, transfer agent, batch resolver, lock manager"
+    href="/docs/cli/architecture/lfs-compatibility"
+  />
+</Cards>
+
+## Subsystems
+
+<Cards>
+  <Card
+    title="Caching Architecture"
+    description="Local chunk cache, shard cache, manifest cache, LRU eviction"
+    href="/docs/cli/architecture/caching-architecture"
+  />
+  <Card
+    title="Virtual Filesystem (FUSE)"
+    description="FUSE mount, overlay, snapshot, on-demand hydration, daemon"
+    href="/docs/cli/virtual-filesystem"
+  />
+  <Card
+    title="Chunk-Level Diff Engine"
+    description="Term resolution, chunk comparison, format hints, output modes"
+    href="/docs/cli/architecture/diff-engine"
+  />
+  <Card
+    title="Configuration System"
+    description="Four-layer config resolution, TOML schema, engine feature flags"
+    href="/docs/cli/architecture/configuration-system"
+  />
+</Cards>
+
+## Operations & Observability
+
+<Cards>
+  <Card
+    title="Error Model & Observability"
+    description="Error taxonomy, exit codes, tracing, metrics, error catalog"
+    href="/docs/cli/architecture/error-observability"
+  />
+</Cards>

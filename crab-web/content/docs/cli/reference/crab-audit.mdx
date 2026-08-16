@@ -1,0 +1,40 @@
+---
+title: "crab audit"
+description: "Inspect, verify, and export Crab audit events."
+---
+
+# crab audit
+
+Inspect and verify the local audit event log.
+
+## Synopsis
+
+```bash
+crab audit <SUBCOMMAND> [OPTIONS]
+```
+
+The log defaults to `.crab/audit/events.jsonl`. Audit events cover important
+local operations such as release, recovery, authentication, replication, and
+storage administration.
+
+## Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `crab audit log` | List events, optionally filtered by operation |
+| `crab audit verify` | Verify event schema and digest links |
+| `crab audit export` | Write a portable JSON bundle |
+
+## Options
+
+`log` and `verify` accept `--path <PATH>` and `--json`. `log` and `export` also
+accept `--operation <OP>`. `export` requires `--output <PATH>`.
+
+## Examples
+
+```bash
+crab audit log
+crab audit log --operation release.publish --json
+crab audit verify --path .crab/audit/events.jsonl
+crab audit export --output audit.json
+```

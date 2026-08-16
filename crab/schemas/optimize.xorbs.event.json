@@ -1,0 +1,199 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OptimizeXorbsEventPayload",
+  "description": "Payload variants emitted under the `optimize.xorbs.event` schema.",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/RestripeEstimate"
+    },
+    {
+      "$ref": "#/definitions/RestripeSummary"
+    },
+    {
+      "$ref": "#/definitions/OptimizeXorbsControlEvent"
+    }
+  ],
+  "definitions": {
+    "OptimizeXorbsControlEvent": {
+      "description": "Control event emitted by xorb optimization management operations.",
+      "type": "object",
+      "required": [
+        "event"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/OptimizeXorbsControlEventKind"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "OptimizeXorbsControlEventKind": {
+      "description": "Control event kind for xorb optimization management operations.",
+      "type": "string",
+      "enum": [
+        "journal_dropped",
+        "aborted"
+      ]
+    },
+    "RestripeCounts": {
+      "description": "Per-status counts in the summary.",
+      "type": "object",
+      "required": [
+        "corrupt",
+        "done",
+        "pending",
+        "skipped"
+      ],
+      "properties": {
+        "corrupt": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "done": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "pending": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "skipped": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RestripeEstimate": {
+      "description": "Result of a dry-run estimation.",
+      "type": "object",
+      "required": [
+        "archive_source_bytes",
+        "archive_source_count",
+        "estimated_cost_usd",
+        "estimated_dest_bytes",
+        "estimated_dest_count",
+        "estimated_wall_secs",
+        "profile",
+        "source_bytes",
+        "source_count"
+      ],
+      "properties": {
+        "archive_source_bytes": {
+          "description": "Bytes in archive-class source xorbs.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "archive_source_count": {
+          "description": "Number of source xorbs in archive classes (skipped if `--include-cold=false`).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "estimated_cost_usd": {
+          "description": "Estimated provider API cost in USD (6 decimal places).",
+          "type": "string"
+        },
+        "estimated_dest_bytes": {
+          "description": "Estimated bytes after recompression.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "estimated_dest_count": {
+          "description": "Estimated number of destination xorbs.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "estimated_wall_secs": {
+          "description": "Estimated wall-clock duration in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "profile": {
+          "description": "Profile name used for the estimate.",
+          "type": "string"
+        },
+        "source_bytes": {
+          "description": "Total bytes across all source xorbs.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "source_count": {
+          "description": "Number of source xorbs that would be processed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RestripeSummary": {
+      "description": "Final summary payload for `--json` / `--jsonl` output.",
+      "type": "object",
+      "required": [
+        "bytes_read",
+        "bytes_written",
+        "corrupt_list",
+        "counts",
+        "elapsed_ms",
+        "profile",
+        "run_id"
+      ],
+      "properties": {
+        "bytes_read": {
+          "description": "Total bytes read.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "bytes_written": {
+          "description": "Total bytes written.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "corrupt_list": {
+          "description": "List of corrupt source xorb hashes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "counts": {
+          "description": "Counts by status.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RestripeCounts"
+            }
+          ]
+        },
+        "elapsed_ms": {
+          "description": "Wall-clock duration in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "profile": {
+          "description": "Profile used.",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "Run identifier.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

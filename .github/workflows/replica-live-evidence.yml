@@ -1,0 +1,279 @@
+name: Replica Live Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Protected GitHub environment containing live replica credentials"
+        required: true
+        default: replica-live
+        type: environment
+      suite:
+        description: "Live evidence suite; enterprise runs control-plane, hydrate, and cross-region with all providers"
+        required: true
+        default: control-plane
+        type: choice
+        options:
+          - control-plane
+          - hydrate
+          - cross-region
+          - enterprise
+      storage_provider:
+        description: "Storage control-plane provider; enterprise requires all"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - s3
+          - gcs
+          - azure
+          - all
+      coordinator:
+        description: "Managed coordinator provider; enterprise requires all"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - dynamodb
+          - spanner
+          - cosmosdb
+          - all
+      hydrate_provider:
+        description: "Provider-backed binary hydrate proof; enterprise requires all"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - s3
+          - gcs
+          - azure
+          - all
+      mutate:
+        description: "Allow live mutations against disposable resources"
+        required: true
+        default: false
+        type: boolean
+      evidence_profile:
+        description: "Evidence verifier profile"
+        required: true
+        default: control-plane-status
+        type: choice
+        options:
+          - control-plane-status
+          - control-plane-mutate
+          - provider-hydrate
+          - active-active-smoke
+          - enterprise
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CRAB_REPLICA_LIVE: "1"
+  CRAB_REPLICA_LIVE_MUTATE: ${{ inputs.mutate && '1' || '0' }}
+  CRAB_REPLICA_LIVE_CROSS_REGION: ${{ (inputs.suite == 'cross-region' || inputs.suite == 'enterprise') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_PRODUCTION_LOAD: ${{ inputs.suite == 'enterprise' && '1' || '0' }}
+  CRAB_REPLICA_LIVE_EVIDENCE_DIR: ${{ github.workspace }}/replica-live-evidence
+  CRAB_REPLICA_LIVE_EVIDENCE_REDACT: "1"
+  CRAB_REPLICA_LIVE_RUN_ID: replica-live-${{ github.run_id }}-${{ github.run_attempt }}
+  CRAB_REPLICA_LIVE_REPAIR_SERVICE_TEMPLATE: ${{ vars.CRAB_REPLICA_LIVE_REPAIR_SERVICE_TEMPLATE }}
+  CRAB_REPLICA_LIVE_REPAIR_WORKER_DEPLOYMENT_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_REPAIR_WORKER_DEPLOYMENT_EVIDENCE }}
+  CRAB_REPLICA_LIVE_S3_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_S3_PROVIDER_LOG_EVIDENCE }}
+  CRAB_REPLICA_LIVE_GCS_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_GCS_PROVIDER_LOG_EVIDENCE }}
+  CRAB_REPLICA_LIVE_AZURE_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_AZURE_PROVIDER_LOG_EVIDENCE }}
+  CRAB_REPLICA_LIVE_DYNAMODB_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_PROVIDER_LOG_EVIDENCE }}
+  CRAB_REPLICA_LIVE_SPANNER_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_PROVIDER_LOG_EVIDENCE }}
+  CRAB_REPLICA_LIVE_COSMOSDB_PROVIDER_LOG_EVIDENCE: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_PROVIDER_LOG_EVIDENCE }}
+
+  CRAB_REPLICA_LIVE_S3: ${{ (inputs.storage_provider == 's3' || inputs.storage_provider == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_GCS: ${{ (inputs.storage_provider == 'gcs' || inputs.storage_provider == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_AZURE: ${{ (inputs.storage_provider == 'azure' || inputs.storage_provider == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_DYNAMODB: ${{ (inputs.coordinator == 'dynamodb' || inputs.coordinator == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_SPANNER: ${{ (inputs.coordinator == 'spanner' || inputs.coordinator == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_COSMOSDB: ${{ (inputs.coordinator == 'cosmosdb' || inputs.coordinator == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_S3_HYDRATE: ${{ (inputs.hydrate_provider == 's3' || inputs.hydrate_provider == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_GCS_HYDRATE: ${{ (inputs.hydrate_provider == 'gcs' || inputs.hydrate_provider == 'all') && '1' || '0' }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE: ${{ (inputs.hydrate_provider == 'azure' || inputs.hydrate_provider == 'all') && '1' || '0' }}
+
+  CRAB_REPLICA_LIVE_S3_NAME: ${{ vars.CRAB_REPLICA_LIVE_S3_NAME }}
+  CRAB_REPLICA_LIVE_S3_PRIMARY: ${{ vars.CRAB_REPLICA_LIVE_S3_PRIMARY }}
+  CRAB_REPLICA_LIVE_S3_REPLICA: ${{ vars.CRAB_REPLICA_LIVE_S3_REPLICA }}
+  CRAB_REPLICA_LIVE_S3_REGION: ${{ vars.CRAB_REPLICA_LIVE_S3_REGION }}
+  CRAB_REPLICA_LIVE_S3_RPO: ${{ vars.CRAB_REPLICA_LIVE_S3_RPO }}
+  CRAB_REPLICA_LIVE_S3_BACKFILL: ${{ vars.CRAB_REPLICA_LIVE_S3_BACKFILL }}
+  CRAB_REPLICA_LIVE_GCS_NAME: ${{ vars.CRAB_REPLICA_LIVE_GCS_NAME }}
+  CRAB_REPLICA_LIVE_GCS_PRIMARY: ${{ vars.CRAB_REPLICA_LIVE_GCS_PRIMARY }}
+  CRAB_REPLICA_LIVE_GCS_REPLICA: ${{ vars.CRAB_REPLICA_LIVE_GCS_REPLICA }}
+  CRAB_REPLICA_LIVE_GCS_REGION: ${{ vars.CRAB_REPLICA_LIVE_GCS_REGION }}
+  CRAB_REPLICA_LIVE_GCS_RPO: ${{ vars.CRAB_REPLICA_LIVE_GCS_RPO }}
+  CRAB_REPLICA_LIVE_GCS_BACKFILL: ${{ vars.CRAB_REPLICA_LIVE_GCS_BACKFILL }}
+  CRAB_REPLICA_LIVE_AZURE_NAME: ${{ vars.CRAB_REPLICA_LIVE_AZURE_NAME }}
+  CRAB_REPLICA_LIVE_AZURE_PRIMARY: ${{ vars.CRAB_REPLICA_LIVE_AZURE_PRIMARY }}
+  CRAB_REPLICA_LIVE_AZURE_REPLICA: ${{ vars.CRAB_REPLICA_LIVE_AZURE_REPLICA }}
+  CRAB_REPLICA_LIVE_AZURE_REGION: ${{ vars.CRAB_REPLICA_LIVE_AZURE_REGION }}
+  CRAB_REPLICA_LIVE_AZURE_RPO: ${{ vars.CRAB_REPLICA_LIVE_AZURE_RPO }}
+  CRAB_REPLICA_LIVE_AZURE_BACKFILL: ${{ vars.CRAB_REPLICA_LIVE_AZURE_BACKFILL }}
+
+  CRAB_REPLICA_LIVE_DYNAMODB_NAME: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_NAME }}
+  CRAB_REPLICA_LIVE_DYNAMODB_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_REGION }}
+  CRAB_REPLICA_LIVE_DYNAMODB_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_FAILOVER_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_NAME: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_NAME }}
+  CRAB_REPLICA_LIVE_SPANNER_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_FAILOVER_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_NAME: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_NAME }}
+  CRAB_REPLICA_LIVE_COSMOSDB_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_FAILOVER_REGION }}
+
+  CRAB_REPLICA_LIVE_S3_HYDRATE_PRIMARY_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_S3_HYDRATE_PRIMARY_BUCKET }}
+  CRAB_REPLICA_LIVE_S3_HYDRATE_REPLICA_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_S3_HYDRATE_REPLICA_BUCKET }}
+  CRAB_REPLICA_LIVE_S3_HYDRATE_REGION: ${{ vars.CRAB_REPLICA_LIVE_S3_HYDRATE_REGION }}
+  CRAB_REPLICA_LIVE_S3_HYDRATE_ENDPOINT: ${{ vars.CRAB_REPLICA_LIVE_S3_HYDRATE_ENDPOINT }}
+  CRAB_REPLICA_LIVE_GCS_HYDRATE_PRIMARY_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_GCS_HYDRATE_PRIMARY_BUCKET }}
+  CRAB_REPLICA_LIVE_GCS_HYDRATE_REPLICA_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_GCS_HYDRATE_REPLICA_BUCKET }}
+  CRAB_REPLICA_LIVE_GCS_HYDRATE_REGION: ${{ vars.CRAB_REPLICA_LIVE_GCS_HYDRATE_REGION }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_ACCOUNT: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_ACCOUNT }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_CONTAINER: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_CONTAINER }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_PRIMARY_BUCKET }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_ACCOUNT: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_ACCOUNT }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_CONTAINER: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_CONTAINER }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_BUCKET: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_REPLICA_BUCKET }}
+  CRAB_REPLICA_LIVE_AZURE_HYDRATE_REGION: ${{ vars.CRAB_REPLICA_LIVE_AZURE_HYDRATE_REGION }}
+
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_A_NAME: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_A_NAME }}
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_A_URL: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_A_URL }}
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_A_REGION: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_A_REGION }}
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_B_NAME: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_B_NAME }}
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_B_URL: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_B_URL }}
+  CRAB_REPLICA_LIVE_SMOKE_WRITER_B_REGION: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_WRITER_B_REGION }}
+  CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_URL: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_URL }}
+  CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_REGION: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_REGION }}
+  CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_COORDINATOR_FAILOVER_REGION }}
+  CRAB_REPLICA_LIVE_SMOKE_TIMEOUT_SECS: ${{ vars.CRAB_REPLICA_LIVE_SMOKE_TIMEOUT_SECS }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_NAME: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_NAME }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_URL: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_URL }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_A_REGION }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_NAME: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_NAME }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_URL: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_URL }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_WRITER_B_REGION }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_URL: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_URL }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_REGION }}
+  CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_DYNAMODB_SMOKE_COORDINATOR_FAILOVER_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_NAME: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_NAME }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_URL: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_URL }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_A_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_NAME: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_NAME }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_URL: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_URL }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_WRITER_B_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_URL: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_URL }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_REGION }}
+  CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_SPANNER_SMOKE_COORDINATOR_FAILOVER_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_NAME: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_NAME }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_URL: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_URL }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_A_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_NAME: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_NAME }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_URL: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_URL }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_WRITER_B_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_URL: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_URL }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_REGION }}
+  CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_FAILOVER_REGION: ${{ vars.CRAB_REPLICA_LIVE_COSMOSDB_SMOKE_COORDINATOR_FAILOVER_REGION }}
+
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+  GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+  GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  AZURE_REGION: ${{ vars.AZURE_REGION }}
+
+jobs:
+  live-evidence:
+    name: Live replica evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Configure Google credentials
+        shell: bash
+        run: |
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" ]; then
+            umask 077
+            printf '%s' "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$RUNNER_TEMP/google-credentials.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/google-credentials.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Preflight selected live evidence inputs
+        working-directory: crab
+        shell: bash
+        run: |
+          args=(
+            --suite "${{ inputs.suite }}"
+            --storage-provider "${{ inputs.storage_provider }}"
+            --coordinator "${{ inputs.coordinator }}"
+            --hydrate-provider "${{ inputs.hydrate_provider }}"
+            --evidence-profile "${{ inputs.evidence_profile }}"
+            --require-evidence
+            --require-redacted
+            --require-cloud-credentials
+          )
+          if [ "${{ inputs.mutate }}" = "true" ]; then
+            args+=(--mutate)
+          fi
+          ./scripts/check-replica-live-env.sh "${args[@]}"
+
+      - name: Run live control-plane evidence
+        if: inputs.suite == 'control-plane' || inputs.suite == 'enterprise'
+        run: cargo test --manifest-path crab/Cargo.toml --test replica_live_control_plane -- --ignored
+
+      - name: Run provider-backed hydrate evidence
+        if: inputs.suite == 'hydrate' || inputs.suite == 'enterprise'
+        run: cargo test --manifest-path crab/Cargo.toml --test replica_binary_hydrate_live -- --ignored
+
+      - name: Run active-active cross-region evidence
+        if: inputs.suite == 'cross-region' || inputs.suite == 'enterprise'
+        run: crab/scripts/run-replica-cross-region-matrix.sh
+
+      - name: Verify retained evidence
+        shell: bash
+        run: |
+          cargo run --manifest-path crab/Cargo.toml --bin crab -- \
+            replica evidence verify "$CRAB_REPLICA_LIVE_EVIDENCE_DIR" \
+            --profile "${{ inputs.evidence_profile }}" \
+            --require-redacted \
+            --expected-run-id "$CRAB_REPLICA_LIVE_RUN_ID" \
+            --json | tee replica-evidence-verify.json
+
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replica-live-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            replica-live-evidence/
+            replica-evidence-verify.json
+          retention-days: 90

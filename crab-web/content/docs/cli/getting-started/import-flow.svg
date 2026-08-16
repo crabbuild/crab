@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 240" width="740" height="240">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="sourceGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="targetGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="740" height="240" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+    <!-- Source bucket container -->
+    <rect x="30" y="40" width="280" height="170" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <!-- Target repo container -->
+    <rect x="430" y="40" width="280" height="170" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1.5"/>
+  </g>
+
+  <g id="nodes">
+    <!-- Source file listing box -->
+    <rect x="55" y="90" width="230" height="100" rx="8" fill="url(#sourceGrad)" stroke="#334155" stroke-width="1.5"/>
+    <!-- Target description box -->
+    <rect x="455" y="90" width="230" height="100" rx="8" fill="url(#targetGrad)" stroke="#0284C7" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Container titles -->
+    <text x="50" y="68" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#64748B" letter-spacing="0.5">EXISTING BUCKET</text>
+    <text x="450" y="68" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#0284C7" letter-spacing="0.5">CRAB REPOSITORY</text>
+
+    <!-- Source content (left-aligned file tree) -->
+    <text x="75" y="118" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">s3://data-lake/models/</text>
+    <text x="75" y="140" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">├── weights.bin</text>
+    <text x="75" y="158" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">├── embeddings.bin</text>
+    <text x="75" y="176" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">└── config.json</text>
+
+    <!-- Target content -->
+    <text x="570" y="125" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Git repo with pointers</text>
+    <text x="570" y="148" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">+ .crab/ metadata</text>
+    <text x="570" y="168" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">+ xorbs in cloud</text>
+
+    <!-- Arrow label -->
+    <text x="380" y="128" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">crab import</text>
+  </g>
+
+  <g id="connections">
+    <!-- Source → Target -->
+    <line x1="285" y1="140" x2="455" y2="140" stroke="#334155" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

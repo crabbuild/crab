@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DehydrateSummaryPayload",
+  "description": "Serializable payload for `--json` / `--jsonl` result events.",
+  "type": "object",
+  "required": [
+    "bytes_freed",
+    "dehydrated",
+    "dirty_skipped",
+    "duration_ms",
+    "failed",
+    "profile_protected",
+    "skipped"
+  ],
+  "properties": {
+    "bytes_freed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dehydrated": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dirty_skipped": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "failed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "profile_protected": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "skipped": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,91 @@
+---
+title: "crab login"
+description: "Discover and authenticate with a Crab managed service, or explicitly authenticate a configured direct provider."
+---
+
+# crab login
+
+Authenticate with a managed service or an explicitly selected direct cloud
+provider.
+
+## Synopsis
+
+```text
+crab login [OPTIONS] [SERVICE_ORIGIN]
+```
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SERVICE_ORIGIN` | No | HTTPS managed-service origin; defaults to `https://crab.build` |
+
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `--headless` | Force the OIDC device authorization flow for SSH or headless sessions |
+| `--provider <NAME>` | Use the configured direct-provider OIDC flow instead of managed-service login |
+| `--enterprise-ca <PATH>` | Trust an administrator-installed PEM CA bundle for this managed service |
+| `--private-ca-only` | Trust only `--enterprise-ca`, excluding public system roots |
+
+`--provider` conflicts with a service origin and enterprise CA options.
+`--private-ca-only` requires `--enterprise-ca`.
+
+## Managed login behavior
+
+Managed login:
+
+1. Fetches `/.well-known/crab` from the HTTPS origin.
+2. Validates the exact authority, API origin, OIDC issuer, TLS trust, and CLI/API compatibility.
+3. Uses authorization-code with PKCE in an interactive terminal or device authorization in a headless terminal.
+4. Stores refreshable tokens in Crab's encrypted token cache.
+5. Installs and activates the exact managed-service profile.
+
+No bucket, physical prefix, provider credential, or repository grant is stored
+in the profile.
+
+## Examples
+
+### Hosted service
+
+```bash
+crab login https://crab.build
+```
+
+Because the hosted origin is the default, this is equivalent:
+
+```bash
+crab login
+```
+
+### Headless hosted login
+
+```bash
+crab login https://crab.build --headless
+```
+
+### Enterprise service with a private CA
+
+```bash
+crab login https://code.corp.example \
+  --enterprise-ca /etc/company/ca.pem \
+  --private-ca-only
+```
+
+### Existing direct-provider login
+
+```bash
+crab login --provider aws-oidc
+```
+
+Direct-provider login continues to use the issuer, client ID, scopes, and
+provider configured in Crab. Passing `aws` as the positional argument is not
+provider selection; positional input is a managed-service origin.
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [Logging In](/docs/cli/authentication/logging-in)
+- [`crab logout`](/docs/cli/reference/crab-logout)
+- [Managed Service Diagnostics](/docs/cli/managed-service/diagnostics)

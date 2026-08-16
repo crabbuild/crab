@@ -1,0 +1,44 @@
+[package]
+name = "crab-auth-server"
+version = "1.0.12"
+edition = "2024"
+license = "Apache-2.0"
+description = "Protected-push and path-scoped view helper binaries for Crab Auth."
+autobins = false
+
+[[bin]]
+name = "crab-auth-receive"
+path = "src/bin/crab_auth_receive.rs"
+
+[[bin]]
+name = "crab-auth-view"
+path = "src/bin/crab_auth_view.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+bytes = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+crab-auth = { workspace = true }
+crab-cache = { workspace = true, features = ["local-cache"] }
+crab-cache-store = { workspace = true }
+crab-coordination = { workspace = true, features = ["object-store-lock", "coordinator-dynamodb", "coordinator-spanner", "coordinator-cosmosdb"] }
+crab-git = { workspace = true }
+crab-lfs = { workspace = true }
+crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "remote-index"] }
+crab-read = { workspace = true }
+crab-staging = { workspace = true }
+crab-storage = { workspace = true }
+crab-types = { workspace = true }
+crab-xet = { workspace = true, features = ["chunker"] }
+gix-hash = { workspace = true }
+gix-pack = { workspace = true }
+object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v7", "serde"] }

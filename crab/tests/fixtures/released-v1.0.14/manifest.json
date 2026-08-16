@@ -1,0 +1,12 @@
+{
+  "release": "v1.0.14",
+  "commit": "a253548a41ec8744d5a60af7048644cc57c8e6fe",
+  "direct_url": "crab://team-bucket/ml/models",
+  "bucket": "team-bucket",
+  "repo_prefix": "ml/models",
+  "endpoints": [
+    "/v1/credentials",
+    "/v1/push/prepare",
+    "/v1/push/finalize"
+  ]
+}

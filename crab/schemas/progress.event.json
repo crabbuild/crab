@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProgressPayload",
+  "description": "Periodic throughput / progress update.\n\nEmitted at most once per 250 ms by [`super::JsonlStream::emit_progress`].",
+  "type": "object",
+  "required": [
+    "bytes",
+    "current",
+    "operation",
+    "rate_bytes_per_sec",
+    "total",
+    "total_bytes"
+  ],
+  "properties": {
+    "bytes": {
+      "description": "Bytes transferred so far.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "current": {
+      "description": "Items completed so far.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "operation": {
+      "description": "Human-readable operation label, e.g. `\"uploading\"`, `\"hydrating\"`.",
+      "type": "string"
+    },
+    "rate_bytes_per_sec": {
+      "description": "Current transfer rate in bytes per second.",
+      "type": "number",
+      "format": "double"
+    },
+    "total": {
+      "description": "Total items expected (0 when unknown).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "total_bytes": {
+      "description": "Total bytes expected (0 when unknown).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "xorbs_produced": {
+      "description": "Number of xorbs newly produced during the current push pipeline.\n\nOnly meaningful for push `packing` events; omitted from other operations to keep the JSONL line small. Consumers summarising \"xorbs created\" should prefer this over `current` (which is a file count during packing) and over the `uploading` phase's `current` (xorbs *uploaded*, which can be lower when uploads dedupe against the remote store).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,1002 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CertificationPayload",
+  "type": "object",
+  "required": [
+    "active_active",
+    "certified",
+    "collected_at_ms",
+    "deep",
+    "findings",
+    "fix_plan",
+    "gates",
+    "profile",
+    "redacted",
+    "status"
+  ],
+  "properties": {
+    "active_active": {
+      "$ref": "#/definitions/ActiveActiveStatus"
+    },
+    "certified": {
+      "type": "boolean"
+    },
+    "collected_at_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "coordinator": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CoordinatorControlPlaneStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coordinator_health": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CoordinatorHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deep": {
+      "type": "boolean"
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CertificationEvidencePayload"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DoctorFinding"
+      }
+    },
+    "fix_plan": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DoctorFixAction"
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CertificationGate"
+      }
+    },
+    "profile": {
+      "$ref": "#/definitions/CertificationProfileArg"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "status": {
+      "$ref": "#/definitions/StatusPayload"
+    }
+  },
+  "definitions": {
+    "ActiveActiveStatus": {
+      "description": "Active-active write admission status.",
+      "type": "object",
+      "required": [
+        "coordinator_configured",
+        "coordinator_ready",
+        "enabled_writers",
+        "mode",
+        "writes_enabled"
+      ],
+      "properties": {
+        "coordinator_configured": {
+          "type": "boolean"
+        },
+        "coordinator_ready": {
+          "type": "boolean"
+        },
+        "enabled_writers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "mode": {
+          "$ref": "#/definitions/ReplicationMode"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writes_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "BackfillReplicaStatus": {
+      "type": "object",
+      "required": [
+        "blocks_read_enable",
+        "message",
+        "name",
+        "provider",
+        "read_enabled",
+        "region",
+        "required",
+        "state",
+        "url"
+      ],
+      "properties": {
+        "blocks_read_enable": {
+          "type": "boolean"
+        },
+        "check_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "progress_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "provider": {
+          "$ref": "#/definitions/ReplicationProviderKind"
+        },
+        "read_enabled": {
+          "type": "boolean"
+        },
+        "region": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/definitions/BackfillState"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "BackfillState": {
+      "type": "string",
+      "enum": [
+        "not-required",
+        "verified",
+        "missing",
+        "drifted",
+        "unknown",
+        "unsupported",
+        "untracked",
+        "unavailable"
+      ]
+    },
+    "CertificationEvidencePayload": {
+      "type": "object",
+      "required": [
+        "directory",
+        "profile",
+        "require_redacted",
+        "summary",
+        "verified"
+      ],
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EvidenceVerifyGate"
+          }
+        },
+        "profile": {
+          "$ref": "#/definitions/EvidenceVerifyProfile"
+        },
+        "require_redacted": {
+          "type": "boolean"
+        },
+        "summary": {
+          "$ref": "#/definitions/EvidenceVerifySummary"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "CertificationGate": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/CertificationGateState"
+        }
+      }
+    },
+    "CertificationGateState": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "CertificationProfileArg": {
+      "type": "string",
+      "enum": [
+        "enterprise",
+        "read-replica",
+        "active-active"
+      ]
+    },
+    "ControlPlaneCheck": {
+      "description": "One provider control-plane check for a replica.",
+      "type": "object",
+      "required": [
+        "action",
+        "code",
+        "managed_resource_id",
+        "message",
+        "provider",
+        "remediation",
+        "state",
+        "target"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "managed_resource_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "progress_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "provider": {
+          "$ref": "#/definitions/ReplicationProviderKind"
+        },
+        "remediation": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ControlPlaneCheckState"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "ControlPlaneCheckState": {
+      "description": "State of one provider control-plane check.",
+      "type": "string",
+      "enum": [
+        "verified",
+        "missing",
+        "drifted",
+        "unknown",
+        "unsupported"
+      ]
+    },
+    "ControlPlaneStatus": {
+      "description": "Provider control-plane status for one configured replica.",
+      "type": "object",
+      "required": [
+        "backend_available",
+        "checked_drift",
+        "checks",
+        "primary",
+        "provider",
+        "replica",
+        "replica_name"
+      ],
+      "properties": {
+        "backend_available": {
+          "type": "boolean"
+        },
+        "checked_drift": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ControlPlaneCheck"
+          }
+        },
+        "primary": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/definitions/ReplicationProviderKind"
+        },
+        "replica": {
+          "type": "string"
+        },
+        "replica_name": {
+          "type": "string"
+        }
+      }
+    },
+    "CoordinatorCheckState": {
+      "description": "State of one managed coordinator control-plane check.",
+      "type": "string",
+      "enum": [
+        "verified",
+        "missing",
+        "drifted",
+        "unknown",
+        "unsupported"
+      ]
+    },
+    "CoordinatorControlPlaneCheck": {
+      "description": "One managed coordinator resource check.",
+      "type": "object",
+      "required": [
+        "action",
+        "code",
+        "managed_resource_id",
+        "message",
+        "provider",
+        "remediation",
+        "state",
+        "target"
+      ],
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "managed_resource_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/definitions/ManagedCoordinatorProvider"
+        },
+        "remediation": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/CoordinatorCheckState"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "CoordinatorControlPlaneStatus": {
+      "description": "Control-plane status for a managed active-active coordinator.",
+      "type": "object",
+      "required": [
+        "backend_available",
+        "checked_drift",
+        "checks",
+        "failover_regions",
+        "name",
+        "provider",
+        "region",
+        "url"
+      ],
+      "properties": {
+        "backend_available": {
+          "type": "boolean"
+        },
+        "checked_drift": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CoordinatorControlPlaneCheck"
+          }
+        },
+        "failover_regions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/definitions/ManagedCoordinatorProvider"
+        },
+        "region": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "CoordinatorHealth": {
+      "description": "Coordinator health snapshot used by active-active write admission.",
+      "type": "object",
+      "required": [
+        "epoch",
+        "healthy",
+        "linearizable"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "linearizable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CoordinatorStateSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CoordinatorStateSummary": {
+      "description": "Size and retention pressure for a managed coordinator's repo authority state.",
+      "type": "object",
+      "required": [
+        "completed_operation_count",
+        "max_completed_operations",
+        "state_bytes",
+        "transaction_count"
+      ],
+      "properties": {
+        "completed_operation_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_completed_operations": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_state_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "state_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "transaction_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DoctorFinding": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "severity"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replica": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/definitions/DoctorSeverity"
+        }
+      }
+    },
+    "DoctorFixAction": {
+      "type": "object",
+      "required": [
+        "code",
+        "cost_hints",
+        "description",
+        "destructive",
+        "risk_hints",
+        "severity"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cost_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "replica": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "risk_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "severity": {
+          "$ref": "#/definitions/DoctorSeverity"
+        }
+      }
+    },
+    "DoctorSeverity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "EvidenceVerifyGate": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/CertificationGateState"
+        }
+      }
+    },
+    "EvidenceVerifyProfile": {
+      "type": "string",
+      "enum": [
+        "artifacts",
+        "control-plane-status",
+        "control-plane-mutate",
+        "provider-hydrate",
+        "active-active-smoke",
+        "enterprise"
+      ]
+    },
+    "EvidenceVerifySummary": {
+      "type": "object",
+      "required": [
+        "control_plane_evidence",
+        "files_failed",
+        "files_seen",
+        "files_verified",
+        "redacted",
+        "smoke_evidence",
+        "unredacted"
+      ],
+      "properties": {
+        "control_plane_evidence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_seen": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "files_verified": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "redacted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "smoke_evidence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unredacted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ManagedCoordinatorProvider": {
+      "description": "Managed active-active coordinator backend.",
+      "type": "string",
+      "enum": [
+        "dynamodb",
+        "spanner",
+        "cosmosdb"
+      ]
+    },
+    "ReplicaFallbackClass": {
+      "description": "Stable class for alerting on the latest primary fallback reason.",
+      "type": "string",
+      "enum": [
+        "auth",
+        "client-unavailable",
+        "missing-object",
+        "policy-drift",
+        "readiness-failed",
+        "stale-manifest",
+        "unknown"
+      ]
+    },
+    "ReplicaHealth": {
+      "type": "object",
+      "required": [
+        "name",
+        "provider",
+        "reason",
+        "region",
+        "state"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/definitions/ReplicationProviderKind"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ReplicaHealthState"
+        }
+      }
+    },
+    "ReplicaHealthState": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "lagging",
+        "partial",
+        "auth-failed",
+        "policy-drift",
+        "backfill-running",
+        "disabled"
+      ]
+    },
+    "ReplicaStatus": {
+      "description": "Status for a replica relative to the primary manifest.",
+      "type": "object",
+      "required": [
+        "backfill_required",
+        "fallback_count",
+        "name",
+        "primary_fallback_bytes",
+        "provider",
+        "read_enabled",
+        "readiness_cache_hit",
+        "readiness_object_probe_count",
+        "readiness_object_read_count",
+        "ready",
+        "region",
+        "selected_count",
+        "url"
+      ],
+      "properties": {
+        "backfill_required": {
+          "type": "boolean"
+        },
+        "fallback_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "lag_generations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "last_fallback_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "last_fallback_class": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReplicaFallbackClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_fallback_operation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_fallback_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_selected_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "last_selected_operation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "primary_fallback_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "primary_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "provider": {
+          "$ref": "#/definitions/ReplicationProviderKind"
+        },
+        "read_enabled": {
+          "type": "boolean"
+        },
+        "readiness_cache_age_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "readiness_cache_hit": {
+          "type": "boolean"
+        },
+        "readiness_check_latency_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "readiness_object_probe_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "readiness_object_read_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "region": {
+          "type": "string"
+        },
+        "replica_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "selected_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "ReplicationMode": {
+      "description": "Replication write model.",
+      "type": "string",
+      "enum": [
+        "read-replica",
+        "active-active"
+      ]
+    },
+    "ReplicationProviderKind": {
+      "description": "Cloud provider backing a replication target.",
+      "type": "string",
+      "enum": [
+        "s3",
+        "gcs",
+        "azure"
+      ]
+    },
+    "StatusPayload": {
+      "type": "object",
+      "required": [
+        "backfill",
+        "control_plane",
+        "health",
+        "replicas"
+      ],
+      "properties": {
+        "backfill": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BackfillReplicaStatus"
+          }
+        },
+        "control_plane": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ControlPlaneStatus"
+          }
+        },
+        "health": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReplicaHealth"
+          }
+        },
+        "primary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replicas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReplicaStatus"
+          }
+        }
+      }
+    }
+  }
+}

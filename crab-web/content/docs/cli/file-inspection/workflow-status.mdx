@@ -1,0 +1,175 @@
+---
+title: "Workflow Status"
+description: "Report per-stage state of your declared workflow pipeline with crab workflow status"
+---
+
+# crab workflow status
+
+Report per-stage state of your declared workflow pipeline.
+
+## Synopsis
+
+```
+crab workflow status [OPTIONS] [TARGET]...
+```
+
+## Description
+
+`crab workflow status` reports the workflow-layer state for every stage
+declared in `crab.yaml`:
+whether the stage is:
+
+| State | Meaning |
+|-------|---------|
+| `up_to_date` | Current stage hash matches the lockfile entry |
+| `stale` | Differs from the lockfile — includes a reason pointing at the first differing input (deps, params, env, or cmd) |
+| `never_run` | No lockfile entry exists for the stage |
+| `in_flight` | A non-terminal run is currently executing this stage |
+| `frozen` | Stage is marked frozen and will be skipped |
+
+When a stage is stale, the command identifies the first differing input
+category so you can quickly understand why a re-run is needed.
+
+Use `--why <stage>` to drill into a single stage and get a field-by-field
+input-hash breakdown — the same information `crab run --explain-miss`
+surfaces, produced here without executing anything.
+
+## Prerequisites
+
+- A `crab.yaml` workflow file must exist in the repository
+- Workflow feature enabled with `crab config set workflow.enabled true`
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--why <STAGE>` | — | Drill into one stage and emit a field-by-field input-hash diff |
+| `--recursive` | `false` | Merge every `crab.yaml` under the repo root. Defaults to the `[workflow] discover` config setting |
+| `--lockfile <PATH>` | `crab.lock` | Path to the lockfile. Useful for tests or inspecting lockfiles outside the repo |
+| `--with-deps` | `false` | Include upstream stages for selected targets |
+| `--cloud` | `false` | Compare local stage-cache entries with the configured Crab remote |
+| `--remote <NAME>` | — | Select the Crab git remote and imply `--cloud` |
+| `--json` | `false` | Emit structured JSON output (single envelope) |
+
+## Examples
+
+### Check status of all workflow stages
+
+```bash
+crab workflow status
+```
+
+Prints a human-readable table showing each stage's state, with stale stages
+annotated with the reason for invalidation.
+
+### Investigate why a specific stage is stale
+
+```bash
+crab workflow status --why train
+```
+
+Emits a field-by-field breakdown comparing current inputs against the
+lockfile entry for the `train` stage. Shows exactly which dependency,
+parameter, environment variable, or command changed.
+
+### Get machine-readable status for CI scripts
+
+```bash
+crab workflow status --json
+```
+
+Returns a structured JSON envelope with the `workflow.status` schema,
+suitable for parsing in automation pipelines.
+
+### Check status across a monorepo with multiple workflow files
+
+```bash
+crab workflow status --recursive
+```
+
+Discovers and merges all `crab.yaml` files under the repository root,
+reporting status for every stage across the entire project.
+
+## JSON Output
+
+Supports `--json`. Emits a single envelope with schema `workflow.status`.
+
+```bash
+crab workflow status --json
+```
+
+```json
+{
+  "schema": "workflow.status",
+  "data": {
+    "stages": [
+      {
+        "stage": "preprocess",
+        "state": "up_to_date",
+        "stage_hash": "a1b2c3d4...",
+        "lockfile_stage_hash": "a1b2c3d4..."
+      },
+      {
+        "stage": "train",
+        "state": "stale",
+        "reason": "dep",
+        "changed_key": "data/train.csv",
+        "stage_hash": "e5f6a7b8...",
+        "lockfile_stage_hash": "c9d0e1f2..."
+      },
+      {
+        "stage": "evaluate",
+        "state": "never_run"
+      }
+    ]
+  }
+}
+```
+
+### `--why` JSON output
+
+```bash
+crab workflow status --why train --json
+```
+
+```json
+{
+  "schema": "workflow.status",
+  "data": {
+    "stage": "train",
+    "stage_hash": "e5f6a7b8...",
+    "lockfile_stage_hash": "c9d0e1f2...",
+    "up_to_date": false,
+    "current": {
+      "cmd": { "kind": "shell", "shell": "python train.py" },
+      "deps": { "data/train.csv": "ab12cd34..." },
+      "params": { "learning_rate": "" },
+      "env": { "kind": "allowlist", "vars": ["CUDA_VISIBLE_DEVICES"] }
+    },
+    "lockfile": {
+      "cmd": { "kind": "shell", "shell": "python train.py" },
+      "deps": { "data/train.csv": "ff00ee11..." },
+      "params": { "learning_rate": "" },
+      "env": { "kind": "allowlist", "vars": ["CUDA_VISIBLE_DEVICES"] }
+    },
+    "diffs": [
+      {
+        "category": "dep",
+        "key": "data/train.csv",
+        "current": "ab12cd34...",
+        "lockfile": "ff00ee11..."
+      }
+    ]
+  }
+}
+```
+
+See [Structured Output](/docs/cli/reference/structured-output) for envelope details and error handling.
+
+## Related Commands
+
+- [`crab status`](/docs/cli/file-inspection/file-status) — report hydration state of the working tree.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — define and manage workflow pipelines.
+- [`crab workflow journal`](/docs/cli/automation/workflow-journal) — inspect workflow run journals.
+- [`crab workflow lockfile`](/docs/cli/automation/workflow-lockfile) — manage the workflow lockfile.
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages (use `--explain-miss` for the same detail as `--why`).

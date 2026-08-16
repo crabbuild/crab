@@ -1,0 +1,103 @@
+---
+title: "Operations"
+description: "Sizing, scaling, upgrades, and recovery for the cache service."
+---
+
+# Operations
+
+Operate the cache service as a performance-critical dependency, not as the source of truth. Origin remains authoritative, but a cold or unavailable cache can still affect developer and CI productivity.
+
+## Capacity Planning
+
+Size the cache for the active working set: the unique data your team reuses during a normal 7- to 30-day window.
+
+Starting points:
+
+| Team profile | Suggested cache size |
+|--------------|----------------------|
+| Small team, one large repo | 256-500 GiB |
+| Mid-size team, multiple repos | 1 TiB |
+| Large team or active CI fleet | 4-8 TiB |
+
+If hit rate is low and eviction is frequent, increase cache size before scaling out.
+
+## Eviction
+
+The service evicts old data when it approaches the configured size budget.
+
+Defaults:
+
+```toml
+[eviction]
+high_water_ratio = 0.95
+low_water_ratio = 0.90
+```
+
+Lower both values if:
+
+- Push warming frequently arrives in bursts.
+- The cache disk has little free space beyond the configured budget.
+- You see storage-pressure errors.
+
+## Scaling
+
+Prefer vertical scaling first:
+
+1. Increase cache disk.
+2. Increase network bandwidth.
+3. Increase CPU if TLS or concurrent traffic is the bottleneck.
+
+Use horizontal scaling when you have:
+
+- Multiple regions.
+- Separate business units or tenants.
+- Very large working sets that should not share one cache.
+
+Run separate cache instances for isolation. Do not share one cache volume between instances.
+
+## Multi-Region Deployments
+
+Deploy one cache per region and point clients to their nearest cache. Keep each cache close to the object-store replica it reads from.
+
+If object-store replication is eventual, expect a newly pushed object to miss in another region until the origin replica catches up.
+
+## Backup And Recovery
+
+Do not back up the cache volume by default. The cache can be rebuilt from origin.
+
+Recovery procedure:
+
+1. Start a new cache service with an empty cache directory.
+2. Keep clients pointed at the service.
+3. Allow normal reads and pushes to warm the cache.
+4. Watch hit rate and origin traffic until they return to normal.
+
+Expect elevated origin reads and uploads while the cache warms.
+
+## Upgrades
+
+Recommended upgrade flow:
+
+1. Remove the instance from readiness rotation.
+2. Stop the service or roll the pod.
+3. Start the new binary with the same config and cache volume.
+4. Verify health, metrics, and admin stats.
+5. Return the instance to service.
+
+For Kubernetes with a single persistent volume, use a recreate strategy rather than a rolling update.
+
+## Operational Checklist
+
+Weekly:
+
+- Review hit rate.
+- Review cache utilization.
+- Review origin miss volume.
+- Review auth failures.
+
+Monthly:
+
+- Revisit cache size against active repo growth.
+- Rotate PSK or tokens according to your security policy.
+- Review policy rules.
+- Confirm CI and developer clients still point at the expected cache.

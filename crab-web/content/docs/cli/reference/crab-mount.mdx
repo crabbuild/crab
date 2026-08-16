@@ -1,0 +1,101 @@
+---
+title: "crab mount"
+description: "Mount a repository as a virtual filesystem for on-demand file access."
+---
+
+# crab mount
+
+Mount a Crab repository as a virtual filesystem. Files are resolved on demand,
+so you can browse a large repository without hydrating everything first.
+`--backend=auto` prefers NFS when available. NFS uses a local loopback NFSv3
+server plus the operating system NFS client; `--backend=fuse` uses the FUSE
+adapter and requires fuse3 or macFUSE.
+
+This is the default coordinator-style mount workflow: the CLI starts or
+contacts a local coordinator process, and active mounts are managed by
+mountpoint. For the persistent named-repo service workflow, see
+[crab daemon](/docs/cli/reference/crab-daemon). For a comparison, see
+[Mount Modes](/docs/cli/virtual-filesystem/mount-modes).
+
+## Synopsis
+
+```bash
+crab mount [OPTIONS] [COMMAND]
+crab unmount [OPTIONS]
+```
+
+## Mount Options
+
+| Option | Description |
+| --- | --- |
+| `--repo, -r <source>` | Remote URL or local repository path. |
+| `--mountpoint, -m <path>` | Local mount path. |
+| `--name <name>` | Human-friendly mount name. |
+| `--ref <branch>` | Branch or ref to mount. |
+| `--backend <auto\|nfs\|fuse>` | Mount backend. Defaults to `auto`, which prefers NFS when compiled in. |
+| `--foreground` | Run in the foreground. |
+| `--read-only` | Disable overlay writes. |
+| `--no-refresh` | Disable automatic remote polling. |
+| `--allow-nested` | Allow mounting inside a Git or Crab working tree. |
+| `--clean-overlay` | Discard existing overlay changes before mounting. |
+
+## Management Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `crab mount list [--json]` | List active mounts. |
+| `crab mount status -m <path> [--verbose] [--live-only] [--json]` | Report mount and hydration state. |
+| `crab mount diff -m <path> [--json]` | Show copy-on-write overlay mutations. |
+| `crab mount export -m <path> --to <dir> [--json]` | Export overlay files for review. |
+| `crab mount commit --mountpoint <path> -m <message> [--push] [--json]` | Commit overlay changes back to the tracked ref. |
+| `crab mount reset -m <path> --overlay --yes [--json]` | Discard overlay changes. |
+| `crab mount refresh -m <path>` | Fetch and rebuild the mounted snapshot. |
+| `crab mount switch -m <path> --ref <branch>` | Switch a mount to another branch or ref. |
+| `crab mount clean [--all]` | Remove inactive mount caches. |
+| `crab unmount -m <path>` | Unmount one filesystem. |
+| `crab unmount --all` | Unmount all active Crab mounts. |
+
+## Overlay Publishing
+
+Writable mounts use a local copy-on-write overlay. Changes stay local until you
+run an explicit publish command.
+
+```bash
+crab mount diff --mountpoint /mnt/models
+crab mount export --mountpoint /mnt/models --to /tmp/models-overlay
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts"
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts" --push
+crab mount reset --mountpoint /mnt/models --overlay --yes
+```
+
+`crab mount commit` freezes writes while it snapshots the overlay, checks that
+the mounted base ref has not moved, creates a Git commit, refreshes the mounted
+snapshot, and clears the overlay after a successful local commit. If `--push`
+fails, the transaction record preserves the local commit OID and leaves the
+overlay in place for recovery.
+
+DaemonService mode uses the same publish model through
+`crab daemon commit --name <name> -m <message>`.
+
+## Examples
+
+```bash
+crab mount --repo crab://bucket/ml-models --mountpoint /mnt/models
+crab mount --repo ./my-repo --mountpoint /tmp/view --ref dev
+crab mount --repo crab://bucket/ml-models --mountpoint /mnt/models --backend=fuse
+crab mount status --mountpoint /mnt/models --json
+crab mount status --mountpoint /mnt/models --live-only --json
+crab mount diff --mountpoint /mnt/models
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts"
+crab mount switch --mountpoint /tmp/view --ref main
+crab unmount --mountpoint /mnt/models
+```
+
+`crab mount status` prefers live backend control data when the helper or
+coordinator is reachable, then falls back to persisted mount metadata so humans
+can still inspect stale mounts. Add `--live-only` for health checks and release
+evidence that must fail instead of using persisted fallback.
+
+For workflow guidance, see [Virtual Filesystem Mount](/docs/cli/virtual-filesystem/fuse-mount),
+[Mount Modes](/docs/cli/virtual-filesystem/mount-modes), and
+[Mount Management](/docs/cli/virtual-filesystem/mount-management).

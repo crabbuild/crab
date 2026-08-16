@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FsckSummary",
+  "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
+  "type": "object",
+  "required": [
+    "errors",
+    "info_count",
+    "passed",
+    "repair_failures",
+    "repaired"
+  ],
+  "properties": {
+    "errors": {
+      "description": "Total errors detected.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "info_count": {
+      "description": "Total informational issues detected.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "passed": {
+      "description": "`true` when the repository passed all checks (no unrepaired errors).",
+      "type": "boolean"
+    },
+    "repair_failures": {
+      "description": "Number of repair attempts that failed.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "repaired": {
+      "description": "Number of issues repaired (when `--repair` is used).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,139 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/crab-auth",
+    "crates/crab-auth-store",
+    "crates/crab-auth-server",
+    "crates/crab-cache",
+    "crates/crab-cache-store",
+    "crates/crab-cache-server",
+    "crates/crab-coordination",
+    "crates/crab-diff",
+    "crates/crab-git",
+    "crates/crab-lfs",
+    "crates/crab-metadata",
+    "crates/crab-read",
+    "crates/crab-remote-git",
+    "crates/crab-staging",
+    "crates/crab-storage",
+    "crates/crab-types",
+    "crates/crab-vfs",
+    "crates/crab-workflow",
+    "crates/crab-xet",
+    "crab",
+]
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+crab-auth = { path = "crates/crab-auth", default-features = false }
+crab-auth-server = { path = "crates/crab-auth-server", default-features = false }
+crab-auth-store = { path = "crates/crab-auth-store", default-features = false }
+crab-cache = { path = "crates/crab-cache", default-features = false }
+crab-cache-server = { path = "crates/crab-cache-server", default-features = false }
+crab-cache-store = { path = "crates/crab-cache-store", default-features = false }
+crab-coordination = { path = "crates/crab-coordination", default-features = false }
+crab-diff = { path = "crates/crab-diff", default-features = false }
+crab-git = { path = "crates/crab-git", default-features = false }
+crab-lfs = { path = "crates/crab-lfs", default-features = false }
+crab-metadata = { path = "crates/crab-metadata", default-features = false }
+crab-read = { path = "crates/crab-read", default-features = false }
+crab-remote-git = { path = "crates/crab-remote-git", default-features = false }
+crab-staging = { path = "crates/crab-staging", default-features = false }
+crab-storage = { path = "crates/crab-storage", default-features = false }
+crab-types = { path = "crates/crab-types", default-features = false }
+crab-vfs = { path = "crates/crab-vfs", default-features = false }
+crab-workflow = { path = "crates/crab-workflow", default-features = false }
+crab-xet = { path = "crates/crab-xet", default-features = false }
+
+xet-client = "1.5.2"
+xet-core-structures = "1.5.2"
+xet-data = "1.5.2"
+xet-runtime = "1.5.2"
+
+gix = "0.83.0"
+gix-attributes = "0.33.0"
+gix-config = "0.56.0"
+gix-credentials = "0.38.0"
+gix-diff = { version = "0.63.0", default-features = false }
+gix-dir = "0.25.0"
+gix-discover = "0.51.0"
+gix-features = "0.48.0"
+gix-filter = "0.30.0"
+gix-fsck = "0.21.0"
+gix-glob = "0.26.0"
+gix-hash = "0.25.0"
+gix-ignore = "0.21.0"
+gix-index = "0.51.0"
+gix-lock = "23.0.0"
+gix-negotiate = "0.31.0"
+gix-object = "0.60.0"
+gix-odb = "0.80.0"
+gix-pack = "0.70.0"
+gix-packetline = "0.21.3"
+gix-pathspec = "0.18.0"
+gix-prompt = "0.15.0"
+gix-protocol = "0.61.0"
+gix-ref = "0.63.0"
+gix-refspec = "0.41.0"
+gix-revwalk = "0.31.0"
+gix-shallow = "0.12.0"
+gix-status = "0.30.0"
+gix-tempfile = "23.0.0"
+gix-transport = "0.57.0"
+gix-traverse = "0.57.0"
+gix-url = "0.36.0"
+gix-validate = "0.11.1"
+gix-worktree = "0.52.0"
+gix-worktree-state = "0.30.0"
+
+aws-config = "1"
+aws-sdk-dynamodb = "1"
+aws-sdk-iam = "1"
+aws-sdk-s3 = "1"
+aws-sdk-s3control = "1"
+aws-sdk-sts = "1"
+azure_core = "0.21"
+azure_identity = "0.21"
+azure_mgmt_storage = "0.21"
+azure_storage = "0.21"
+azure_storage_blobs = "0.21"
+google-cloud-storage = "0.24"
+google-cloud-token = "0.1.2"
+
+async-trait = "0.1"
+blake3 = "1.8"
+bytes = "1.11"
+futures-util = "0.3"
+globset = "0.4"
+object_store = { version = "0.14.1", default-features = false }
+reqwest = { version = "0.12", default-features = false }
+rusqlite = { version = "0.34", features = ["bundled"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+secrecy = { version = "=0.10.3" }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "macros", "migrate", "uuid", "time", "json"] }
+tempfile = "3"
+thiserror = "2.0"
+tokio = "1.49"
+tokio-util = "0.7"
+toml = "0.8"
+tracing = "0.1"
+time = { version = "=0.3.47", features = ["formatting", "parsing", "serde", "serde-well-known"] }
+jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+utoipa = { version = "=5.5.0", default-features = false, features = ["macros", "uuid"] }
+uuid = { version = "=1.24.0", features = ["v7", "serde"] }
+
+[profile.release]
+opt-level = 3
+lto = false
+debug = 0
+strip = "symbols"
+
+[profile.dev]
+# Keep debug builds fast; full debug info only when profiling.
+opt-level = 0
+debug = true

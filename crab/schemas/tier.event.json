@@ -1,0 +1,226 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TierEventPayload",
+  "description": "Payload variants emitted under the `tier.event` schema.",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/TierPlanPayload"
+    },
+    {
+      "$ref": "#/definitions/RestoreSubmitPayload"
+    },
+    {
+      "$ref": "#/definitions/RestoreCompletePayload"
+    }
+  ],
+  "definitions": {
+    "RestoreCompletePayload": {
+      "description": "JSONL event emitted when a restore completes (object is warm) during `crab hydrate`.\n\nSchema: `\"tier.event\"` v `\"1.0\"`, event type: `\"restore_complete\"`.",
+      "type": "object",
+      "required": [
+        "class",
+        "completed_at",
+        "state",
+        "wait_ms",
+        "xorb_hash"
+      ],
+      "properties": {
+        "class": {
+          "description": "Provider-native storage class of the object.",
+          "type": "string"
+        },
+        "completed_at": {
+          "description": "RFC 3339 UTC timestamp when the restore completed.",
+          "type": "string"
+        },
+        "state": {
+          "description": "Final restore state: `\"ready\"`, `\"failed\"`, `\"timeout\"`.",
+          "type": "string"
+        },
+        "wait_ms": {
+          "description": "Wall-clock milliseconds spent waiting for the restore.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "xorb_hash": {
+          "description": "Hex-encoded content hash of the restored xorb.",
+          "type": "string"
+        }
+      }
+    },
+    "RestoreSubmitPayload": {
+      "description": "JSONL event emitted when a restore request is submitted for an archived xorb during `crab hydrate`.\n\nSchema: `\"tier.event\"` v `\"1.0\"`, event type: `\"restore_submit\"`.",
+      "type": "object",
+      "required": [
+        "class",
+        "poll_interval_ms",
+        "requested_at",
+        "restore_tier",
+        "xorb_hash"
+      ],
+      "properties": {
+        "class": {
+          "description": "Provider-native storage class of the archived object.",
+          "type": "string"
+        },
+        "expected_ready_at": {
+          "description": "Estimated RFC 3339 UTC timestamp when the object will be ready. `None` when the provider does not supply an estimate.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "poll_interval_ms": {
+          "description": "Initial poll interval in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requested_at": {
+          "description": "RFC 3339 UTC timestamp when the restore was requested.",
+          "type": "string"
+        },
+        "restore_tier": {
+          "description": "Restore tier requested (e.g. `\"standard\"`, `\"expedited\"`).",
+          "type": "string"
+        },
+        "xorb_hash": {
+          "description": "Hex-encoded content hash of the xorb being restored.",
+          "type": "string"
+        }
+      }
+    },
+    "StorageClass": {
+      "description": "Provider-native storage class.\n\nCovers S3, GCS, and Azure Blob classes that Crab interacts with. Unrecognised class strings from provider APIs map to [`Unknown`].\n\n[`Unknown`]: StorageClass::Unknown",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "S3Standard",
+            "S3IntelligentTiering",
+            "S3StandardIa",
+            "S3OneZoneIa",
+            "S3GlacierInstantRetrieval",
+            "S3GlacierFlexibleRetrieval",
+            "S3GlacierDeepArchive",
+            "GcsStandard",
+            "GcsNearline",
+            "GcsColdline",
+            "GcsArchive",
+            "AzureHot",
+            "AzureCool",
+            "AzureCold",
+            "AzureArchive"
+          ]
+        },
+        {
+          "description": "Returned when the provider reports a class string we don't recognise. Treated as warm with no retention minimum.",
+          "type": "string",
+          "enum": [
+            "Unknown"
+          ]
+        }
+      ]
+    },
+    "TierPlanPayload": {
+      "description": "Structured payload for `crab tier plan --json`.\n\nWraps the plan output with provider, rules, and versioning status for the `\"tier.plan\"` schema envelope.",
+      "type": "object",
+      "required": [
+        "object_lock_enabled",
+        "provider",
+        "rules",
+        "versioning_enabled"
+      ],
+      "properties": {
+        "object_lock_enabled": {
+          "description": "Whether object-lock is enabled on the bucket.",
+          "type": "boolean"
+        },
+        "provider": {
+          "description": "Cloud provider hosting the bucket.",
+          "type": "string"
+        },
+        "rules": {
+          "description": "Lifecycle rules in the plan.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TierRulePayload"
+          }
+        },
+        "versioning_enabled": {
+          "description": "Whether bucket versioning is enabled.",
+          "type": "boolean"
+        }
+      }
+    },
+    "TierRulePayload": {
+      "description": "One lifecycle rule within the structured plan output.",
+      "type": "object",
+      "required": [
+        "id",
+        "prefix",
+        "transitions"
+      ],
+      "properties": {
+        "id": {
+          "description": "Rule identifier (always prefixed `crab-`).",
+          "type": "string"
+        },
+        "min_object_size_bytes": {
+          "description": "Minimum object size in bytes for the filter.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "noncurrent_expiration_days": {
+          "description": "Days after which noncurrent versions expire (versioned buckets).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "prefix": {
+          "description": "Object key prefix this rule applies to.",
+          "type": "string"
+        },
+        "transitions": {
+          "description": "Transitions in this rule.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TierTransitionPayload"
+          }
+        }
+      }
+    },
+    "TierTransitionPayload": {
+      "description": "A storage-class transition within a lifecycle rule.",
+      "type": "object",
+      "required": [
+        "days",
+        "to_class"
+      ],
+      "properties": {
+        "days": {
+          "description": "Days after object creation before the transition fires.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "to_class": {
+          "description": "Target storage class.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/StorageClass"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

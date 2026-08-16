@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EventEnvelope_for_AnyValue",
+  "description": "Outer wrapper for each line in a `--jsonl` stream.",
+  "type": "object",
+  "required": [
+    "data",
+    "schema",
+    "timestamp",
+    "type",
+    "version"
+  ],
+  "properties": {
+    "data": {
+      "description": "Event-specific payload."
+    },
+    "schema": {
+      "description": "Canonical event schema name, e.g. `\"hydrate.event\"`.",
+      "type": "string"
+    },
+    "timestamp": {
+      "description": "RFC 3339 UTC timestamp with millisecond precision.",
+      "type": "string"
+    },
+    "type": {
+      "description": "Event discriminator: `\"progress\"`, `\"file_done\"`, `\"xorb_done\"`, `\"warning\"`, or `\"result\"`.",
+      "type": "string"
+    },
+    "version": {
+      "description": "Schema version.",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,172 @@
+---
+title: "Workflow Quickstart"
+description: "Enable Crab Workflow, define a small pipeline, run it, and share the stage cache."
+---
+
+# Workflow Quickstart
+
+This quickstart creates a two-stage pipeline, runs it, records metrics, and
+pushes the stage cache so another clone or CI job can reuse the result.
+
+## Prerequisites
+
+You need a Crab repository with a configured remote:
+
+```bash
+mkdir ml-project
+cd ml-project
+git init
+crab init crab://my-bucket/ml-project
+crab config set workflow.enabled true
+```
+
+If this is an existing repository, run the same `crab config set` command from
+the repo root. Workflow commands are disabled until `workflow.enabled` is true.
+
+## Create a Small Project
+
+```bash
+mkdir -p src data models metrics
+
+cat > data/raw.csv <<'EOF'
+x,y
+1,2
+2,4
+3,6
+EOF
+
+cat > params.yaml <<'EOF'
+train:
+  multiplier: 2
+EOF
+```
+
+Add tiny scripts for the example:
+
+```bash
+cat > src/prepare.py <<'EOF'
+from pathlib import Path
+raw = Path("data/raw.csv").read_text()
+Path("data/prepared.csv").write_text(raw.replace(",", "\t"))
+EOF
+
+cat > src/train.py <<'EOF'
+import json
+from pathlib import Path
+Path("models/model.txt").write_text("trained\n")
+Path("metrics/train.json").write_text(json.dumps({"accuracy": 0.91}))
+EOF
+```
+
+## Define the Pipeline
+
+Create `crab.yaml`:
+
+```yaml
+params:
+  - params.yaml
+
+metrics:
+  - metrics/train.json
+
+stages:
+  prepare:
+    cmd: python src/prepare.py
+    deps:
+      - src/prepare.py
+      - data/raw.csv
+    outs:
+      - data/prepared.csv
+
+  train:
+    cmd: python src/train.py
+    deps:
+      - src/train.py
+      - data/prepared.csv
+    params:
+      - train.multiplier
+    outs:
+      - models/model.txt
+    metrics:
+      - metrics/train.json
+```
+
+Validate before running:
+
+```bash
+crab run --validate
+```
+
+## Run and Inspect
+
+```bash
+crab run
+crab workflow status
+crab metrics show
+crab workflow dag --format mermaid
+```
+
+The first run executes both stages and writes `crab.lock`. A second run should
+skip unchanged stages:
+
+```bash
+crab run --dry
+```
+
+Use `--explain-miss` when a stage runs and you expected a cache hit:
+
+```bash
+crab run --dry --explain-miss
+```
+
+## Commit the Reproducible State
+
+Commit the workflow definition, params, lockfile, scripts, and small metrics:
+
+```bash
+git add crab.yaml crab.lock params.yaml src data/raw.csv metrics/train.json
+git commit -m "add reproducible workflow"
+```
+
+Large outputs can be tracked with Crab before committing if your project
+produces models, datasets, or reports that should live in object storage:
+
+```bash
+crab track "models/**"
+crab add models/model.txt
+git add .gitattributes models/model.txt
+git commit -m "track model output"
+```
+
+## Share the Stage Cache
+
+Push git state and stage cache:
+
+```bash
+crab push
+crab workflow push-cache --all
+```
+
+For day-to-day runs, publish cache entries as each stage completes:
+
+```bash
+crab run --cache-push
+```
+
+A clone or CI job can reuse remote cache entries:
+
+```bash
+crab clone crab://my-bucket/ml-project
+cd ml-project
+crab config set workflow.enabled true
+crab run --cache-only
+```
+
+`--cache-only` exits with code 3 on a cache miss. That is useful in CI when a
+job should prove the committed lockfile and remote cache are complete.
+
+## Next Steps
+
+- Learn the mental model in [Concepts](./concepts).
+- Add richer stages in [Authoring Stages](./authoring-stages).
+- Publish cache from CI with [Remote Cache and CI](./remote-cache-ci).

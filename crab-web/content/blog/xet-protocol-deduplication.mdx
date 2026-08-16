@@ -1,0 +1,287 @@
+---
+title: "How Crab Avoids Storing Duplicate Data"
+description: "Crab splits files with content-defined chunking, hashes chunks with BLAKE3, and uploads only chunks that are not already present."
+date: "2025-06-09"
+author: "Crab Team"
+category: "architecture"
+tags: ["deduplication", "chunking", "xorb", "blake3", "storage"]
+excerpt: "Learn how Crab splits files at content-determined boundaries, deduplicates chunks across local and remote indexes, and packs new chunks into compressed xorbs."
+level: "intermediate"
+path: "core-internals"
+order: 1
+concepts: ["deduplication", "chunking", "xorb", "BLAKE3"]
+prerequisites: ["How Crab Plugs Into Your Git Workflow"]
+outcome: "Trace how a file becomes chunks, hashes, xorbs, and storage objects with duplicate data removed."
+diagramType: "Chunking pipeline"
+---
+
+<FlowSteps
+  title="Deduplication in one pass"
+  steps={[
+    "Split each file at content-defined boundaries.",
+    "Hash every chunk with BLAKE3 so identical bytes get the same identity.",
+    "Check local session, shard metadata, and global indexes for existing chunks.",
+    "Pack only new chunks into xorbs and upload those objects.",
+    "Record metadata so future pushes and hydrations can reuse the same chunks."
+  ]}
+/>
+
+## Why Deduplication Matters
+
+Every time you modify a large file and push it, traditional Git stores the entire file again. Change one layer in a 4 GB model? That's another 4 GB on your storage bill. Multiply that across a team pushing daily, and costs spiral fast.
+
+Crab takes a different approach. Instead of storing whole files, it breaks them into smaller pieces, checks which pieces already exist, and only uploads the genuinely new ones. For iterative work where most bytes stay stable, that can turn a large file update into a much smaller upload.
+
+## What You'll Learn
+
+- How Crab finds smart split points in your files (content-defined chunking)
+- Why small edits don't cause massive re-uploads
+- How three layers of dedup checking eliminate redundant storage
+- How chunks get packed and addressed for fast retrieval
+
+## Key Takeaways
+
+- **Only new data gets uploaded.** Crab checks multiple dedup indexes before packing chunks for upload.
+- **Smart chunking survives edits.** Content-defined boundaries mean inserting or deleting bytes only affects nearby chunks — the rest deduplicates perfectly.
+- **Storage costs scale with unique content.** A 500 MB edit with high overlap might upload only the changed slice.
+- **It's streaming.** The pipeline processes files incrementally instead of loading whole artifacts into memory.
+
+---
+
+## How Crab Finds Natural Split Points
+
+Think of content-defined chunking like finding natural paragraph breaks in a book. Instead of splitting every 64 pages regardless of content, you split at sentence endings — so if someone inserts a paragraph in chapter 3, only that chapter's splits change. The rest of the book stays identical.
+
+Crab uses a **rolling hash** (called Gearhash) that slides over your file byte by byte. When the hash hits a specific pattern, that's a chunk boundary. Because boundaries depend on the content itself, small edits only shift nearby boundaries — everything else stays the same and deduplicates against the previous version.
+
+<svg viewBox="0 0 720 280" width="100%" role="img" aria-label="Diagram comparing fixed-size chunking versus content-defined chunking. Fixed chunking shifts all boundaries after an edit, while content-defined chunking only affects the chunk near the edit.">
+  <defs>
+    <marker id="arrow-dedup-1" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Fixed-size chunking */}
+  <text x="20" y="30" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Fixed-Size Chunking"}</text>
+  <rect x="20" y="45" width="140" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="90" y="70" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 1 (64KB)"}</text>
+  <rect x="170" y="45" width="140" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="240" y="70" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 2 (64KB)"}</text>
+  <rect x="320" y="45" width="140" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="390" y="70" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 3 (64KB)"}</text>
+
+  <text x="500" y="70" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Insert 1 byte →"}</text>
+  <text x="500" y="90" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"ALL chunks shift ✗"}</text>
+
+  {/* Content-defined chunking */}
+  <text x="20" y="150" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Content-Defined Chunking"}</text>
+  <rect x="20" y="165" width="120" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="80" y="190" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 1 (48KB)"}</text>
+  <rect x="150" y="165" width="155" height="40" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="228" y="190" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 2 (72KB) ✎"}</text>
+  <rect x="315" y="165" width="130" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="380" y="190" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk 3 (56KB)"}</text>
+
+  <text x="500" y="185" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Insert 1 byte →"}</text>
+  <text x="500" y="205" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Only 1 chunk affected ✓"}</text>
+
+  {/* Summary */}
+  <rect x="20" y="230" width="680" height="35" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="1" />
+  <text x="360" y="253" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Boundaries based on content → edits stay local → unchanged chunks deduplicate perfectly"}</text>
+</svg>
+
+The target chunk size is 64 KB, with a minimum of 32 KB and maximum of 128 KB. For a 1 GB file, that's roughly 16,000 chunks — each independently addressable and dedupable.
+
+---
+
+## Three Layers of Dedup Checking
+
+Once a file is chunked, Crab checks each chunk against three tiers of previously stored content — from cheapest to most expensive:
+
+<svg viewBox="0 0 720 380" width="100%" role="img" aria-label="Flowchart showing the three-tier deduplication process: session check, shard index check, and global registry check, with outcomes for each tier.">
+  <defs>
+    <marker id="arrow-dedup-2" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Input */}
+  <rect x="280" y="10" width="160" height="44" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="360" y="37" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Chunk Hash"}</text>
+
+  {/* Arrow down */}
+  <line x1="360" y1="54" x2="360" y2="80" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+
+  {/* Tier 1 */}
+  <rect x="240" y="80" width="240" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="360" y="101" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Tier 1: Session Memory"}</text>
+  <text x="360" y="120" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"In-memory set (this push only)"}</text>
+
+  {/* Found branch right */}
+  <line x1="480" y1="105" x2="570" y2="105" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="525" y="97" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Found"}</text>
+  <rect x="575" y="85" width="120" height="36" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="635" y="108" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Skip ✓"}</text>
+
+  {/* Arrow down */}
+  <line x1="360" y1="130" x2="360" y2="160" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="345" y="150" textAnchor="end" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Not found"}</text>
+
+  {/* Tier 2 */}
+  <rect x="240" y="160" width="240" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="360" y="181" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Tier 2: Shard Index"}</text>
+  <text x="360" y="200" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"Remote metadata (this repo)"}</text>
+
+  {/* Found branch right */}
+  <line x1="480" y1="185" x2="570" y2="185" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="525" y="177" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Found"}</text>
+  <rect x="575" y="165" width="120" height="36" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="635" y="188" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Skip ✓"}</text>
+
+  {/* Arrow down */}
+  <line x1="360" y1="210" x2="360" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="345" y="230" textAnchor="end" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Not found"}</text>
+
+  {/* Tier 3 */}
+  <rect x="240" y="240" width="240" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="360" y="261" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Tier 3: Global Registry"}</text>
+  <text x="360" y="280" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"All repos sharing this backend"}</text>
+
+  {/* Found branch right */}
+  <line x1="480" y1="265" x2="570" y2="265" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="525" y="257" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Found"}</text>
+  <rect x="575" y="245" width="120" height="36" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="635" y="268" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13">{"Skip ✓"}</text>
+
+  {/* Arrow down to new */}
+  <line x1="360" y1="290" x2="360" y2="320" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-2)" />
+  <text x="345" y="310" textAnchor="end" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"Not found"}</text>
+
+  {/* New chunk */}
+  <rect x="280" y="320" width="160" height="44" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="360" y="347" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Upload (new data)"}</text>
+</svg>
+
+**Tier 1 — Session memory:** A hash set of chunks seen during this push. Catches duplicates within the same operation (like copied assets). Cost: zero — just a hash lookup.
+
+**Tier 2 — Shard index:** A compact remote index mapping chunk hashes to storage locations. Catches data already in this repository without listing the object store.
+
+**Tier 3 — Global registry:** Covers all chunks across all repos sharing the same storage backend. Catches cross-repo duplicates. Queries are batched to amortize latency.
+
+In practice, a typical push looks like this:
+
+```text
+Chunk Classification (push of 847 chunks):
+─────────────────────────────────────────────
+New (will upload):         142 chunks  (16.8%)
+Session duplicate:          89 chunks  (10.5%)
+Already stored:            616 chunks  (72.7%)
+─────────────────────────────────────────────
+Upload savings: 83.2% of chunks skipped
+```
+
+<Callout type="tip" title="Real-world impact">
+For iterative development, many chunks are already stored remotely. The more overlap a new version has with previous versions, the less data Crab needs to upload.
+</Callout>
+
+---
+
+## How New Chunks Get Packed and Stored
+
+Chunks that pass all three dedup tiers — the genuinely new data — get grouped into larger archives called **xorbs** (roughly 64 MB each). This avoids creating millions of tiny objects in your cloud bucket.
+
+Each xorb is compressed with zstd and addressed by its **Blake3 hash** — a fast, cryptographic content hash. This means you can always verify data integrity on download, and identical content always maps to the same address.
+
+<svg viewBox="0 0 720 200" width="100%" role="img" aria-label="Pipeline diagram showing the flow from file to chunks to deduplication to xorb packing to cloud upload.">
+  <defs>
+    <marker id="arrow-dedup-3" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Step 1: File */}
+  <rect x="10" y="60" width="100" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="60" y="82" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13" fontWeight="bold">{"Your File"}</text>
+  <text x="60" y="99" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"4 GB model"}</text>
+
+  <line x1="110" y1="85" x2="140" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-3)" />
+
+  {/* Step 2: Chunks */}
+  <rect x="145" y="60" width="110" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="200" y="82" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13" fontWeight="bold">{"CDC Split"}</text>
+  <text x="200" y="99" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"~64KB chunks"}</text>
+
+  <line x1="255" y1="85" x2="285" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-3)" />
+
+  {/* Step 3: Dedup */}
+  <rect x="290" y="60" width="120" height="50" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="350" y="82" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13" fontWeight="bold">{"3-Tier Dedup"}</text>
+  <text x="350" y="99" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"skip known chunks"}</text>
+
+  <line x1="410" y1="85" x2="440" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-3)" />
+
+  {/* Step 4: Xorb pack */}
+  <rect x="445" y="60" width="120" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="505" y="82" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13" fontWeight="bold">{"Xorb Pack"}</text>
+  <text x="505" y="99" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"zstd + Blake3"}</text>
+
+  <line x1="565" y1="85" x2="595" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-dedup-3)" />
+
+  {/* Step 5: Upload */}
+  <rect x="600" y="60" width="105" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="653" y="82" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="13" fontWeight="bold">{"Upload"}</text>
+  <text x="653" y="99" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="11">{"S3 / GCS"}</text>
+
+  {/* Labels */}
+  <text x="360" y="150" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Only genuinely new chunks travel over the network"}</text>
+  <text x="360" y="175" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"high-overlap edits upload only the changed chunks"}</text>
+</svg>
+
+---
+
+## What This Means for Your Workflow
+
+The combination of content-defined chunking and tiered deduplication means:
+
+- **Faster pushes.** Less data to upload means shorter wait times. The win depends on how much of the new file overlaps existing chunks and how fast your network is.
+- **Lower storage costs.** You pay for unique content, not total file size. Teams working with large binary assets (ML models, game textures, video) see the biggest savings.
+- **Edits stay cheap.** Changing a few layers in a model file doesn't re-upload the whole thing. Only the chunks near your edit are new.
+- **It works across repos.** The global registry catches duplicates even across different repositories sharing the same bucket — useful for teams with shared assets.
+
+<Callout type="note" title="Bounded resources">
+The chunking and dedup pipeline streams through your files. Crab does not need to hold the whole file in memory before it can classify and upload chunks.
+</Callout>
+
+<Accordions>
+<Accordion title="Technical detail: Gearhash parameters">
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Target size | 64 KB | Expected average chunk size |
+| Minimum size | 32 KB | Prevents pathologically small chunks |
+| Maximum size | 128 KB | Bounds worst-case memory usage |
+| Mask bits | 13 | Trailing zeros for boundary detection (~64KB average) |
+
+The gear table maps each byte to a pseudorandom 64-bit integer. The left-shift-and-add recurrence gives each byte's contribution an exponential decay, creating a natural sliding window. One shift, one add, one table lookup per byte — fast enough to be memory-bandwidth bound rather than CPU bound.
+
+</Accordion>
+</Accordions>
+
+---
+
+## Example Overlap Patterns
+
+| Workload | What Usually Deduplicates |
+|----------|----------------|
+| ML model weights with a few layers changed | Most unchanged layers |
+| Game texture atlases with minor edits | Unchanged texture regions |
+| Re-exported datasets with stable rows | Chunks around unchanged records |
+| First push of entirely new content | Nothing yet; there is no history to dedup against |
+
+The ratio improves as the shard index sees more of your repository's history. The best workloads are the ones where each new version shares long stretches of bytes with earlier versions.
+
+---
+
+## Summary
+
+Crab's deduplication pipeline ensures your storage costs and push times scale with the amount of genuinely new content — not the total size of files you touched. Content-defined chunking finds stable split points that survive edits, three tiers of dedup checking eliminate redundant uploads, and xorb packing keeps your cloud bucket organized and efficient. For teams working with large binary assets, this translates directly into faster iteration and lower bills.

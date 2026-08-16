@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkflowStageFailed",
+  "description": "Payload for `workflow.stage.failed`.",
+  "type": "object",
+  "required": [
+    "reason",
+    "stage",
+    "stage_hash",
+    "timed_out"
+  ],
+  "properties": {
+    "elapsed_ms": {
+      "description": "Milliseconds elapsed since the DAG run started.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
+    },
+    "reason": {
+      "description": "Short reason tag, e.g. `\"exit_nonzero\"`, `\"signal\"`, `\"timeout\"`, `\"disk_full\"`, `\"out_malformed\"`, `\"other\"`.",
+      "type": "string"
+    },
+    "signal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
+    },
+    "stage": {
+      "type": "string"
+    },
+    "stage_hash": {
+      "type": "string"
+    },
+    "stderr_tail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timed_out": {
+      "type": "boolean"
+    }
+  }
+}

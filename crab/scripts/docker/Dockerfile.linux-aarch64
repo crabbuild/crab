@@ -1,0 +1,29 @@
+# Build crab for aarch64-unknown-linux-gnu.
+# Runs on linux/arm64. Docker Desktop can emulate this platform on Intel hosts.
+FROM --platform=linux/arm64 rust:1.93-bookworm
+
+ARG CRAB_BUILD_VERSION
+ARG GIT_SHA
+ENV CRAB_BUILD_VERSION=${CRAB_BUILD_VERSION}
+ENV GIT_SHA=${GIT_SHA}
+ENV CRAB_CLI_FEATURES_NO_FUSE=simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs
+ENV CRAB_CLI_FEATURES_WITH_FUSE=${CRAB_CLI_FEATURES_NO_FUSE},fuse
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    libfuse3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc
+ENV CC_aarch64_unknown_linux_gnu=cc
+
+WORKDIR /workspace
+COPY . .
+
+RUN cargo build --release --locked --manifest-path crab/Cargo.toml -p crab --bin crab --no-default-features --features "$CRAB_CLI_FEATURES_WITH_FUSE" \
+    && cp target/release/crab /crab-fuse-mount \
+    && cargo build --release --locked --manifest-path crab/Cargo.toml -p crab --bin crab --no-default-features --features "$CRAB_CLI_FEATURES_NO_FUSE" \
+    && cp target/release/crab /crab \
+    && rm -rf target

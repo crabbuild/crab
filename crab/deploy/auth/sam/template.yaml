@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Crab Auth endpoint — AWS SAM deployment
+
+Parameters:
+  JwksUrl:
+    Type: String
+    Description: OIDC JWKS endpoint URL for token verification
+  Issuer:
+    Type: String
+    Description: Expected issuer (iss) claim in ID tokens
+  Audience:
+    Type: String
+    Description: Expected audience (aud) claim in ID tokens
+  AuthRoleArn:
+    Type: String
+    Description: IAM role ARN to assume for credential generation
+  AuthExternalId:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional STS ExternalId to send when assuming AuthRoleArn
+  GitLayerArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:lambda:[a-z0-9-]+:[0-9]{12}:layer:[A-Za-z0-9-_]+:[0-9]+$"
+    Description: Versioned Lambda layer ARN that provides /opt/bin/git for crab-auth-receive
+  SessionDuration:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 43200
+    Description: Credential lifetime in seconds
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.12
+
+Resources:
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: crab-auth
+      Handler: src.lambda_handler.handler
+      CodeUri: ../
+      Layers:
+        - !Ref GitLayerArn
+      Environment:
+        Variables:
+          CRAB_AUTH_JWKS_URL: !Ref JwksUrl
+          CRAB_AUTH_ISSUER: !Ref Issuer
+          CRAB_AUTH_AUDIENCE: !Ref Audience
+          CRAB_AUTH_AWS_ROLE_ARN: !Ref AuthRoleArn
+          CRAB_AUTH_AWS_EXTERNAL_ID: !Ref AuthExternalId
+          CRAB_AUTH_AWS_REGION: !Ref AWS::Region
+          CRAB_AUTH_SESSION_DURATION: !Ref SessionDuration
+          CRAB_AUTH_LOG_LEVEL: !Ref LogLevel
+          CRAB_AUTH_POLICY_PATH: /var/task/config/policy.yaml
+          CRAB_AUTH_RECEIVE_HELPER: /var/task/bin/crab-auth-receive
+          CRAB_AUTH_VIEW_HELPER: /var/task/bin/crab-auth-view
+          PATH: /opt/bin:/var/task/bin:/var/lang/bin:/usr/local/bin:/usr/bin:/bin
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref AuthRoleArn
+      Events:
+        Credentials:
+          Type: HttpApi
+          Properties:
+            Path: /v1/credentials
+            Method: POST
+        PushPrepare:
+          Type: HttpApi
+          Properties:
+            Path: /v1/push/prepare
+            Method: POST
+        PushFinalize:
+          Type: HttpApi
+          Properties:
+            Path: /v1/push/finalize
+            Method: POST
+        Health:
+          Type: HttpApi
+          Properties:
+            Path: /health
+            Method: GET
+        Ready:
+          Type: HttpApi
+          Properties:
+            Path: /ready
+            Method: GET
+
+Outputs:
+  ApiEndpoint:
+    Description: Crab Auth API endpoint
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt AuthFunction.Arn
+  CrabConfigSnippet:
+    Description: Configuration for crab CLI users
+    Value: !Sub |
+      [auth]
+      provider = "crab-auth"
+      issuer_url = "${Issuer}"
+      client_id = "${Audience}"
+      auth_endpoint = "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1/credentials"

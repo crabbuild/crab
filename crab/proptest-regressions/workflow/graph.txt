@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9c4f1860e93a38b5b7a2cca8ff1e610bcf6c338400b31869e525784ac1d9a8c5 # shrinks to spec = DagSpec { node_count: 3, edges: [] }, pick = (0, 0)

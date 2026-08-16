@@ -1,0 +1,27 @@
+---
+title: "crab locks"
+description: "List active advisory locks on Crab-managed files."
+---
+
+# crab locks
+
+List active advisory file locks.
+
+## Synopsis
+
+```bash
+crab locks [OPTIONS]
+```
+
+| Option | Description |
+| --- | --- |
+| `-p, --path <PATH>` | Filter by file path |
+| `-o, --owner <OWNER>` | Filter by owner, including `self` |
+| `-l, --limit <LIMIT>` | Limit the number of displayed locks |
+| `-j, --json` | Emit machine-readable JSON output |
+
+```bash
+crab locks
+crab locks --owner self --json
+crab locks --path models/
+```

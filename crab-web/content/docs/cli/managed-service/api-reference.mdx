@@ -1,0 +1,369 @@
+---
+title: "Managed Service API Reference"
+description: "Reference for Crab managed discovery, authentication, control-plane routes, transfer grants, service accounts, audit, quotas, errors, compatibility, and deprecation."
+---
+
+# Managed Service API Reference
+
+The managed service exposes public discovery at the repository authority and a
+versioned, bearer-authenticated JSON API at the discovered API base. For Crab's
+hosted service:
+
+```text
+Repository URL:   crab://crab.build/acme/models
+Discovery:        https://crab.build/.well-known/crab
+API base:         discovered from api_base, normally https://api.crab.build/v1
+```
+
+Do not construct the API base from the repository URL. Fetch discovery, validate
+its authority and HTTPS origins, negotiate a common API version and required
+capabilities, then use the returned `api_base` exactly.
+
+The committed [managed OpenAPI 3.1 document](https://github.com/crabbuild/crab/blob/main/crates/crab-auth/openapi/managed-v1.json)
+is generated from shared Rust DTOs and checked for breaking changes in CI. It is
+the machine-readable contract for discovery, repository access, protected push,
+audit, usage, replica promotion, and job operations. The complete current route
+catalog, including administrative resources, is below.
+
+## Protocol conventions
+
+| Concern | Contract |
+|---------|----------|
+| Authentication | `Authorization: Bearer <access-token-or-service-token>` on every `/v1` route |
+| Token transport | Headers only; managed routes reject identity tokens in query parameters and do not authenticate from JSON bodies |
+| JSON | `application/json`, `snake_case`, RFC 3339 UTC timestamps, UUID strings, and `schema_version: 1` where the DTO declares it |
+| Request shape | Unknown JSON fields are rejected; clients must not send physical placement overrides |
+| Request identity | Successful and failed API responses include `Crab-Request-Id`; error bodies repeat it as `error.request_id` |
+| Idempotency | Required mutations use `Idempotency-Key`, 1-128 visible ASCII bytes; reuse with a different normalized body fails |
+| Concurrency | Mutable resources return a strong ETag such as `"revision-7"`; guarded mutations require that exact value in `If-Match` |
+| Pagination | `cursor` is opaque and actor, collection, and filter bound; return `next_cursor` unchanged, with `limit` from 1 through 100 |
+| Additive responses | V1 clients must ignore unknown response fields and unknown capability names |
+| Strict variants | Unknown schema versions, transfer modes, operations, permissions, and request fields fail closed |
+
+The API applies a 2 MiB request-body limit, bounded execution time, and
+concurrency and rate limits before expensive work. A client must use the
+`retryable` field and any `Retry-After` header instead of retrying solely from
+the HTTP status.
+
+## Discovery
+
+`GET /.well-known/crab` is unauthenticated and served by the exact managed
+authority. The service rejects a mismatched `Host` header. Successful responses
+include `ETag` and `Cache-Control: public, max-age=<seconds>`; send
+`If-None-Match` to receive `304 Not Modified` while the document is unchanged.
+
+```bash
+curl --fail-with-body \
+  --header 'Accept: application/json' \
+  https://crab.build/.well-known/crab
+```
+
+```json
+{
+  "schema_version": 1,
+  "authority": "crab.build",
+  "api_base": "https://api.crab.build/v1",
+  "api_versions": [1],
+  "oidc": {
+    "issuer": "https://identity.crab.build",
+    "client_id": "crab-cli",
+    "scopes": ["openid", "profile", "email", "offline_access"]
+  },
+  "auth_flows": ["authorization_code_pkce", "device_authorization"],
+  "service_version": "1.0.0",
+  "minimum_cli_version": "1.1.0",
+  "capabilities": ["direct-s3-v1", "protected-push-v1"],
+  "cache": { "max_age_seconds": 3600 }
+}
+```
+
+Values above illustrate the response shape; the live document controls. A
+client validates all of the following before storing a profile:
+
+- `schema_version` is 1, `authority` exactly matches the configured lowercase
+  DNS authority, and `api_base` is an HTTPS `/v1` root.
+- The OIDC issuer is HTTPS, scopes are unique and include `openid`, and at least
+  one advertised authentication flow is supported.
+- The client and service share an API version, the CLI meets
+  `minimum_cli_version`, and the operation's named capabilities are present.
+- The cache lifetime is between 1 and 86,400 seconds. Refresh cannot change the
+  authority binding, issuer, or API origin without successful rediscovery.
+
+Discovery and repository resolution never include a bucket, container, region,
+physical prefix, provider credential, or grant token. Failure never causes
+`crab.build` or an explicitly configured enterprise authority to be retried as
+direct object storage.
+
+## Authentication and capabilities
+
+Interactive users authenticate at the discovered OIDC issuer through
+authorization code with PKCE or device authorization. Service accounts use an
+OIDC workload subject or an opaque Crab token. Both are presented to the API in
+the same header:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $CRAB_ACCESS_TOKEN" \
+  "$CRAB_API_BASE/capabilities"
+```
+
+`GET /v1/capabilities` reports supported API and transfer-grant versions,
+transfer modes, named capabilities, maximum page size, and maximum grant
+lifetime. `GET /v1/me` reports the authenticated principal and visible
+memberships, or the organization and role of a service account. Capability
+negotiation is required even when the version number matches.
+
+## Route catalog
+
+Paths below are relative to the discovered `/v1` API base. All require bearer
+authentication. Authorization is evaluated against current organization
+membership, repository state, explicit deny policy, and the requested action.
+Inaccessible repositories use the same `404 repository_not_found` response as
+absent repositories.
+
+| Method and path | Purpose | Mutation guards |
+|-----------------|---------|-----------------|
+| `GET /capabilities` | Negotiate API, grant, transfer, and feature bounds | None |
+| `GET /me` | Inspect the current principal or service account | None |
+| `GET /organizations` | List visible organizations | `cursor`, `limit` |
+| `POST /organizations` | Create an organization and owner membership | `Idempotency-Key` |
+| `GET /organizations/{organization}` | Inspect one organization | None |
+| `PATCH /organizations/{organization}` | Rename an organization | `Idempotency-Key`, `If-Match` |
+| `DELETE /organizations/{organization}` | Soft-delete an organization | `Idempotency-Key`, `If-Match` |
+| `GET /organizations/{organization}/members` | List memberships | `cursor`, `limit` |
+| `POST /organizations/{organization}/members` | Add a principal and role | `Idempotency-Key` |
+| `PATCH /organizations/{organization}/members/{principal_id}` | Change a role | `Idempotency-Key`, `If-Match` |
+| `DELETE /organizations/{organization}/members/{principal_id}` | Remove a membership | `Idempotency-Key`, `If-Match` |
+| `GET /organizations/{organization}/repositories` | List visible repositories | `cursor`, `limit` |
+| `POST /organizations/{organization}/repositories` | Create and provision a repository | `Idempotency-Key` |
+| `GET /repositories/{organization}/{repository}` | Resolve a logical repository | None |
+| `PATCH /repositories/{organization}/{repository}` | Rename or archive a repository | `Idempotency-Key`, `If-Match` |
+| `DELETE /repositories/{organization}/{repository}` | Soft-delete a repository | `Idempotency-Key`, `If-Match` |
+| `POST /repositories/{organization}/{repository}` | Restore a retained repository | `Idempotency-Key`, `If-Match` |
+| `POST /repositories/{organization}/{repository}/transfer-grants` | Issue a read grant for clone, fetch, or hydrate | Repository ID and operation bound |
+| `POST /repositories/{organization}/{repository}/pushes` | Prepare a protected push and staging grant | `Idempotency-Key` |
+| `POST /repositories/{organization}/{repository}/pushes/{push_id}:finalize` | Verify and publish one prepared push | Same actor/session and request digest |
+| `POST /repositories/{organization}/{repository}/pushes/{push_id}:abort` | Abort an uncommitted push | Session owner or repository administrator |
+| `POST /repositories/{organization}/{repository}/replicas/{replica}/promotion` | Start a fenced replica-promotion job | `Idempotency-Key` |
+| `GET /organizations/{organization}/service-accounts` | List automation identities without secrets | None |
+| `POST /organizations/{organization}/service-accounts` | Create workload identity or one-time opaque credential | Role-authorized request |
+| `POST /organizations/{organization}/service-accounts/{account_id}/credentials:rotate` | Rotate an opaque credential | `If-Match` |
+| `DELETE /organizations/{organization}/service-accounts/{account_id}` | Revoke an account | `If-Match` |
+| `GET /organizations/{organization}/audit-events` | Query immutable tenant events | Filters, `cursor`, `limit` |
+| `POST /organizations/{organization}/audit-exports` | Start an integrity-protected JSONL export | `Idempotency-Key` |
+| `GET /organizations/{organization}/audit-exports/{job_id}` | Download a completed export | Completed export job |
+| `GET /organizations/{organization}/usage` | Query usage totals | RFC 3339 window and optional repository/category filters |
+| `GET /organizations/{organization}/jobs` | List sanitized durable jobs | Filters, `cursor`, `limit` |
+| `GET /organizations/{organization}/jobs/{job_id}` | Inspect one job | None |
+| `POST /organizations/{organization}/jobs/{job_id}:retry` | Retry a safe failed job | `Idempotency-Key`, `If-Match`, reason body |
+| `POST /organizations/{organization}/jobs/{job_id}:cancel` | Cancel at a handler-defined safe point | `Idempotency-Key`, `If-Match`, reason body |
+| `POST /organizations/{organization}/jobs/{job_id}:quarantine` | Prevent further automated execution | `Idempotency-Key`, `If-Match`, reason body |
+
+`GET /health/live` and `GET /health/ready` are unversioned, unauthenticated
+orchestrator probes and deliberately expose no dependency details. `/metrics`
+is a deployment operations surface and must not be published through the public
+managed ingress.
+
+## Transfer grants
+
+A read grant request identifies the logical repository and operation, never a
+provider or physical destination:
+
+```json
+{
+  "schema_version": 1,
+  "repository_id": "01922b33-6cd6-7aa8-9b5a-8c0c74a47791",
+  "operation": "clone"
+}
+```
+
+Read operations are `clone`, `fetch`, and `hydrate`. `push_upload` grants are
+created only by protected-push preparation and are bound to that push ID. Every
+grant contains:
+
+- `schema_version`, opaque `grant_id`, logical `repository_id`, exact
+  `operation`, and RFC 3339 `expires_at`;
+- the smallest permission set from `read_object`, `read_metadata`,
+  `list_prefix`, and `create_immutable_object`;
+- one exact `storage_scope`, with a push-specific staging scope only for
+  `push_upload`; and
+- either a `direct` transport with short-lived provider credentials or a
+  `gateway` transport with an HTTPS object-gateway URL and short-lived token.
+
+Direct grants necessarily carry transient container, region/endpoint, prefix,
+and provider credential fields so the existing Crab data plane can transfer
+objects without proxying bulk bytes through the control plane. These are
+runtime secrets and routing details: keep them only in memory, redact them from
+logs and support output, never write them to Git configuration, and never
+replace the canonical `crab://...` remote with them.
+
+A client validates the version, repository, operation, expiry, permissions,
+exact prefix, push ID, HTTPS endpoint, and transport before constructing a
+store. A read grant has no write/delete capability. A push grant creates
+immutable objects only beneath its exact `staging/{push_id}` scope and cannot
+write canonical refs or manifests, overwrite an object, or delete anything.
+Expired grants are replaced through a newly authorized request; they are never
+silently widened or reused for another operation.
+
+## Service-account contract
+
+Organization owners and administrators can create:
+
+- `oidc_workload`: exact HTTPS issuer plus immutable subject; no Crab secret is
+  issued and no token-expiry field is accepted.
+- `opaque_token`: a named account and role with an expiry from 1 second through
+  1 year. The response includes the token exactly once and sends
+  `Cache-Control: no-store`.
+
+Service accounts are organization scoped, cannot create organizations or act as
+interactive owners, and use an explicit non-owner role. List responses expose
+identity metadata, revocation state, last revision, and no credential secret.
+Opaque rotation accepts a new lifetime plus an overlap no longer than 24 hours,
+returns the replacement once, and advances the ETag. Revocation rejects new API
+authentication immediately; already issued direct grants remain valid only
+until their short expiry, while gateway revocation observes the deployment's
+bounded propagation policy.
+
+See [Automation Identities](/docs/cli/managed-service/automation) for safe CLI
+handling patterns.
+
+## Audit and usage
+
+Audit queries are tenant scoped and accept optional `from`, `to`,
+`repository_id`, exact `action`, `decision`, `cursor`, and `limit` filters. The
+maximum query/export window is 366 days. Events include opaque actor and
+request IDs, action, decision, source category, resource revision, timestamp,
+safe details, and an optional denial reason; they exclude credentials and
+repository bytes.
+
+An export request uses `schema_version: 1`, an RFC 3339 `[from, to)` window,
+`format: "json_lines"`, and `Idempotency-Key`. The `202` response returns a
+durable job ID and `Location`. Poll the job API, then download from the export
+location after completion. The download is `application/x-ndjson` and includes
+content length plus integrity metadata for the BLAKE3 content digest and event
+hash-chain root. An export request and delivery are themselves audited.
+
+Usage reports aggregate append-only observations for `stored_bytes`,
+`uploaded_bytes`, `downloaded_bytes`, `cache_egress_bytes`, `requests`, and
+`job_compute`. Billing/rollup availability does not control repository
+correctness.
+
+## Quotas
+
+Push preparation rejects an individual request that exceeds its session byte
+limit, exceeds organization/repository retained-plus-reserved storage limits,
+or would exceed the concurrent-session limit. It reserves estimated bytes
+transactionally. Finalization locks and rechecks current usage with verified
+stored bytes so individually admitted concurrent pushes cannot collectively
+bypass a hard limit.
+
+Soft storage limits emit a notification/auditable operational signal but do not
+reject a valid push. Hard-limit rejection returns HTTP `429` with
+`error.code: "quota_exceeded"` and safe details:
+
+```json
+{
+  "error": {
+    "code": "quota_exceeded",
+    "message": "the push would exceed a configured quota",
+    "request_id": "req_01922b336cd67aa89b5a8c0c74a47791",
+    "retryable": true,
+    "details": {
+      "scope": "organization",
+      "category": "stored_bytes",
+      "current_usage": 900000000,
+      "requested": 200000000,
+      "limit": 1000000000,
+      "remediation": "finish or abort active pushes, remove retained data, or request a higher limit"
+    }
+  }
+}
+```
+
+Treat `retryable` as authoritative. Concurrency or reserved-storage pressure may
+clear after another session finishes; an individual session-size violation
+requires a smaller push or a changed limit.
+
+## Error envelope and stable codes
+
+Every managed API error has the same shape:
+
+```json
+{
+  "error": {
+    "code": "repository_not_found",
+    "message": "repository was not found or is not accessible",
+    "request_id": "req_01922b336cd67aa89b5a8c0c74a47791",
+    "retryable": false,
+    "details": {}
+  }
+}
+```
+
+`message` is for people and may be clarified without changing the contract.
+Branch on `code`, inspect only documented `details`, retain `request_id` for
+support, and honor `retryable`. The most important stable code families are:
+
+| Codes | Meaning |
+|-------|---------|
+| `invalid_request`, `idempotency_key_required`, `precondition_required` | Fix the body or required concurrency header before retrying |
+| `authentication_required`, `authentication_failed`, `token_in_query` | Supply one valid bearer header; never move a token into another transport |
+| `authentication_rate_limited`, `request_rate_limited` | Back off; request limiting returns `Retry-After: 60` |
+| `identity_unavailable`, `audit_unavailable`, `dependency_unavailable` | A required service dependency is temporarily unavailable |
+| `forbidden`, `owner_role_required`, `last_owner` | The current actor or ownership invariant denies the operation |
+| `organization_not_found`, `member_not_found`, `service_account_not_found`, `job_not_found` | The named administrative resource is absent or inaccessible |
+| `repository_not_found` | The repository is absent or intentionally undisclosed; no placement information is revealed |
+| `repository_provisioning`, `repository_soft_deleted`, `repository_unavailable`, `repository_state_conflict` | Repository lifecycle or a concurrent transition prevents the operation |
+| `precondition_failed`, `idempotency_conflict`, `conflict` | Refresh the resource or use a new key only after reconciling intent |
+| `transfer_grant_denied`, `transfer_provider_throttled`, `transfer_provider_unavailable`, `transfer_grant_unavailable` | Grant policy or provider issuance failed; follow `retryable` |
+| `ref_conflict`, `push_ref_locked`, `push_state_conflict`, `push_replay_conflict` | Protected-push identity, serialization, or ref preconditions failed |
+| `push_session_expired`, `push_session_unavailable`, `push_finalization_in_progress` | The session expired, cannot safely proceed, or is being finalized |
+| `push_finalize_conflict`, `push_finalize_unavailable`, `push_verification_failed` | Canonical state conflicted, a dependency failed, or staged content did not verify |
+| `quota_exceeded` | A hard quota rejected admission or finalization; inspect the documented usage details |
+| `audit_export_not_ready`, `job_state_conflict`, `replica_not_found`, `replica_state_conflict` | The asynchronous administrative operation is not in the required state |
+
+HTTP `404` is intentionally non-disclosing for repository access. HTTP `409`
+means state, idempotency, replay, or serialization conflict; it is not generally
+safe to retry unchanged. HTTP `412` means the resource ETag changed. HTTP `428`
+means `If-Match` was omitted or malformed. HTTP `422` means staged push
+verification failed. HTTP `429` covers rate or quota limits. HTTP `503` covers
+dependency unavailability.
+
+## Compatibility and deprecation
+
+The independently versioned surfaces are discovery schema 1, control-plane
+`/v1`, transfer-grant schema 1, service configuration schema 1, PostgreSQL
+schema compatibility bounds, CLI capability versions, and Helm chart major 1.
+Compatibility is an intersection, not a fallback:
+
+1. validate discovery schema and authority;
+2. negotiate an API major;
+3. require the operation's named capability and transfer-grant version;
+4. validate every returned DTO and grant before use; and
+5. fail closed if any bound does not overlap.
+
+Within `/v1`, the service may add endpoints, capabilities, error details, and
+response fields. It may not remove or change a supported field's type or
+meaning, reuse a stable error code, widen a grant, or weaken identity and
+idempotency semantics. A breaking change requires a new API path or a published
+migration window with both versions available as declared in release metadata.
+
+A supported surface is deprecated only after release metadata announces its
+replacement, affected supported consumers are identified, migration and
+rollback instructions ship, and the declared support window closes. Security
+issues may shorten a window, but still fail closed with an explicit minimum
+safe version. Crab does not preserve unreleased aliases or silently translate
+retired request shapes.
+
+The Python `/v1/credentials`, `/v1/push/prepare`, and `/v1/push/finalize`
+contracts are **not** current managed API routes. The Rust compatibility router
+is pending, will be disabled by default, and will be restricted to explicitly
+registered direct repositories after parity proof. There is no per-request
+Rust-to-Python fallback, and managed repositories never use the Python service.
+See [Migration to the Managed Service](/docs/cli/managed-service/migration) for
+the data-independent whole-environment cutover boundary.
+
+Direct BYOC repositories remain a separate contract. An authority other than
+`crab.build` is managed only when an installed profile binds it explicitly;
+otherwise it retains direct bucket/prefix behavior. Once classified as managed,
+any discovery or API failure remains managed and never falls back to BYOC.

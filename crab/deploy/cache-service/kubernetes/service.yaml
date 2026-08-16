@@ -1,0 +1,17 @@
+# Kubernetes Service exposing crab-cache-server on port 8443.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: crab-cache-server
+  labels:
+    app: crab-cache-server
+spec:
+  type: ClusterIP
+  selector:
+    app: crab-cache-server
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP

@@ -1,0 +1,67 @@
+---
+title: "crab diff"
+description: "Show content differences between file versions at the chunk level."
+---
+
+# crab diff
+
+Show content differences between file versions.
+
+## Synopsis
+
+```bash
+crab diff [OPTIONS] <REF1> [REF2] [-- <PATHS>...]
+```
+
+## Description
+
+`crab diff` compares Crab-tracked files between two Git refs using file-index
+and shard metadata. It reports changed chunks, affected bytes, and reuse
+without downloading full file content.
+
+For conceptual background, see [Comparing Changes](/docs/cli/daily-workflow/diffing-changes).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `REF1` | Yes | First Git ref, such as a branch, tag, SHA, or `HEAD~N` |
+| `REF2` | No | Second Git ref; defaults to `HEAD` |
+| `PATHS` | No | Paths after `--` to restrict the comparison |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--stat` | `false` | Show summary-only output |
+| `--name-only` | `false` | List only changed file names |
+| `--verbose` | `false` | Show per-segment detail |
+| `--byte-ranges` | `false` | Show changed byte offset ranges |
+| `--no-color` | `false` | Disable colored output |
+| `--no-annotations` | `false` | Disable format-aware annotations |
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+### Diff all changed files
+
+```bash
+crab diff HEAD~1 HEAD
+```
+
+### Diff a specific file
+
+```bash
+crab diff HEAD~1 HEAD -- models/weights.bin
+```
+
+### Summary only
+
+```bash
+crab diff --stat HEAD~1 HEAD
+```
+
+## Related Commands
+
+- [`crab status`](/docs/cli/reference/crab-status) — see which files have changes.
+- [`crab add`](/docs/cli/reference/crab-add) — stage changes.

@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FetchSummary",
+  "description": "Summary of a completed fetch operation.",
+  "type": "object",
+  "required": [
+    "bytes_downloaded",
+    "duration_ms",
+    "objects_fetched",
+    "objects_skipped"
+  ],
+  "properties": {
+    "bytes_downloaded": {
+      "description": "Total bytes downloaded.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the operation in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "objects_fetched": {
+      "description": "Number of objects fetched.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "objects_skipped": {
+      "description": "Number of objects skipped (already cached).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

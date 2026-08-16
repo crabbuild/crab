@@ -1,0 +1,149 @@
+<svg viewBox="0 0 1120 760" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    text { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace; fill: #e2e8f0; }
+    .title { fill: #f8fafc; font-size: 18px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 10px; }
+    .region-label { font-size: 10px; font-weight: 700; }
+    .name { fill: #f8fafc; font-size: 12px; font-weight: 700; text-anchor: middle; }
+    .desc { fill: #cbd5e1; font-size: 9px; text-anchor: middle; }
+    .tiny { fill: #94a3b8; font-size: 8px; text-anchor: middle; }
+    .arrow-label { fill: #cbd5e1; font-size: 8px; font-weight: 500; text-anchor: middle; }
+    .note { fill: #e2e8f0; font-size: 9px; }
+  </style>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-open" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polyline points="0 0, 10 3.5, 0 7" fill="none" stroke="#fbbf24" stroke-width="1.5"/>
+    </marker>
+  </defs>
+
+  <rect width="1120" height="760" fill="#0f172a"/>
+  <rect width="1120" height="760" fill="url(#grid)"/>
+
+  <text x="40" y="42" class="title">Crab add operation architecture</text>
+  <text x="40" y="61" class="subtitle">Bounded streaming, provisional staging, add-time push planning, and Git pointer publication</text>
+
+  <rect x="35" y="105" width="260" height="500" rx="12" fill="none" stroke="#22d3ee" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="50" y="124" class="region-label" fill="#22d3ee">CLI orchestration</text>
+
+  <rect x="330" y="105" width="305" height="500" rx="12" fill="none" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="345" y="124" class="region-label" fill="#34d399">Streaming and local staging</text>
+
+  <rect x="675" y="105" width="305" height="500" rx="12" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="690" y="124" class="region-label" fill="#a78bfa">Plan and Git publication</text>
+
+  <rect x="765" y="25" width="280" height="70" rx="10" fill="none" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="780" y="44" class="region-label" fill="#fbbf24">Optional remote context</text>
+
+  <!-- Connections behind boxes -->
+  <path d="M 165 210 L 165 255" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+  <path d="M 165 330 L 165 375" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+  <path d="M 260 415 L 365 415" fill="none" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrow-emerald)"/>
+  <path d="M 482 210 L 482 255" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+  <path d="M 482 330 L 482 375" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+  <path d="M 560 415 L 715 415" fill="none" stroke="#a78bfa" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <path d="M 827 210 L 827 255" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 827 330 L 827 375" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 905 95 L 827 255" fill="none" stroke="#fbbf24" stroke-width="1.3" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+
+  <text x="314" y="399" class="arrow-label">candidates</text>
+  <text x="637" y="399" class="arrow-label">chunk rows</text>
+  <text x="863" y="172" class="arrow-label">remote hits</text>
+
+  <!-- CLI boxes -->
+  <rect x="75" y="150" width="180" height="60" rx="6" fill="#0f172a"/>
+  <rect x="75" y="150" width="180" height="60" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="165" y="174" class="name">User patterns</text>
+  <text x="165" y="191" class="desc">crab add *.bin</text>
+
+  <rect x="75" y="270" width="180" height="60" rx="6" fill="#0f172a"/>
+  <rect x="75" y="270" width="180" height="60" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="165" y="294" class="name">run_add</text>
+  <text x="165" y="311" class="desc">jobs, progress, rollback</text>
+
+  <rect x="70" y="390" width="190" height="70" rx="6" fill="#0f172a"/>
+  <rect x="70" y="390" width="190" height="70" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="165" y="414" class="name">Candidate discovery</text>
+  <text x="165" y="431" class="desc">gitattributes + path filter</text>
+  <text x="165" y="447" class="tiny">skips pointers and internals</text>
+
+  <!-- Streaming boxes -->
+  <rect x="365" y="150" width="235" height="60" rx="6" fill="#0f172a"/>
+  <rect x="365" y="150" width="235" height="60" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="482" y="174" class="name">stage_file_streaming</text>
+  <text x="482" y="191" class="desc">128 KiB buffers, bounded memory</text>
+
+  <rect x="365" y="270" width="235" height="60" rx="6" fill="#0f172a"/>
+  <rect x="365" y="270" width="235" height="60" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="482" y="294" class="name">Blake3 + GearChunker</text>
+  <text x="482" y="311" class="desc">single read loop, CDC batches</text>
+
+  <g transform="translate(385,390)">
+    <rect x="0" y="12" width="195" height="60" rx="3" fill="#0f172a"/>
+    <ellipse cx="97.5" cy="12" rx="97.5" ry="14" fill="#0f172a"/>
+    <ellipse cx="97.5" cy="72" rx="97.5" ry="14" fill="#0f172a"/>
+    <rect x="0" y="12" width="195" height="60" fill="rgba(76,29,149,0.4)"/>
+    <ellipse cx="97.5" cy="12" rx="97.5" ry="14" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <ellipse cx="97.5" cy="72" rx="97.5" ry="14" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <line x1="0" y1="12" x2="0" y2="72" stroke="#a78bfa" stroke-width="1.5"/>
+    <line x1="195" y1="12" x2="195" y2="72" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="97.5" y="37" class="name">StagingArea</text>
+    <text x="97.5" y="54" class="desc">segments + SQLite rows</text>
+  </g>
+
+  <!-- Plan and Git boxes -->
+  <rect x="715" y="150" width="225" height="60" rx="6" fill="#0f172a"/>
+  <rect x="715" y="150" width="225" height="60" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="827" y="174" class="name">Push-plan builder</text>
+  <text x="827" y="191" class="desc">validate chunks, pack misses</text>
+
+  <rect x="715" y="270" width="225" height="60" rx="6" fill="#0f172a"/>
+  <rect x="715" y="270" width="225" height="60" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="827" y="294" class="name">Prepared plans</text>
+  <text x="827" y="311" class="desc">FilePushPlan v3 + xorbs</text>
+
+  <rect x="715" y="390" width="225" height="70" rx="6" fill="#0f172a"/>
+  <rect x="715" y="390" width="225" height="70" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="827" y="414" class="name">Git pointer publish</text>
+  <text x="827" y="431" class="desc">gix write_blob per pointer</text>
+  <text x="827" y="447" class="tiny">one update-index batch</text>
+
+  <rect x="805" y="45" width="200" height="35" rx="6" fill="#0f172a"/>
+  <rect x="805" y="45" width="200" height="35" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="905" y="67" class="name">crab:// chunk index</text>
+
+  <rect x="700" y="520" width="255" height="45" rx="6" fill="#0f172a"/>
+  <rect x="700" y="520" width="255" height="45" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="827" y="548" class="name">Git index contains pointer blobs</text>
+
+  <path d="M 827 460 L 827 520" fill="none" stroke="#94a3b8" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <!-- Progress strip -->
+  <rect x="95" y="645" width="930" height="62" rx="8" fill="#0f172a"/>
+  <rect x="95" y="645" width="930" height="62" rx="8" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="120" y="670" class="note" font-weight="700">Visible phases:</text>
+  <text x="245" y="670" class="note">Streaming</text>
+  <text x="345" y="670" class="note">Planning</text>
+  <text x="435" y="670" class="note">Flushing</text>
+  <text x="525" y="670" class="note">Indexing</text>
+  <text x="120" y="690" class="subtitle">JSONL emits staging progress, push-plan progress, per-file completion, and final AddSummary.</text>
+
+  <circle cx="224" cy="666" r="5" fill="#34d399"/>
+  <circle cx="324" cy="666" r="5" fill="#a78bfa"/>
+  <circle cx="414" cy="666" r="5" fill="#fbbf24"/>
+  <circle cx="504" cy="666" r="5" fill="#22d3ee"/>
+</svg>

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "authority": "crab.build",
+  "api_base": "https://api.crab.build/v1",
+  "api_versions": [
+    1
+  ],
+  "oidc": {
+    "issuer": "https://identity.crab.build",
+    "client_id": "crab-cli",
+    "scopes": [
+      "openid",
+      "profile",
+      "email",
+      "offline_access"
+    ]
+  },
+  "auth_flows": [
+    "authorization_code_pkce",
+    "device_authorization"
+  ],
+  "service_version": "1.0.0",
+  "minimum_cli_version": "1.1.0",
+  "capabilities": [
+    "direct-s3-v1",
+    "gateway-v1",
+    "protected-push-v1"
+  ],
+  "cache": {
+    "max_age_seconds": 3600
+  }
+}

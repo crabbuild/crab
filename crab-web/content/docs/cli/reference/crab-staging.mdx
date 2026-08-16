@@ -1,0 +1,57 @@
+---
+title: "crab staging"
+description: "Inspect and manage the local staging area where chunks are stored between add and push."
+---
+
+# crab staging
+
+Manage the staging area.
+
+## Synopsis
+
+```bash
+crab staging stats
+crab staging clean [OPTIONS]
+```
+
+## Description
+
+The Crab staging area (`.crab/staging/`) stores chunk data locally between
+`crab add` and `git push`. The `crab staging` command provides subcommands
+to inspect and clean this area.
+
+For conceptual background, see [Staging Area](/docs/cli/storage/staging-area).
+
+## Subcommands
+
+### stats
+
+Print staging area statistics (read-only, never blocks writers).
+
+```bash
+crab staging stats
+```
+
+### clean
+
+Purge stale staging data.
+
+```bash
+crab staging clean
+crab staging clean --force   # break stale locks from dead processes
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--force` | `false` | Force-break a stale lock held by a dead process |
+| `--prune-abandoned` | `false` | Reclaim rolled-over segments left by a crashed or older add process |
+
+`crab staging stats` also accepts `--json`; `crab staging clean` does not.
+
+## Related Commands
+
+- [`crab add`](/docs/cli/reference/crab-add) — writes to the staging area.
+- [`crab reset`](/docs/cli/reference/crab-reset) — unstage files.
+- [`crab du`](/docs/cli/reference/crab-du) — disk usage including staging.

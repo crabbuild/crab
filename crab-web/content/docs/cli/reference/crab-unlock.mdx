@@ -1,0 +1,26 @@
+---
+title: "crab unlock"
+description: "Release advisory locks on Crab-managed files."
+---
+
+# crab unlock
+
+Release an advisory lock on one or more files.
+
+## Synopsis
+
+```bash
+crab unlock [OPTIONS] <PATHS>...
+```
+
+| Option | Description |
+| --- | --- |
+| `-f, --force` | Force-break another user's lock |
+| `-j, --json` | Emit machine-readable JSON output |
+
+```bash
+crab unlock models/checkpoint.safetensors
+crab unlock --force models/checkpoint.safetensors
+```
+
+Use [`crab locks`](/docs/cli/reference/crab-locks) to inspect active locks.

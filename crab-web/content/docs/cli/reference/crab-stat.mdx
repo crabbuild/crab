@@ -1,0 +1,53 @@
+---
+title: "crab stat"
+description: "Show staging, push-plan, performance, and storage-class statistics."
+---
+
+# crab stat
+
+Show staging, push-plan, and performance statistics.
+
+## Synopsis
+
+```bash
+crab stat [OPTIONS] [COMMAND]
+```
+
+## Description
+
+`crab stat` prints staging-area statistics by default. Its subcommands expose
+performance counters, the add-time push plan, and per-storage-class totals.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `perf` | Print performance counters |
+| `push-plan` | Print the add-time push-plan inventory; use `--verify` to verify payloads |
+| `classes` | Print per-storage-class bytes and object counts |
+
+## Examples
+
+### Staging statistics
+
+```bash
+crab stat
+```
+
+### Push-plan verification
+
+```bash
+crab stat push-plan --verify --json
+```
+
+## Related Commands
+
+- [`crab ls-files`](/docs/cli/reference/crab-ls-files) — list all tracked files.
+- [`crab du`](/docs/cli/reference/crab-du) — disk usage overview.
+- [`crab status`](/docs/cli/reference/crab-status) — hydration state.

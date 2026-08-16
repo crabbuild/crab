@@ -1,0 +1,254 @@
+---
+title: "Shard Reconstruction: How Crab Rebuilds Files from Chunks"
+description: "How Crab puts your files back together perfectly every time — from pointer blobs through file-index, shard, and xorb lookups to byte-identical reconstruction."
+date: "2025-08-04"
+author: "Crab Team"
+category: "architecture"
+tags: ["hydration", "shard", "xorb", "blake3", "reconstruction"]
+excerpt: "When you hydrate a file, Crab follows a chain of lookups — pointer → file-index → shard → xorb — to locate every chunk, downloads them in parallel, and reassembles the original bytes with cryptographic verification. Here's how it works."
+level: "deep-dive"
+path: "core-internals"
+order: 4
+concepts: ["hydration", "shard", "xorb", "verification"]
+prerequisites: ["Crab's Multi-Layer Caching Architecture"]
+outcome: "Understand how Crab reconstructs original bytes from pointer metadata, shards, xorbs, and verified chunks."
+diagramType: "Hydration lookup chain"
+---
+
+<FlowSteps
+  title="Hydration lookup chain"
+  steps={[
+    "Read the small pointer blob stored in the Git working tree.",
+    "Resolve the file-index recipe that lists the chunks in order.",
+    "Ask the shard index where each chunk is packed.",
+    "Fetch byte ranges from xorbs in parallel.",
+    "Verify BLAKE3 hashes and write the original file bytes."
+  ]}
+/>
+
+## How Crab Puts Your Files Back Together Perfectly Every Time
+
+When you clone a Crab repository, your working directory contains small placeholder files called pointer blobs — think of them as bookmarks that say "the real content lives over there." When you actually need a file, opening a model or running a build, Crab **hydrates** it. That means following a recipe to reassemble the ingredients: locating every chunk, downloading them in parallel, and rebuilding the exact original bytes.
+
+It's similar to how a streaming service works. You don't download the entire library — you stream the specific film you want, assembled from chunks stored across servers. Crab does the same thing for your large files, with one extra promise: every byte is cryptographically verified before you see it.
+
+## TL;DR
+
+- **Four lookups, one outcome.** Pointer → file-index → shard → xorb. Each layer is independently cacheable.
+- **Parallel by design.** Chunks are fetched concurrently, grouped by location to minimize round-trips.
+- **Bounded memory.** Even a 10 GB file uses tens of MB of RAM during reconstruction.
+- **Byte-identical, guaranteed.** Blake3 verification means no silent corruption, ever.
+
+
+<svg viewBox="0 0 720 220" width="100%" role="img" aria-label="The reconstruction chain: a pointer blob is resolved through the file-index, then the shard index, then the xorb download, producing a verified file output">
+  <defs>
+    <marker id="arrow-recon-chain" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="360" y="28" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"The Reconstruction Chain"}</text>
+
+  {/* Box 1: Pointer Blob */}
+  <rect x="20" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="100" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Pointer Blob"}</text>
+  <text x="100" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"~200 bytes"}</text>
+  <text x="100" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"file hash, size"}</text>
+
+  {/* Arrow 1 */}
+  <line x1="180" y1="100" x2="200" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+
+  {/* Box 2: File-Index */}
+  <rect x="200" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="280" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"File-Index"}</text>
+  <text x="280" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"the recipe"}</text>
+  <text x="280" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"ordered chunks"}</text>
+
+  {/* Arrow 2 */}
+  <line x1="360" y1="100" x2="380" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+
+  {/* Box 3: Shard Index */}
+  <rect x="380" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="460" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Shard Index"}</text>
+  <text x="460" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"the warehouse map"}</text>
+  <text x="460" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"chunk → location"}</text>
+
+  {/* Arrow 3 */}
+  <line x1="540" y1="100" x2="560" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+
+  {/* Box 4: Xorb Download */}
+  <rect x="560" y="60" width="140" height="80" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="630" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb Fetch"}</text>
+  <text x="630" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel ranges"}</text>
+  <text x="630" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"from cloud storage"}</text>
+
+  {/* Down arrow to verified file */}
+  <line x1="630" y1="140" x2="630" y2="170" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+
+  {/* Box 5: Verified file */}
+  <rect x="540" y="172" width="180" height="36" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="630" y="195" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"✓ Blake3-verified file"}</text>
+</svg>
+
+
+## Step 1: The Recipe (File-Index)
+
+Reconstruction works like following a recipe. The pointer blob is your table of contents entry — it tells you which recipe to look up. The **file-index** is the actual recipe: given a file's identity (its Blake3 hash), it returns the exact list of ingredients (chunks) needed, in the order they must be combined.
+
+Each entry says: take chunk A, then chunk B, then chunk C, concatenate them in order, and you get the original bytes back.
+
+It's similar to a music playlist. The playlist doesn't contain the songs — it contains an ordered list of references. The file-index doesn't contain your data — it contains an ordered list of chunk hashes that, when assembled, reproduce your file perfectly.
+
+### Why This Indirection Matters
+
+The file-index stores chunk hashes, not physical locations. So when Crab reorganizes storage (repacking xorbs for efficiency), the file-index doesn't need updating. The recipe stays the same even when the ingredients move to different shelves.
+
+For a 4 GB file split into roughly 64 KB chunks, the file-index contains around 65,000 entries — about 2.3 MB of metadata. Small enough to download quickly, detailed enough to reconstruct any file.
+
+## Step 2: Finding the Ingredients (Shard Resolution)
+
+The file-index tells Crab **what** chunks it needs. The shard index answers **where** they live — which xorb archive contains each chunk, and at what byte offset.
+
+Think of it like a warehouse inventory system. You have your shopping list (chunk hashes from the file-index), and the shard is the warehouse map telling you which aisle and shelf each item is on.
+
+Crab resolves all chunks in a single batch pass through the shard's sorted index. That's much faster than looking up each chunk individually — one scan handles thousands of chunks at once.
+
+### Chunks Across Time
+
+A single file's chunks might live in xorbs from completely different time periods. Imagine a 1 GB model file you first pushed six months ago. Most of its chunks are in old xorbs from that original push. Last week you tweaked a few layers — those new chunks landed in a fresh xorb. The shard unifies all of this. It doesn't care when a chunk was uploaded; it just knows where everything is right now.
+
+<Callout type="warning" title="Missing chunks = hard error">
+If any chunk can't be found, Crab refuses to produce a partial file. A missing chunk indicates something went wrong during the original push — Crab will never give you a corrupted or incomplete file.
+</Callout>
+
+
+## Step 3: Smart Downloading
+
+Once Crab knows where every chunk lives, it plans downloads intelligently rather than fetching each chunk individually. The goal is fewer round-trips, parallel work, and bounded memory.
+
+<svg viewBox="0 0 720 360" width="100%" role="img" aria-label="Download planner: chunks are grouped by xorb, fetched in parallel, then streamed through a bounded channel into the assembler before the verified file is written">
+  <defs>
+    <marker id="arrow-recon-dl" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="360" y="28" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"From Plan to Bytes"}</text>
+
+  {/* Row 1: Planner */}
+  <rect x="260" y="50" width="200" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="360" y="73" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Download Planner"}</text>
+  <text x="360" y="91" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"group + coalesce ranges"}</text>
+
+  {/* Three downward arrows from planner to xorb fetchers */}
+  <line x1="360" y1="100" x2="160" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+  <line x1="360" y1="100" x2="360" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+  <line x1="360" y1="100" x2="560" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+
+  {/* Row 2: Three parallel xorb fetchers */}
+  <rect x="60" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="160" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb A range"}</text>
+  <text x="160" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
+
+  <rect x="260" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="360" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb B range"}</text>
+  <text x="360" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
+
+  <rect x="460" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="560" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb C range"}</text>
+  <text x="560" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
+
+  {/* Three arrows converging to bounded channel */}
+  <line x1="160" y1="200" x2="320" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+  <line x1="360" y1="200" x2="360" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+  <line x1="560" y1="200" x2="400" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+
+  {/* Row 3: Bounded channel */}
+  <rect x="240" y="250" width="240" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
+  <text x="360" y="273" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Bounded Channel"}</text>
+  <text x="360" y="291" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"cap ≈ 32 chunks (~4 MB)"}</text>
+
+  {/* Arrow to assembler */}
+  <line x1="360" y1="300" x2="360" y2="320" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+
+  {/* Row 4: Streaming assembler */}
+  <rect x="240" y="322" width="240" height="30" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
+  <text x="360" y="342" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Streaming Assembler + Blake3"}</text>
+</svg>
+
+
+**Grouping.** If 50 chunks live in the same xorb, Crab fetches them as one contiguous byte range instead of making 50 separate requests. If two chunks are close together (gap under ~64 KB), it merges them into a single request and discards the gap bytes — still cheaper than a separate round-trip.
+
+**Parallel fetching.** Up to 8 download tasks run concurrently, each pulling ranges from different xorbs. Downloaded chunks are decompressed and sent through a bounded channel to the assembler.
+
+**Bounded memory.** The channel holds at most 32 chunks (~4 MB). If the assembler can't write fast enough, downloaders pause automatically. That means even a 10 GB file uses only tens of MB of RAM during reconstruction — file size doesn't matter.
+
+## Step 4: Verification and Atomic Assembly
+
+This is where Crab's "no compromises" philosophy shows up. Every reconstructed file is verified with Blake3 hashing — the same algorithm used throughout Crab's storage engine.
+
+The verification is **streaming**. As each chunk is written to a temporary file, the same bytes are fed to a Blake3 hasher. By the time the last chunk is written, the hash is already computed. There's no separate verification pass — it happens during assembly at no extra cost.
+
+```bash
+$ crab hydrate models/checkpoint.bin
+Resolving chunks... ~12k chunks across ~20 xorbs
+Downloading...    ████████████████████████  100%  (1.2 GB)
+Verified ✓        Blake3 hash matches pointer
+```
+
+If the hash matches, the temporary file is atomically renamed to the final path. One instant it's a pointer blob, the next it's your full file. No process ever sees a half-written file.
+
+If the hash doesn't match, the temporary file is deleted and Crab returns an error. This would indicate a storage corruption bug, but the check is non-negotiable: data integrity isn't optional.
+
+<Callout type="note" title="Blake3 is fast">
+Blake3 hashes at over 1 GB/s per core. Since it's computed incrementally during the write, verification adds essentially zero time. A 4 GB file verifies in roughly the same time it takes to write the file to disk.
+</Callout>
+
+## Caching Makes It Faster Over Time
+
+Downloaded chunks are cached locally at `~/.cache/crab/chunks/`, keyed by content hash. That means:
+
+- **Second hydration is faster.** If you dehydrate and re-hydrate, most chunks come from local cache instead of cloud storage.
+- **Related files share chunks.** Thanks to deduplication, files with overlapping content (like model versions) share cached chunks.
+- **Cross-repo benefits.** The cache is shared across all your Crab repositories.
+
+After the first full hydration of a project, later operations can reuse cached chunks instead of fetching them again. Iterative workflows like hydrate → edit → dehydrate → hydrate usually get faster as more of the working set is already local.
+
+## Selective Hydration: Only What You Need
+
+You don't have to hydrate everything. For a repo with 10,000 tracked files where you only need 50, selective hydration cuts wait time by orders of magnitude.
+
+When hydrating multiple files, they share the download pool and chunk cache. Chunks needed by several files are downloaded once and reused — the planner deduplicates requests automatically.
+
+
+## What Happens When Things Go Wrong
+
+Reconstruction is designed to be resilient at every level. Here's what Crab does when each layer hits trouble:
+
+| Failure | What Crab Does |
+|---------|---------------|
+| Network timeout on a chunk | Retries with exponential backoff (up to 3 attempts) |
+| Corrupted download | Re-fetches from scratch, bypasses cache for that chunk |
+| Blake3 mismatch on final file | Discards temp file, re-hydrates with cache bypass |
+| Process interrupted (Ctrl+C) | Temp file cleaned up; cached chunks preserved for next attempt |
+
+The key principle: every operation is idempotent. You can interrupt and retry hydration as many times as you want — partial progress is preserved in the chunk cache, and the final result is always verified end-to-end.
+
+```json
+{
+  "file": "models/checkpoint.bin",
+  "chunks_resolved": 12047,
+  "xorbs_touched": 19,
+  "bytes_downloaded": 412905472,
+  "cache_hits": 0.61,
+  "verified": true
+}
+```
+
+## What This Means for You
+
+Reconstruction is the part of Crab you'll never have to think about — and that's the point. You run `crab hydrate`, and the right bytes show up at the right path. Behind the scenes, four lookups, parallel downloads, bounded memory, and cryptographic verification all conspire to make sure the file is exactly what you pushed.
+
+Curious about the other side of the round-trip? Read about [how Crab dedups your data on push](/blog/xet-protocol-deduplication) or [how lazy checkout keeps clones fast on multi-TB repos](/blog/lazy-checkout-fuse).

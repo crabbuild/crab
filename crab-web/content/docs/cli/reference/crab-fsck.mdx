@@ -1,0 +1,49 @@
+---
+title: "crab fsck"
+description: "Verify repository integrity by checking all references and stored objects."
+---
+
+# crab fsck
+
+Verify repository integrity.
+
+## Synopsis
+
+```
+crab fsck [OPTIONS]
+```
+
+## Description
+
+`crab fsck` performs a deep integrity check of the repository: verifying that
+all pointer blobs reference valid chunks, all chunks are present in the remote
+store, and all hashes match their content.
+
+For conceptual background, see [Integrity Check](/docs/cli/diagnostics/integrity-check).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--repair` | `false` | Attempt to repair detected issues |
+| `--json` | `false` | Emit structured JSON output |
+| `--jsonl` | `false` | Stream JSONL progress events |
+
+## Examples
+
+### Local integrity check
+
+```bash
+crab fsck
+```
+
+### Repair safe issues
+
+```bash
+crab fsck --repair
+```
+
+## Related Commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — quick health checks.
+- [`crab gc`](/docs/cli/reference/crab-gc) — garbage collection.

@@ -1,0 +1,39 @@
+# Copy this file to terraform.tfvars and fill in your values.
+
+aws_region = "us-west-2"
+
+# Lambda architecture. Terraform builds crab-auth-receive for this target.
+lambda_architecture = "x86_64"
+
+# Your corporate IdP's JWKS endpoint (for token signature verification).
+jwks_url = "https://login.corp.example.com/.well-known/jwks.json"
+
+# Expected issuer claim in ID tokens.
+issuer = "https://login.corp.example.com"
+
+# The OAuth2 client_id registered for the crab CLI.
+audience = "crab-cli-prod"
+
+# IAM role that the auth endpoint assumes to generate scoped credentials.
+# This role should have broad S3 access — the inline session policy scopes
+# it down per-request.
+auth_role_arn = "arn:aws:iam::123456789012:role/crab-auth-base"
+
+# Set this when the role trust policy requires sts:ExternalId.
+auth_external_id = "crab-auth"
+
+# Versioned Lambda layer ARN that provides /opt/bin/git for crab-auth-receive.
+# Use a layer built for lambda_architecture and your AWS region/account.
+git_layer_arn = "arn:aws:lambda:us-west-2:123456789012:layer:git:1"
+
+# Credential lifetime (default: 1 hour).
+session_duration = 3600
+
+log_level = "INFO"
+
+tags = {
+  Project     = "crab"
+  Component   = "crab-auth"
+  Environment = "production"
+  ManagedBy   = "terraform"
+}

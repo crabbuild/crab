@@ -1,0 +1,86 @@
+---
+title: "Pruning Objects"
+description: "How to reclaim local disk space by evicting local cache objects."
+---
+
+## Reclaiming Local Cache Space
+
+As you work with different branches and files, Crab's local cache accumulates chunks, xorbs, and shards. Pruning evicts the least-recently-used cache objects until the cache fits its configured budgets, freeing disk space without touching the remote store.
+
+```mermaid
+flowchart TD
+    Walk[Walk local cache objects] --> Sort[Sort by last access time]
+    Sort --> Check{Within budget?}
+    Check -->|Yes| Keep[Keep cache]
+    Check -->|No| Remove[Evict oldest chunks, xorbs, shards]
+```
+
+## How Pruning Works
+
+Prune is purely local and always safe:
+
+1. Walks the local cache directory (`~/.cache/crab/` or `$CRAB_CACHE_DIR`).
+2. Sorts chunk/xorb objects by least-recently-used order under the shared data-object budget.
+3. Sorts shard objects by least-recently-used order when a shard budget is configured.
+4. Removes the oldest objects needed to bring the cache back under budget.
+
+The remote store always retains the authoritative copy. Pruned objects can be re-fetched anytime with `crab hydrate`.
+
+## Usage
+
+### Preview what would be removed
+
+```bash
+crab prune --dry-run
+```
+
+```
+prune (dry run): would remove 15 objects (234567890 bytes)
+```
+
+### Run the prune
+
+```bash
+crab prune
+```
+
+```
+prune complete: removed 15 objects (234567890 bytes freed)
+```
+
+### Verbose output (see each object)
+
+```bash
+crab prune --verbose
+```
+
+## When to Prune
+
+| Scenario | Why it helps |
+|----------|-------------|
+| After heavy hydrate/fetch work | Trims oldest cached data back to budget |
+| Disk space is low | Reclaims cache space without affecting the remote |
+| Periodic maintenance | Keeps the cache lean over time |
+
+## Prune vs. GC
+
+These are different operations at different scopes:
+
+| | `crab prune` | `crab gc` |
+|---|---|---|
+| **Scope** | Local cache only | Remote store |
+| **Safety** | Always safe — remote is untouched | Requires careful reference checking |
+| **Reversibility** | Objects re-fetched on next hydrate | Deleted objects are gone permanently |
+| **When to use** | Free local disk space | Remove unreachable remote objects |
+
+## Cache Location
+
+The local cache defaults to `~/.cache/crab/`. Override with:
+
+```bash
+export CRAB_CACHE_DIR=/path/to/cache
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab prune reference](/docs/cli/reference/crab-prune).

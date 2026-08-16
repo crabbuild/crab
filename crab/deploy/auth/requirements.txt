@@ -1,0 +1,33 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pyyaml==6.0.2
+
+# JWT verification
+pyjwt[crypto]==2.10.1
+cryptography==44.0.0
+
+# Cloud providers — AWS (required for reference implementation)
+boto3==1.36.4
+
+# Cloud providers — GCP (optional, install if using GCP)
+google-auth==2.37.0
+google-cloud-iam==2.16.1
+
+# Cloud providers — Azure (optional, install if using Azure)
+azure-identity==1.19.0
+azure-storage-blob==12.24.0
+
+# Lambda adapter
+mangum==0.19.0
+
+# Observability
+structlog==24.4.0
+
+# Dev/test
+pytest==8.3.4
+httpx==0.28.1
+pytest-asyncio==0.25.0
+ruff==0.8.6
+moto[server,sts]==5.0.27

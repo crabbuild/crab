@@ -1,0 +1,40 @@
+---
+title: "crab env"
+description: "Display environment and configuration information."
+---
+
+# crab env
+
+Display environment and configuration info.
+
+## Synopsis
+
+```
+crab env [OPTIONS]
+```
+
+## Description
+
+`crab env` shows the Crab version and build metadata, Git version, configured
+remote, Git filter/diff drivers, and selected storage-related environment
+variables. It does not print secret credentials.
+
+For conceptual background, see [Environment Info](/docs/cli/authentication/environment-info).
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | `false` | Emit structured JSON output |
+
+## Examples
+
+```bash
+crab env
+```
+
+## Related Commands
+
+- [`crab config`](/docs/cli/reference/crab-config) — read/write settings.
+- [`crab auth status`](/docs/cli/reference/crab-auth-status) — authentication state.
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.

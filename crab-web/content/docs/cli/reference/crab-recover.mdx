@@ -1,0 +1,57 @@
+---
+title: "crab recover"
+description: "Plan and apply verified repository recovery actions."
+---
+
+# crab recover
+
+Plan and apply repository recovery from a release manifest and verified local
+or backup sources. Recovery plans are explicit JSON artifacts; inspect one
+before applying it.
+
+## Synopsis
+
+```bash
+crab recover <SUBCOMMAND> [OPTIONS]
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `plan` | Build a repair plan from an expected release inventory and available sources |
+| `show` | Inspect a saved plan |
+| `apply` | Materialize verified files and optionally repair durable objects or a remote |
+| `history` | List, verify, and restore immutable historical repository roots |
+
+## Plan and apply
+
+```bash
+crab recover plan \
+  --manifest release.json \
+  --source /mnt/backup \
+  --output recovery-plan.json
+
+crab recover show --plan recovery-plan.json --json
+crab recover apply --plan recovery-plan.json --restore-to restored-files
+```
+
+`plan` can also consume `--cache-root`, `--replica-source`, import or workflow
+journals, pointer roots, shard/xorb/pack inventories, file indexes, and
+`crab fsck --jsonl` output. `apply` accepts explicit flags for restoring shards,
+xorbs, packs, rebuilding the file index, or repairing a remote.
+
+## Historical roots
+
+Successful manifest replacements retain immutable historical roots. Inspect and
+restore one explicitly:
+
+```bash
+crab recover history list
+crab recover history verify 41
+crab recover history restore 41
+crab recover history restore 41 --apply
+```
+
+Verification is required before restoration. If a generation has multiple
+valid roots, provide `--digest` to select one.

@@ -1,0 +1,27 @@
+---
+title: "crab completions"
+description: "Generate or install shell completion scripts for Crab."
+---
+
+# crab completions
+
+Generate shell completion scripts for the current Crab command surface.
+
+## Synopsis
+
+```bash
+crab completions [OPTIONS] <SHELL>
+```
+
+Supported shells are `bash`, `zsh`, `fish`, and `powershell`.
+
+```bash
+crab completions zsh > ~/.zsh/completions/_crab
+crab completions bash
+crab completions fish --install
+crab completions powershell --install
+```
+
+`--install` writes to the shell-specific completion directory. Use
+`crab completions <shell> --help` if your shell setup needs a different load
+path.

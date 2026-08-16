@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 450" width="680" height="450">
+
+  <defs>
+    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <linearGradient id="crabGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="gitGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="resultGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <g id="background">
+    <rect x="0" y="0" width="680" height="450" fill="#FFFFFF"/>
+  </g>
+
+  <g id="containers">
+    <!-- Push phase background -->
+    <rect x="30" y="30" width="620" height="100" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+    <!-- Pull phase background -->
+    <rect x="30" y="200" width="620" height="220" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1"/>
+  </g>
+
+  <g id="nodes">
+    <!-- Row 1: Push flow (horizontal) -->
+    <rect x="60" y="55" width="150" height="50" rx="8" fill="url(#crabGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="270" y="55" width="150" height="50" rx="8" fill="url(#gitGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="480" y="55" width="150" height="50" rx="8" fill="url(#gitGrad)" stroke="#334155" stroke-width="1.5"/>
+
+    <!-- Row 2: Clone -->
+    <rect x="430" y="250" width="190" height="56" rx="8" fill="url(#crabGrad)" stroke="#0284C7" stroke-width="1.5"/>
+
+    <!-- Row 3: Hydrate -->
+    <rect x="430" y="340" width="190" height="56" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+  </g>
+
+  <g id="labels">
+    <!-- Phase labels -->
+    <text x="50" y="48" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#64748B" letter-spacing="0.5">PUSH</text>
+    <text x="50" y="218" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#0284C7" letter-spacing="0.5">PULL (NEW MACHINE)</text>
+
+    <!-- Row 1 labels -->
+    <text x="135" y="85" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab add</text>
+    <text x="345" y="85" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">git commit</text>
+    <text x="555" y="85" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">git push</text>
+
+    <!-- Annotation between push and clone -->
+    <text x="525" y="160" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#475569">uploads xorbs to</text>
+    <text x="525" y="175" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#475569">S3 / GCS / Azure</text>
+
+    <!-- Row 2 label -->
+    <text x="525" y="273" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">crab clone</text>
+    <text x="525" y="291" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">(new machine)</text>
+
+    <!-- Row 3 label -->
+    <text x="525" y="363" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">crab hydrate</text>
+    <text x="525" y="381" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#94A3B8">(restore files)</text>
+  </g>
+
+  <g id="connections">
+    <!-- crab add → git commit -->
+    <line x1="210" y1="80" x2="270" y2="80" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- git commit → git push -->
+    <line x1="420" y1="80" x2="480" y2="80" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- git push → crab clone (vertical with offset) -->
+    <line x1="555" y1="105" x2="555" y2="250" stroke="#334155" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#arrowhead)"/>
+
+    <!-- crab clone → crab hydrate -->
+    <line x1="525" y1="306" x2="525" y2="340" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  </g>
+
+</svg>

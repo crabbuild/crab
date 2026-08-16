@@ -1,0 +1,46 @@
+---
+title: "crab du"
+description: "Report disk usage for tracked files, staging area, and cache."
+---
+
+# crab du
+
+Report disk usage for tracked files.
+
+## Synopsis
+
+```bash
+crab du [OPTIONS]
+```
+
+## Description
+
+`crab du` shows a disk-usage breakdown for Crab-managed local storage. Pass
+`--remote` when you also want a remote storage size query.
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--remote` | `false` | Include remote storage size; requires network access |
+| `-j, --json` | `false` | Emit machine-readable JSON output |
+
+## Examples
+
+### Full disk usage report
+
+```bash
+crab du
+```
+
+### Include remote storage
+
+```bash
+crab du --remote
+```
+
+## Related Commands
+
+- [`crab status`](/docs/cli/reference/crab-status) — file state overview.
+- [`crab staging`](/docs/cli/reference/crab-staging) — staging area details.
+- [`crab cache`](/docs/cli/reference/crab-cache) — cache management.

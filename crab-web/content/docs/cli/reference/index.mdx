@@ -1,0 +1,145 @@
+---
+title: "Crab CLI command index"
+description: "Current top-level Crab CLI commands, grouped by repository, file, storage, workflow, service, and operations use case."
+---
+
+# Crab CLI command index
+
+This page reflects the current top-level command surface of the open-source Crab
+CLI. Reference pages cover the higher-use commands and workflows. For the full
+option set for any installed binary, run `crab <command> --help`.
+
+The CLI also exposes aliases such as `crab get` for `crab download` and
+`crab repro` for `crab run`. Internal Git filter and remote-helper entry points
+are intentionally omitted from this user-facing index.
+
+## Repository setup and transfer
+
+| Command | Purpose |
+| --- | --- |
+| [`crab init`](/docs/cli/reference/crab-init) | Initialize or re-apply a Crab repository connection |
+| [`crab setup`](/docs/cli/reference/crab-setup) | Scan for large files and configure tracking |
+| [`crab clone`](/docs/cli/reference/crab-clone) | Clone a repository with Crab filter and hydration setup |
+| [`crab mirror`](/docs/cli/reference/crab-mirror) | Mirror a Git remote into a Crab remote |
+| [`crab download`](/docs/cli/reference/crab-download) | Download selected files without cloning |
+| [`crab worktree`](/docs/cli/reference/crab-worktree) | Manage Crab-aware Git worktrees |
+| [`crab import`](/docs/cli/reference/crab-import) | Import a raw object-storage prefix into a Crab-backed repository |
+| [`crab export`](/docs/cli/reference/crab-export) | Export a Crab snapshot as materialized files |
+| `crab install` / `crab uninstall` | Install or remove the Git filter driver |
+
+## File workflow
+
+| Command | Purpose |
+| --- | --- |
+| [`crab add`](/docs/cli/reference/crab-add) | Stage files through Crab chunking and deduplication |
+| [`crab reset`](/docs/cli/reference/crab-reset) | Unstage files and clean Crab staging data |
+| [`crab track`](/docs/cli/reference/crab-track) | Add or list Crab tracking patterns |
+| `crab untrack` | Remove a tracking pattern |
+| [`crab adopt`](/docs/cli/reference/crab-adopt) | Convert existing large files to Crab pointers |
+| [`crab unadopt`](/docs/cli/reference/crab-unadopt) | Restore files converted by `crab adopt` |
+| [`crab undo`](/docs/cli/reference/crab-undo) | Reverse a detected reversible Crab operation |
+| [`crab push`](/docs/cli/reference/crab-push) | Push through the native concurrent Crab pipeline |
+| [`crab pull`](/docs/cli/reference/crab-pull) | Pull Git changes and hydrate new pointers |
+| [`crab ship`](/docs/cli/reference/crab-ship) | Add, commit, and push in one command |
+| [`crab migrate`](/docs/cli/reference/crab-migrate) | Rewrite history into or out of Crab tracking |
+
+## File inspection and hydration
+
+| Command | Purpose |
+| --- | --- |
+| [`crab status`](/docs/cli/reference/crab-status) | Report working-tree hydration state |
+| [`crab why`](/docs/cli/reference/crab-why) | Explain tracking and hydration for one file |
+| [`crab hydrate`](/docs/cli/reference/crab-hydrate) | Materialize pointer files |
+| [`crab dehydrate`](/docs/cli/reference/crab-dehydrate) | Replace materialized files with pointers |
+| [`crab fetch`](/docs/cli/reference/crab-fetch) | Pre-fetch remote objects into the local cache |
+| [`crab diff`](/docs/cli/reference/crab-diff) | Compare file content between Git refs |
+| `crab diff-driver` | Run the Git external diff driver |
+| [`crab ls-files`](/docs/cli/reference/crab-ls-files) | List Crab-tracked files and state |
+| [`crab du`](/docs/cli/reference/crab-du) | Show Crab-managed disk usage |
+| [`crab stat`](/docs/cli/reference/crab-stat) | Show staging or performance statistics |
+
+## Locks and storage maintenance
+
+| Command | Purpose |
+| --- | --- |
+| [`crab lock`](/docs/cli/reference/crab-lock) | Acquire advisory file locks |
+| `crab unlock` | Release advisory file locks |
+| `crab locks` | List active advisory file locks |
+| [`crab cache`](/docs/cli/reference/crab-cache) | Inspect and manage the local chunk cache |
+| [`crab staging`](/docs/cli/reference/crab-staging) | Inspect and manage the staging area |
+| [`crab gc`](/docs/cli/reference/crab-gc) | Garbage-collect unreachable remote objects |
+| [`crab prune`](/docs/cli/reference/crab-prune) | Evict local cache objects within configured budgets |
+| [`crab repack`](/docs/cli/reference/crab-repack) | Consolidate remote Git packs |
+| [`crab compact`](/docs/cli/reference/crab-compact) | Compact metadata shards |
+| [`crab optimize`](/docs/cli/reference/crab-optimize) | Optimize storage, indexes, caches, LFS, workflows, replicas, and repo posture |
+| [`crab tier`](/docs/cli/reference/crab-tier) | Plan or roll back lifecycle tiering rules |
+| [`crab metadb`](/docs/cli/reference/crab-metadb) | Diagnose, rebuild, compact, and cache metadata databases |
+| [`crab replica`](/docs/cli/reference/crab-replica) | Manage read replicas and replication operations |
+
+## Workflow and experiments
+
+| Command | Purpose |
+| --- | --- |
+| [`crab run`](/docs/cli/reference/crab-run) | Execute workflow stages with content-addressed caching |
+| `crab repro` | DVC-compatible spelling for `crab run` |
+| [`crab stage`](/docs/cli/reference/crab-stage) | Create or list workflow stages |
+| [`crab freeze`](/docs/cli/reference/crab-freeze) | Freeze workflow stages |
+| [`crab unfreeze`](/docs/cli/reference/crab-freeze) | Unfreeze workflow stages |
+| [`crab workflow`](/docs/cli/reference/crab-workflow) | Manage lockfiles, DAGs, journals, and stage caches |
+| [`crab exp`](/docs/cli/reference/crab-exp) | Run and manage experiments |
+| [`crab queue`](/docs/cli/reference/crab-queue) | Manage queued experiment tasks |
+| [`crab params`](/docs/cli/reference/crab-params) | Read or diff parameter files |
+| [`crab metrics`](/docs/cli/reference/crab-metrics) | Read or diff metrics files |
+| [`crab plots`](/docs/cli/reference/crab-plots) | Render workflow plots and templates |
+
+## Virtual filesystem and LFS
+
+| Command | Purpose |
+| --- | --- |
+| [`crab mount`](/docs/cli/reference/crab-mount) | Mount a repository for on-demand file access |
+| [`crab unmount`](/docs/cli/reference/crab-unmount) | Unmount one or all Crab filesystems |
+| [`crab daemon`](/docs/cli/reference/crab-daemon) | Run persistent named multi-repository mounts |
+| [`crab lfs`](/docs/cli/reference/crab-lfs) | Manage Git LFS compatibility commands |
+
+## Authentication and managed services
+
+| Command | Purpose |
+| --- | --- |
+| [`crab login`](/docs/cli/reference/crab-login) | Authenticate with an identity provider |
+| [`crab logout`](/docs/cli/reference/crab-logout) | Clear cached credentials |
+| [`crab auth`](/docs/cli/reference/crab-auth) | Inspect or refresh authentication state |
+| [`crab config`](/docs/cli/reference/crab-config) | Read and write Crab configuration |
+| [`crab env`](/docs/cli/reference/crab-env) | Print diagnostic environment information |
+| [`crab organization`](/docs/cli/reference/crab-organization) | Manage organizations |
+| [`crab repo`](/docs/cli/reference/crab-repo) | Manage logical repositories |
+| [`crab member`](/docs/cli/reference/crab-member) | Manage organization memberships |
+| [`crab service-account`](/docs/cli/reference/crab-service-account) | Manage service accounts |
+
+## Diagnostics, release, and administration
+
+| Command | Purpose |
+| --- | --- |
+| [`crab doctor`](/docs/cli/reference/crab-doctor) | Run comprehensive health checks |
+| [`crab fsck`](/docs/cli/reference/crab-fsck) | Verify repository integrity |
+| [`crab errors`](/docs/cli/reference/crab-errors) | Look up Crab error codes |
+| [`crab logs`](/docs/cli/reference/crab-logs) | Manage diagnostic logs |
+| [`crab audit`](/docs/cli/reference/crab-audit) | Inspect and verify audit events |
+| [`crab release`](/docs/cli/reference/crab-release) | Create and verify release manifests |
+| [`crab recover`](/docs/cli/reference/crab-recover) | Plan and apply repository recovery |
+| [`crab update`](/docs/cli/reference/crab-update) | Check for or install the latest release |
+| [`crab completions`](/docs/cli/reference/crab-completions) | Generate shell completion scripts |
+| [`crab version`](/docs/cli/reference/crab-version) | Print version information |
+
+## Output and cost references
+
+| Page | Purpose |
+| --- | --- |
+| [Structured output](/docs/cli/reference/structured-output) | JSON and JSONL envelope contracts |
+| [Pricing tables](/docs/cli/reference/pricing-tables) | Storage cost reference by provider and tier |
+
+For command-specific behavior, the installed parser is authoritative:
+
+```bash
+crab --help
+crab <command> --help
+```

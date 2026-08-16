@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkflowStageResult",
+  "description": "Single-envelope terminal payload for `crab run` (single-stage mode). Emitted under `--json` as `Envelope<WorkflowStageResult>` and under `--jsonl` as the final `result` event.",
+  "type": "object",
+  "required": [
+    "attempts",
+    "cache_hit",
+    "duration_ms",
+    "outs",
+    "side_effects_skipped",
+    "stage_hash",
+    "stage_name"
+  ],
+  "properties": {
+    "attempts": {
+      "description": "Number of attempts it took to reach success (always `>= 1`).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "cache_hit": {
+      "description": "Whether the result came from the cache.",
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the attempt in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "outs": {
+      "description": "Declared outputs with their content hashes and sizes.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/WorkflowStageOut"
+      }
+    },
+    "side_effects_skipped": {
+      "description": "Set to `true` when a stage has `side_effects: true` but no `on_cache_hit` hook — the side effects were skipped on this cache hit.",
+      "type": "boolean"
+    },
+    "source": {
+      "description": "Cache hit source: `\"Local\"`, `\"Remote\"`, or `\"Execution\"`. Present only when the stage was served from cache.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stage_hash": {
+      "description": "Lowercase hex `stage_hash` (64 chars).",
+      "type": "string"
+    },
+    "stage_name": {
+      "description": "Stage name as declared on the CLI.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "WorkflowStageOut": {
+      "description": "One output recorded in a [`WorkflowStageResult`] or [`WorkflowStageHashed`] payload.",
+      "type": "object",
+      "required": [
+        "file_hash",
+        "path",
+        "size"
+      ],
+      "properties": {
+        "file_hash": {
+          "description": "`\"b3:\" + lowercase_hex(32 bytes)` content hash.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repo-relative path of the output.",
+          "type": "string"
+        },
+        "size": {
+          "description": "Size of the output in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

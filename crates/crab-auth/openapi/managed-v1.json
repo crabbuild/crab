@@ -1,0 +1,3155 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Crab Managed Service API",
+    "description": "Auth client contracts and token handling for Crab.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/.well-known/crab": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "discover_service",
+        "responses": {
+          "200": {
+            "description": "Managed service discovery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveryDocument"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Discovery is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "service_capabilities",
+        "responses": {
+          "200": {
+            "description": "Negotiated service capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/audit-events": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "list_audit_events",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive RFC 3339 lower bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive RFC 3339 upper bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository_id",
+            "in": "query",
+            "description": "Repository filter",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Exact audit action filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "decision",
+            "in": "query",
+            "description": "Authorization decision filter",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AuditDecision"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque next-page cursor",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PageCursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant audit events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/audit-exports": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "request_audit_export",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique mutation key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuditExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Audit export accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditExportOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid export request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/audit-exports/{job}": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "download_audit_export",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "description": "Completed audit-export job",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hash-chained JSON Lines audit export",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Export not found in this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Export is not complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog or archive unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/jobs": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Job state filter",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/JobState"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Job kind filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque next-page cursor",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PageCursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sanitized durable jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/jobs/{job}": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "inspect_job",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sanitized durable job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/jobs/{job}:cancel": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Current job revision entity tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique mutation key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Job safely cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cancellation request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Unsafe job state or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Job revision changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Revision precondition required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/jobs/{job}:quarantine": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "quarantine_job",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Current job revision entity tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique mutation key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Job quarantined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid quarantine request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Unsafe job state or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Job revision changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Revision precondition required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/jobs/{job}:retry": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "retry_job",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Current job revision entity tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique mutation key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Job scheduled for retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid retry request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Unsafe job state or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Job revision changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Revision precondition required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/organizations/{organization}/usage": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "query_usage",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive RFC 3339 lower bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive RFC 3339 upper bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository_id",
+            "in": "query",
+            "description": "Repository filter",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Usage category filter",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/UsageCategory"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant usage window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid usage filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Billing or administrative role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}": {
+      "get": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "resolve_repository",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logical repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogicalRepository"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}/pushes": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "prepare_push",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique push preparation key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushPrepareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Durable push session and staging grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPrepareResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid push request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ref, quota, concurrency, or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Push admission limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog, storage, or transfer provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}/pushes/{push_id}:abort": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "abort_push",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "push_id",
+            "in": "path",
+            "description": "Prepared push session ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Push session aborted or already aborted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushAbortResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid abort request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the session owner or a repository administrator may abort",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository or push absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Committed, terminal, expired, or actively finalizing session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}/pushes/{push_id}:finalize": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "finalize_push",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "push_id",
+            "in": "path",
+            "description": "Prepared push session ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushFinalizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Protected push committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushFinalizeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid finalize request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository or push absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, ref, session, or serialization conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Staged push failed receive verification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Current push quota rejects finalization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog, storage, or coordination unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}/replicas/{replica}/promotion": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "promote_replica",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "replica",
+            "in": "path",
+            "description": "Configured replica name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique promotion request key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteReplicaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Fenced promotion job accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromoteReplicaResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid promotion request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository or replica absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replica, placement, or idempotency conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/repositories/{organization}/{repository}/transfer-grants": {
+      "post": {
+        "tags": [
+          "managed"
+        ],
+        "operationId": "issue_transfer_grant",
+        "parameters": [
+          {
+            "name": "organization",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "Repository slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Short-lived transfer grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferGrant"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid grant request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Transfer is not authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Repository absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Transfer grant rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Transfer provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Stable managed API error body.",
+        "required": [
+          "code",
+          "message",
+          "request_id",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiErrorEnvelope": {
+        "type": "object",
+        "description": "Stable managed API error envelope.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        }
+      },
+      "AuditDecision": {
+        "type": "string",
+        "description": "Audit decision recorded by the managed service.",
+        "enum": [
+          "allowed",
+          "denied"
+        ]
+      },
+      "AuditEvent": {
+        "type": "object",
+        "description": "Tenant-visible immutable audit event.",
+        "required": [
+          "id",
+          "actor_key",
+          "action",
+          "decision",
+          "request_id",
+          "source_category",
+          "details",
+          "occurred_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_key": {
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/AuditDecision"
+          },
+          "details": {},
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repository_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "resource_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "source_category": {
+            "type": "string"
+          }
+        }
+      },
+      "AuditEventPage": {
+        "type": "object",
+        "description": "Cursor-paginated tenant audit events.",
+        "required": [
+          "schema_version",
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            }
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageCursor"
+              }
+            ]
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "AuditExportFormat": {
+        "type": "string",
+        "description": "Supported audit-export encoding.",
+        "enum": [
+          "json_lines"
+        ]
+      },
+      "AuditExportOperation": {
+        "type": "object",
+        "description": "Durable operation returned after an audit export is accepted.",
+        "required": [
+          "schema_version",
+          "job_id",
+          "state"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          }
+        }
+      },
+      "AuditExportRequest": {
+        "type": "object",
+        "description": "Request for an integrity-protected tenant audit export.",
+        "required": [
+          "schema_version",
+          "from",
+          "to",
+          "format"
+        ],
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/AuditExportFormat"
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AuthFlow": {
+        "type": "string",
+        "description": "OAuth flow name advertised by discovery."
+      },
+      "CapabilityName": {
+        "type": "string",
+        "description": "Named managed-service capability. Unknown valid names are intentionally retained."
+      },
+      "DirectObjectCredentials": {
+        "type": "object",
+        "description": "Direct object-store route and temporary credential payload.",
+        "required": [
+          "container",
+          "object_prefix",
+          "credentials"
+        ],
+        "properties": {
+          "container": {
+            "type": "string"
+          },
+          "credentials": {
+            "$ref": "#/components/schemas/ProviderCredentials"
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object_prefix": {
+            "type": "string"
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "DiscoveryCache": {
+        "type": "object",
+        "description": "Discovery cache bounds supplied by the service authority.",
+        "required": [
+          "max_age_seconds"
+        ],
+        "properties": {
+          "max_age_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "DiscoveryDocument": {
+        "type": "object",
+        "description": "Versioned `/.well-known/crab` discovery document.",
+        "required": [
+          "schema_version",
+          "authority",
+          "api_base",
+          "api_versions",
+          "oidc",
+          "auth_flows",
+          "service_version",
+          "minimum_cli_version",
+          "capabilities",
+          "cache"
+        ],
+        "properties": {
+          "api_base": {
+            "type": "string"
+          },
+          "api_versions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "auth_flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthFlow"
+            }
+          },
+          "authority": {
+            "type": "string"
+          },
+          "cache": {
+            "$ref": "#/components/schemas/DiscoveryCache"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityName"
+            }
+          },
+          "minimum_cli_version": {
+            "type": "string"
+          },
+          "oidc": {
+            "$ref": "#/components/schemas/OidcClientDiscovery"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "service_version": {
+            "type": "string"
+          }
+        }
+      },
+      "EntityTag": {
+        "type": "string",
+        "description": "Strong entity tag used by managed mutation preconditions."
+      },
+      "GatewayAccess": {
+        "type": "object",
+        "description": "Authenticated object-gateway route for providers without safe downscoping.",
+        "required": [
+          "service_url",
+          "token"
+        ],
+        "properties": {
+          "service_url": {
+            "type": "string"
+          },
+          "token": {
+            "$ref": "#/components/schemas/SecretString"
+          }
+        },
+        "additionalProperties": false
+      },
+      "IdempotencyKey": {
+        "type": "string",
+        "description": "Idempotency key supplied for retryable managed mutations."
+      },
+      "JobActionRequest": {
+        "type": "object",
+        "description": "Operator reason supplied for a job state transition.",
+        "required": [
+          "schema_version",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "JobPage": {
+        "type": "object",
+        "description": "Cursor-paginated job summaries.",
+        "required": [
+          "schema_version",
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobSummary"
+            }
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageCursor"
+              }
+            ]
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "JobState": {
+        "type": "string",
+        "description": "Durable job state visible through administrative APIs.",
+        "enum": [
+          "pending",
+          "running",
+          "retry_wait",
+          "completed",
+          "cancelled",
+          "dead_letter",
+          "quarantined"
+        ]
+      },
+      "JobSummary": {
+        "type": "object",
+        "description": "Sanitized durable-job representation.",
+        "required": [
+          "schema_version",
+          "id",
+          "kind",
+          "state",
+          "attempts",
+          "max_attempts",
+          "payload_version",
+          "revision",
+          "available_at",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "payload_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "repository_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "LogicalRepository": {
+        "type": "object",
+        "description": "Logical repository representation returned by repository resolution.",
+        "required": [
+          "schema_version",
+          "repository_id",
+          "organization_id",
+          "canonical_url",
+          "state",
+          "revision",
+          "transfer_modes",
+          "protected_push"
+        ],
+        "properties": {
+          "canonical_url": {
+            "type": "string"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "protected_push": {
+            "type": "boolean"
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/RepositoryState"
+          },
+          "transfer_modes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferMode"
+            }
+          }
+        }
+      },
+      "OidcClientDiscovery": {
+        "type": "object",
+        "description": "Public OIDC client metadata returned by service discovery.",
+        "required": [
+          "issuer",
+          "client_id",
+          "scopes"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PageCursor": {
+        "type": "string",
+        "description": "Opaque signed pagination cursor."
+      },
+      "PromoteReplicaRequest": {
+        "type": "object",
+        "description": "Operator request to promote one verified read replica to primary.",
+        "required": [
+          "schema_version",
+          "placement_generation",
+          "replica_revision",
+          "reason"
+        ],
+        "properties": {
+          "placement_generation": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "replica_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromoteReplicaResponse": {
+        "type": "object",
+        "description": "Durable promotion job accepted by the managed service.",
+        "required": [
+          "schema_version",
+          "job_id",
+          "state"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          }
+        }
+      },
+      "ProviderCredentials": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "access_key_id",
+              "secret_access_key",
+              "session_token",
+              "provider"
+            ],
+            "properties": {
+              "access_key_id": {
+                "$ref": "#/components/schemas/SecretString"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "aws"
+                ]
+              },
+              "secret_access_key": {
+                "$ref": "#/components/schemas/SecretString"
+              },
+              "session_token": {
+                "$ref": "#/components/schemas/SecretString"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "access_token",
+              "provider"
+            ],
+            "properties": {
+              "access_token": {
+                "$ref": "#/components/schemas/SecretString"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "gcp"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "account",
+              "token",
+              "provider"
+            ],
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "azure"
+                ]
+              },
+              "token": {
+                "$ref": "#/components/schemas/SecretString"
+              }
+            }
+          }
+        ],
+        "description": "Provider-specific temporary credentials returned in direct mode."
+      },
+      "PushAbortResponse": {
+        "type": "object",
+        "description": "Durable response after a managed push session is aborted.",
+        "required": [
+          "schema_version",
+          "push_id",
+          "state"
+        ],
+        "properties": {
+          "push_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushAdmissionPlan": {
+        "type": "object",
+        "description": "Client estimates used for push quota admission.",
+        "required": [
+          "estimated_bytes",
+          "estimated_objects"
+        ],
+        "properties": {
+          "estimated_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "estimated_objects": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushFinalizeRequest": {
+        "type": "object",
+        "description": "Versioned request to finalize one durable managed push session.",
+        "required": [
+          "schema_version",
+          "repository_id",
+          "ref_updates",
+          "plan",
+          "client_version"
+        ],
+        "properties": {
+          "client_version": {
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PushAdmissionPlan"
+          },
+          "ref_updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushRefUpdate"
+            }
+          },
+          "replication": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PushReplicationRequest"
+              }
+            ]
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushFinalizeResponse": {
+        "type": "object",
+        "description": "Response returned after a protected push is finalized by Crab Auth.",
+        "required": [
+          "status",
+          "ref_updates"
+        ],
+        "properties": {
+          "commit_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coordinator_epoch": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "manifest_generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "operation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushRefUpdate"
+            }
+          },
+          "status": {
+            "type": "string"
+          },
+          "writer_region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushPrepareRequest": {
+        "type": "object",
+        "description": "Versioned request for a durable managed push session.",
+        "required": [
+          "schema_version",
+          "repository_id",
+          "ref_updates",
+          "plan",
+          "client_version"
+        ],
+        "properties": {
+          "client_version": {
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PushAdmissionPlan"
+          },
+          "ref_updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushRefUpdate"
+            }
+          },
+          "replication": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PushReplicationRequest"
+              }
+            ]
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushPrepareResponse": {
+        "type": "object",
+        "description": "Durable session identity and exact staging authorization for one push.",
+        "required": [
+          "schema_version",
+          "push_id",
+          "repository_id",
+          "expires_at",
+          "base_manifest_generation",
+          "base_manifest_etag",
+          "staging_grant"
+        ],
+        "properties": {
+          "base_manifest_etag": {
+            "type": "string"
+          },
+          "base_manifest_generation": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "push_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "staging_grant": {
+            "$ref": "#/components/schemas/TransferGrant"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushRefUpdate": {
+        "type": "object",
+        "description": "One protected-push ref update authorized by Crab Auth.",
+        "required": [
+          "ref_name",
+          "new_oid"
+        ],
+        "properties": {
+          "new_oid": {
+            "type": "string"
+          },
+          "old_oid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushReplicationRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "writer",
+              "configuration",
+              "mode"
+            ],
+            "properties": {
+              "configuration": {},
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "active_active"
+                ]
+              },
+              "writer": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Optional replication identity bound to a managed push session."
+      },
+      "RepositoryState": {
+        "type": "string",
+        "description": "Managed repository lifecycle state visible to clients.",
+        "enum": [
+          "provisioning",
+          "active",
+          "archived",
+          "soft_deleted",
+          "failed"
+        ]
+      },
+      "SecretString": {
+        "type": "string",
+        "description": "Opaque secret transported only inside a short-lived grant."
+      },
+      "ServiceCapabilities": {
+        "type": "object",
+        "description": "Authenticated capability and protocol-bound response.",
+        "required": [
+          "schema_version",
+          "api_versions",
+          "transfer_grant_versions",
+          "transfer_modes",
+          "capabilities",
+          "max_page_size",
+          "max_grant_lifetime_seconds"
+        ],
+        "properties": {
+          "api_versions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityName"
+            }
+          },
+          "max_grant_lifetime_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_page_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "transfer_grant_versions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "transfer_modes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferMode"
+            }
+          }
+        }
+      },
+      "StagingScope": {
+        "type": "object",
+        "description": "Exact staging sub-scope for one protected push.",
+        "required": [
+          "push_id",
+          "prefix"
+        ],
+        "properties": {
+          "prefix": {
+            "type": "string"
+          },
+          "push_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransferGrant": {
+        "type": "object",
+        "description": "Versioned, repository-bound, short-lived transfer authorization.",
+        "required": [
+          "schema_version",
+          "grant_id",
+          "repository_id",
+          "operation",
+          "expires_at",
+          "permissions",
+          "storage_scope",
+          "transport"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "grant_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/TransferOperation"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferPermission"
+            }
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "storage_scope": {
+            "$ref": "#/components/schemas/TransferScope"
+          },
+          "transport": {
+            "$ref": "#/components/schemas/TransferTransport"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransferGrantRequest": {
+        "type": "object",
+        "description": "Operation-bound request for a managed transfer grant.",
+        "required": [
+          "schema_version",
+          "repository_id",
+          "operation"
+        ],
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/TransferOperation"
+          },
+          "push_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "repository_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransferMode": {
+        "type": "string",
+        "description": "Transfer transports negotiated through discovery and capabilities.",
+        "enum": [
+          "direct_s3",
+          "direct_gcs",
+          "direct_azure",
+          "gateway"
+        ]
+      },
+      "TransferOperation": {
+        "type": "string",
+        "description": "Operation authorized by a transfer grant.",
+        "enum": [
+          "clone",
+          "fetch",
+          "hydrate",
+          "push_upload"
+        ]
+      },
+      "TransferPermission": {
+        "type": "string",
+        "description": "Smallest object capability expressible by a managed transfer grant.",
+        "enum": [
+          "read_object",
+          "read_metadata",
+          "list_prefix",
+          "create_immutable_object"
+        ]
+      },
+      "TransferScope": {
+        "type": "object",
+        "description": "Physical repository and optional staging scope authorized by a grant.",
+        "required": [
+          "repository_prefix"
+        ],
+        "properties": {
+          "repository_prefix": {
+            "type": "string"
+          },
+          "staging": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StagingScope"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransferTransport": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "direct",
+              "transport"
+            ],
+            "properties": {
+              "direct": {
+                "$ref": "#/components/schemas/DirectObjectCredentials"
+              },
+              "transport": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "gateway",
+              "transport"
+            ],
+            "properties": {
+              "gateway": {
+                "$ref": "#/components/schemas/GatewayAccess"
+              },
+              "transport": {
+                "type": "string",
+                "enum": [
+                  "gateway"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Transport selected for a managed transfer grant."
+      },
+      "UsageCategory": {
+        "type": "string",
+        "description": "Usage dimension supported by the managed service.",
+        "enum": [
+          "stored_bytes",
+          "uploaded_bytes",
+          "downloaded_bytes",
+          "cache_egress_bytes",
+          "requests",
+          "job_compute"
+        ]
+      },
+      "UsageReport": {
+        "type": "object",
+        "description": "Tenant-scoped usage report derived from append-only observations.",
+        "required": [
+          "schema_version",
+          "from",
+          "to",
+          "totals"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "totals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageTotal"
+            }
+          }
+        }
+      },
+      "UsageTotal": {
+        "type": "object",
+        "description": "One aggregated usage total within a requested window.",
+        "required": [
+          "category",
+          "quantity"
+        ],
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/UsageCategory"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "repository_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT or Crab service token"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "managed",
+      "description": "Crab managed-service API"
+    }
+  ]
+}

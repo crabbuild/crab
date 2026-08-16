@@ -1,0 +1,171 @@
+---
+title: "Parameters"
+description: "Display and compare workflow parameters across git refs with structured output and multiple rendering formats."
+---
+
+# crab params
+
+Read and diff structured parameter files (e.g. `params.yaml`) across git refs.
+Useful for tracking hyperparameter changes between experiments, branches, or
+commits.
+
+## Synopsis
+
+```
+crab params show [OPTIONS]
+crab params diff <REF_A> <REF_B> [OPTIONS]
+```
+
+## Description
+
+`crab params` provides two subcommands for working with parameter files stored
+in your repository:
+
+1. **`crab params show`** — reads parameter files at a given git ref and
+   renders them in the chosen format. Defaults to reading `params.yaml` at the
+   repo root when no explicit paths are given.
+
+2. **`crab params diff`** — compares parameter files between two git refs,
+   showing added, removed, and changed values. This is particularly useful for
+   reviewing hyperparameter changes between experiment branches or before/after
+   a training run.
+
+Parameter files are YAML files containing flat key-value pairs where values are
+scalars (booleans, integers, floats, strings, or null). Nested structures are
+flattened with dot-separated keys.
+
+Output can be rendered as a terminal table, Markdown, JSON, or a PR comment
+suitable for pasting into pull request descriptions.
+
+## Subcommands
+
+### show
+
+Display parameters at a specific git ref.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--ref <REF>` | `HEAD` | Git ref to read parameters from. |
+| `--paths <PATH>` | `params.yaml` | Parameter file paths to read. Repeatable. Defaults to `params.yaml` at the repo root when present. |
+| `--format <FMT>` | `table` | Output format: `table`, `json`, `md`, `pr-comment`. |
+| `--json` | `false` | Emit structured JSON output via the standard envelope. Equivalent to `--format=json` but uses the `core::output` envelope shape. |
+
+### diff
+
+Compare parameters between two git refs.
+
+#### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<REF_A>` | Yes | First git ref (the "old" side of the diff). |
+| `<REF_B>` | Yes | Second git ref (the "new" side of the diff). |
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--paths <PATH>` | `params.yaml` | Parameter file paths to compare. Repeatable. Defaults to `params.yaml` if present at either ref. |
+| `--format <FMT>` | `table` | Output format: `table`, `json`, `md`, `pr-comment`. |
+| `--json` | `false` | Emit structured JSON output via the standard envelope. |
+
+## Examples
+
+### Show current parameters
+
+```bash
+crab params show
+```
+
+Reads `params.yaml` at HEAD and prints a table of all parameter key-value
+pairs.
+
+### Show parameters at a specific commit
+
+```bash
+crab params show --ref abc123 --paths config/hparams.yaml
+```
+
+Reads `config/hparams.yaml` at commit `abc123` and displays the values.
+
+### Diff parameters between branches
+
+```bash
+crab params diff main experiment/lr-sweep
+```
+
+Compares `params.yaml` between the `main` branch and the
+`experiment/lr-sweep` branch, highlighting added, removed, and changed
+parameters.
+
+### Generate a PR comment
+
+```bash
+crab params diff main HEAD --format pr-comment
+```
+
+Produces a Markdown-formatted summary suitable for pasting into a pull request
+description, showing which parameters changed and their old/new values.
+
+### Output as JSON
+
+```bash
+crab params show --json
+```
+
+Emits a single JSON envelope with all parameter entries for programmatic
+consumption.
+
+## JSON Output
+
+Supports `--json` on both subcommands.
+
+### crab params show --json
+
+```json
+{
+  "schema": "params.show",
+  "version": "1.0",
+  "data": {
+    "git_ref": "HEAD",
+    "paths": ["params.yaml"],
+    "entries": {
+      "lr": 0.001,
+      "epochs": 50,
+      "batch_size": 32,
+      "dropout": 0.1,
+      "optimizer": "adam"
+    }
+  }
+}
+```
+
+### crab params diff --json
+
+```json
+{
+  "schema": "params.diff",
+  "version": "1.0",
+  "data": {
+    "ref_a": "main",
+    "ref_b": "experiment/lr-sweep",
+    "added": {
+      "warmup_steps": 1000
+    },
+    "removed": {},
+    "changed": {
+      "lr": { "old": 0.001, "new": 0.01 },
+      "epochs": { "old": 50, "new": 100 }
+    }
+  }
+}
+```
+
+## Related Commands
+
+- [`crab metrics`](/docs/cli/automation/metrics-tracking) — track and compare experiment metrics (complementary to params).
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages that consume parameters.
+- [`crab exp`](/docs/cli/automation/experiments) — manage experiments with associated parameters and metrics.
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — define and manage workflow pipelines.

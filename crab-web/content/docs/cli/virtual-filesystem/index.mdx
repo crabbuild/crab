@@ -1,0 +1,39 @@
+---
+title: "Virtual Filesystem"
+description: "Mount Crab repositories so files are available on demand without hydrating the whole working tree."
+---
+
+# Virtual Filesystem
+
+The Crab virtual filesystem lets you browse and read a repository without
+downloading every file first. Directory listings appear immediately, and file
+content is fetched from cloud storage when an application actually reads it.
+
+Use it when you want to:
+
+- Inspect a large repository before deciding what to hydrate.
+- Run tools that expect a normal filesystem path.
+- Open another branch or remote repository without changing your working tree.
+- Keep local disk usage low while still making files available on demand.
+
+## Start Here
+
+- [FUSE Mount](/docs/cli/virtual-filesystem/fuse-mount) — mount a Crab repository on macOS or Linux.
+- [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) — choose between default coordinator-style mounts and DaemonService mode.
+- [Local Mount](/docs/cli/virtual-filesystem/local-mount) — expose an existing local repository through the virtual filesystem.
+- [Mount Management](/docs/cli/virtual-filesystem/mount-management) — list, refresh, switch, and unmount active mounts.
+- [LFS Compatibility](/docs/cli/virtual-filesystem/lfs-compatibility) — work with repositories that still contain Git LFS pointers.
+
+## How To Think About It
+
+The virtual filesystem is a view over a Crab repository. It does not replace
+normal clone, push, or hydrate workflows; it gives you another way to access
+large repositories when selective, on-demand reads are more convenient.
+
+For repeatable development workflows, keep using `crab clone`, `crab fetch`,
+and `crab hydrate`. For exploration, review, notebooks, model inspection, and
+large read-only datasets, a mount is often faster and cleaner.
+
+For most interactive use, start with `crab mount`. For persistent multi-repo
+service workflows, use `crab daemon`. The [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) guide
+compares both paths in detail.

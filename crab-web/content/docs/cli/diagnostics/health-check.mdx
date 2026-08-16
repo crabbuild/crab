@@ -1,0 +1,83 @@
+---
+title: "Health Check"
+description: "How to run a comprehensive health check on your Crab installation to verify configuration, connectivity, and repository state."
+---
+
+## Running Health Checks
+
+`crab doctor` is the first command to run when something isn't working. It performs a series of diagnostic checks on your installation and repository configuration, reporting exactly what's set up correctly and what needs attention.
+
+## What Gets Checked
+
+| Check | What it verifies |
+|-------|-----------------|
+| Git version | Git is installed and meets the minimum version |
+| Crab binary | The binary is accessible on `PATH` |
+| Git repository | Current directory is inside a git repo |
+| Filter driver | `filter.crab.process`, `.clean`, `.smudge`, `.required` are configured |
+| `.gitattributes` | At least one pattern with `filter=crab` exists |
+| Crab config | `.crab/config.toml` exists and is parseable |
+| Remote URL | `.crab/remote` contains a valid crab URL |
+| Credentials | Can authenticate to the configured bucket |
+| Staging area | `.crab/staging/` exists and is accessible |
+| Cache | Local cache directory exists |
+| Version guard | Repository version is compatible with installed binary |
+
+## Reading the Output
+
+Each check produces one of three statuses:
+
+```bash
+crab doctor
+```
+
+```
+  ✓ Git version          git 2.43.0
+  ✓ Crab binary          /usr/local/bin/crab
+  ✓ Git repository       /home/user/my-repo
+  ✓ Filter driver        filter.crab.process configured
+  ✓ .gitattributes       2 crab patterns found
+  ✓ Crab config          .crab/config.toml valid
+  ✓ Remote URL           crab://my-bucket/my-repo
+  ✓ Credentials          authenticated to my-bucket
+  ⚠ Staging area         .crab/staging/ (12.3 MB)
+  ✓ Cache                ~/.cache/crab (45.6 MB)
+  ✓ Version guard        compatible
+```
+
+- `✓` — check passed
+- `⚠` — suboptimal but not blocking
+- `✗` — critical issue that will prevent Crab from working
+
+## Common Issues and Fixes
+
+| Issue | Fix |
+|-------|-----|
+| Filter driver not configured | Run `crab install` or `crab init <url>` |
+| No crab patterns in .gitattributes | Run `crab track '*.bin'` |
+| Remote URL not configured | Run `crab init <url>` |
+| Credentials check failed | Verify `AWS_PROFILE`, `AWS_REGION`, and `~/.aws/credentials` |
+| Large staging area warning | Run `git push` to upload, then `crab staging clean` |
+
+## Typical Workflows
+
+### After initial setup
+
+```bash
+git init
+crab init crab://my-bucket/my-repo
+crab track '*.bin'
+crab doctor  # verify everything is wired up
+```
+
+### Before filing a bug report
+
+```bash
+crab doctor --json > doctor-output.json
+crab env > env-info.txt
+# Attach both to your issue
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab doctor reference](/docs/cli/reference/crab-doctor).

@@ -1,0 +1,86 @@
+---
+title: "Error Codes"
+description: "How to understand and resolve Crab error codes — structured identifiers that point you to causes and fixes."
+---
+
+## Understanding Error Codes
+
+When Crab encounters an error, it prints a structured error code like `CRAB-E0017`. These codes are stable identifiers you can look up for the meaning, common causes, and suggested fixes — no more guessing from vague error messages.
+
+## Looking Up an Error
+
+After encountering an error:
+
+```
+ERROR: CRAB-E0017: failed to acquire push lock
+```
+
+Look it up:
+
+```bash
+crab errors CRAB-E0017
+```
+
+This prints the error name, category, whether it's retryable, and remediation steps.
+
+## Browsing All Error Codes
+
+```bash
+crab errors
+```
+
+Lists every known error code with its name and category. Useful for understanding the error landscape or building monitoring rules.
+
+## Error Code Format
+
+Codes follow the pattern `CRAB-EXXXX` where `XXXX` is a four-digit number. The lookup is case-insensitive.
+
+## Error Categories
+
+Errors fall into categories that tell you how to respond:
+
+| Category | Meaning | Typical action |
+|----------|---------|----------------|
+| `transient` | Temporary failure (network, throttling) | Retry automatically or manually |
+| `conflict` | Concurrent operation conflict | Pull latest changes and retry |
+| `config` | Configuration problem | Fix config and retry |
+| `permission` | Insufficient credentials | Check IAM/role setup |
+| `corruption` | Data integrity issue | Run `crab fsck --repair` |
+| `storage` | Storage-layer failure | Check bucket access and state |
+
+## Common Error Codes
+
+| Code | Name | Quick fix |
+|------|------|-----------|
+| `CRAB-E0001` | `NetworkTransient` | Retry — transient network issue |
+| `CRAB-E0017` | `NonFastForward` | Pull latest changes, then push again |
+| `CRAB-E0200` | `TierLifecycleConflict` | Use `--merge` or remove conflicting rules |
+| `CRAB-E0210` | `ArchiveRestoreRequired` | Run with `--restore` to initiate restore |
+| `CRAB-E0211` | `ArchiveRestoreTimeout` | Retry later — provider-side restore continues |
+
+## Machine-Readable Output
+
+For automation and monitoring:
+
+```bash
+crab errors CRAB-E0017 --json
+```
+
+```json
+{
+  "schema": "errors",
+  "version": "1.0",
+  "data": {
+    "code": "CRAB-E0017",
+    "name": "NonFastForward",
+    "category": "conflict",
+    "retryable": false,
+    "message_template": "non-fast-forward push rejected",
+    "remediation": "Pull the latest changes and retry the push."
+  }
+}
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab errors reference](/docs/cli/reference/crab-errors).

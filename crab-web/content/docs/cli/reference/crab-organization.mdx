@@ -1,0 +1,112 @@
+---
+title: "crab organization"
+description: "Create, list, inspect, rename, and soft-delete managed organizations."
+---
+
+# crab organization
+
+Manage organizations on a Crab managed service.
+
+## Synopsis
+
+```text
+crab organization [OPTIONS] <COMMAND>
+```
+
+## Common options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--service <AUTHORITY>` | Active profile | Target an exact installed managed-service authority |
+| `--json` | `false` | Emit one structured JSON envelope |
+
+These options are global within the command tree and may appear before or
+after the subcommand.
+
+## Commands
+
+### create
+
+Create an organization and make the current principal its owner.
+
+```text
+crab organization create [OPTIONS] <ORGANIZATION>
+```
+
+```bash
+crab organization create acme
+```
+
+### list
+
+List organizations visible to the current principal.
+
+```text
+crab organization list [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--cursor <CURSOR>` | None | Opaque cursor returned by the preceding page |
+| `--limit <LIMIT>` | `50` | Page size from 1 through 100 |
+
+```bash
+crab organization list --limit 25 --json
+```
+
+### info
+
+Show an organization, lifecycle state, and revision.
+
+```text
+crab organization info [OPTIONS] <ORGANIZATION>
+```
+
+```bash
+crab organization info acme --json
+```
+
+### rename
+
+Rename an organization using its current revision.
+
+```text
+crab organization rename [OPTIONS] --revision <REVISION> <ORGANIZATION> <NEW_SLUG>
+```
+
+```bash
+crab organization rename acme acme-labs --revision 4
+```
+
+Renaming does not change organization or repository IDs and does not move
+object data.
+
+### delete
+
+Soft-delete an organization using its current revision.
+
+```text
+crab organization delete [OPTIONS] --revision <REVISION> <ORGANIZATION>
+```
+
+```bash
+crab organization delete acme --revision 5
+```
+
+## Revision safety
+
+Read the current revision immediately before a mutation:
+
+```bash
+revision=$(crab organization info acme --json | jq -er '.data.revision')
+crab organization rename acme acme-labs --revision "$revision"
+```
+
+A stale revision is rejected instead of overwriting a concurrent change.
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [Access Management](/docs/cli/managed-service/access-management)
+- [`crab member`](/docs/cli/reference/crab-member)
+- [`crab repo`](/docs/cli/reference/crab-repo)

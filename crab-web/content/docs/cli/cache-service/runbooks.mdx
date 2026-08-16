@@ -1,0 +1,285 @@
+---
+title: "Runbooks"
+description: "Alert response procedures for cache-service incidents."
+---
+
+# Runbooks
+
+These runbooks cover the bundled cache-service Prometheus alerts. The cache
+service is an acceleration layer, so incident response should first preserve
+origin correctness, then restore cache effectiveness.
+
+Use authenticated admin stats during triage:
+
+```bash
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  https://crab-cache.example.com:8443/v1/admin/stats
+```
+
+Collect a redacted support bundle from a configured Crab repo when escalating:
+
+```bash
+crab doctor --support-bundle --output cache-service-support.json
+```
+
+For S3-compatible staging environments, validate cache behavior with the
+RustFS smoke:
+
+```bash
+cd crab
+make cache-service-rustfs-smoke
+```
+
+<a id="cache-service-release-evidence-gate-failed"></a>
+
+## CacheServiceReleaseEvidenceGateFailed
+
+Impact: release packaging is blocked because the retained cache-service RustFS
+smoke evidence is missing, stale, ambiguous, or failed verification. Do not
+bypass the gate for an enterprise release; it is the proof that real Crab CLI
+traffic avoided cacheable object-store reads through the cache service.
+
+Confirm:
+
+- In `.github/workflows/release.yml`, open the `cache-service-enterprise-gate`
+  job and identify whether the failure happened while downloading evidence or
+  while running `crab-cache-server evidence gate`.
+- If verification ran, download the
+  `cache-service-release-evidence-gate-<release-run-id>-<attempt>` artifact and
+  read `cache-service-release-evidence-doctor.txt` first. The same diagnosis is
+  appended to the job summary when the verifier fails.
+- Confirm the referenced run came from the `Cache Service Tests` workflow, was
+  started with `workflow_dispatch`, completed successfully, and used the same
+  commit SHA as the release.
+- Confirm the retained artifact name is
+  `cache-service-rustfs-smoke-<run-id>-<attempt>` unless the release input
+  `cache_service_evidence_artifact` explicitly names a custom artifact.
+- Download the retained artifact and run the same gate locally:
+
+```bash
+cd crab
+make cache-service-release-gate \
+  CACHE_SERVICE_RELEASE_EVIDENCE_DIR=../cache-service-release-evidence \
+  CACHE_SERVICE_RELEASE_EXPECTED_RUN_ID=gha-<run-id>-<attempt>
+```
+
+The `make` target runs:
+
+```bash
+crab-cache-server evidence gate \
+  --evidence-dir ../cache-service-release-evidence \
+  --expected-run-id gha-<run-id>-<attempt> \
+  --output cache-service-release-evidence-verify.json \
+  --summary-output cache-service-release-evidence-summary.json \
+  --doctor-output cache-service-release-evidence-doctor.json \
+  --doctor-text-output cache-service-release-evidence-doctor.txt
+```
+
+If you only have `cache-service-release-evidence-verify.json`, classify that
+verification before acting:
+
+```bash
+crab-cache-server evidence doctor \
+  --verification cache-service-release-evidence-verify.json
+```
+
+Act:
+
+- If the release was given the wrong run ID, rerun the release with
+  `cache_service_evidence_run_id=<run-id>` from the passing cache-service
+  workflow. For tag-triggered releases, update
+  `CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID`.
+- If the evidence run was not manual, failed, or came from another commit,
+  rerun `Cache Service Tests` with `workflow_dispatch` on the release commit.
+- If the verifier reports no `report.json` or multiple `report.json` files,
+  redownload the workflow artifact without merging it with older smoke output.
+- If `release-run-id-matches` fails, use the workflow attempt shown by GitHub;
+  the expected report run ID is `gha-<run-id>-<attempt>`.
+- If `cli-dedup-cacheable-origin-get-zero` or
+  `cli-dedup-only-manifest-cas-origin-read` fails, treat it as a product
+  regression. Do not release until cache+dedup push traffic avoids cacheable
+  origin reads again.
+- If retained config or manifest checks fail, regenerate the smoke evidence
+  after fixing redaction, relative artifact paths, or artifact hashes.
+
+Escalate when a fresh `Cache Service Tests` run on the release commit passes
+but release verification still fails, or when the no-cacheable-origin-read
+checks fail after the cache server and Crab CLI were built from the same
+commit.
+
+<a id="crab-cache-runtime-integrity-repair"></a>
+
+## CrabCacheRuntimeIntegrityRepair
+
+Impact: the cache server repaired metadata drift while serving traffic. Clients
+can keep reading through origin, but repeated repairs usually mean the cache
+volume or metadata store is unhealthy.
+
+Confirm:
+
+- Check `/v1/admin/stats` for `runtime_integrity.missing_files_repaired`,
+  `runtime_integrity.invalid_objects_evicted`, and
+  `runtime_integrity.metadata_entries_recreated`.
+- Check logs for repair events near the alert window.
+- Compare `origin_fetch_total` and `cache_miss_total` before and after the
+  repair. A short miss increase is expected after eviction.
+
+Act:
+
+- Verify the cache volume has free space and no filesystem errors.
+- Keep the service in rotation when origin is healthy and repairs stop.
+- Replace the cache volume if repairs repeat for the same objects.
+- Run `make cache-service-rustfs-smoke` against staging before rolling the same
+  storage class or cache-store change to production.
+
+Escalate when repairs continue after a fresh cache volume, or when repair
+events coincide with read errors, 5xx responses, or rising origin latency.
+
+<a id="crab-cache-startup-integrity-repair"></a>
+
+## CrabCacheStartupIntegrityRepair
+
+Impact: the cache server found stale metadata, size drift, or unindexed files
+while opening the cache store. The repair is local to the cache and does not
+change origin data.
+
+Confirm:
+
+- Check `/v1/admin/stats` for `startup_integrity.metadata_entries_removed`,
+  `startup_integrity.metadata_size_corrections`,
+  `startup_integrity.unindexed_objects_indexed`, and
+  `startup_integrity.unindexed_paths_removed`.
+- Confirm whether the alert followed a deploy, restart, node drain, or volume
+  attach event.
+- Check `cache_bytes_stored` after startup to confirm the cache size matches
+  the repaired metadata.
+
+Act:
+
+- Let one startup repair finish before restarting again.
+- Stop rollout loops that repeatedly attach the same unhealthy cache volume.
+- Check persistent-volume health, mount options, and available disk space.
+- Replace the cache volume if every restart performs the same repair.
+
+Escalate when startup repair prevents readiness, repeats across fresh volumes,
+or appears after an unclean node shutdown pattern.
+
+<a id="crab-cache-origin-fallback-high"></a>
+
+## CrabCacheOriginFallbackHigh
+
+Impact: immutable reads are falling through to object storage after the cache
+should be warm, so the cache is not reducing object-store traffic enough.
+
+Confirm:
+
+- Compare `origin_fetch_total`, `cache_hit_total`, and `cache_miss_total`.
+- Check `cache_bytes_stored` and `cache_eviction_total` for a cache that is too
+  small or constantly evicting hot data.
+- Confirm push warming is active with `push_warming_total`.
+- Run the RustFS smoke in staging to prove repeated immutable reads stop
+  increasing origin GETs.
+
+Act:
+
+- Verify all Crab clients use the cache URL for immutable paths.
+- Keep route locality stable so repeated reads land on warm cache instances.
+- Increase cache capacity if eviction is driving cold misses.
+- Confirm push paths send warming writes to the same cache tier used by reads.
+
+Escalate when origin fallback stays high after warmup, no cache volume was
+replaced, and client routing is confirmed to be stable.
+
+<a id="crab-cache-hit-rate-low"></a>
+
+## CrabCacheHitRateLow
+
+Impact: latency and object-store cost increase because too few immutable reads
+are served from cache.
+
+Confirm:
+
+- Ignore the alert during initial warmup, immediately after cache replacement,
+  or after a workload shift to new repositories.
+- Check hit rate by object type with `traffic.by_object_type` in
+  `/v1/admin/stats`.
+- Compare `cache_eviction_total` with cache size to spot pressure from a small
+  cache budget.
+
+Act:
+
+- Increase cache capacity for workloads with a working set larger than the
+  configured budget.
+- Enable and verify push warming for the repositories that matter most.
+- Avoid spreading one repository's clients across many cold cache pools.
+- Keep the cache close to clients and origin to reduce miss penalty while it
+  warms.
+
+Escalate when hit rate remains low for a stable workload after warming, enough
+capacity is available, and cache reads are confirmed to reach the service.
+
+<a id="crab-cache-eviction-pressure"></a>
+
+## CrabCacheEvictionPressure
+
+Impact: the cache is close to its configured byte budget and evicting while hit
+rate remains low. The cache is still correct, but it is no longer absorbing the
+working set well enough to reduce origin traffic.
+
+Confirm:
+
+- Compare `cache_bytes_stored / cache_max_bytes`,
+  `cache_eviction_total`, `cache_hit_total`, and `cache_miss_total`.
+- Check `/v1/admin/stats` for `eviction.total` and object-type splits such as
+  `eviction.pack`, `eviction.metadata`, and `eviction.xorb`.
+- Confirm whether clients for the same repository are pinned to the same cache
+  pool or bouncing across cold instances.
+- Check whether a deploy, restart, or cache volume replacement reset the warm
+  working set during the alert window.
+
+Act:
+
+- Increase `cache.max_bytes` when the active repository working set is larger
+  than the configured cache budget.
+- Tighten client or load-balancer routing so hot repositories consistently hit
+  a warm cache tier.
+- Keep push warming enabled and confirm `push_warming_total` is increasing for
+  the object types that later miss.
+- Use the RustFS smoke with a reduced cache budget to reproduce pressure before
+  changing production eviction thresholds.
+
+Escalate when eviction pressure continues after capacity and routing changes,
+or when origin latency/cost remains high even though the cache is near its
+budget and push warming is active.
+
+<a id="crab-cache-mutable-proxy-active"></a>
+
+## CrabCacheMutableProxyActive
+
+Impact: transparent mode is proxying mutable paths through the cache service.
+Those reads are not cached, so this mode adds operational risk without reducing
+origin traffic. Enterprise deployments should usually use strict mutable-path
+mode and route mutable paths directly to origin.
+
+Confirm:
+
+- Check `mutable_path_proxy_read_total` labels to identify `GET` or `HEAD`
+  proxy traffic.
+- Check `/v1/admin/stats` for `traffic.mutable_proxy_gets`,
+  `traffic.mutable_proxy_heads`, and `traffic.mutable_proxy_bytes`.
+- Confirm `server.mutable_path_mode` in the active cache-server config.
+
+Act:
+
+- Switch production configs to strict mutable-path mode.
+- Route mutable Git metadata, locks, and ref updates directly to origin.
+- Update clients or edge proxies so only immutable cacheable paths use the
+  cache service.
+- Keep transparent mode only for short migration windows with explicit owner
+  approval. If an authorization policy is configured, confirm denied mutable
+  paths return `403` and ambiguous mutable paths return `400` instead of
+  reaching origin.
+
+Escalate when mutable proxy traffic remains after strict-mode rollout, because
+that usually means a client or proxy is still using the cache endpoint for
+mutable repository operations.

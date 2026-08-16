@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "HistoryVerificationPayload": {
+      "properties": {
+        "dependency_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "dependency_objects": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "git_objects": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "packs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "refs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "shards": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "xorbs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dependency_bytes",
+        "dependency_objects",
+        "digest",
+        "generation",
+        "git_objects",
+        "packs",
+        "refs",
+        "shards",
+        "xorbs"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "acceleration_rebuilt": {
+      "type": "boolean"
+    },
+    "applied": {
+      "type": "boolean"
+    },
+    "previous_generation": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "refs_added": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "refs_deleted": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "refs_updated": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "restored_generation": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "source_digest": {
+      "type": "string"
+    },
+    "source_generation": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "verification": {
+      "$ref": "#/definitions/HistoryVerificationPayload"
+    }
+  },
+  "required": [
+    "acceleration_rebuilt",
+    "applied",
+    "previous_generation",
+    "refs_added",
+    "refs_deleted",
+    "refs_updated",
+    "source_digest",
+    "source_generation",
+    "verification"
+  ],
+  "title": "HistoryRestorePayload",
+  "type": "object"
+}

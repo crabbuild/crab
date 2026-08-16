@@ -1,0 +1,12 @@
+{
+  "title": "Managed Service",
+  "pages": [
+    "index",
+    "api-reference",
+    "access-management",
+    "automation",
+    "diagnostics",
+    "migration",
+    "direct-storage"
+  ]
+}

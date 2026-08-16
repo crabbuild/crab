@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LsFilesPayload",
+  "description": "Serializable payload for `--json` output. Field names match the pre-envelope bare JSON that `ls-files` used to emit.",
+  "type": "object",
+  "required": [
+    "files"
+  ],
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LsFileEntry"
+      }
+    }
+  },
+  "definitions": {
+    "LsFileEntry": {
+      "description": "A single file entry in the JSON payload.",
+      "type": "object",
+      "required": [
+        "hydrated",
+        "name",
+        "size"
+      ],
+      "properties": {
+        "hydrated": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "oid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

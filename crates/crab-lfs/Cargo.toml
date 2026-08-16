@@ -1,0 +1,25 @@
+[package]
+name = "crab-lfs"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+description = "Git LFS object storage contracts for Crab."
+
+[lib]
+name = "crab_lfs"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = { workspace = true }
+crab-git = { workspace = true }
+crab-storage = { workspace = true }
+futures-util = { workspace = true }
+object_store = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

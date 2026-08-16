@@ -1,0 +1,28 @@
+---
+title: "crab auth"
+description: "Inspect and refresh Crab authentication state."
+---
+
+# crab auth
+
+Manage cached authentication state for a configured Crab service.
+
+## Synopsis
+
+```bash
+crab auth <SUBCOMMAND>
+```
+
+| Command | Purpose |
+| --- | --- |
+| `crab auth status` | Display authentication status and configuration |
+| `crab auth refresh` | Force an immediate token refresh |
+
+```bash
+crab auth status
+crab auth refresh
+```
+
+Use [`crab login`](/docs/cli/reference/crab-login) and
+[`crab logout`](/docs/cli/reference/crab-logout) to establish or clear the
+cached login session.

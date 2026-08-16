@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320" role="img" aria-labelledby="title desc">
+  <title id="title">How Crab used SlateDB?</title>
+  <desc id="desc">Architecture diagram showing how Crab uses SlateDB through MetaDb, why the two metadata databases exist, and how cache-aware object storage accelerates versioned SlateDB metadata.</desc>
+  <defs>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M 64 0 L 0 0 0 64" fill="none" stroke="#1b2a44" stroke-width="1" opacity="0.48"/>
+    </pattern>
+
+    <linearGradient id="panelFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101b2e"/>
+      <stop offset="1" stop-color="#0d1728"/>
+    </linearGradient>
+    <linearGradient id="blueFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e3f74"/>
+      <stop offset="1" stop-color="#142a52"/>
+    </linearGradient>
+    <linearGradient id="greenFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b3b35"/>
+      <stop offset="1" stop-color="#092a29"/>
+    </linearGradient>
+    <linearGradient id="violetFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#312069"/>
+      <stop offset="1" stop-color="#201748"/>
+    </linearGradient>
+    <linearGradient id="orangeFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#593927"/>
+      <stop offset="1" stop-color="#3a271f"/>
+    </linearGradient>
+    <linearGradient id="roseFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5a1432"/>
+      <stop offset="1" stop-color="#351124"/>
+    </linearGradient>
+    <linearGradient id="darkFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172033"/>
+      <stop offset="1" stop-color="#101827"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-8%" y="-12%" width="116%" height="128%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#020817" flood-opacity="0.35"/>
+    </filter>
+
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb923c"/>
+    </marker>
+    <marker id="arrowRose" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185"/>
+    </marker>
+  </defs>
+
+  <style>
+    .bg { fill: #0b1220; }
+    .grid { fill: url(#grid); opacity: 0.7; }
+    .title { fill: #f8fafc; font: 700 30px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .subtitle { fill: #94a3b8; font: 500 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .group-title { font: 700 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .node-title { fill: #f8fafc; font: 700 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .node-copy { fill: #a8b3c7; font: 500 11.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .tiny { fill: #9ca3af; font: 600 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .label { fill: #cbd5e1; font: 700 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0; }
+    .section { fill: none; stroke-width: 2; stroke-dasharray: 10 8; rx: 12; }
+    .node { stroke-width: 2.2; rx: 8; filter: url(#shadow); }
+    .soft { fill: rgba(15, 23, 42, 0.72); stroke: #334155; stroke-width: 1.5; rx: 8; }
+    .cyan { stroke: #22d3ee; }
+    .green { stroke: #34d399; }
+    .violet { stroke: #a78bfa; }
+    .orange { stroke: #fb923c; }
+    .rose { stroke: #fb7185; }
+    .blue { stroke: #60a5fa; }
+    .muted { stroke: #94a3b8; }
+    .flow-cyan { fill: none; stroke: #22d3ee; stroke-width: 2.4; marker-end: url(#arrowCyan); }
+    .flow-green { fill: none; stroke: #34d399; stroke-width: 2.4; marker-end: url(#arrowGreen); }
+    .flow-violet { fill: none; stroke: #a78bfa; stroke-width: 2.4; marker-end: url(#arrowViolet); }
+    .flow-orange { fill: none; stroke: #fb923c; stroke-width: 2.4; stroke-dasharray: 9 7; marker-end: url(#arrowOrange); }
+    .flow-rose { fill: none; stroke: #fb7185; stroke-width: 2.4; marker-end: url(#arrowRose); }
+    .no-marker-cyan { fill: none; stroke: #22d3ee; stroke-width: 2.2; }
+    .no-marker-orange { fill: none; stroke: #fb923c; stroke-width: 2.4; stroke-dasharray: 9 7; }
+  </style>
+
+  <rect class="bg" width="1800" height="1320"/>
+  <rect class="grid" width="1800" height="1320"/>
+
+  <text class="title" x="50" y="62">How Crab used SlateDB?</text>
+  <text class="subtitle" x="50" y="94">SlateDB is the object-store-native metadata engine behind Crab file lookup, global dedup lookup, and a separate desktop cache.</text>
+  <text class="subtitle" x="50" y="118">Crab wraps it behind narrow typed stores so push, hydrate, mount, fsck, and cache acceleration share one correctness model.</text>
+
+  <!-- Section boundaries -->
+  <rect class="section cyan" x="40" y="150" width="360" height="690" rx="14"/>
+  <text class="group-title" x="64" y="178" fill="#22d3ee">Crab surfaces that touch SlateDB</text>
+
+  <rect class="section green" x="430" y="150" width="580" height="690" rx="14"/>
+  <text class="group-title" x="454" y="178" fill="#34d399">MetaDb boundary inside crab process</text>
+
+  <rect class="section violet" x="1040" y="150" width="710" height="690" rx="14"/>
+  <text class="group-title" x="1064" y="178" fill="#a78bfa">SlateDB state persisted as object-store objects</text>
+
+  <rect class="section blue" x="40" y="870" width="1710" height="275" rx="14"/>
+  <text class="group-title" x="64" y="898" fill="#60a5fa">Rationale: why this shape works for Crab</text>
+
+  <!-- Main flows are drawn before components so boxes mask passing lines. -->
+  <path class="flow-cyan" d="M 360 261 H 470"/>
+  <text class="label" x="416" y="249" text-anchor="middle">push installs guard</text>
+
+  <path class="no-marker-cyan" d="M 360 381 H 396 M 360 501 H 396 M 360 621 H 396 M 396 381 V 621"/>
+  <path class="flow-cyan" d="M 396 389 H 470"/>
+  <text class="label" x="414" y="367" text-anchor="middle">read-only lookup</text>
+
+  <path class="flow-green" d="M 585 302 V 340"/>
+  <path class="flow-green" d="M 855 302 V 340"/>
+  <path class="flow-green" d="M 585 436 V 470"/>
+  <path class="flow-green" d="M 720 436 V 582 H 585 V 605"/>
+
+  <path class="flow-green" d="M 700 500 H 1080"/>
+  <text class="label" x="890" y="488" text-anchor="middle">file-index point reads / writes</text>
+
+  <path class="flow-green" d="M 700 653 H 740"/>
+  <path class="flow-green" d="M 970 635 H 1080"/>
+  <text class="label" x="1025" y="623" text-anchor="middle">remote miss</text>
+
+  <path class="flow-green" d="M 855 735 V 701"/>
+  <text class="label" x="894" y="724" text-anchor="start">warm local tier</text>
+
+  <path class="flow-green" d="M 970 754 H 1018 V 540 H 1080"/>
+  <path class="flow-green" d="M 970 786 H 1056 V 680 H 1080"/>
+  <text class="label" x="1014" y="742" text-anchor="middle">parallel commit</text>
+
+  <path class="flow-violet" d="M 1390 515 H 1430"/>
+  <path class="flow-violet" d="M 1390 653 H 1430"/>
+  <text class="label" x="1410" y="494" text-anchor="middle">LSM files</text>
+
+  <path class="no-marker-orange" d="M 1570 701 V 720 H 1235"/>
+  <path class="flow-orange" d="M 1235 720 V 735"/>
+  <path class="flow-orange" d="M 1390 771 H 1430"/>
+  <text class="label" x="1406" y="712" text-anchor="middle">versioned metadata can be cached</text>
+
+  <path class="flow-rose" d="M 970 822 H 1040"/>
+  <text class="label" x="950" y="814" text-anchor="end">manifest CAS publishes refs</text>
+
+  <!-- Caller nodes -->
+  <rect class="node cyan" fill="#0c2d3d" x="80" y="220" width="280" height="82" rx="8"/>
+  <text class="node-title" x="220" y="254" text-anchor="middle">Push pipeline</text>
+  <text class="node-copy" x="220" y="277" text-anchor="middle">durable shards/xorbs first</text>
+  <text class="node-copy" x="220" y="295" text-anchor="middle">then metadata before manifest CAS</text>
+
+  <rect class="node cyan" fill="#0c2d3d" x="80" y="340" width="280" height="82" rx="8"/>
+  <text class="node-title" x="220" y="374" text-anchor="middle">Hydrate / clone / diff</text>
+  <text class="node-copy" x="220" y="397" text-anchor="middle">resolve file_hash to shard_hash</text>
+  <text class="node-copy" x="220" y="415" text-anchor="middle">then read shard and xorb bytes</text>
+
+  <rect class="node cyan" fill="#0c2d3d" x="80" y="460" width="280" height="82" rx="8"/>
+  <text class="node-title" x="220" y="494" text-anchor="middle">Mount / fetch / smudge</text>
+  <text class="node-copy" x="220" y="517" text-anchor="middle">shared lookup sessions</text>
+  <text class="node-copy" x="220" y="535" text-anchor="middle">cache-aware immutable reads</text>
+
+  <rect class="node cyan" fill="#0c2d3d" x="80" y="580" width="280" height="82" rx="8"/>
+  <text class="node-title" x="220" y="614" text-anchor="middle">Doctor / fsck / metadb</text>
+  <text class="node-copy" x="220" y="637" text-anchor="middle">read-only diagnose and repair</text>
+  <text class="node-copy" x="220" y="655" text-anchor="middle">deep scan only on diagnostic paths</text>
+
+  <rect class="node muted" fill="#162033" x="80" y="700" width="280" height="82" rx="8"/>
+  <text class="node-title" x="220" y="734" text-anchor="middle">Desktop indexer cache</text>
+  <text class="node-copy" x="220" y="757" text-anchor="middle">local SlateDB over filesystem</text>
+  <text class="node-copy" x="220" y="775" text-anchor="middle">separate from remote MetaDb</text>
+
+  <!-- MetaDb nodes -->
+  <rect class="node green" fill="url(#greenFill)" x="470" y="220" width="230" height="82" rx="8"/>
+  <text class="node-title" x="585" y="252" text-anchor="middle">MetaDbGuard</text>
+  <text class="node-copy" x="585" y="275" text-anchor="middle">one owner per operation</text>
+  <text class="node-copy" x="585" y="293" text-anchor="middle">explicit close_all, drop fallback</text>
+
+  <rect class="node green" fill="url(#greenFill)" x="740" y="220" width="230" height="82" rx="8"/>
+  <text class="node-title" x="855" y="252" text-anchor="middle">MetaDb config</text>
+  <text class="node-copy" x="855" y="275" text-anchor="middle">repo prefix and global prefix</text>
+  <text class="node-copy" x="855" y="293" text-anchor="middle">read_only, lazy DB slots</text>
+
+  <rect class="node blue" fill="url(#blueFill)" x="470" y="340" width="500" height="96" rx="8"/>
+  <text class="node-title" x="720" y="374" text-anchor="middle">Db wrapper around SlateDB</text>
+  <text class="node-copy" x="720" y="398" text-anchor="middle">writer Db for push / gc / rebuild</text>
+  <text class="node-copy" x="720" y="416" text-anchor="middle">read-only DbReader for hydrate / diff / fsck / doctor</text>
+
+  <rect class="node green" fill="url(#greenFill)" x="470" y="470" width="230" height="90" rx="8"/>
+  <text class="node-title" x="585" y="503" text-anchor="middle">FileIndexStore</text>
+  <text class="node-copy" x="585" y="528" text-anchor="middle">file_hash -&gt; shard_hash</text>
+  <text class="node-copy" x="585" y="546" text-anchor="middle">per-repo point lookups</text>
+
+  <rect class="node green" fill="url(#greenFill)" x="470" y="605" width="230" height="96" rx="8"/>
+  <text class="node-title" x="585" y="640" text-anchor="middle">ChunkIndexStore</text>
+  <text class="node-copy" x="585" y="665" text-anchor="middle">chunk_hash -&gt; XorbRef</text>
+  <text class="node-copy" x="585" y="683" text-anchor="middle">global dedup lookup</text>
+
+  <rect class="node violet" fill="url(#violetFill)" x="740" y="605" width="230" height="96" rx="8"/>
+  <text class="node-title" x="855" y="640" text-anchor="middle">Local chunk tiers</text>
+  <text class="node-copy" x="855" y="665" text-anchor="middle">in-memory hot tier</text>
+  <text class="node-copy" x="855" y="683" text-anchor="middle">SQLite warm tier, then remote</text>
+
+  <rect class="node rose" fill="url(#roseFill)" x="470" y="735" width="500" height="70" rx="8"/>
+  <text class="node-title" x="720" y="765" text-anchor="middle">Transaction</text>
+  <text class="node-copy" x="720" y="788" text-anchor="middle">target-tagged ops split into two WriteBatches and committed in parallel</text>
+
+  <!-- Object-store / SlateDB nodes -->
+  <rect class="node orange" fill="url(#orangeFill)" x="1080" y="220" width="630" height="104" rx="8"/>
+  <text class="node-title" x="1395" y="255" text-anchor="middle">Object store is the metadata substrate</text>
+  <text class="node-copy" x="1395" y="280" text-anchor="middle">S3 / GCS / Azure hold Git packs, xorbs, shards, manifests, and SlateDB files</text>
+  <text class="node-copy" x="1395" y="298" text-anchor="middle">no always-on Crab metadata server required for the core repo format</text>
+
+  <rect class="node violet" fill="url(#violetFill)" x="1080" y="470" width="310" height="90" rx="8"/>
+  <text class="node-title" x="1235" y="502" text-anchor="middle">per-repo file_index_db</text>
+  <text class="node-copy" x="1235" y="527" text-anchor="middle">{repo}/file_index_db/</text>
+  <text class="node-copy" x="1235" y="545" text-anchor="middle">file_hash -&gt; shard_hash</text>
+
+  <rect class="node violet" fill="url(#violetFill)" x="1080" y="605" width="310" height="96" rx="8"/>
+  <text class="node-title" x="1235" y="639" text-anchor="middle">global chunk_index_db</text>
+  <text class="node-copy" x="1235" y="664" text-anchor="middle">.crab/chunk_index_db/</text>
+  <text class="node-copy" x="1235" y="682" text-anchor="middle">chunk_hash -&gt; xorb placement</text>
+
+  <rect class="node violet" fill="url(#violetFill)" x="1430" y="470" width="280" height="231" rx="8"/>
+  <text class="node-title" x="1570" y="502" text-anchor="middle">SlateDB objects</text>
+  <text class="node-copy" x="1570" y="528" text-anchor="middle">manifest/current</text>
+  <text class="node-copy" x="1570" y="548" text-anchor="middle">manifest/*.manifest</text>
+  <text class="node-copy" x="1570" y="568" text-anchor="middle">wal/*.sst</text>
+  <text class="node-copy" x="1570" y="588" text-anchor="middle">compacted/*.sst</text>
+  <text class="node-copy" x="1570" y="608" text-anchor="middle">compactions/*.compactions</text>
+  <text class="tiny" x="1570" y="645" text-anchor="middle">versioned files are immutable</text>
+  <text class="tiny" x="1570" y="663" text-anchor="middle">current manifest stays mutable</text>
+
+  <rect class="node orange" fill="url(#orangeFill)" x="1080" y="735" width="310" height="72" rx="8"/>
+  <text class="node-title" x="1235" y="764" text-anchor="middle">Cache route taxonomy</text>
+  <text class="node-copy" x="1235" y="784" text-anchor="middle">client + service share</text>
+  <text class="node-copy" x="1235" y="802" text-anchor="middle">cacheable path taxonomy</text>
+
+  <rect class="node orange" fill="url(#orangeFill)" x="1430" y="735" width="280" height="72" rx="8"/>
+  <text class="node-title" x="1570" y="764" text-anchor="middle">Enterprise cache service</text>
+  <text class="node-copy" x="1570" y="784" text-anchor="middle">dedup fanout + metadata reads</text>
+  <text class="node-copy" x="1570" y="802" text-anchor="middle">cut repeated origin GETs</text>
+
+  <!-- Rationale cards -->
+  <rect class="node orange" fill="url(#orangeFill)" x="70" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="197.5" y="971" text-anchor="middle">Serverless metadata</text>
+  <text class="node-copy" x="197.5" y="1000" text-anchor="middle">SlateDB speaks object_store,</text>
+  <text class="node-copy" x="197.5" y="1018" text-anchor="middle">so Crab keeps metadata in the</text>
+  <text class="node-copy" x="197.5" y="1036" text-anchor="middle">same bucket as repo content.</text>
+
+  <rect class="node green" fill="url(#greenFill)" x="345" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="472.5" y="971" text-anchor="middle">Point-lookup workload</text>
+  <text class="node-copy" x="472.5" y="1000" text-anchor="middle">Hydrate and dedup need many</text>
+  <text class="node-copy" x="472.5" y="1018" text-anchor="middle">small key reads, not full</text>
+  <text class="node-copy" x="472.5" y="1036" text-anchor="middle">manifest scans.</text>
+
+  <rect class="node violet" fill="url(#violetFill)" x="620" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="747.5" y="971" text-anchor="middle">Two logical indexes</text>
+  <text class="node-copy" x="747.5" y="1000" text-anchor="middle">File metadata is repo-scoped;</text>
+  <text class="node-copy" x="747.5" y="1018" text-anchor="middle">chunk placement is bucket-global</text>
+  <text class="node-copy" x="747.5" y="1036" text-anchor="middle">for cross-repo dedup.</text>
+
+  <rect class="node blue" fill="url(#blueFill)" x="895" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="1022.5" y="971" text-anchor="middle">Read-write concurrency</text>
+  <text class="node-copy" x="1022.5" y="1000" text-anchor="middle">Push uses writer handles;</text>
+  <text class="node-copy" x="1022.5" y="1018" text-anchor="middle">read-only commands use DbReader</text>
+  <text class="node-copy" x="1022.5" y="1036" text-anchor="middle">without fencing the writer.</text>
+
+  <rect class="node rose" fill="url(#roseFill)" x="1170" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="1297.5" y="971" text-anchor="middle">Correctness boundary</text>
+  <text class="node-copy" x="1297.5" y="1000" text-anchor="middle">Cross-DB atomicity is not</text>
+  <text class="node-copy" x="1297.5" y="1018" text-anchor="middle">assumed. Manifest CAS exposes</text>
+  <text class="node-copy" x="1297.5" y="1036" text-anchor="middle">refs after durable data.</text>
+
+  <rect class="node orange" fill="url(#orangeFill)" x="1445" y="935" width="255" height="146" rx="8"/>
+  <text class="node-title" x="1572.5" y="971" text-anchor="middle">Cache economics</text>
+  <text class="node-copy" x="1572.5" y="1000" text-anchor="middle">Versioned SlateDB objects are</text>
+  <text class="node-copy" x="1572.5" y="1018" text-anchor="middle">safe to cache. Mutable current</text>
+  <text class="node-copy" x="1572.5" y="1036" text-anchor="middle">pointers still hit origin.</text>
+
+  <!-- Legend -->
+  <rect class="soft" x="40" y="1180" width="1710" height="96" rx="10"/>
+  <path class="flow-cyan" d="M 90 1230 H 150"/>
+  <text class="tiny" x="170" y="1234">caller request</text>
+
+  <path class="flow-green" d="M 365 1230 H 425"/>
+  <text class="tiny" x="445" y="1234">MetaDb operation</text>
+
+  <path class="flow-violet" d="M 680 1230 H 740"/>
+  <text class="tiny" x="760" y="1234">SlateDB object files</text>
+
+  <path class="flow-orange" d="M 1040 1230 H 1100"/>
+  <text class="tiny" x="1120" y="1234">cache acceleration</text>
+
+  <path class="flow-rose" d="M 1370 1230 H 1430"/>
+  <text class="tiny" x="1450" y="1234">publication invariant</text>
+</svg>

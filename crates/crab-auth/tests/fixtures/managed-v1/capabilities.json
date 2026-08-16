@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "api_versions": [
+    1
+  ],
+  "transfer_grant_versions": [
+    1
+  ],
+  "transfer_modes": [
+    "direct_s3",
+    "gateway"
+  ],
+  "capabilities": [
+    "direct-s3-v1",
+    "gateway-v1",
+    "protected-push-v1"
+  ],
+  "max_page_size": 100,
+  "max_grant_lifetime_seconds": 900
+}

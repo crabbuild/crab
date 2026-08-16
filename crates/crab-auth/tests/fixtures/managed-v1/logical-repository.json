@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "repository_id": "01900000-0000-7000-8000-000000000001",
+  "organization_id": "01900000-0000-7000-8000-000000000002",
+  "canonical_url": "crab://crab.build/acme/models",
+  "state": "active",
+  "revision": 7,
+  "transfer_modes": [
+    "direct_s3"
+  ],
+  "protected_push": true
+}

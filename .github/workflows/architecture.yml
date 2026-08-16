@@ -1,0 +1,258 @@
+name: Architecture Gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/architecture.yml"
+      - ".github/workflows/nfs-mount.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/Makefile"
+      - "crab/benches/nfs_read_path_bench.rs"
+      - "crab/deploy/auth/**"
+      - "crab/docs/architecture/multi-crate-transition.md"
+      - "crab/docs/architecture/nfs-mount-architecture.md"
+      - "crab/scripts/check-architecture-gates.py"
+      - "crab/scripts/check-auth-helper-packaging.py"
+      - "crab/scripts/check-crate-behavior.py"
+      - "crab/scripts/check-crab-types-admission.py"
+      - "crab/scripts/check-crate-interface-builds.py"
+      - "crab/scripts/check-final-integration.py"
+      - "crab/scripts/check-install-layout.py"
+      - "crab/scripts/check-release-archive-contents.py"
+      - "crab/scripts/check-shipped-binary-versions.py"
+      - "crab/scripts/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/Dockerfile.linux-aarch64"
+      - "crab/scripts/docker/Dockerfile.linux-x86_64"
+      - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
+      - "crab/scripts/install-binaries.py"
+      - "crab/scripts/nfs-evidence-summary.py"
+      - "crab/scripts/nfs-read-path-bench-report.py"
+      - "crab/scripts/release.sh"
+      - "crab/scripts/run-mount-nfs-macos-smoke.sh"
+      - "crab/scripts/run-mount-nfs-windows-smoke.ps1"
+      - "crab/scripts/seed-homebrew-tap.sh"
+      - "crab/scripts/update-homebrew.sh"
+      - "crab/scripts/verify-nfs-smoke-report.py"
+      - "crates/**"
+  pull_request:
+    paths:
+      - ".github/workflows/architecture.yml"
+      - ".github/workflows/nfs-mount.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/Makefile"
+      - "crab/benches/nfs_read_path_bench.rs"
+      - "crab/deploy/auth/**"
+      - "crab/docs/architecture/multi-crate-transition.md"
+      - "crab/docs/architecture/nfs-mount-architecture.md"
+      - "crab/scripts/check-architecture-gates.py"
+      - "crab/scripts/check-auth-helper-packaging.py"
+      - "crab/scripts/check-crate-behavior.py"
+      - "crab/scripts/check-crab-types-admission.py"
+      - "crab/scripts/check-crate-interface-builds.py"
+      - "crab/scripts/check-final-integration.py"
+      - "crab/scripts/check-install-layout.py"
+      - "crab/scripts/check-release-archive-contents.py"
+      - "crab/scripts/check-shipped-binary-versions.py"
+      - "crab/scripts/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/Dockerfile.linux-aarch64"
+      - "crab/scripts/docker/Dockerfile.linux-x86_64"
+      - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
+      - "crab/scripts/install-binaries.py"
+      - "crab/scripts/nfs-evidence-summary.py"
+      - "crab/scripts/nfs-read-path-bench-report.py"
+      - "crab/scripts/release.sh"
+      - "crab/scripts/run-mount-nfs-macos-smoke.sh"
+      - "crab/scripts/run-mount-nfs-windows-smoke.ps1"
+      - "crab/scripts/seed-homebrew-tap.sh"
+      - "crab/scripts/update-homebrew.sh"
+      - "crab/scripts/verify-nfs-smoke-report.py"
+      - "crates/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  architecture:
+    name: Multi-crate guardrails
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run architecture checks
+        working-directory: crab
+        run: make architecture-check
+
+  crate-interfaces:
+    name: Split-crate interface checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run split-crate interface checks
+        working-directory: crab
+        run: make crate-interface-check
+
+  crate-behavior:
+    name: Split-crate behavior checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run split-crate behavior checks
+        working-directory: crab
+        run: make crate-behavior-check
+
+  split-crate-clippy:
+    name: Split-crate clippy checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run split-crate clippy checks
+        working-directory: crab
+        run: make split-crate-clippy-check
+
+  split-crate-tests:
+    name: Split-crate test checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run split-crate test checks
+        working-directory: crab
+        run: make split-crate-test-check
+
+  shipped-binary-versions:
+    name: Shipped binary version checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Run shipped binary version checks
+        working-directory: crab
+        run: make shipped-binary-version-check
+
+  install-layout:
+    name: Install layout check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Run install layout check
+        working-directory: crab
+        run: make install-layout-check
+
+  auth-helper-packaging:
+    name: Auth helper packaging check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run auth helper packaging check
+        working-directory: crab
+        run: make auth-helper-packaging-check
+
+  auth-python-tests:
+    name: Auth Python service tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install auth service dependencies
+        working-directory: crab/deploy/auth
+        run: python -m pip install -r requirements.txt
+
+      - name: Run auth service tests
+        working-directory: crab/deploy/auth
+        run: python -m pytest tests/ -q
+
+  release-archive-contents:
+    name: Release archive contents check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run release archive contents check
+        working-directory: crab
+        run: make release-archive-contents-check
+
+  final-integration:
+    name: Final integration checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Run final integration checks
+        working-directory: crab
+        run: make final-integration-check

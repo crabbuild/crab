@@ -1,0 +1,147 @@
+---
+title: "File Statistics"
+description: "Print staging area statistics or performance counters with crab stat"
+---
+
+# crab stat
+
+Print staging area statistics or performance counters.
+
+## Synopsis
+
+```
+crab stat
+crab stat perf
+```
+
+## Description
+
+`crab stat` provides two modes: a staging area summary (default) and
+performance counter reporting (`perf`).
+
+## Subcommands
+
+### crab stat (default)
+
+Print staging area statistics. This is similar to `crab staging stats` but
+operates on the default staging root (`.crab/staging`).
+
+```bash
+crab stat
+```
+
+```
+Staging area: .crab/staging
+  Sealed segments:       3
+  Current segment bytes: 1234567
+  Total staged bytes:    45678901
+  Live bytes:            40000000
+  Dead bytes:            5678901
+  Dead ratio:            12.43%
+  Chunk count:           847
+  File count:            12
+```
+
+### crab stat perf
+
+Print persisted performance counters from `.crab/perf-state.json`.
+
+```bash
+crab stat perf
+```
+
+Performance counters track cumulative metrics across all crab operations:
+
+| Counter | Description |
+|---------|-------------|
+| `push_duration_ms` | Total time spent pushing |
+| `bytes_uploaded` | Total bytes uploaded to remote |
+| `fetch_duration_ms` | Total time spent fetching |
+| `bytes_downloaded` | Total bytes downloaded from remote |
+| `gc_duration_ms` | Total time spent in garbage collection |
+| `gc_objects_deleted` | Total objects deleted by GC |
+| `chunk_index_lookups` | Number of chunk index lookups |
+| `chunk_index_hits` | Number of chunk index cache hits |
+| `shard_bloom_queries` | Number of shard bloom filter queries |
+| `shard_bloom_false_positives` | Number of bloom filter false positives |
+| `staging_bytes_written` | Total bytes written to staging |
+| `staging_bytes_read` | Total bytes read from staging |
+| `xorbs_skipped` | Number of xorbs skipped (already uploaded) |
+| `clean_fastpath_taken` | Number of clean filter fast-path hits |
+| `xorb_fetch_requests_coalesced` | Number of coalesced xorb fetch requests |
+| `xorb_fetch_bytes_saved` | Bytes saved by request coalescing |
+| `multipart_resumed_uploads` | Number of resumed multipart uploads |
+
+If the perf-state file doesn't exist or is corrupt, zeroed counters are shown.
+
+## Examples
+
+### View staging stats
+
+```bash
+crab stat
+```
+
+### View performance counters
+
+```bash
+crab stat perf
+```
+
+### Use perf counters for monitoring
+
+```bash
+crab stat perf | grep bytes_uploaded
+```
+
+## Related Commands
+
+- [`crab staging`](/docs/cli/storage/staging-area) — detailed staging area statistics.
+- [`crab du`](/docs/cli/file-inspection/disk-usage) — disk usage breakdown.
+- [`crab env`](/docs/cli/authentication/environment-info) — diagnostic environment information.
+
+## JSON Output
+
+Both `crab stat` and `crab stat perf` support `--json`.
+
+### crab stat --json
+
+```json
+{
+  "schema": "stat",
+  "version": "1.0",
+  "timestamp": "2026-04-24T18:32:17.123Z",
+  "data": {
+    "sealed_segments": 3,
+    "current_segment_bytes": 1234567,
+    "total_staged_bytes": 45678901,
+    "live_bytes": 40000000,
+    "dead_bytes": 5678901,
+    "dead_ratio": 0.1243,
+    "chunk_count": 847,
+    "file_count": 12
+  }
+}
+```
+
+### crab stat perf --json
+
+```json
+{
+  "schema": "stat.perf",
+  "version": "1.0",
+  "timestamp": "2026-04-24T18:32:17.123Z",
+  "data": {
+    "push_duration_ms": 45230,
+    "bytes_uploaded": 1288490188,
+    "fetch_duration_ms": 12400,
+    "bytes_downloaded": 524288000,
+    "gc_duration_ms": 3200,
+    "gc_objects_deleted": 42,
+    "chunk_index_lookups": 8400,
+    "chunk_index_hits": 7200
+  }
+}
+```
+
+See [Structured Output](/docs/cli/reference/structured-output) for envelope details and error handling.

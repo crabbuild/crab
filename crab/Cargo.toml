@@ -1,0 +1,442 @@
+[package]
+name = "crab"
+version = "1.0.14"
+edition = "2024"
+license = "Apache-2.0"
+description = "Serverless git remote helper backed by object storage with Xet-style chunk dedup."
+build = "build.rs"
+
+[[bin]]
+name = "crab"
+path = "src/main.rs"
+
+[[bin]]
+name = "crab-nfs-mount"
+path = "src/bin/crab_nfs_mount.rs"
+
+[[bin]]
+name = "dump_shard_file"
+path = "src/bin/dump_shard_file.rs"
+
+[[bin]]
+name = "generate_test_file"
+path = "src/bin/generate_test_file.rs"
+
+[lib]
+name = "crab"
+path = "src/lib.rs"
+
+[features]
+default = [
+    "simd-accel",
+    "tier",
+    "replication-s3-control-plane",
+    "replication-gcs-control-plane",
+    "replication-azure-control-plane",
+    "coordinator-dynamodb",
+    "coordinator-spanner",
+    "coordinator-cosmosdb",
+    "watch",
+    "nfs",
+    "fuse",
+]
+
+# SIMD-accelerated boundary scanning in the gearhash chunker.
+# The gearhash crate auto-detects AVX2 (x86_64) at runtime and uses
+# compile-time NEON on aarch64, so this feature is primarily a
+# documentation/gating mechanism for future SIMD-specific code paths.
+simd-accel = []
+
+# In-process test doubles (MockStore, etc.). Kept off by default so the
+# release binary doesn't pull in async-trait / futures just for tests.
+testing = ["dep:futures", "crab-workflow/testing"]
+
+# FUSE virtual filesystem mount with on-demand hydration.
+# Included in `default` so macOS and Linux get VFS out of the box.
+# Windows builds must use `--no-default-features` and re-enable the
+# features they need (fuser does not compile on Windows).
+fuse = ["crab-vfs/fuse"]
+
+# NFSv3 virtual filesystem mount over the native OS NFS client.
+nfs = ["crab-vfs/nfs"]
+
+# OpenTelemetry tracing export via OTLP.
+otlp = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
+
+# Flame-graph profiling via tracing-flame.
+profiling = ["dep:tracing-flame"]
+
+# All tier providers — default-on so `crab tier` works out of the box.
+tier = ["tier-s3", "tier-gcs", "tier-azure"]
+
+# Per-provider lifecycle/restore SDKs (object_store lacks these APIs).
+tier-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+tier-gcs = ["dep:google-cloud-storage"]
+tier-azure = ["dep:azure_core", "dep:azure_mgmt_storage", "dep:azure_storage", "dep:azure_storage_blobs"]
+
+# Managed active-active coordinator control planes.
+coordinator-dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb", "crab-coordination/coordinator-dynamodb"]
+coordinator-spanner = ["dep:google-cloud-storage", "dep:google-cloud-token", "crab-coordination/coordinator-spanner"]
+coordinator-cosmosdb = ["dep:azure_core", "dep:azure_identity", "crab-coordination/coordinator-cosmosdb"]
+
+# Native provider replication control planes.
+replication-s3-control-plane = [
+    "tier-s3",
+    "dep:aws-config",
+    "dep:aws-sdk-iam",
+    "dep:aws-sdk-s3control",
+    "dep:aws-sdk-sts",
+]
+replication-gcs-control-plane = ["tier-gcs", "dep:google-cloud-token"]
+replication-azure-control-plane = ["tier-azure", "dep:azure_core", "dep:azure_identity"]
+
+# Debug-only crash-injection harness for the workflow executor.
+# Enables the `CRAB_CRASH_AT=<StateName>` env-var hook so tests can
+# abort the process immediately after a named state transition is
+# recorded to the journal. Never turn this on in release builds —
+# `std::process::abort()` is, by design, lethal.
+crash-injection = ["crab-workflow/crash-injection"]
+
+# File-watching for `crab run --watch`. Uses the `notify` crate for
+# cross-platform file events (FSEvents on macOS, inotify on Linux).
+# Default-on for desktop builds; disable for minimal/CI builds.
+watch = ["crab-workflow/watch"]
+
+# --- Gitoxide adoption per-requirement feature flags ---
+#
+# Each flag gates one requirement's adoption path in the
+# `crab-gitoxide-adoption` spec. Flags default OFF so the legacy
+# path keeps running; individual flags flip default-on after one
+# release cycle of green E2E (see design §Feature Flag Strategy).
+# At this stage the flags are declared but gate no code — cfg-gated
+# call sites land in Phase 1 and Phase 2.
+#
+# The `gix-all` meta-flag activates every per-requirement adoption
+# at once, which is how `scripts/build-matrix.sh` exercises the
+# full combined surface in CI before any flag is promoted.
+
+gix-transport    = []  # Fetch protocol via gix-protocol/gix-transport
+gix-filter-api   = []  # Filter process on gix-filter Server
+gix-ref-edits    = []  # Typed ref edits via gix-ref::transaction
+gix-pack-native  = []  # Pack gen + install via gix-pack
+gix-worktree     = []  # Worktree materialization + status
+gix-facade       = ["crab-git/facade", "crab-vfs/gix-facade", "crab-workflow/gix-facade"]  # gix::Repository facade
+gix-config       = []  # Layered config reads via gix-config
+gix-credentials  = []  # Credential helper cascade
+# Pathspec + attributes + ignore consolidation. Activates the wrappers
+# in `core::attrs` (gix_attributes::Search) and `core::pathmatch`
+# (gix_pathspec::Search), and routes the clean/hydrate/dehydrate/status/
+# add/filter-process classifiers through them in place of the legacy
+# hand-rolled glob engines. Renamed from `gix-attrs` to reflect that
+# this flag covers three gix crates. The gix-* deps are already in the
+# tree unconditionally (pulled in by gix-worktree, gix-pathspec, etc.),
+# so the flag gates behavior, not dep compilation.
+gix-pathmatch    = []
+gix-revwalk      = []  # Connectivity + rev-walk completion
+
+# Meta-flag: activate every gix-* adoption flag above. Used by
+# `scripts/build-matrix.sh` for combined E2E verification.
+gix-all = [
+    "gix-transport",
+    "gix-filter-api",
+    "gix-ref-edits",
+    "gix-pack-native",
+    "gix-worktree",
+    "gix-facade",
+    "gix-config",
+    "gix-credentials",
+    "gix-pathmatch",
+    "gix-revwalk",
+]
+
+[dependencies]
+# Shared cross-crate contracts.
+crab-auth = { workspace = true, features = ["aws-oidc-client", "azure-entra-client", "crab-auth-client", "gcp-workload-identity-client"] }
+crab-auth-store = { workspace = true, features = ["managed-service"] }
+crab-cache = { workspace = true, features = ["local-cache", "remote-client", "xet-chunk-cache"] }
+crab-cache-store = { workspace = true, features = ["remote-client"] }
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
+crab-diff = { workspace = true }
+crab-git = { workspace = true }
+crab-lfs = { workspace = true }
+crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
+crab-read = { workspace = true }
+crab-staging = { workspace = true }
+crab-storage = { workspace = true }
+crab-types = { workspace = true }
+crab-vfs = { workspace = true }
+crab-workflow = { workspace = true }
+crab-xet = { workspace = true, features = ["chunker", "upload-concurrency"] }
+
+# Xet data plane (chunking, dedup, reconstruction).
+xet-data = { workspace = true }
+xet-client = { workspace = true }
+# Shared runtime primitives (`AdjustableSemaphore` bounds the
+# filter-process prefetch queue).
+xet-runtime = { workspace = true }
+
+# Async runtime.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs", "time", "signal", "process"] }
+tokio-util = { workspace = true, features = ["rt", "io"] }
+
+# Object storage abstraction.
+object_store = { workspace = true, features = [
+    "aws",
+    "gcp",
+    "azure",
+    "fs",
+] }
+
+# Errors, logging, hashing, CLI, bytes.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+blake3 = { workspace = true, features = ["rayon"] }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+bytes = { workspace = true }
+crc32fast = "1"
+
+# Glob pattern matching for hydrate/dehydrate filters.
+globset = { workspace = true }
+
+# Regex matching for DVC-style experiment table column filters.
+regex-lite = "0.1"
+
+# Cross-platform terminal styling with NO_COLOR and dumb-terminal detection.
+console = "0.15"
+
+# Compression.
+zstd = "0.13"
+flate2 = "1"
+tar = "0.4"
+
+# Retry jitter.
+rand = "0.9"
+
+# Data parallelism for per-chunk xorb compression.
+rayon = "1.10"
+
+# SQLite for staging, cache metadata, and local warm indexes.
+rusqlite = { workspace = true }
+
+# Atomic file writes (tempfile + rename).
+tempfile = { workspace = true }
+
+# File mtime manipulation for LRU cache eviction.
+filetime = "0.2"
+
+# Cross-platform advisory file locks for staging and track metadata guards.
+fs4 = "0.13"
+
+# Byte-budget LRU for the ODB adapter's resolved-blob cache.
+lru = "0.12"
+
+# Remote metadata index (file_index_db, chunk_index_db) — LSM over object
+# storage. Replaces the legacy per-file `file-index/{hash}` S3 objects with
+# two SlateDB instances: a per-repo `file_index_db` and a globally shared
+# `chunk_index_db` (single instance, not sharded).
+slatedb = "=0.14.1"
+
+# Directed-graph primitives for the workflow DAG (topological sort,
+# cycle detection). Used by `workflow::graph`.
+petgraph = "0.6"
+
+# UUID v7 for workflow run IDs and experiment refs (time-ordered, sortable).
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# Unicode NFC normalization for canonical string serialization in the
+# workflow lockfile (R5). Pulled in here rather than hand-rolled because
+# the 0.1.25 tables are already transitively present via gitoxide.
+unicode-normalization = "0.1"
+
+# SHA1 for git pack checksum verification.
+sha1 = "0.10"
+
+# SHA-256 for LFS object integrity verification.
+sha2 = "0.10"
+
+# Base64 encoding/decoding for JWT parsing and PKCE challenges.
+base64 = "0.22"
+
+# Ed25519 verification for detached release manifest signatures.
+ring = "0.17"
+
+# Serialization for perf-state.json and other config files.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# JSON Schema generation for structured CLI output (--json / --jsonl).
+schemars = { workspace = true }
+
+# Stream utilities (used by ref listing, shard sync).
+futures-util = { workspace = true }
+
+# Gitoxide URL parsing for crab:// scheme.
+gix-url = { workspace = true }
+
+# Packet-line framing for the long-running filter protocol v2.
+gix-packetline = { workspace = true, features = ["blocking-io"] }
+
+# Gitoxide crates for GC walk, fsck, git discovery, and signal-safe tempfiles.
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-validate = { workspace = true }
+gix-object = { workspace = true }
+gix-traverse = { workspace = true }
+gix-fsck = { workspace = true, features = ["sha1"] }
+gix-discover = { workspace = true }
+gix-ref = { workspace = true, features = ["sha1"] }
+gix-tempfile = { workspace = true, features = ["signals"] }
+gix-odb = { workspace = true, features = ["sha1"] }
+gix-pack = { workspace = true, features = ["streaming-input", "generate", "sha1"] }
+gix-features = { workspace = true, features = ["progress", "zlib", "crc32", "parallel"] }
+gix-diff = { workspace = true }
+gix-index = { workspace = true, features = ["sha1"] }
+
+# Gitoxide crates declared for the gitoxide adoption. Versions are centralized
+# in the workspace manifest; these entries keep local feature choices. SHA-1
+# feature is set explicitly on every crate that exposes one so hashing stays
+# consistent across the gix-* stack. Crates without a `sha1` feature (gix-lock,
+# gix-transport, gix-credentials, gix-pathspec, gix-attributes, gix-ignore,
+# gix-glob) don't hash directly and inherit consistency through their own
+# gix-* deps.
+gix = { workspace = true }
+gix-lock = { workspace = true }
+# gix-protocol exposes `fetch::Error` (the error type `CrabError::GixProtocol`
+# wraps) only when a client feature is enabled; `blocking-client` pulls in
+# `fetch` + `handshake` and is the stdio transport will drive.
+gix-protocol = { workspace = true, features = ["sha1", "blocking-client"] }
+gix-transport = { workspace = true, features = ["blocking-client"] }
+gix-negotiate = { workspace = true, features = ["sha1"] }
+gix-refspec = { workspace = true, features = ["sha1"] }
+gix-filter = { workspace = true, features = ["sha1"] }
+gix-credentials = { workspace = true }
+gix-prompt = { workspace = true }
+gix-config = { workspace = true, features = ["sha1"] }
+gix-pathspec = { workspace = true }
+gix-attributes = { workspace = true }
+gix-ignore = { workspace = true }
+gix-glob = { workspace = true }
+gix-worktree = { workspace = true, features = ["sha1"] }
+gix-worktree-state = { workspace = true, features = ["sha1"] }
+gix-status = { workspace = true, features = ["sha1"] }
+gix-dir = { workspace = true, features = ["sha1"] }
+gix-revwalk = { workspace = true, features = ["sha1"] }
+gix-shallow = { workspace = true, features = ["sha1"] }
+
+# Load .env files for credential/config injection without manual sourcing.
+dotenvy = "0.15"
+
+# Byte-string type used across the gitoxide API for paths in the index.
+bstr = { version = "1", default-features = false, features = ["std"] }
+
+# TOML parsing for user/repo config files.
+toml = { workspace = true }
+
+# Semantic version comparison for required_cli_version guard.
+semver = "1"
+
+# Optional observability — gated behind cargo features.
+tracing-opentelemetry = { version = "0.28", optional = true }
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry-otlp = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", optional = true }
+tracing-flame = { version = "0.2", optional = true }
+
+# Async trait support for xet-core's Client trait adapter and test
+# doubles. Needed as a direct dep because xet_client's Client trait is
+# defined with #[async_trait::async_trait] and downstream impls must
+# match that macro form.
+async-trait = { workspace = true }
+
+# Test-time only (enabled by the `testing` feature).
+futures = { version = "0.3", optional = true }
+
+# Hardware-accelerated CRC32C (Castagnoli) for segment record integrity.
+crc32c = "0.6"
+
+# Concurrent hash map for inflight dedup in hydration service and
+# restore orchestrator active-restore tracking.
+dashmap = "6"
+
+# Provider SDKs for lifecycle/restore APIs not exposed by object_store.
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-sdk-iam = { workspace = true, optional = true }
+aws-sdk-s3control = { workspace = true, optional = true }
+aws-sdk-sts = { workspace = true, optional = true }
+urlencoding = "2.1"
+google-cloud-storage = { workspace = true, optional = true }
+google-cloud-token = { workspace = true, optional = true }
+azure_mgmt_storage = { workspace = true, optional = true }
+azure_core = { workspace = true, optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+azure_identity = { workspace = true, optional = true }
+
+# Monetary precision for cost modeling (used throughout cost module).
+rust_decimal = "1"
+
+# XML generation for S3 lifecycle configuration documents.
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# URL parsing for credential redaction.
+url = "2.5"
+
+# Parquet footer parsing for format-aware diff annotations and inventory report consumption.
+parquet = { version = "55", default-features = false, features = ["arrow", "snap", "lz4"] }
+
+# Best-effort RSS sampling for perf.phase telemetry and memory regression benches.
+memory-stats = "1"
+
+# YAML parsing for workflow files and cache-service authorization policy files.
+serde_yaml = { workspace = true }
+
+# HTTP client for client-side CachingStore.
+reqwest = { workspace = true, features = ["blocking", "rustls-tls", "json"] }
+
+# Unix flock for single-writer staging guard.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+# Signal sending to child processes (SIGTERM/SIGKILL escalation in
+# the workflow child-process supervisor).
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json", "matched-path"] }
+crab-cache-server = { workspace = true }
+crab-workflow = { workspace = true, features = ["testing"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+insta = "1"
+jsonschema = "0.18"
+
+[[bench]]
+name = "staging"
+harness = false
+
+[[bench]]
+name = "staging_recovery"
+harness = false
+
+[[bench]]
+name = "staging_sweep"
+harness = false
+
+[[bench]]
+name = "dehydrate_bench"
+harness = false
+
+[[bench]]
+name = "repo_pipeline_bench"
+harness = false
+
+[[bench]]
+name = "nfs_read_path_bench"
+harness = false

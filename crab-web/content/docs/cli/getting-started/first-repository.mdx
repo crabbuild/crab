@@ -1,0 +1,204 @@
+---
+title: "Creating a Repository"
+description: "Set up a new Crab repository connected to your cloud storage bucket."
+---
+
+# Creating a Repository
+
+A Crab repository is a standard git repository with a cloud storage backend for large files. Crab handles the wiring between git and your bucket in a short setup flow.
+
+## Quick Start
+
+```bash
+mkdir my-project && cd my-project
+crab init crab://my-bucket/my-project
+crab setup
+crab ship . -m "initial commit"
+```
+
+`crab init` creates the Git and Crab configuration. `crab setup` detects or
+applies large-file tracking rules. The same setup works with `crab ship` for
+the first commit:
+
+```bash
+mkdir my-project && cd my-project
+crab init crab://my-bucket/my-project
+crab setup
+crab ship . -m "initial commit"
+```
+
+## What You Need
+
+Before creating a Crab repository, you need:
+
+1. **A cloud storage bucket** — S3, GCS, or Azure Blob Storage
+2. **Credentials** — Access to write to that bucket (AWS keys, GCP service account, or Azure credentials)
+
+You do **not** need to run `git init` separately — `crab init` handles that automatically.
+
+## Initialize
+
+```bash
+cd my-project
+crab init crab://my-bucket/my-project
+crab setup
+```
+
+These commands:
+1. Runs `git init` if no git repository exists
+2. Creates `.crab/` and `.crab.toml` with remote configuration
+3. Registers the filter and diff drivers in `.git/config`
+4. Scans for large files and writes matching `.gitattributes` rules when you run `crab setup`
+
+### Example output
+
+```
+Initialized git repository in /home/user/my-project
+Filter driver installed
+Auto-tracked 3 extension(s) in .gitattributes
+```
+
+## What Crab Creates
+
+| Created | Purpose |
+|---------|---------|
+| `.git/` | Git repository (created if missing) |
+| `.crab/remote` | Stores the remote bucket URL |
+| `.crab/config.toml` | Local configuration (concurrency, cache settings) |
+| `.crab/staging/` | Local staging area for chunks between add and push |
+| `.git/config` changes | Registers the Crab filter driver |
+| `.gitattributes` | Tracking rules for large file extensions (auto-generated) |
+
+## Auto-Tracking
+
+`crab setup` automatically detects files that should be managed by Crab:
+
+- Files larger than 1 MiB trigger tracking for their extension
+- Well-known binary formats (`.safetensors`, `.bin`, `.onnx`, `.parquet`, `.h5`, etc.) are always tracked when found
+
+This means you rarely need to manually run `crab track` — the common case is handled automatically. If you need to add more patterns later, use:
+
+```bash
+crab track '*.custom-extension'
+```
+
+To skip auto-tracking (e.g., in CI or when you want full manual control):
+
+```bash
+crab setup --no-auto-track
+```
+
+## URL Format
+
+Crab URLs follow the pattern `crab://<bucket>/<repo-path>`:
+
+```
+crab://my-bucket/my-project
+crab://company-data/team-ml/experiment-42
+crab://us-west-2-storage/repos/frontend-assets
+```
+
+The `<repo-path>` isolates this repository's data within the bucket. Multiple repositories can share a single bucket with different paths.
+
+## Supported Cloud Providers
+
+| Provider | URL Format | Example |
+|----------|-----------|---------|
+| AWS S3 | `crab://<bucket>/<path>` | `crab init --storage-provider s3 crab://ml-data/models` |
+| Google Cloud Storage | `gs://<bucket>/<path>` or `crab://<bucket>/<path>` with `--storage-provider gcs` | `crab init gs://ml-data/models` |
+| Azure Blob Storage | `az://<container>/<path>` or `azure://<container>/<path>` | `crab init azure://ml-data/models` |
+| S3-compatible (MinIO, R2, Ceph) | `crab://<bucket>/<path>` | `crab://my-minio-bucket/data` |
+
+### How Provider Detection Works
+
+For `crab init`, Crab infers the provider from a provider-prefixed input URL
+(`s3://`, `gs://`/`gcs://`, or `az://`/`azure://`) or uses the explicit
+`--storage-provider` flag. Provider-prefixed inputs are normalized to a
+canonical `crab://` Git remote. For an unprefixed `crab://` URL, set the
+provider explicitly when it is not S3:
+
+```toml title=".crab/config.toml"
+[auth]
+storage_provider = "gcs"   # "s3" | "gcs" | "azure" | "auto"
+```
+
+The `CRAB_STORAGE_PROVIDER` environment variable is also accepted for
+credential discovery. Its values are case-insensitive:
+
+| Value | Provider |
+|-------|----------|
+| `s3` (default) | AWS S3 / S3-compatible |
+| `gcs`, `gs`, `google` | Google Cloud Storage |
+| `azure`, `az`, `abs` | Azure Blob Storage |
+
+### S3-Compatible Endpoints
+
+For S3-compatible stores like MinIO, Cloudflare R2, or Ceph, use the standard `crab://` URL (no prefix) and set the custom endpoint via environment variable:
+
+```bash
+export AWS_ENDPOINT_URL=https://s3.example.com
+crab init crab://my-bucket/my-project
+```
+
+The S3 builder picks up `AWS_ENDPOINT_URL` automatically — no URL-level distinction is needed.
+
+## After Initialization
+
+Once initialized, start adding files:
+
+```bash
+# Add your large files (auto-tracked extensions are already configured)
+crab add .
+
+# Commit and push
+git commit -m "Initial commit with large files"
+git push
+```
+
+Or use the one-shot shorthand:
+
+```bash
+crab ship . -m "Initial commit with large files"
+```
+
+## For Collaborators
+
+When a teammate has already set up a Crab repository, you have two options:
+
+### Option A: `crab clone` (recommended)
+
+```bash
+crab clone crab://my-bucket/my-project
+```
+
+This handles everything: git clone, filter driver, tracking rules, and optional hydration.
+
+### Option B: Global install + regular git clone
+
+```bash
+# One-time setup (works for all repos):
+crab install --global
+
+# Then clone normally:
+git clone <url>
+```
+
+With the global filter driver installed, any repo that has `.gitattributes` with `filter=crab` rules will work automatically.
+
+## Re-initialization
+
+Running `crab init` on an already-initialized repository is safe and idempotent. It refreshes the filter driver configuration without overwriting your existing config or staging data. Run `crab setup` separately when you want to rescan for new large-file patterns.
+
+## Troubleshooting
+
+**"invalid URL" error** — Ensure the URL follows `crab://<bucket>/<path>`. The bucket name must not contain slashes.
+
+**"access denied" error** — Check that your cloud credentials have read/write access to the bucket. Run `crab auth status` to verify.
+
+**Filter driver not registered** — Run `crab doctor` for a full health check. If the filter is missing, `crab init` or `crab setup` will re-register it.
+
+## Next Steps
+
+- [Track file patterns](/docs/cli/getting-started/tracking-files) — Manually configure additional patterns
+- [Add and push files](/docs/cli/daily-workflow/adding-files) — Stage tracked files for push
+- [Clone a repository](/docs/cli/getting-started/cloning-a-repository) — Share with collaborators

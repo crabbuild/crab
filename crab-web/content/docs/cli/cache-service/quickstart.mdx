@@ -1,0 +1,126 @@
+---
+title: "Quickstart"
+description: "Start a cache service, connect one Crab client, and verify cache traffic."
+---
+
+# Quickstart
+
+This guide starts one cache service and connects one Crab repository to it.
+
+## Prerequisites
+
+- A reachable object-store bucket used by Crab.
+- A built `crab-cache-server` binary.
+- A built `crab` CLI.
+- Credentials for the cache server to read from the bucket.
+- Credentials for the Crab client to perform normal repository operations.
+
+## 1. Create A PSK
+
+Choose a shared secret and compute the server-side hash:
+
+```bash
+export CRAB_CACHE_PSK="replace-with-a-long-random-secret"
+export CRAB_CACHE_PSK_HASH="$(printf '%s' "$CRAB_CACHE_PSK" | b3sum | cut -d' ' -f1)"
+```
+
+Do not commit the shared secret to repository config.
+
+## 2. Write A Server Config
+
+Create `cache-server.toml`:
+
+```toml
+[server]
+listen_addr = "127.0.0.1:8443"
+
+[auth]
+mechanism = "psk"
+psk_hash = "replace-with-your-psk-hash"
+
+[origin]
+url = "s3://my-bucket"
+
+[cache]
+root = "/tmp/crab-cache"
+max_bytes = 107374182400
+
+[logging]
+format = "text"
+level = "info"
+```
+
+Replace the bucket and PSK hash before starting the server.
+
+## 3. Preflight The Server
+
+Run the startup preflight before serving traffic:
+
+```bash
+crab-cache-server --config ./cache-server.toml check
+```
+
+For automation:
+
+```bash
+crab-cache-server --config ./cache-server.toml check --json
+```
+
+For production rollout gates, use `--profile enterprise`. Add `--fail-on-warn` after native TLS and policy are configured, or use `--trusted-proxy-boundary` when TLS and identity are enforced by a trusted proxy or service mesh.
+
+The preflight opens the cache database, cache store, chunk index, and origin client; validates listen bind and TLS files; probes origin reachability; and reports auth/policy warnings without printing secrets. This local sample returns warnings for missing TLS and missing policy; before production rollout, either enable TLS on the server or terminate TLS before it, and add a `policy_path`.
+
+## 4. Start The Server
+
+```bash
+crab-cache-server --config ./cache-server.toml
+```
+
+Verify health:
+
+```bash
+curl -fsS http://127.0.0.1:8443/v1/health/live
+curl -fsS http://127.0.0.1:8443/v1/health
+```
+
+The liveness endpoint should return `ok`. The readiness endpoint should return `ok` when the origin is reachable.
+
+## 5. Configure One Crab Repo
+
+Add this to the repository `.crab/config.toml`, preserving existing remote configuration:
+
+```toml
+[cache]
+service_url = "http://127.0.0.1:8443"
+service_mode = "cache+dedup"
+service_auth = "psk"
+service_psk = "replace-with-the-shared-secret"
+push_warming = true
+```
+
+For shared team config, put the URL and mode in repository config, but provide the PSK through `CRAB_CACHE_PSK` or user-global config.
+
+## 6. Verify With Crab
+
+Run a push with cache logging enabled:
+
+```bash
+RUST_LOG=info,crab::cache=debug crab push origin HEAD:refs/heads/main
+```
+
+Expected evidence:
+
+- The client reports the cache service as healthy.
+- Push warming requests appear in cache-server logs.
+- Cache stats show nonzero cached bytes after the push.
+- Later reads increase `traffic.cache_hits` without increasing
+  `traffic.origin_fetches` for the same warm objects.
+
+Check stats:
+
+```bash
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  http://127.0.0.1:8443/v1/admin/stats
+```
+
+Then clear only the local client cache and run a hydrate or fetch. The cache-server logs should show object reads through the service.

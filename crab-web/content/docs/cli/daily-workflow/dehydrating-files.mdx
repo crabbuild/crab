@@ -1,0 +1,110 @@
+---
+title: "Dehydrating Files"
+description: "How Crab replaces hydrated files with pointer blobs to free disk space while keeping content safely stored in the cloud."
+---
+
+# Dehydrating Files
+
+Dehydration is the process of replacing fully materialized files with their lightweight pointer blobs. It's the inverse of hydration — instead of reconstructing content from chunks, you're swapping content back to a pointer stub. The original data remains safely stored in your cloud bucket and can be re-hydrated at any time.
+
+## Why Dehydrate?
+
+Large files consume disk space even when you're not actively using them. A machine learning repository might contain 50 GB of model checkpoints across different experiments, but you only need one or two at a time. Dehydration lets you:
+
+- **Reclaim disk space** — A 10 GB model file becomes a 128-byte pointer.
+- **Keep your working tree focused** — Only the files you're actively working on are materialized.
+- **Prepare for pulls** — Dehydrating before `git pull` keeps git status clean and avoids merge conflicts with pointer blobs.
+- **Speed up branch switching** — Switching branches with dehydrated files is instant since git only swaps tiny pointers.
+
+## How It Works
+
+When you dehydrate a file, Crab:
+
+1. Identifies which files are currently hydrated (full content on disk, matching tracked patterns in `.gitattributes`).
+2. Checks each file against `git status` — files with uncommitted modifications are skipped.
+3. For each clean, hydrated file: computes the Blake3 hash, builds the pointer blob, and atomically writes it in place of the full content.
+4. Reports a summary of what was dehydrated and how much space was freed.
+
+The write is atomic — a temporary file is written first, then renamed into place. If Crab crashes mid-dehydration, the original file remains intact.
+
+## Safety Guarantees
+
+Dehydration is designed to be safe by default:
+
+- **Dirty files are never touched** — If a file has uncommitted modifications, Crab skips it entirely. This prevents data loss from replacing modified content with a stale pointer.
+- **Already-dehydrated files are skipped** — Pointer files pass through without modification.
+- **Atomic writes** — No partial state. Either the full pointer replaces the file, or nothing changes.
+- **Content is preserved remotely** — The file's chunks remain in cloud storage. You can always `crab hydrate` to get the content back.
+
+## Common Patterns
+
+### Dehydrate everything when switching context
+
+When you're done working on a set of files and want to reclaim space:
+
+```bash
+crab dehydrate --all
+```
+
+### Dehydrate specific file types
+
+Keep your code hydrated but dehydrate large assets:
+
+```bash
+crab dehydrate '*.safetensors' '*.bin'
+```
+
+### Dehydrate before pulling
+
+The recommended pattern for pulling changes that affect tracked files:
+
+```bash
+crab dehydrate --all
+git pull origin main
+crab hydrate --all
+```
+
+This avoids the "hydrated files show as modified" issue, since git status compares working tree content against the index. When files are dehydrated (pointer in working tree, pointer in index), status is clean.
+
+### Dehydrate a directory
+
+Free space from a specific directory while keeping others hydrated:
+
+```bash
+crab dehydrate 'models/*'
+```
+
+## Understanding "Dirty" Files
+
+Crab considers a file "dirty" if it has uncommitted changes from git's perspective. This includes:
+
+- Modified files (content differs from the index)
+- Newly added but uncommitted files
+- Files with staged changes that haven't been committed
+
+If you see "skipped (modified)" in the output, commit or stash your changes first, then retry the dehydration.
+
+## When Dehydration Makes Sense
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Finished working on large files | Dehydrate to reclaim space |
+| Switching branches | Dehydrate first, hydrate after checkout |
+| CI runner running low on disk | Dehydrate after processing |
+| Preparing to pull/rebase | Dehydrate to keep status clean |
+| Actively editing a file | Don't dehydrate — you'll lose your working copy |
+
+## Relationship to Hydration
+
+Dehydration and hydration form a cycle:
+
+```
+Full content ──dehydrate──▶ Pointer blob
+Pointer blob ──hydrate────▶ Full content
+```
+
+You can cycle between these states as many times as needed. The content in cloud storage is immutable — it doesn't matter how many times you dehydrate and re-hydrate a file.
+
+## CLI Reference
+
+For complete command syntax, options, and JSON output format, see the [crab dehydrate reference](/docs/cli/reference/crab-dehydrate).

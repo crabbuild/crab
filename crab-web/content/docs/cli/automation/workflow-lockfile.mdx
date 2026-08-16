@@ -1,0 +1,146 @@
+---
+title: "Workflow Lockfile"
+description: "Resolve merge conflicts in crab.lock and migrate between single and split lockfile layouts."
+---
+
+# crab workflow lockfile
+
+Manage the workflow lockfile — resolve merge conflicts and migrate between
+lockfile layouts.
+
+## Synopsis
+
+```
+crab workflow lockfile resolve [OPTIONS]
+crab workflow lockfile split [OPTIONS]
+```
+
+## Description
+
+`crab workflow lockfile` provides two subcommands for managing the `crab.lock`
+file that records the state of workflow stages:
+
+- **resolve** — automatically resolves git merge conflicts in `crab.lock` using
+  one of three strategies.
+- **split** — migrates a monolithic `crab.lock` into per-workflow lockfiles
+  placed alongside each workflow YAML file.
+
+The lockfile tracks which stages have been executed and their output hashes. When
+two branches modify the lockfile independently, git produces a merge conflict
+that cannot be resolved by hand without understanding the stage dependency graph.
+`crab workflow lockfile resolve` handles this automatically.
+
+For repositories with multiple workflow files (`*.workflow.yaml`), the split
+layout places each workflow's lock state next to its definition, reducing merge
+conflicts and making it clear which stages belong to which pipeline.
+
+## Subcommands
+
+### resolve
+
+Resolves git merge conflicts in `crab.lock`.
+
+#### Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--ours` | | `false` | Pick the HEAD side wholesale for every conflicted stage block |
+| `--theirs` | | `false` | Pick the incoming side wholesale for every conflicted stage block |
+| `--recompute` | | `true` (default) | Recompute the resolved lockfile from both sides — stages present on only one side are kept; stages that disagree are dropped so the next `crab run` re-runs them |
+| `--path <PATH>` | | `crab.lock` | Path to the lockfile to resolve |
+| `--json` | | `false` | Emit structured JSON output |
+
+The three strategy flags (`--ours`, `--theirs`, `--recompute`) are mutually
+exclusive. Omitting all three selects `--recompute` as the default.
+
+### split
+
+Migrates a monolithic `crab.lock` into per-workflow lockfiles.
+
+#### Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--dry-run` | | `false` | Preview the split without writing anything |
+| `--keep` | | `false` | Keep the monolithic `crab.lock` after writing split files |
+| `--update-config` | | `false` | Also set `[workflow] lockfile = "split"` in `.crab/config.toml` |
+| `--json` | | `false` | Emit structured JSON output |
+
+## Examples
+
+### Resolve a lockfile conflict using the default strategy
+
+```bash
+crab workflow lockfile resolve
+```
+
+After a `git merge` or `git rebase` leaves `crab.lock` in conflict, this
+recomputes the resolved lockfile. Stages unique to either side are preserved;
+stages that disagree are dropped so `crab run` re-derives them.
+
+### Resolve keeping only the incoming branch's stages
+
+```bash
+crab workflow lockfile resolve --theirs
+```
+
+### Migrate to split lockfiles with a dry run
+
+```bash
+crab workflow lockfile split --dry-run
+```
+
+Shows which per-workflow lockfiles would be created and how many stages each
+would contain, without modifying the working tree.
+
+### Migrate to split lockfiles and update config
+
+```bash
+crab workflow lockfile split --update-config
+```
+
+Writes per-workflow lockfiles alongside each `*.workflow.yaml`, removes the
+monolithic `crab.lock`, and sets `[workflow] lockfile = "split"` in
+`.crab/config.toml` so subsequent `crab run` invocations use the new layout.
+
+## JSON Output
+
+Both subcommands support `--json` for structured output.
+
+### crab workflow lockfile resolve --json
+
+```json
+{
+  "schema": "workflow.lockfile_resolve",
+  "version": "1.0",
+  "data": {
+    "strategy": "recompute",
+    "path": "crab.lock",
+    "stages_kept": ["preprocess", "train"],
+    "stages_dropped": ["evaluate"]
+  }
+}
+```
+
+### crab workflow lockfile split --json
+
+```json
+{
+  "schema": "workflow.lockfile_split",
+  "version": "1.0",
+  "data": {
+    "dry_run": false,
+    "removed_monolithic": true,
+    "files": [
+      { "path": "pipelines/train.workflow.lock", "stage_count": 4 },
+      { "path": "pipelines/deploy.workflow.lock", "stage_count": 2 }
+    ]
+  }
+}
+```
+
+## Related Commands
+
+- [`crab workflow`](/docs/cli/automation/workflow-pipelines) — define and run multi-stage pipelines.
+- [`crab workflow journal`](/docs/cli/automation/workflow-journal) — inspect the workflow execution journal.
+- [`crab run`](/docs/cli/automation/running-commands) — execute workflow stages.

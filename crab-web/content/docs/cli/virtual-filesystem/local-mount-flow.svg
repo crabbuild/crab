@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 700" width="720" height="700">
+
+  <defs>
+    <marker id="arrow-solid" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#0D9488"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#2563EB"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <g id="background">
+    <rect x="0" y="0" width="720" height="700" fill="#F9FAFB"/>
+  </g>
+
+  <!-- Containers -->
+  <g id="containers">
+  </g>
+
+  <!-- Nodes -->
+  <g id="nodes">
+    <!-- A: read file -->
+    <rect x="240" y="60" width="240" height="50" rx="12" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+    <!-- B: Pointer file? diamond -->
+    <polygon points="360,150 460,195 360,240 260,195" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <!-- C: Read from .git/objects (No path, right) -->
+    <rect x="500" y="270" width="170" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- D: Return content instantly (right) -->
+    <rect x="500" y="360" width="170" height="50" rx="12" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+    <!-- E: Parse pointer (Yes path, left) -->
+    <rect x="60" y="270" width="240" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- F: Chunk in cache? diamond -->
+    <polygon points="180,360 280,405 180,450 80,405" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <!-- G: Return cached content (left) -->
+    <rect x="50" y="500" width="210" height="50" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1.5"/>
+    <!-- H: Download from object storage (right) -->
+    <rect x="360" y="490" width="250" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <!-- I: Cache chunk locally -->
+    <rect x="360" y="580" width="250" height="50" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <!-- Title -->
+    <text x="360" y="36" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#0F172A">Local Mount Read Flow</text>
+
+    <!-- A -->
+    <text x="360" y="90" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">read /tmp/view/model.bin</text>
+    <!-- B -->
+    <text x="360" y="199" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Pointer file?</text>
+    <!-- Branch labels for B -->
+    <text x="480" y="225" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#64748B">No</text>
+    <text x="220" y="255" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#0D9488">Yes</text>
+    <!-- C -->
+    <text x="585" y="300" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Read .git/objects</text>
+    <!-- D -->
+    <text x="585" y="390" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Return content instantly</text>
+    <!-- E -->
+    <text x="180" y="300" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Parse pointer → file_hash</text>
+    <!-- F -->
+    <text x="180" y="409" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Chunk in cache?</text>
+    <!-- Branch labels for F -->
+    <text x="90" y="460" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#0D9488">Yes</text>
+    <text x="310" y="430" font-family="Inter, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#64748B">No</text>
+    <!-- G -->
+    <text x="155" y="530" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Return cached content</text>
+    <!-- H -->
+    <text x="485" y="520" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Download from object storage</text>
+    <!-- I -->
+    <text x="485" y="610" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#0F172A">Cache chunk locally</text>
+  </g>
+
+  <!-- Connections -->
+  <g id="connections">
+    <!-- A → B -->
+    <line x1="360" y1="110" x2="360" y2="150" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- B → C (No, right) -->
+    <path d="M 460,195 L 585,195 L 585,270" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- C → D -->
+    <line x1="585" y1="320" x2="585" y2="360" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- B → E (Yes, left) -->
+    <path d="M 260,195 L 180,195 L 180,270" fill="none" stroke="#0D9488" stroke-width="1.5" marker-end="url(#arrow-teal)"/>
+    <!-- E → F -->
+    <line x1="180" y1="320" x2="180" y2="360" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- F → G (Yes, down) -->
+    <path d="M 80,405 L 60,405 L 60,520 L 50,520" fill="none" stroke="#0D9488" stroke-width="1.5" marker-end="url(#arrow-teal)"/>
+    <!-- F → H (No, right) -->
+    <path d="M 280,405 L 485,405 L 485,490" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- H → I -->
+    <line x1="485" y1="540" x2="485" y2="580" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+    <!-- I → G (cache then return) -->
+    <path d="M 360,605 L 155,605 L 155,550" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  </g>
+
+  <!-- Info callout -->
+  <g id="callout">
+    <rect x="60" y="650" width="600" height="36" rx="10" fill="#F1F5F9" stroke="#E2E8F0" stroke-width="1"/>
+    <circle cx="84" cy="668" r="10" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1"/>
+    <text x="84" y="672" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="10" fill="#2563EB">i</text>
+    <text x="106" y="672" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#334155">Non-pointer files are served directly from git objects. Pointer files trigger on-demand chunk resolution.</text>
+  </g>
+
+</svg>

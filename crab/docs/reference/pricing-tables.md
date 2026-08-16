@@ -1,0 +1,72 @@
+# Pricing Tables Reference
+
+Crab ships an embedded pricing table generated at build time from
+`crab/pricing/data/<version>.yaml`. The `price_table_version` field
+appears in every cost report so results are reproducible.
+
+Current version: **2026-03-01**
+
+## How pricing data is used
+
+- `crab doctor --cost` uses the embedded table to estimate monthly
+  storage costs, projected savings, and recommendation deltas.
+- `crab gc --dry-run` uses it to estimate early-deletion penalties.
+- `crab optimize xorbs --dry-run` uses PUT and storage costs for the
+  xorb optimization cost estimate.
+
+## Override mechanism
+
+Contract rates or custom pricing can be supplied via
+`cost.pricing_file` in `.crab/config.toml`. Override fields replace
+embedded values; missing fields inherit. See
+[crab-cost.md](../guides/crab-cost.md) for details.
+
+## AWS S3 — us-east-1
+
+| Class | Storage ($/GB/mo) | PUT/1K | GET/1K | Retrieval ($/GB) | Min retention | Min object size |
+|-------|-------------------|--------|--------|------------------|---------------|-----------------|
+| Standard | 0.023 | 0.005 | 0.0004 | — | — | — |
+| Standard-IA | 0.0125 | 0.01 | 0.001 | 0.01 | 30 days | 128 KB |
+| One-Zone-IA | 0.01 | 0.01 | 0.001 | 0.01 | 30 days | 128 KB |
+| Glacier Instant Retrieval | 0.004 | 0.02 | 0.01 | 0.03 | 90 days | 128 KB |
+| Glacier Flexible Retrieval | 0.0036 | 0.03 | 0.01 | 0.03 | 90 days | 40 KB |
+| Glacier Deep Archive | 0.00099 | 0.05 | 0.01 | 0.02 | 180 days | 40 KB |
+
+Egress: $0.09/GB (all classes).
+
+## GCS — us-central1
+
+| Class | Storage ($/GB/mo) | PUT/1K | GET/1K | Retrieval ($/GB) | Min retention |
+|-------|-------------------|--------|--------|------------------|---------------|
+| Standard | 0.020 | 0.005 | 0.0004 | — | — |
+| Nearline | 0.010 | 0.01 | 0.001 | 0.01 | 30 days |
+| Coldline | 0.004 | 0.01 | 0.01 | 0.02 | 90 days |
+| Archive | 0.0012 | 0.05 | 0.05 | 0.05 | 365 days |
+
+Egress: $0.12/GB (all classes).
+
+## Azure Blob — eastus
+
+| Class | Storage ($/GB/mo) | PUT/1K | GET/1K | Retrieval ($/GB) | Min retention |
+|-------|-------------------|--------|--------|------------------|---------------|
+| Hot | 0.018 | 0.005 | 0.0004 | — | — |
+| Cool | 0.01 | 0.01 | 0.001 | 0.01 | 30 days |
+| Cold | 0.0036 | 0.018 | 0.01 | 0.02 | 90 days |
+| Archive | 0.002 | 0.01 | 0.005 | 0.02 | 180 days |
+
+Egress: $0.087/GB (all classes).
+
+## Refreshing pricing data
+
+Run `scripts/refresh_pricing.sh` to update the embedded table from
+published cloud pricing pages. CI fails if the newest pricing file is
+older than 90 days.
+
+## Versioning
+
+The `price_table_version` field is included in every cost report and
+JSON output. Upgrading Crab may ship a newer price table, but prior
+reports remain reproducible because the version is recorded.
+
+Override files carry their own version string, which also appears in
+reports when an override is active.

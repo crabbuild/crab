@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseVerifyPayload",
+  "type": "object",
+  "required": [
+    "content_digest",
+    "deep",
+    "issues",
+    "manifest_digest",
+    "release_id",
+    "signature_state",
+    "signature_verified",
+    "verified"
+  ],
+  "properties": {
+    "content_digest": {
+      "type": "string"
+    },
+    "deep": {
+      "type": "boolean"
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReleaseVerifyIssue"
+      }
+    },
+    "manifest_digest": {
+      "type": "string"
+    },
+    "release_id": {
+      "type": "string"
+    },
+    "signature_state": {
+      "$ref": "#/definitions/ReleaseSignatureState"
+    },
+    "signature_verified": {
+      "type": "boolean"
+    },
+    "verified": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ReleaseSignatureState": {
+      "description": "Signature state reported by release verification.",
+      "type": "string",
+      "enum": [
+        "unsigned",
+        "signed",
+        "unsupported"
+      ]
+    },
+    "ReleaseVerifyIssue": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

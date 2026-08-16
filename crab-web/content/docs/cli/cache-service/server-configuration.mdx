@@ -1,0 +1,218 @@
+---
+title: "Server Configuration"
+description: "TOML configuration reference for crab-cache-server."
+---
+
+# Server Configuration
+
+`crab-cache-server` reads a TOML file passed with `--config`.
+
+Validate a config and its startup dependencies before serving traffic:
+
+```bash
+crab-cache-server --config /etc/crab-cache-server/config.toml check --json
+```
+
+The check opens the same cache metadata stack used by the server, validates listen bind and TLS files, probes origin reachability, and reports auth/policy warnings with redacted origin URLs. It warns when TLS is not configured, when PSK would travel over plain HTTP, and when no authorization policy is configured. Add `--fail-on-warn` in rollout gates when warnings should block deployment. When a policy is configured, JSON output includes rule count, repo-pattern count, and the covered action set without printing principals.
+
+For enterprise rollouts, use the named profile:
+
+```bash
+crab-cache-server --config /etc/crab-cache-server/config.toml check \
+  --json --profile enterprise
+```
+
+The enterprise profile requires an authorization policy, enforced auth, `mutable_path_mode = "strict"`, and native TLS/mTLS. If TLS termination or mTLS identity happens at a trusted load balancer, ingress, or service mesh, add `--trusted-proxy-boundary` after verifying that only that boundary can reach the cache service and that client-supplied identity headers are stripped.
+
+Non-ok JSON checks include stable issue metadata:
+
+```json
+{
+  "name": "auth",
+  "status": "warn",
+  "detail": "psk configured over plain HTTP; enable native TLS or terminate TLS before clients",
+  "code": "auth_psk_plain_http",
+  "remediation": "Enable native TLS, place the cache service behind TLS termination, or keep PSK traffic on a trusted private network."
+}
+```
+
+Use `checks[].code` for automation and dashboards. Treat `detail` and `remediation` as operator-facing text.
+
+## Preflight Issue Codes
+
+| Code | Meaning |
+|------|---------|
+| `config_invalid` | The config file or environment overrides could not be parsed. |
+| `startup_components_failed` | Startup dependencies such as cache metadata, policy, origin, or local cache state failed to open. |
+| `listen_bind_failed` | The configured listen address cannot be bound. |
+| `tls_not_configured` | No native TLS is configured; traffic must stay private or be protected by a terminator before the cache service. |
+| `tls_invalid` | TLS certificate, key, client CA, or file permissions are invalid. |
+| `auth_psk_plain_http` | PSK auth would travel over plain HTTP. |
+| `auth_bearer_signature_not_enforced` | Bearer mode has `jwks_url` configured, but signatures are not enforced yet. |
+| `auth_bearer_trusted_only` | Bearer tokens are accepted as principals and require trusted upstream authentication. |
+| `auth_proxy_mtls_header_trust` | Proxy-terminated mTLS relies on a trusted `X-Client-CN` header. |
+| `policy_not_configured` | No authorization policy is configured. |
+| `cache_budget_exceeded` | Current cache usage is above `cache.max_bytes`; startup eviction will run. |
+| `cache_budget_above_high_water` | Current cache usage is above the eviction high-water mark. |
+| `cache_budget_unavailable` | Cache usage statistics could not be read. |
+| `dedup_index_rebuild_incomplete` | The shared dedup index rebuild is incomplete or degraded. |
+| `origin_unreachable` | The origin object store is unreachable. |
+| `origin_probe_failed` | The origin probe returned an unexpected error. |
+| `origin_probe_timeout` | The origin probe timed out. |
+| `enterprise_trusted_boundary_required` | Enterprise profile needs native TLS/mTLS or an explicit trusted proxy boundary assertion. |
+| `enterprise_policy_required` | Enterprise profile requires `server.policy_path`. |
+| `enterprise_auth_enforcement_required` | Enterprise profile rejects bearer placeholder auth modes. |
+| `enterprise_strict_mutable_paths_required` | Enterprise profile requires `mutable_path_mode = "strict"`. |
+
+Required sections:
+
+- `[auth]`
+- `[origin]`
+
+All other sections are optional.
+
+## Minimal Example
+
+```toml
+[auth]
+mechanism = "psk"
+psk_hash = "0dc7af953ee2c2e947d4dd2a73828ed42dff776f8bd6b3fb230798fc3a6addd1"
+
+[origin]
+url = "s3://my-bucket"
+```
+
+The example hash is for `your-shared-secret`. Generate your own:
+
+```bash
+printf '%s' "your-shared-secret" | b3sum | cut -d' ' -f1
+```
+
+## Full Example
+
+```toml
+[server]
+listen_addr = "0.0.0.0:8443"
+drain_timeout_secs = 30
+mutable_path_mode = "strict"
+policy_path = "/etc/crab-cache-server/policy.yaml"
+
+[tls]
+cert_path = "/etc/crab-cache-server/tls/cert.pem"
+key_path = "/etc/crab-cache-server/tls/key.pem"
+# Set this for native mTLS.
+client_ca_path = "/etc/crab-cache-server/tls/client-ca.pem"
+
+[auth]
+mechanism = "psk"
+psk_hash = "<64-character-blake3-hash>"
+
+[origin]
+url = "s3://my-bucket"
+
+[cache]
+root = "/data/crab-cache"
+max_bytes = 1099511627776
+
+[dedup]
+scope = "all"
+
+[eviction]
+high_water_ratio = 0.95
+low_water_ratio = 0.90
+
+[logging]
+format = "json"
+level = "info"
+```
+
+## Server
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `listen_addr` | `0.0.0.0:8443` | Address and port to bind. |
+| `drain_timeout_secs` | `30` | Grace period for shutdown. |
+| `mutable_path_mode` | `strict` | `strict` rejects mutable paths; `transparent` proxies them without caching. |
+| `policy_path` | unset | Optional YAML authorization policy. |
+
+Keep `mutable_path_mode = "strict"` unless you explicitly need the service to proxy non-cacheable paths. When `policy_path` is configured, transparent mutable `GET` and `HEAD` requests still enforce repo-scoped `read` authorization before proxying; mutable paths that cannot be mapped to a repo are rejected instead of being proxied.
+
+## TLS
+
+| Field | Description |
+|-------|-------------|
+| `cert_path` | Server certificate PEM. |
+| `key_path` | Server private key PEM. |
+| `client_ca_path` | Optional trusted client CA bundle PEM. When set, the server requires verified client certificates and mTLS principals use `mtls-sha256:<leaf-certificate-fingerprint>`. |
+
+Omit `[tls]` only when TLS is terminated by a load balancer, ingress, or service mesh before traffic reaches the cache service. Preflight reports this as a warning because plaintext is safe only inside that trusted boundary.
+
+For native mTLS, set `client_ca_path` on the server and configure `cache.service_client_cert` plus `cache.service_client_key` on Crab clients. For proxy-terminated mTLS, omit `client_ca_path`, validate client certificates at the proxy or mesh, and forward the validated identity to the cache service. See [Authentication](/docs/cli/cache-service/authentication).
+
+## Auth
+
+| Field | Description |
+|-------|-------------|
+| `mechanism` | `psk`, `bearer`, or `mtls`. |
+| `psk_hash` | Required for PSK. Blake3 hash of the shared secret. |
+| `jwks_url` | Reserved for future bearer-token validation. |
+
+Use PSK only over native TLS, proxy-terminated TLS, or a trusted private network. Preflight warns when PSK is configured without a `[tls]` section.
+
+Bearer mode currently accepts non-empty bearer tokens but does not validate signatures. Do not expose bearer mode to untrusted networks.
+
+## Origin
+
+| Field | Description |
+|-------|-------------|
+| `url` | Object-store URL, such as `s3://my-bucket` or `file:///var/lib/crab-origin`. |
+
+The cache server needs read access to origin. Clients still perform normal pushes directly to origin.
+
+For S3-compatible stores, provide the usual AWS environment variables, including endpoint and region when needed.
+
+## Cache
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `root` | `/data/crab-cache` | Local cache directory. Use durable SSD or NVMe storage. |
+| `max_bytes` | `1099511627776` | Cache size budget in bytes. |
+
+The cache can be rebuilt from origin, but losing it temporarily reduces hit rate and dedup effectiveness.
+
+## Dedup
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `scope` | `all` | Dedup serving scope. Use `bucket-prefix:<prefix>` or `repos:<repo1>,<repo2>` to restrict which repo-scoped dedup queries can use the shared index. |
+
+Use separate cache instances when dedup visibility must be isolated by team, tenant, environment, or regulatory boundary.
+
+## Eviction
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `high_water_ratio` | `0.95` | Start eviction when the cache exceeds this fill level. |
+| `low_water_ratio` | `0.90` | Evict down to this fill level. |
+
+Lower both values if writes frequently hit disk pressure.
+
+## Logging
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `format` | `text` | `text` or `json`. Use `json` in production. |
+| `level` | `info` | Log level. |
+
+`RUST_LOG` can override the configured level.
+
+## Environment Overrides
+
+| Variable | Overrides |
+|----------|-----------|
+| `CRAB_CACHE_ORIGIN_URL` | Origin URL. |
+| `CRAB_CACHE_TLS_CERT` | TLS certificate path. |
+| `CRAB_CACHE_TLS_KEY` | TLS private key path. |
+| `RUST_LOG` | Log filter. |
+
+There is no `CRAB_CACHE_PSK_HASH` override. Render `auth.psk_hash` into the config file from your deployment system.

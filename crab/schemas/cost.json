@@ -1,0 +1,263 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CostReport",
+  "description": "The complete cost report.",
+  "type": "object",
+  "required": [
+    "assumptions",
+    "current_monthly_usd",
+    "generated_at",
+    "heaviest_cold",
+    "inventory",
+    "per_class_costs",
+    "price_table_version",
+    "projected_monthly_usd",
+    "projected_savings_usd",
+    "recommendations"
+  ],
+  "properties": {
+    "assumptions": {
+      "description": "Assumptions and caveats.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "current_monthly_usd": {
+      "description": "Current estimated monthly cost.",
+      "type": "string"
+    },
+    "generated_at": {
+      "description": "When the report was generated (RFC 3339).",
+      "type": "string"
+    },
+    "heaviest_cold": {
+      "description": "Top-K heaviest cold objects.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ColdObjectSummary"
+      }
+    },
+    "inventory": {
+      "description": "Inventory summary.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/InventorySummary"
+        }
+      ]
+    },
+    "override_version": {
+      "description": "Override file version, if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "per_class_costs": {
+      "description": "Per-class cost breakdown.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ClassCost"
+      }
+    },
+    "price_table_version": {
+      "description": "Price table version used for this report.",
+      "type": "string"
+    },
+    "projected_monthly_usd": {
+      "description": "Projected monthly cost under tier-plan defaults.",
+      "type": "string"
+    },
+    "projected_savings_usd": {
+      "description": "Projected monthly savings.",
+      "type": "string"
+    },
+    "recommendations": {
+      "description": "Recommendations.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Recommendation"
+      }
+    }
+  },
+  "definitions": {
+    "ClassCost": {
+      "description": "Per-class cost breakdown.",
+      "type": "object",
+      "required": [
+        "bytes",
+        "bytes_human",
+        "monthly_retrieval_usd",
+        "monthly_storage_usd",
+        "monthly_total_usd",
+        "objects",
+        "share_pct"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "bytes_human": {
+          "type": "string"
+        },
+        "monthly_retrieval_usd": {
+          "type": "string"
+        },
+        "monthly_storage_usd": {
+          "type": "string"
+        },
+        "monthly_total_usd": {
+          "type": "string"
+        },
+        "objects": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "share_pct": {
+          "type": "string"
+        }
+      }
+    },
+    "ColdObjectSummary": {
+      "description": "Summary of a heavy cold object.",
+      "type": "object",
+      "required": [
+        "key",
+        "last_modified",
+        "size",
+        "size_human",
+        "storage_class"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "last_modified": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "size_human": {
+          "type": "string"
+        },
+        "storage_class": {
+          "type": "string"
+        }
+      }
+    },
+    "InventorySummary": {
+      "description": "Summary of the inventory used for the report.",
+      "type": "object",
+      "required": [
+        "scanned_at",
+        "source",
+        "total_bytes",
+        "total_bytes_human",
+        "total_objects"
+      ],
+      "properties": {
+        "scanned_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "total_bytes_human": {
+          "type": "string"
+        },
+        "total_objects": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Recommendation": {
+      "description": "A single cost-reduction recommendation.",
+      "type": "object",
+      "required": [
+        "action_cmd",
+        "delta_usd_month",
+        "dependencies",
+        "enabled",
+        "rationale",
+        "risk_level",
+        "title"
+      ],
+      "properties": {
+        "action_cmd": {
+          "description": "CLI command to execute the recommendation.",
+          "type": "string"
+        },
+        "delta_usd_month": {
+          "description": "Estimated monthly savings in USD (positive = savings).",
+          "type": "string"
+        },
+        "dependencies": {
+          "description": "IDs of recommendations that must be applied first.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Whether this recommendation is currently enabled (fires).",
+          "type": "boolean"
+        },
+        "rationale": {
+          "description": "Explanation of why this recommendation applies.",
+          "type": "string"
+        },
+        "risk_level": {
+          "description": "Risk level of the action.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RiskLevel"
+            }
+          ]
+        },
+        "title": {
+          "description": "Short title (e.g. \"Enable Standard-IA tiering\").",
+          "type": "string"
+        }
+      }
+    },
+    "RiskLevel": {
+      "description": "Risk level for a recommendation.",
+      "oneOf": [
+        {
+          "description": "Low risk — read-only or easily reversible.",
+          "type": "string",
+          "enum": [
+            "Low"
+          ]
+        },
+        {
+          "description": "Medium risk — writes data but is reversible.",
+          "type": "string",
+          "enum": [
+            "Medium"
+          ]
+        },
+        {
+          "description": "High risk — may incur costs or is hard to reverse.",
+          "type": "string",
+          "enum": [
+            "High"
+          ]
+        }
+      ]
+    }
+  }
+}

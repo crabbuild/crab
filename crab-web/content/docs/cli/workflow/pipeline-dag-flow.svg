@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-label="Pipeline DAG flow">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563EB"/>
+    </marker>
+  </defs>
+  <rect width="960" height="520" fill="#F9FAFB"/>
+  <text x="480" y="48" text-anchor="middle" font-family="Inter, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#0F172A">DAG Execution and Cache Decisions</text>
+
+  <g font-family="Inter, -apple-system, sans-serif">
+    <rect x="385" y="95" width="190" height="60" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1.5"/>
+    <text x="480" y="121" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">ingest</text>
+    <text x="480" y="141" text-anchor="middle" font-size="12" fill="#0D9488">cache hit</text>
+
+    <rect x="175" y="225" width="190" height="60" rx="12" fill="#F0FDFA" stroke="#14B8A6" stroke-width="1.5"/>
+    <text x="270" y="251" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">features</text>
+    <text x="270" y="271" text-anchor="middle" font-size="12" fill="#0D9488">cache hit</text>
+
+    <rect x="595" y="225" width="190" height="60" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="690" y="251" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">report</text>
+    <text x="690" y="271" text-anchor="middle" font-size="12" fill="#64748B">stale</text>
+
+    <rect x="280" y="355" width="190" height="60" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="375" y="381" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">train</text>
+    <text x="375" y="401" text-anchor="middle" font-size="12" fill="#64748B">stale</text>
+
+    <rect x="490" y="355" width="190" height="60" rx="12" fill="#EFF6FF" stroke="#BFDBFE" stroke-width="1.5"/>
+    <text x="585" y="381" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">evaluate</text>
+    <text x="585" y="401" text-anchor="middle" font-size="12" fill="#2563EB">waits for train</text>
+
+    <path d="M 440 155 L 315 225" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 520 155 L 645 225" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 300 285 L 355 355" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 690 285 L 610 355" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M 470 385 L 490 385" fill="none" stroke="#2563EB" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <rect x="75" y="440" width="810" height="44" rx="10" fill="#F1F5F9" stroke="#CBD5E1"/>
+    <text x="480" y="467" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">Crab runs stale nodes in topological order and replays cached nodes without executing their commands</text>
+  </g>
+</svg>

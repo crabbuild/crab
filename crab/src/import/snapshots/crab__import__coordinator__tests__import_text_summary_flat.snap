@@ -1,0 +1,6 @@
+---
+source: crab/src/import/coordinator.rs
+expression: rendered
+---
+Imported 3 files (56320 bytes source) from s3://src-bucket/data → crab://dst-bucket/repo.
+  Commits: 1 on main; HEAD abc123def456; duration 1234 ms; same-bucket: false.

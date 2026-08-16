@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigGetPayload",
+  "description": "Payload emitted by `crab config get --json`.",
+  "type": "object",
+  "required": [
+    "key",
+    "source",
+    "value"
+  ],
+  "properties": {
+    "key": {
+      "description": "The dotted config key that was queried.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Where the value came from: `\"local\"`, `\"default\"`, `\"env\"`, or `\"remote\"`.",
+      "type": "string"
+    },
+    "value": {
+      "description": "The resolved value as a string.",
+      "type": "string"
+    }
+  }
+}

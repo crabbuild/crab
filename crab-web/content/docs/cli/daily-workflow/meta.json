@@ -1,0 +1,14 @@
+{
+  "title": "Working with Files",
+  "pages": [
+    "index",
+    "adding-files",
+    "pushing-changes",
+    "fetching-updates",
+    "hydrating-files",
+    "dehydrating-files",
+    "resetting-staged-files",
+    "file-locking",
+    "diffing-changes"
+  ]
+}

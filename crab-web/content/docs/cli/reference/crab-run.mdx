@@ -1,0 +1,103 @@
+---
+title: "crab run"
+description: "Execute workflow stages with content-addressed caching and reproducible inputs."
+---
+
+# crab run
+
+Execute an inline stage or one or more stages declared in `crab.yaml` with
+content-addressed caching.
+
+## Synopsis
+
+```bash
+crab run [OPTIONS] [CMD]...
+```
+
+## Description
+
+Inline mode requires `--name` and treats the arguments after `--` as the child
+command. With `crab.yaml`, positional values select stages; with no positional
+targets, Crab runs the workflow DAG. `crab repro` is a DVC-compatible alias.
+
+Stage hashes include the command, declared dependencies, parameters, and the
+selected environment. A matching cache entry restores outputs instead of
+running the command again.
+
+For conceptual background, see [Running Commands](/docs/cli/automation/running-commands).
+
+## Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `CMD` | No | Inline command arguments after `--`, or workflow stage targets |
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--name <NAME>` | | Stage name; required for inline mode |
+| `--deps <PATH>` | | Dependency path; repeatable in inline mode |
+| `--outs <PATH>` | | Cached output path; repeatable in inline mode |
+| `--env <VAR>` | | Allow a named environment variable into the stage hash; repeatable |
+| `--empty-env` | `false` | Run with an empty environment plus the minimum execution variables |
+| `--timeout <DURATION>` | | Per-stage timeout such as `30s`, `5m`, or `1h` |
+| `--hermetic` | `false` | Opt into the hermetic sandbox |
+| `--nondeterministic` | `false` | Mark the stage non-deterministic and include that choice in its hash |
+| `--force` | `false` | Ignore a cache hit and re-execute |
+| `--dry-run` | `false` | Print the plan without executing |
+| `-i, --interactive` | `false` | Ask before executing each stage that would run |
+| `--cache-only` | `false` | Restore cached outputs and fail on a cache miss |
+| `--no-run-cache` | `false` | Run commands without reading matching run-cache entries |
+| `--no-commit` | `false` | Run without writing new run-cache entries or output xorbs |
+| `--no-overwrite` | `false` | Refuse a cache hit that would overwrite a differing declared output |
+| `--resume-trust-outputs` | `false` | Trust output files when resuming a crashed run |
+| `--abandon <RUN_ID>` | | Mark a stuck journal run as aborted and exit |
+| `--explain-miss` | `false` | Print the input-hash breakdown for a cache miss |
+| `--lock-timeout <SECS>` | `600` | Wait time for the workflow scheduler lock |
+| `--no-wait` | `false` | Fail immediately when another workflow run holds the scheduler lock |
+| `--validate` | `false` | Validate `crab.yaml` without executing stages |
+| `--watch` | `false` | Re-run affected stages when declared deps change |
+| `--workflow <NAME>` | | Execute only stages in a named workflow |
+| `--stages <GLOB>` | | Execute stages matching a stage-name glob |
+| `--glob` | `false` | Treat positional targets as stage-name globs |
+| `-R, --recursive` | `false` | Discover nested workflow files |
+| `-s, --single-item` | `false` | Run target stages without adding upstream dependencies |
+| `--downstream` | `false` | Run target stages and downstream consumers |
+| `--force-downstream` | `false` | Force descendants to execute after a stage runs |
+| `-p, --pipeline` | `false` | Run the pipeline component containing target stages |
+| `-P, --all-pipelines` | `false` | Discover and run all pipelines under the repository root |
+| `--keep-going` | `false` | Continue unrelated branches after a stage failure |
+| `--ignore-errors` | `false` | Attempt remaining stages even after producer failures |
+| `--parallelism <N>` | Configured value | Maximum concurrent stages |
+| `--cache-push` | `false` | Push newly produced stage cache entries after each stage |
+| `--allow-missing` | `false` | Allow unchanged stages whose dependency files are missing locally |
+| `--pull` | `false` | Download missing dependencies or cache entries before execution |
+| `--json` / `--jsonl` | | Emit structured output |
+
+## Examples
+
+### Cache a training run
+
+```bash
+crab run --name train --deps 'data/**' --outs 'models/output.pkl' -- python train.py
+```
+
+### Force re-execution
+
+```bash
+crab run --name train --force --deps 'data/**' --outs 'models/output.pkl' -- python train.py
+```
+
+### Run a declared workflow
+
+```bash
+crab run
+crab run train --downstream
+crab run --validate
+```
+
+## Related Commands
+
+- [`crab workflow`](/docs/cli/reference/crab-workflow) — multi-step pipelines.
+- [`crab exp`](/docs/cli/reference/crab-exp) — experiment tracking.

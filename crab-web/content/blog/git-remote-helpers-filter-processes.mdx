@@ -1,0 +1,971 @@
+---
+title: "How Crab connects Git remote helpers and filter processes"
+description: "A complete technical guide to the two Git extension points that let Crab use normal Git commands while storing large-file bytes in cloud object storage."
+date: "2025-06-16"
+author: "Crab Team"
+category: "architecture"
+tags: ["git", "remote-helper", "filter-process", "integration"]
+excerpt: "Crab uses Git remote helpers for transport and Git filter processes for clean and smudge. Together, they make object storage feel like a native Git remote."
+level: "deep-dive"
+path: "first-workflow"
+order: 3
+concepts: ["remote helper", "filter process", "clean", "smudge", "pointer blob", "object storage"]
+prerequisites: ["Your First Crab Push"]
+outcome: "Explain how Git invokes Crab for transport and content transformation, then debug the integration from protocol transcripts to storage side effects."
+diagramType: "ASCII protocol flow"
+meta:
+  contentType: "Conceptual"
+  goal: "Explain Crab's Git integration glue from first principles through advanced protocol behavior."
+  audience: "Developers who know Git basics and want to understand how Crab integrates without a Git server."
+---
+
+Crab connects to Git through two extension points: a remote helper for repository transport and a long-running filter process for file transformation. This article explains both contracts, how Crab implements them, and how bytes flow from `git add` to object storage and back to a hydrated working tree.
+
+## What you will learn
+
+- **Remote helper role**: how Git turns a `crab://bucket/repo` URL into a `git-remote-crab` process
+- **Filter process role**: how Git streams file bytes through `crab filter-process`
+- **Shared state**: why staging, pointers, manifests, xorbs, shards, caches, and refs stay consistent
+- **Failure behavior**: how Crab fails closed when it cannot prove data is backed
+- **Debug model**: how to map protocol traces to source files
+
+## The integration in one picture
+
+Git stays the interface. Crab supplies transport and large-file content handling.
+
+```text
+                 normal Git commands
+          git add   git commit   git push   git clone
+             |          |           |           |
+             v          v           v           v
+        +------------------------------------------------+
+        |                      Git                       |
+        +------------------------------------------------+
+             |                              |
+             | clean/smudge                 | remote I/O
+             v                              v
+  +-----------------------+      +-----------------------+
+  | crab filter-process   |      | git-remote-crab       |
+  | content transformer   |      | transport helper      |
+  +-----------------------+      +-----------------------+
+             |                              |
+             | pointer blobs                | packs, refs,
+             | staged chunks                | manifests
+             v                              v
+        +------------------------------------------------+
+        |          object storage: S3, GCS, Azure        |
+        +------------------------------------------------+
+```
+
+The filter process decides what Git stores as file content.
+
+The remote helper decides where Git fetches and pushes repository state.
+
+Together, they let Git commit small pointer blobs while Crab stores full content outside Git's object database.
+
+## The terms you need first
+
+Git object database: the `.git/objects` store that holds commits, trees, tags, and blobs.
+
+Blob: Git's name for file content stored in the object database.
+
+Remote helper: a program Git spawns when it sees a remote URL scheme Git does not implement itself.
+
+Filter driver: a Git attribute rule that transforms file content before Git stores it or writes it to the worktree.
+
+Clean: the filter direction that runs when Git adds content to the index.
+
+Smudge: the filter direction that runs when Git checks content out to the working tree.
+
+Pointer blob: a small text blob committed to Git instead of the original large file.
+
+Xorb: Crab's packed, compressed, content-addressed storage object for chunks.
+
+Shard: metadata that maps file hashes to the chunk ranges needed for reconstruction.
+
+Manifest: Crab's remote ref and metadata summary stored in object storage.
+
+Hydration: reconstructing a pointer back into full file bytes.
+
+## Why Crab needs two Git hooks
+
+Git separates content transformation from remote transport.
+
+Crab follows that split.
+
+`git add` needs a content hook.
+
+`git push` needs a transport hook.
+
+One hook cannot do both jobs without blurring ownership.
+
+```text
++-------------------+--------------------------+--------------------------+
+| Git operation     | Git extension point      | Crab implementation      |
++-------------------+--------------------------+--------------------------+
+| git add           | filter clean             | crab filter-process      |
+| git checkout      | filter smudge            | crab filter-process      |
+| git status        | filter smudge checks     | crab filter-process      |
+| git push          | remote helper push       | git-remote-crab          |
+| git fetch         | remote helper fetch      | git-remote-crab          |
+| git clone         | remote helper list/fetch | git-remote-crab          |
++-------------------+--------------------------+--------------------------+
+```
+
+The filter process changes the blob Git stores.
+
+The remote helper changes the backing transport Git uses.
+
+Crab uses both because it wants normal Git commands and object-storage durability.
+
+## Git's remote helper contract
+
+Git's remote helper contract defines a process boundary.
+
+When Git sees a URL such as `crab://bucket/repo`, it looks for `git-remote-crab` on `PATH`.
+
+Git starts the helper as a separate process.
+
+Git sends text commands on standard input.
+
+The helper writes protocol responses on standard output.
+
+The first command is `capabilities`.
+
+```text
+Git process                         git-remote-crab process
+    |                                         |
+    | exec git-remote-crab origin crab://x    |
+    |---------------------------------------->|
+    |                                         |
+    | capabilities\n                          |
+    |---------------------------------------->|
+    | fetch\npush\noption\nagent=crab/x.y.z   |
+    |<----------------------------------------|
+    |                                         |
+    | list\n                                  |
+    |---------------------------------------->|
+    | <sha> refs/heads/main\n\n               |
+    |<----------------------------------------|
+```
+
+The protocol is line-framed.
+
+Batches end with blank lines.
+
+Helper stdout belongs to Git.
+
+Progress, logs, and JSONL events must go to stderr.
+
+Crab's protocol loop lives in `crab/src/git/remote_helper.rs`.
+
+The process dispatch entry lives in `crab/src/main.rs`.
+
+## Why `git-remote-crab` is the `crab` binary
+
+Crab ships one binary.
+
+Installation creates a `git-remote-crab` symlink that points to `crab`.
+
+Git controls the helper invocation name, so Crab dispatches on `argv[0]`.
+
+```text
+installed files
+
+~/.crab/bin/crab
+       ^
+       |
+       +---------------------------+
+                                   |
+~/.crab/bin/git-remote-crab ------+
+
+startup decision
+
+argv[0] = "git-remote-crab"  -> remote helper mode
+argv[0] = "crab"             -> normal CLI mode
+argv[0] = "crab-gc"          -> symlink subcommand mode
+```
+
+This removes version skew between helper mode and CLI mode.
+
+`crab/Makefile` installs the binary and recreates the helper link.
+
+`crab/src/main.rs` detects `git-remote-crab` before it parses CLI subcommands.
+
+## Ref listing reads the manifest
+
+Git needs remote refs before it can fetch or push.
+
+Crab stores ref state in a manifest object.
+
+The helper reads that manifest and formats Git's `list` response.
+
+```text
+Git list request
+      |
+      v
++---------------------------+
+| git-remote-crab           |
+| read manifest             |
++---------------------------+
+      |
+      v
++---------------------------+
+| object storage            |
+| repo/manifest             |
++---------------------------+
+      |
+      v
++---------------------------+
+| format for Git            |
+| @refs/heads/main HEAD     |
+| <sha> refs/heads/main     |
+| <peeled> refs/tags/v1^{}  |
++---------------------------+
+```
+
+For fetch listing, Crab can use an eligible read replica.
+
+For `list for-push`, Crab reads with primary authority.
+
+Push listing must prepare writes against the current primary manifest.
+
+## Fetch batches move Git objects into the local database
+
+Git sends one or more `fetch <sha> <name>` lines.
+
+The batch ends with a blank line.
+
+Crab validates the request, selects the read store, fetches pack data, and writes the result into Git's object database path.
+
+```text
+Git -> Crab
+
+fetch <sha-a> refs/heads/main
+fetch <sha-b> refs/tags/v1.0
+
+Crab actions
+
+1. resolve config
+2. select primary or replica read store
+3. read pack metadata
+4. download required pack objects
+5. write pack into Git object database
+6. return a blank line when the batch completes
+```
+
+Fetch options such as `depth` and `filter blob:none` are stored in helper options.
+
+Crab acknowledges supported options before it receives the fetch batch.
+
+Unsupported options return `unsupported`.
+
+## Push batches publish refs after data
+
+Git sends one or more `push <src>:<dst>` lines.
+
+Crab keeps response order identical to request order.
+
+Git maps each `ok` or `error` line back to a pushed ref.
+
+```text
+Git -> Crab
+
+push refs/heads/main:refs/heads/main
+push refs/tags/v1.0:refs/tags/v1.0
+
+Crab -> Git
+
+ok refs/heads/main
+ok refs/tags/v1.0
+
+```
+
+Crab parses refspecs before it starts the push pipeline.
+
+Malformed destination refs become per-ref rejections when possible.
+
+An empty destination is a protocol error because there is no ref name to report against.
+
+Mixed fetch and push commands in the same batch abort as protocol errors.
+
+Those edge cases have transcript tests in `crab/tests/remote_helper_transcript.rs`.
+
+## Push connects commits to Crab metadata
+
+The helper passes pushed refs into Crab's native push pipeline.
+
+The pipeline inspects Git commits and finds pointer blobs.
+
+It reads staged chunks for those pointers.
+
+It uploads missing xorbs and shards.
+
+It updates refs after backing data is durable.
+
+```text
+git push
+   v
++--------------------------+
+| git-remote-crab          |
+| parse push refspecs      |
++--------------------------+
+   v
++--------------------------+
+| native push pipeline     |
+| inspect commits          |
+| find pointer chunks      |
+| upload backing data      |
++--------------------------+
+   v
++--------------------------+
+| object storage           |
+| xorbs, shards, packs     |
++--------------------------+
+   v
++--------------------------+
+| manifest update          |
+| refs become visible      |
++--------------------------+
+```
+
+The order protects readers.
+
+A ref should not point at a commit whose pointer blobs cannot be reconstructed.
+
+Crab uploads backing data and metadata before refs become visible in the manifest.
+
+## Staging bridges clean and push
+
+The filter process runs during `git add`.
+
+The remote helper runs during `git push`.
+
+They meet through `.crab/staging`.
+
+```text
+git add large.bin
+   |
+   v
+clean filter
+   |
+   +--> writes chunks into .crab/staging
+   |
+   +--> gives Git a pointer blob
+
+git commit
+   |
+   v
+Git stores pointer blob in commit
+
+git push
+   |
+   v
+remote helper reads .crab/staging read-only
+   |
+   v
+push uploads chunks referenced by pointer blobs
+```
+
+The push helper opens staging read-only.
+
+The clean filter opens staging as a writer only when a clean command arrives.
+
+This split prevents status-like operations from taking the write lock.
+
+## Git's filter process contract
+
+Git attributes define content filters.
+
+A path such as `*.bin filter=crab` tells Git to send matching content through the configured filter.
+
+Crab configures the filter driver as a long-running process.
+
+```ini
+[filter "crab"]
+    process = crab filter-process
+    clean = crab filter-process
+    smudge = crab filter-process
+    required = true
+```
+
+`process` activates Git's long-running filter protocol.
+
+Git starts one process for the lifetime of a single Git command.
+
+That process can handle multiple clean and smudge requests.
+
+`required = true` tells Git to fail if the filter fails.
+
+That is a data-safety setting.
+
+## `.gitattributes` selects Crab-managed paths
+
+`crab track '*.bin'` writes an attribute line.
+
+That line marks matching files as Crab-managed.
+
+```text
+*.bin filter=crab diff=crab merge=crab -text
+```
+
+The `filter=crab` part controls clean and smudge.
+
+The `diff=crab` part routes diff display through Crab's diff driver.
+
+The `merge=crab` part reserves merge behavior for Crab-aware handling.
+
+The `-text` part prevents Git text normalization from altering binary payloads.
+
+`crab/src/cmd/track.rs` owns this exact line shape.
+
+## The filter handshake
+
+The filter process speaks Git's packet-line protocol.
+
+Each packet starts with four hexadecimal bytes that include the header length.
+
+`0000` marks a flush boundary.
+
+Git starts by sending its welcome and protocol version.
+
+Crab answers with its welcome and version.
+
+Then both sides negotiate capabilities.
+
+```text
+Git -> Crab
+
+0016git-filter-client\n
+000eversion=2\n
+0000
+
+Crab -> Git
+
+0016git-filter-server\n
+000eversion=2\n
+0000
+
+Git -> Crab
+
+0015capability=clean\n
+0016capability=smudge\n
+0015capability=delay\n
+0000
+```
+
+Crab replies with `clean`, `smudge`, and `delay`.
+
+The handshake code lives in `crab/src/git/filter_process.rs`.
+
+The handshake snapshot lives in `crab/src/git/snapshots/crab__git__filter_process__tests__handshake_response.snap`.
+
+## Clean turns file bytes into pointers
+
+Clean runs when Git adds matching content to the index.
+
+For Crab-managed paths, clean turns full file bytes into a pointer.
+
+```text
+working tree file
+      |
+      v
+Git sends command=clean
+      |
+      v
+crab filter-process
+      |
+      +--> BLAKE3 file hash
+      +--> content-defined chunks
+      +--> staged chunk records
+      +--> optional shard hint
+      |
+      v
+pointer blob returned to Git
+      |
+      v
+Git index contains pointer, not full file
+```
+
+The clean path lives in `crab/src/git/clean.rs`.
+
+The streaming packet reader lives in `crab/src/git/filter_process.rs`.
+
+The pointer format lives in `crab/src/engine/pointer.rs`.
+
+## A pointer is the Git-facing contract
+
+A Crab pointer is small text.
+
+It records the content hash and original byte size.
+
+It may also carry a shard hint.
+
+```text
+version https://crab.build/spec/v1
+oid blake3:<file_hash>
+size 1073741824
+shard-hint blake3:<shard_hash>
+```
+
+Git commits the pointer.
+
+Crab stores the content.
+
+The pointer's hash gives Crab a stable lookup key.
+
+The pointer's size lets Crab reject incomplete reconstruction.
+
+The shard hint lets hydration skip a metadata lookup when the hint is current.
+
+## Clean streams and fast-paths known files
+
+Large files should not sit in memory twice.
+
+Crab reads packet bodies through `PktLineReader`.
+
+It feeds each packet into the hasher and chunker.
+
+It can also skip staging when it proves the file already exists remotely.
+
+```text
+pkt-line packets
+       |
+       v
++-------------------+       +------------------------------+
+| BLAKE3 hasher     |       | Gear chunker                 |
++-------------------+       +------------------------------+
+       |                              |
+       v                              v
+file hash                     chunk records
+       |                              |
+       +--------------+---------------+
+                      |
+                      v
+        index match or file-index fast path?
+                      |
+          +-----------+-----------+
+          |                       |
+          v                       v
+    return pointer          stage chunks
+```
+
+The fast path checks for an existing pointer in the Git index first.
+
+Then it uses a Bloom filter and file-index probe for known remote content.
+
+The ignored memory regression test in `crab/tests/clean_stream_memory.rs` streams 128 MB and checks bounded resident memory growth.
+
+## Clean fails closed when staging is unavailable
+
+A clean filter must never emit a pointer that has no backing chunks.
+
+If the slow path needs staging and Crab cannot write staging records, Crab returns an error.
+
+Git rejects the add because `filter.crab.required` is true.
+
+```text
+clean needs staging
+      |
+      v
+can Crab write .crab/staging?
+      |
+      +--> yes: stage chunks, return pointer
+      |
+      +--> no: return filter error
+                   |
+                   v
+                Git aborts the add
+```
+
+This behavior protects the next push.
+
+Without it, Git could commit pointer blobs whose chunks were never staged or uploaded.
+
+## Smudge turns pointers back into bytes
+
+Smudge runs when Git checks matching blobs out to the working tree.
+
+Crab classifies the incoming blob.
+
+If it is a Crab pointer, Crab either passes it through for lazy checkout or reconstructs the full content.
+
+```text
+Git blob from index or checkout
+        |
+        v
+command=smudge
+        |
+        v
+classify bytes
+        |
+        +--> Crab pointer
+        |        |
+        |        +--> lazy mode: keep pointer in worktree
+        |        |
+        |        +--> hydrate mode: reconstruct bytes
+        |
+        +--> LFS pointer: LFS path handling
+        |
+        +--> normal blob: pass through unchanged
+```
+
+The filter-process smudge dispatcher lives in `crab/src/git/filter_process.rs`.
+
+The reconstruction session lives in `crab/src/git/smudge.rs`.
+
+The shard-backed hydrator lives in `crab/src/cmd/hydrate.rs`.
+
+## Hydration follows metadata to bytes
+
+Hydration starts with a pointer.
+
+The pointer names the file hash.
+
+The file index or shard hint names the shard.
+
+The shard names reconstruction terms.
+
+The reconstruction terms name xorb byte ranges.
+
+```text
+pointer blob
+   |
+   v
++---------------------+
+| file_hash, size     |
+| optional shard hint |
++---------------------+
+   |
+   v
++---------------------+
+| file-index lookup   |
+| or shard-list scan  |
++---------------------+
+   |
+   v
++---------------------+
+| xorb range GETs     |
+| chunk verification  |
++---------------------+
+   |
+   v
+byte-identical file
+```
+
+Crab verifies reconstructed bytes before returning them to Git.
+
+It checks size and BLAKE3 hash.
+
+No output is emitted until verification passes.
+
+## Delayed smudge lets Git ask later
+
+Git's long-running filter protocol includes a `delay` capability.
+
+Crab advertises it.
+
+When Git sends `can-delay=1`, Crab can queue a smudge and reply `status=delayed`.
+
+Git later asks `list_available_blobs`.
+
+```text
+Git                            Crab filter-process
+ |                                     |
+ | command=smudge, can-delay=1         |
+ | content=<pointer>                   |
+ |------------------------------------>|
+ |                                     | enqueue reconstruction
+ | status=delayed                      |
+ |<------------------------------------|
+ |                                     |
+ | command=list_available_blobs        |
+ |------------------------------------>|
+ | status=success, pathname=<path>     |
+ |<------------------------------------|
+ |                                     |
+ | command=smudge without can-delay    |
+ |------------------------------------>|
+ | status=success + hydrated bytes     |
+ |<------------------------------------|
+```
+
+Delayed smudge gives Crab room to coalesce range reads.
+
+It also keeps checkout responsive when multiple pointer files arrive together.
+
+## Session state keeps repeated work low
+
+The long-running process keeps useful state alive across files.
+
+It holds a clean session.
+
+It keeps a Bloom filter.
+
+It caches confirmed file hashes.
+
+It caches `.gitattributes` filter resolution.
+
+It owns delayed-smudge prefetch state.
+
+```text
+one Git command
+      |
+      v
++----------------------------------------------------+
+| crab filter-process                                |
+|                                                    |
+| clean session                                      |
+| - Bloom filter                                     |
+| - confirmed file hashes                            |
+| - lazy staging handle                              |
+| - filter attribute cache                           |
+|                                                    |
+| smudge session                                     |
+| - hydrator                                         |
+| - prefetch queue                                   |
+| - speculation state when enabled                   |
++----------------------------------------------------+
+```
+
+The session ends when Git closes stdin.
+
+Crab saves the Bloom filter on clean exit.
+
+Crab drains background prefetch tasks before shutdown.
+
+## Lazy staging avoids needless lock contention
+
+Git can invoke filters for operations that do not intend to stage new content.
+
+`git status` and IDE integrations can touch smudge-like paths.
+
+Opening staging as a writer at process startup would create needless lock contention.
+
+Crab defers writer acquisition until the first clean command.
+
+```text
+filter-process startup
+      |
+      v
+staging state = unopened
+      |
+      +--> smudge only: never takes LOCK_EX
+      |
+      +--> first clean: acquire LOCK_EX once
+                         |
+                         v
+                      reuse writer for later cleans
+```
+
+This lets `git status` coexist with a concurrent `crab add`.
+
+It also makes lock errors point at the operation that truly needs write access.
+
+## The full add, commit, push flow
+
+This is the everyday path.
+
+```text
+1. edit model.bin
+      |
+      v
+2. git add model.bin
+      |
+      v
+3. Git sends model.bin bytes to crab filter-process
+      |
+      v
+4. Crab chunks, hashes, stages, and returns pointer bytes
+      |
+      v
+5. Git writes pointer blob to index
+      |
+      v
+6. git commit records pointer blob
+      |
+      v
+7. git push
+      |
+      v
+8. Git starts git-remote-crab
+      |
+      v
+9. Crab uploads staged chunks, shards, packs, and refs
+```
+
+The E2E smoke for `git add` through push lives in `crab/tests/e2e_add_commit_push.rs`.
+
+It verifies that Git adds a Crab-tracked file through the filter and that push uploads manifest, xorb, and shard data.
+
+## The shared invariants
+
+The integration works because both hooks preserve the same invariants.
+
+```text
++-------------------------------+-------------------------------+
+| Invariant                     | Why it matters                |
++-------------------------------+-------------------------------+
+| Pointer hash matches content  | Hydration can verify output   |
+| Staged chunks cover pointer   | Push can publish safely       |
+| Shards cover all file chunks  | Smudge can reconstruct bytes  |
+| Xorbs upload before ref move  | Readers never see gaps        |
+| Filter failure aborts add     | Git never stores bad pointer  |
+| Helper stdout stays protocol  | Git parser stays synchronized |
++-------------------------------+-------------------------------+
+```
+
+The root safety rule is: a visible ref must never require missing data.
+
+The filter enforces this before Git commits.
+
+The push pipeline enforces this before refs move.
+
+The smudge path enforces this before bytes reach the worktree.
+
+## Debugging the wiring
+
+Start with path selection.
+
+Then inspect the Git driver.
+
+Then inspect the indexed blob.
+
+```bash
+git check-attr filter diff merge -- model.bin
+git config --get filter.crab.process
+git config --get filter.crab.required
+git show :model.bin
+```
+
+Read the results in order:
+
+- **No `filter=crab`**: update `.gitattributes` with `crab track`
+- **No `filter.crab.process`**: run `crab install`
+- **Indexed blob is full content**: Git did not run the filter for that path
+- **Indexed blob is a pointer**: clean succeeded
+- **Git add failed with filter error**: inspect staging lock or Crab config
+
+`git check-attr` answers the first question faster than reading attribute files by eye.
+
+## Debugging push and hydration
+
+Start with the remote URL.
+
+Then prove the commit contains pointers.
+
+Then hydrate one file explicitly.
+
+```bash
+git remote -v
+git show HEAD:model.bin
+crab doctor
+crab hydrate model.bin
+```
+
+Read the results in order:
+
+- **Remote is not `crab://<bucket>/<repo>`**: Git will not start `git-remote-crab`
+- **Blob is not a Crab pointer**: the file bypassed the clean path
+- **Doctor reports driver issues**: repair install/config first
+- **Hydration succeeds**: backing data is present
+- **Hydration reports missing terms**: metadata is incomplete or the pointer references unavailable data
+- **Hydration reports hash mismatch**: downloaded bytes do not match the pointer hash
+
+The smudge gate prevents mismatched bytes from becoming successful checkout output.
+
+## Failure modes to recognize
+
+Crab favors loud, recoverable failures over silent corruption.
+
+```text
++-----------------------------+-------------------------------+------------------------------+
+| Failure                     | Crab response                 | Why                          |
++-----------------------------+-------------------------------+------------------------------+
+| helper cannot open store    | reject or empty protocol data | stdout must stay parseable   |
+| staging locked on clean     | filter error                  | no unbacked pointer emitted  |
+| staging unavailable on push | refuse pointer-backed push    | no ref to missing chunks     |
+| smudge cannot find shard    | reconstruction error          | no unverifiable output       |
+| xorb range read fails       | reconstruction error          | no partial file output       |
+| hash or size mismatch       | reconstruction error          | pointer contract failed      |
+| malformed helper batch      | protocol error                | broken client input          |
+| filter command failure      | drain to flush, status=error  | next command stays aligned   |
++-----------------------------+-------------------------------+------------------------------+
+```
+
+The helper response must remain Git remote-helper protocol.
+
+The filter response must remain packet-line filter protocol.
+
+That is why logs go to stderr and content goes to the exact stream Git owns.
+
+## Advanced behaviors worth knowing
+
+Crab keeps compatibility narrow and explicit.
+
+It advertises only implemented remote-helper capabilities.
+
+It uses `required` filters to avoid silent raw commits.
+
+It treats stdout as a protocol-owned file descriptor.
+
+It keeps read-replica eligibility out of push-authoritative paths.
+
+It refuses to emit unbacked pointers.
+
+It verifies reconstruction before output.
+
+It can route `filter=lfs` paths through the same filter process for Git LFS compatibility.
+
+It accepts push options such as `atomic`, `followtags`, `depth`, `filter blob:none`, and `include-tag` when they map to implemented behavior.
+
+It can prepare protected push state behind the helper boundary while Git still sees ordinary `ok <ref>` and `error <ref>` lines.
+
+These details are the difference between a demo integration and a durable one.
+
+## Source map
+
+Use this map when you want to read the implementation after the concepts.
+
+```text
++-----------------------------------+-------------------------------------------+
+| Concept                           | Source                                    |
++-----------------------------------+-------------------------------------------+
+| binary and argv dispatch          | crab/src/main.rs                          |
+| install symlink                   | crab/Makefile                             |
+| git driver install config         | crab/src/cmd/install.rs                   |
+| .gitattributes tracking           | crab/src/cmd/track.rs                     |
+| remote helper protocol loop       | crab/src/git/remote_helper.rs             |
+| remote helper transcript tests    | crab/tests/remote_helper_transcript.rs    |
+| filter process protocol loop      | crab/src/git/filter_process.rs            |
+| clean pipeline                    | crab/src/git/clean.rs                     |
+| smudge reconstruction             | crab/src/git/smudge.rs                    |
+| pointer parser and serializer     | crab/src/engine/pointer.rs                |
+| hydrate shard-backed reconstructor| crab/src/cmd/hydrate.rs                   |
+| add, commit, push smoke           | crab/tests/e2e_add_commit_push.rs         |
+| clean pointer integration tests   | crab/tests/integration.rs                 |
+| streaming clean memory test       | crab/tests/clean_stream_memory.rs         |
++-----------------------------------+-------------------------------------------+
+```
+
+For the Git side of the contract, read the official `gitremote-helpers` and `gitattributes` manuals.
+
+Those manuals define the process boundary that Crab implements.
+
+## The full picture
+
+Crab's Git integration is small at the boundary and deep behind it.
+
+Git sees a remote helper and a filter process.
+
+The remote helper turns `crab://` into object-storage transport.
+
+The filter process turns large-file content into Git-safe pointers and back again.
+
+The staging area connects clean to push.
+
+The manifest connects object storage to Git refs.
+
+The file index, shards, xorbs, caches, and hydrator connect pointers to bytes.
+
+That is the glue: Git remains Git, while Crab supplies the storage behavior Git was not designed to provide.

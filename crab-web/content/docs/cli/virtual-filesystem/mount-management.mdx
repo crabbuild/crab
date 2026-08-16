@@ -1,0 +1,81 @@
+---
+title: "Mount Management"
+description: "List, inspect, refresh, switch, unmount, and clean Crab mounts."
+---
+
+# Mount Management
+
+Use the mount-management commands when an NFS or FUSE mount is already running
+and you need to inspect, refresh, switch, or clean it.
+
+This page covers coordinator-style `crab mount` operations, which are addressed
+by mountpoint. For persistent named repos managed by `crab daemon`, see
+[Mount Modes](mount-modes) and the [crab daemon reference](/docs/cli/reference/crab-daemon).
+
+## Command Map
+
+| Goal | Command |
+| --- | --- |
+| List active mounts | `crab mount list` |
+| Get machine-readable mount list | `crab mount list --json` |
+| Inspect one mount | `crab mount status --mountpoint /mnt/models` |
+| Require live control status | `crab mount status --mountpoint /mnt/models --live-only --json` |
+| Include dirty paths | `crab mount status -m /mnt/models --verbose` |
+| Show overlay changes | `crab mount diff -m /mnt/models` |
+| Export overlay files | `crab mount export -m /mnt/models --to /tmp/models-overlay` |
+| Commit overlay changes | `crab mount commit --mountpoint /mnt/models -m "Update artifacts"` |
+| Discard overlay changes | `crab mount reset -m /mnt/models --overlay --yes` |
+| Refresh from remote | `crab mount refresh -m /mnt/models` |
+| Switch branch or ref | `crab mount switch -m /mnt/models --ref main` |
+| Unmount one path | `crab unmount -m /mnt/models` |
+| Unmount everything | `crab unmount --all` |
+| Remove inactive caches | `crab mount clean` |
+
+## Typical Flows
+
+### Refresh a long-running mount
+
+```bash
+crab mount refresh --mountpoint /mnt/models
+crab mount status --mountpoint /mnt/models
+```
+
+### Compare two refs
+
+```bash
+crab mount --repo ./repo --mountpoint /tmp/crab-view --ref main
+crab mount switch --mountpoint /tmp/crab-view --ref experiment/v2
+crab unmount --mountpoint /tmp/crab-view
+```
+
+### Clean inactive state
+
+```bash
+crab mount list
+crab mount clean
+```
+
+Use `crab mount clean --all` only when no Crab mounts are active.
+
+### Publish overlay changes
+
+```bash
+crab mount diff --mountpoint /mnt/models
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts"
+```
+
+Add `--push` to push the new commit to origin after the local commit succeeds.
+If the mounted base ref moved, the commit is rejected so you can refresh or
+remount before publishing.
+
+## Troubleshooting
+
+- If a mount looks stale, run `crab mount refresh` and check `crab mount status`.
+- If unmount fails, close shells or programs whose current directory is inside
+  the mountpoint, then retry.
+- If local overlay changes are no longer needed, run `crab mount reset --overlay --yes`.
+- Use `--json` on `list` or `status` for scripts and monitoring.
+- Use `crab mount status --live-only --json` when automation should fail
+  instead of falling back to persisted metadata for a stale helper.
+
+For full syntax, see the [crab mount reference](/docs/cli/reference/crab-mount).

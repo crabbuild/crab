@@ -1,0 +1,102 @@
+---
+title: "Automation Identities"
+description: "Create, rotate, and revoke workload and opaque-token service accounts without exposing permanent storage credentials."
+---
+
+# Automation Identities
+
+Service accounts identify automation to the managed API. They are scoped to
+one organization and receive an explicit role. They never receive permanent
+bucket credentials or interactive owner privileges; repository transfers still
+use short-lived, operation-scoped grants.
+
+## Prefer workload identity
+
+Use an OIDC workload identity when your CI system or cluster can present a
+verifiable issuer and immutable subject:
+
+```bash
+crab service-account create-workload acme release-ci \
+  --role writer \
+  --issuer https://token.actions.githubusercontent.com \
+  --subject 'repo:acme/models:ref:refs/heads/main'
+```
+
+Match the issuer and subject exactly to the claims supplied by the workload.
+Do not use a mutable display name, branch label, or email when the identity
+provider offers an immutable subject.
+
+## Create an opaque token
+
+Use an opaque token only when workload identity is unavailable. The secret is
+shown once by `create-token` and is never returned by list operations:
+
+```bash
+umask 077
+response=$(crab service-account create-token acme release-ci \
+  --role writer \
+  --expires-in-seconds 2592000 \
+  --json)
+
+printf '%s\n' "$response" | jq -er '.data.token' > "$RUNNER_TEMP/crab-service-token"
+account_id=$(printf '%s\n' "$response" | jq -er '.data.account.id')
+revision=$(printf '%s\n' "$response" | jq -er '.data.account.revision')
+unset response
+```
+
+Move the token immediately into the CI platform's secret store, restrict file
+permissions, and remove the temporary file. Do not place it in a command-line
+argument, repository config, Git remote, shell history, logs, or build output.
+`CRAB_CACHE_TOKEN` is for the optional cache service and is not a managed
+service-account credential.
+
+## List service accounts
+
+```bash
+crab service-account list acme
+crab service-account list acme --json | jq '.data.accounts'
+```
+
+List output contains identity metadata, state, and revision but never an opaque
+token secret.
+
+## Rotate an opaque token
+
+Rotation returns a replacement secret once. Use the current account revision
+and choose the smallest overlap that your rollout needs:
+
+```bash
+response=$(crab service-account rotate acme "$account_id" \
+  --revision "$revision" \
+  --expires-in-seconds 2592000 \
+  --overlap-seconds 300 \
+  --json)
+
+replacement=$(printf '%s\n' "$response" | jq -er '.data.token')
+revision=$(printf '%s\n' "$response" | jq -er '.data.account.revision')
+unset response
+```
+
+Install the replacement in every intended runner during the overlap, verify
+new authentication, then retire the old credential. An overlap of zero is the
+default and is appropriate when replacement can be atomic.
+
+## Revoke an account
+
+```bash
+crab service-account revoke acme "$account_id" --revision "$revision"
+```
+
+Revocation blocks new API requests immediately. Previously issued direct
+object-store grants remain bounded by their short original expiration; gateway
+grant revocation follows the deployment's documented propagation bound.
+
+## Automation output contract
+
+All service-account commands accept `--json`. Successful output uses the
+standard Crab envelope. Only `create-token` and `rotate` include `.data.token`.
+The token is redacted from Rust debug output and service telemetry, but the
+calling script is responsible for protecting stdout and any captured value.
+
+See [`crab service-account`](/docs/cli/reference/crab-service-account) for the
+complete command syntax.

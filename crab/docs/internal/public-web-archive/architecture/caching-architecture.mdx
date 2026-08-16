@@ -1,0 +1,134 @@
+# Caching Architecture
+
+## Overview
+
+Crab maintains a local disk cache to avoid re-downloading objects from the
+remote store. The cache is a performance optimization — the object store is
+always authoritative, and the cache can be rebuilt at any time.
+
+Source: `crab/src/cache/`
+
+## Cache Layout
+
+```
+~/.cache/crab/{bucket}/{repo-hash}/
+├── chunks/{h[:2]}/{h}          Decompressed chunk data
+├── shards/{h[:2]}/{h}          Shard metadata files
+├── manifests/{name}.json       Cached manifest snapshots
+├── manifests/{name}.etag       ETag for conditional refresh
+└── index.redb                  Persistent chunk index (redb)
+```
+
+The cache directory defaults to `~/.cache/crab/`. Override with
+`$CRAB_CACHE_DIR`.
+
+## Chunk Cache
+
+The `ChunkCache` stores decompressed chunk data keyed by MerkleHash:
+
+```
+ChunkCache
+├── get(hash) → Option<Bytes>     Read from disk, verify blake3
+├── put(hash, bytes)              Write to disk
+├── contains(hash) → bool         Existence check (no I/O)
+└── stats() → CacheStats          Hit/miss counters
+```
+
+### Hash Verification
+
+Every chunk read from cache is verified against its MerkleHash. If the hash
+doesn't match (disk corruption), the entry is evicted and re-fetched from the
+remote.
+
+### Write Path
+
+Chunks are written atomically: write to a temp file, then rename into place.
+This prevents partial reads from concurrent processes.
+
+Source: `crab/src/cache/chunks.rs`
+
+## Local Cache
+
+The `LocalCache` provides higher-level cache management:
+
+```
+LocalCache
+├── get(key) → Option<Bytes>      Keyed by CacheKey enum
+├── put(key, bytes)
+├── prune(referenced_set)         Remove unreferenced entries
+├── verify() → VerifyReport       Hash-check all entries
+├── stats() → CacheStats          Size, count, hit rate
+└── evict_lru(target_size)        LRU eviction to target size
+```
+
+### CacheKey
+
+```rust
+enum CacheKey {
+    Chunk(MerkleHash),
+    Shard(MerkleHash),
+    Manifest(String),
+}
+```
+
+### LRU Eviction
+
+When the cache exceeds a configured size limit, the least-recently-used entries
+are evicted. Access time is tracked via filesystem atime (where available) or
+a lightweight access log.
+
+### Pruning
+
+`crab prune` walks the working tree to collect referenced hashes, then
+removes cache entries not in the referenced set. This is more targeted than
+LRU eviction — it removes objects that are definitely not needed.
+
+Source: `crab/src/cache/local_cache.rs`
+
+## Manifest Cache
+
+Manifests (pack-list, shard-list) are cached with their ETags. On refresh:
+
+1. Send conditional GET with `If-None-Match: {cached_etag}`
+2. If 304 Not Modified → use cached version (zero transfer)
+3. If 200 OK → update cache with new content and ETag
+
+This minimizes bandwidth for frequently-accessed manifests.
+
+## Shard Cache
+
+Shards are immutable and content-addressed, making them ideal cache candidates.
+Once downloaded, a shard never needs to be re-fetched (its hash guarantees
+content hasn't changed).
+
+The shard cache is consulted during:
+- Smudge filter (reconstruct files on checkout)
+- Hydrate command (selective file materialization)
+- Pre-push shard sync (refresh ChunkIndex)
+- Diff command (resolve reconstruction terms)
+
+## Cache Warming
+
+`crab fetch` pre-warms the cache by downloading shards and xorbs from the
+remote without hydrating files. This is useful for:
+- Preparing for offline work
+- Speeding up subsequent hydrate operations
+- CI pipelines that need fast access to specific files
+
+## Cache Coherence
+
+The cache has no coherence protocol — it's a pure read-through cache. Stale
+entries are harmless because all cached objects are content-addressed:
+- A chunk with hash H always contains the same bytes
+- A shard with hash H always contains the same reconstruction terms
+- Manifests use ETag-based conditional refresh
+
+The only scenario where the cache can be "wrong" is disk corruption, which
+is detected by hash verification on read.
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `$CRAB_CACHE_DIR` | `~/.cache/crab/` | Cache root directory |
+| Cache size limit | Unlimited | Maximum cache size (LRU eviction) |

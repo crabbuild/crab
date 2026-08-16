@@ -1,0 +1,90 @@
+---
+title: "Auth Status"
+description: "How to check your current authentication state, token expiry, and provider configuration without contacting the identity provider."
+---
+
+## Checking Authentication State
+
+Before running operations that need valid credentials, you can quickly check whether you're authenticated and when your token expires. `crab auth status` reads only local state — it never contacts the identity provider, so it's instant and safe to run anytime.
+
+## Usage
+
+```bash
+crab auth status
+```
+
+When authenticated with a valid token:
+
+```
+Provider:     aws-oidc
+Identity:     alice@corp.example.com
+Token expiry: 2025-01-15T14:30:00Z (2h 15m remaining)
+Refresh:      yes
+AWS role:     arn:aws:iam::123456789012:role/crab-prod
+Region:       us-west-2
+```
+
+When not authenticated:
+
+```
+Provider:     aws-oidc
+Status:       Not authenticated
+
+Run `crab login` to authenticate.
+```
+
+When the token has expired:
+
+```
+Provider:     crab-auth
+Identity:     bob@team.example.com
+Token expiry: 2025-01-14T09:00:00Z (expired)
+Refresh:      no
+
+Run `crab login` to re-authenticate.
+```
+
+## What It Shows
+
+The output includes:
+
+- **Provider** — which auth provider is configured
+- **Identity** — your email or subject claim from the token
+- **Token expiry** — when the current token expires, with remaining time
+- **Refresh** — whether a refresh token is available for automatic renewal
+- **Provider settings** — role ARN, region, tenant ID, or other provider-specific details
+
+## Provider-Specific Fields
+
+| Provider | Additional fields shown |
+|----------|----------------------|
+| `aws-oidc` | AWS role, Region |
+| `gcp-workload-identity` | WI pool, Service account, Project |
+| `azure-entra` | Tenant, Storage account |
+| `crab-auth` | Endpoint |
+
+## Machine-Readable Output
+
+For CI scripts and automation, use `--json`:
+
+```bash
+crab auth status --json
+```
+
+```json
+{
+  "provider": "aws-oidc",
+  "identity": "alice@corp.example.com",
+  "token_expiry": "2025-01-15T14:30:00Z",
+  "token_expired": false,
+  "refresh": true,
+  "provider_settings": [
+    { "key": "AWS role", "value": "arn:aws:iam::123456789012:role/crab-prod" },
+    { "key": "Region", "value": "us-west-2" }
+  ]
+}
+```
+
+## CLI Reference
+
+For complete command syntax and all available flags, see the [crab auth status reference](/docs/cli/reference/crab-auth-status).

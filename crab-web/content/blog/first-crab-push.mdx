@@ -1,0 +1,273 @@
+---
+title: "Your First Crab Push: A Step-by-Step Walkthrough"
+description: "Push a 1 GB model file to S3 using Crab in under ten minutes. This hands-on tutorial walks you through every command with expected output."
+date: "2025-09-15"
+author: "Crab Team"
+category: "tutorial"
+tags: ["beginner", "tutorial", "hands-on"]
+excerpt: "A complete hands-on walkthrough of pushing a large file with Crab — from install to verification. Follow along with copy-paste commands and see exactly what to expect at each step."
+level: "beginner"
+path: "first-workflow"
+order: 2
+concepts: ["push", "verification", "S3", "hands-on"]
+prerequisites: ["Getting Started with Crab in 5 Minutes"]
+outcome: "Run a complete push workflow and verify that large-file data landed where expected."
+diagramType: "Push walkthrough"
+---
+
+## What We're Building
+
+By the end of this tutorial, you'll push a 1 GB machine learning model file to S3 using nothing but Crab and standard git commands. Then you'll clone the repo on a fresh machine and verify the file comes back byte-for-byte identical.
+
+No servers to set up. No LFS endpoints to configure. Just your files, your bucket, and git.
+
+Let's do it.
+
+## Step 1: Install Crab
+
+First, install the Crab CLI. This gives you the `crab` command and a git remote helper that works behind the scenes.
+
+```bash
+curl -fsSL https://crab.build/install.sh | bash
+```
+
+```
+==> Downloading crab v1.0.14 for darwin-aarch64
+==> Installing to /Users/you/.crab/bin
+==> Created symlink: git-remote-crab -> crab
+Installed crab v1.0.14
+```
+
+Verify the install:
+
+```bash
+crab --version
+```
+
+```
+crab 1.0.14
+```
+
+That's all you need. Crab is a single binary — no runtime dependencies, no background services.
+
+## Step 2: Configure Your Bucket
+
+Crab stores your large files in a cloud bucket you own. For this tutorial, we'll use an S3 bucket. Make sure you have AWS credentials configured (via `~/.aws/credentials` or environment variables).
+
+Create a new git repo and point Crab at your bucket:
+
+```bash
+mkdir ml-project && cd ml-project
+git init
+crab init crab://my-crab-bucket/ml-project
+crab setup
+```
+
+```
+✓ Initialized crab in /Users/you/ml-project
+✓ Remote: s3://my-crab-bucket/ml-project
+✓ Added crab remote to git config
+```
+
+That's the entire setup. Crab wrote a small config file and registered itself as a git remote. Your bucket is now your file server.
+
+## Step 3: Add Your Large File
+
+Let's say you have a 1 GB model checkpoint. Stage it with `crab add`:
+
+```bash
+crab add models/resnet50-v2.bin
+```
+
+```
+Staging models/resnet50-v2.bin (1.02 GB)
+  ├─ Chunking .............. 847 chunks
+  ├─ Deduplicating ......... 0 existing, 847 new
+  └─ Staged ✓
+
+Ready to commit.
+```
+
+`crab add` does the heavy lifting: it splits your file into content-aware chunks and stages them for upload. Nothing has left your machine yet.
+
+## Step 4: Commit and Push
+
+Now use regular git commands — commit and push just like you normally would:
+
+```bash
+git add .
+git commit -m "Add resnet50-v2 model checkpoint"
+```
+
+```
+[main (root-commit) a3f7c21] Add resnet50-v2 model checkpoint
+ 2 files changed, 4 insertions(+)
+ create mode 100644 .crab/config
+ create mode 100644 models/resnet50-v2.bin
+```
+
+```bash
+git push origin main
+```
+
+```
+Pushing to s3://my-crab-bucket/ml-project
+  ├─ Uploading 847 chunks (1.02 GB) ████████████████████ 100%
+  ├─ Writing shard index .... done
+  ├─ Writing manifest ....... done
+  └─ Finalizing refs ........ done
+
+To crab://my-crab-bucket/ml-project
+ * [new branch]      main -> main
+```
+
+Your file is now in S3. The push uploaded 847 compressed chunks, wrote an index so Crab knows how to reassemble them, and updated the branch ref. All through a standard `git push`.
+
+## What Happened Behind the Scenes
+
+Here's the simplified version of what Crab did during that push:
+
+<svg viewBox="0 0 900 340" width="100%" role="img" aria-label="Flow diagram showing the six steps of a Crab push: setup, crab add (chunking), git commit, git push (upload), clone, and hydrate">
+  <defs>
+    <marker id="arrow-push-flow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
+    </marker>
+  </defs>
+
+  {/* Title */}
+  <text x="450" y="30" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"The Crab Push Flow"}</text>
+
+  {/* Step 1: Setup */}
+  <rect x="10" y="55" width="130" height="75" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="75" y="82" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"1. Setup"}</text>
+  <text x="75" y="104" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"install + configure"}</text>
+
+  {/* Arrow 1→2 */}
+  <line x1="140" y1="92" x2="165" y2="92" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-flow)" />
+
+  {/* Step 2: Add */}
+  <rect x="170" y="55" width="130" height="75" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="235" y="82" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"2. crab add"}</text>
+  <text x="235" y="104" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"chunk + dedup"}</text>
+
+  {/* Arrow 2→3 */}
+  <line x1="300" y1="92" x2="325" y2="92" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-flow)" />
+
+  {/* Step 3: Commit */}
+  <rect x="330" y="55" width="130" height="75" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="395" y="82" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"3. commit"}</text>
+  <text x="395" y="104" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"record in history"}</text>
+
+  {/* Arrow 3→4 */}
+  <line x1="460" y1="92" x2="485" y2="92" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-flow)" />
+
+  {/* Step 4: Push */}
+  <rect x="490" y="55" width="130" height="75" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
+  <text x="555" y="82" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"4. git push"}</text>
+  <text x="555" y="104" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"upload to S3"}</text>
+
+  {/* Arrow 4→5 */}
+  <line x1="620" y1="92" x2="645" y2="92" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-flow)" />
+
+  {/* Step 5: Clone */}
+  <rect x="650" y="55" width="130" height="75" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
+  <text x="715" y="82" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"5. clone"}</text>
+  <text x="715" y="104" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"fetch + hydrate"}</text>
+
+  {/* Detail boxes below */}
+  <rect x="110" y="170" width="280" height="80" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="250" y="198" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Chunking + Dedup"}</text>
+  <text x="250" y="220" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"File → content-aware chunks"}</text>
+  <text x="250" y="240" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Skip chunks already in bucket"}</text>
+
+  {/* Arrow from step 2 down to detail */}
+  <line x1="235" y1="130" x2="235" y2="170" stroke="var(--border)" strokeWidth="2" strokeDasharray="4 3" />
+
+  <rect x="480" y="170" width="280" height="80" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
+  <text x="620" y="198" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Upload + Finalize"}</text>
+  <text x="620" y="220" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Compress and upload new chunks"}</text>
+  <text x="620" y="240" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Write index + update branch ref"}</text>
+
+  {/* Arrow from step 4 down to detail */}
+  <line x1="555" y1="130" x2="555" y2="170" stroke="var(--border)" strokeWidth="2" strokeDasharray="4 3" />
+
+  {/* Bottom summary */}
+  <text x="450" y="310" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Only new, unique data crosses the network — subsequent pushes are much faster"}</text>
+</svg>
+
+Three things worth noting:
+
+1. **Chunking is content-aware.** Crab doesn't split at fixed byte offsets. It finds natural boundaries in your data, so small edits only affect nearby chunks — not the entire file.
+
+2. **Deduplication happens before upload.** If you push a slightly modified version of this model tomorrow, Crab will skip the 800+ chunks that didn't change and only upload the handful of new ones.
+
+3. **Everything is compressed.** Chunks are packed into compressed archives (called xorbs) before upload, so your actual bandwidth and storage usage is lower than the raw file size.
+
+## Step 5: Verify It Worked
+
+Let's prove the file made it safely. Open a new terminal (or imagine you're on a different machine) and clone the repo:
+
+```bash
+cd /tmp
+crab clone crab://my-crab-bucket/ml-project ml-project-clone
+```
+
+```
+Cloning into 'ml-project-clone'...
+  ├─ Fetching refs ......... done
+  ├─ Fetching objects ...... done
+  └─ Checkout .............. done
+
+Repository cloned. Large files are dehydrated (pointer-only).
+Run 'crab hydrate' to download file contents.
+```
+
+The clone is fast because it only downloads git metadata and lightweight pointers — not the full 1 GB file. To get the actual file contents, hydrate:
+
+```bash
+cd ml-project-clone
+crab hydrate
+```
+
+```
+Hydrating 1 file (1.02 GB)
+  ├─ models/resnet50-v2.bin ████████████████████ 100%
+  └─ Done ✓ (1 file, 1.02 GB, 12.4s)
+```
+
+Now verify the file is identical:
+
+```bash
+sha256sum models/resnet50-v2.bin
+```
+
+```
+a7f3b2c1...d94e  models/resnet50-v2.bin
+```
+
+Same hash as the original. Byte-for-byte identical. Crab reconstructed your file perfectly from its chunks.
+
+## What You Just Did
+
+Let's recap. In about five minutes, you:
+
+1. Installed Crab (one command)
+2. Pointed it at an S3 bucket (one command)
+3. Staged a 1 GB file with smart chunking (`crab add`)
+4. Pushed it with standard git (`git commit` + `git push`)
+5. Cloned it elsewhere and verified it came back perfectly (`crab clone` + `crab hydrate`)
+
+No server running. No LFS endpoint. No special hosting. Just your bucket and git.
+
+## Next Steps
+
+Now that you've done your first push, here are some things to try:
+
+- **Modify and re-push** — Edit the model file and push again. Watch how Crab only uploads the changed chunks (much faster the second time).
+- **Selective hydration** — Use `crab hydrate models/` to only download files in a specific directory.
+- **Check storage usage** — Run `crab status` to see how much unique data is in your bucket.
+- **Add teammates** — Anyone with bucket access and Crab installed can clone and contribute. No server setup needed.
+
+For more details, check out the [CLI documentation](/docs/cli) or learn [how deduplication works under the hood](/blog/xet-protocol-deduplication).
+
+Happy pushing!

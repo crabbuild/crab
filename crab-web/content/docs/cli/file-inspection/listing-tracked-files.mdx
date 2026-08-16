@@ -1,0 +1,94 @@
+---
+title: "Listing Tracked Files"
+description: "See which files Crab is managing, their content hashes, and hydration state."
+---
+
+# Listing Tracked Files
+
+When you need to see exactly which files Crab is managing in your repository — their names, sizes, content hashes, and whether they're hydrated or still pointers — `crab ls-files` gives you the full picture.
+
+## What It Shows
+
+For each Crab-tracked file in your working tree, you can see:
+
+- **Content hash** — The blake3 hash identifying this file version (from the pointer blob)
+- **Hydration state** — Whether the file is a pointer (`p`) or hydrated (`*`)
+- **File path** — Relative path in the repository
+- **Size** — Original file size (with `--size`)
+
+## Basic Usage
+
+```bash
+crab ls-files
+```
+
+```
+abc1234567 p models/weights.bin
+def8901234 p models/embeddings.bin
+---------- * data/train.csv
+```
+
+The `p` marker means the file is a pointer (dehydrated). The `*` marker means it's hydrated (full content on disk). The hash is `----------` for hydrated files because the pointer isn't readable when full content is present.
+
+## With File Sizes
+
+```bash
+crab ls-files --size
+```
+
+```
+abc1234567 p models/weights.bin (1.2 GB)
+def8901234 p models/embeddings.bin (800 MB)
+---------- * data/train.csv (45.2 MB)
+```
+
+## Just File Names
+
+For scripting or piping to other tools:
+
+```bash
+crab ls-files --name-only
+```
+
+```
+models/weights.bin
+models/embeddings.bin
+data/train.csv
+```
+
+## Common Patterns
+
+### Find all pointer files (not yet hydrated)
+
+```bash
+crab ls-files | grep ' p '
+```
+
+### Count tracked files
+
+```bash
+crab ls-files --name-only | wc -l
+```
+
+### Feed into hydration
+
+```bash
+crab ls-files --name-only | grep 'models/' | xargs crab hydrate
+```
+
+### JSON for automation
+
+```bash
+crab ls-files --json | jq '.data.files[] | select(.hydrated == false) | .name'
+```
+
+## Difference from `crab status`
+
+- `crab status` gives a **summary** — counts of hydrated, pointer, and modified files.
+- `crab ls-files` gives a **listing** — every tracked file with its details.
+
+Use `status` for a quick overview, `ls-files` when you need the full list.
+
+## CLI Reference
+
+For complete command syntax, all output modes, and JSON format, see the [crab ls-files reference](/docs/cli/reference/crab-ls-files).

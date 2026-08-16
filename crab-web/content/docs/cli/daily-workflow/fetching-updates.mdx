@@ -1,0 +1,98 @@
+---
+title: "Fetching Updates"
+description: "How Crab downloads remote objects and pre-warms the local cache for faster hydration."
+---
+
+# Fetching Updates
+
+Fetching is how you download objects from cloud storage into your local cache without immediately hydrating files. Think of it as "download now, use later" — you can fetch objects while on a fast connection, then hydrate files later when offline or on a slower link.
+
+## Why Fetch Separately?
+
+Hydration downloads chunks on demand — when you ask for a specific file, Crab fetches its chunks from cloud storage. This works well for small numbers of files, but for large batches it means hydration speed is limited by download latency.
+
+Fetching decouples the download from the reconstruction:
+
+- **Pre-warm before going offline** — Fetch everything while on fast WiFi, hydrate later on a plane.
+- **Speed up hydration** — If chunks are already in the local cache, hydration is purely local I/O.
+- **CI optimization** — Fetch objects once at the start of a pipeline, then hydrate selectively in each job.
+- **Shared cache** — On shared machines, fetch once and all users benefit from the warm cache.
+
+## How It Works
+
+When you fetch, Crab:
+
+1. Connects to the remote object store (S3, GCS, or Azure).
+2. Lists the shards and xorbs under the repository prefix.
+3. Checks each object against the local cache — already-cached objects are skipped.
+4. Downloads missing objects and writes them to the cache directory.
+
+The local cache lives at `~/.cache/crab/` by default (configurable via `$CRAB_CACHE_DIR` or `.crab/config.toml`).
+
+## Selective Fetching
+
+You don't have to fetch everything. For large repositories, fetch only what you'll need:
+
+```bash
+# Fetch objects for model files only
+crab fetch --include '*.safetensors'
+
+# Fetch everything except training data
+crab fetch --exclude 'data/train/*'
+
+# Fetch objects for all branches (not just HEAD)
+crab fetch --all
+```
+
+## The Fetch → Hydrate Pattern
+
+The most common pattern is fetching before hydrating:
+
+```bash
+# Download objects while on fast network
+crab fetch --include 'models/**'
+
+# Later, hydrate is instant (reads from cache)
+crab hydrate 'models/**'
+```
+
+In CI pipelines:
+
+```bash
+# Fetch at pipeline start
+crab fetch --include 'tests/fixtures/**'
+
+# Each test job hydrates from warm cache
+crab hydrate 'tests/fixtures/**'
+pytest tests/
+```
+
+## Cache Management
+
+The fetch cache persists across operations and repositories. Over time it can grow large. Manage it with:
+
+- `crab cache stats` — See cache size and hit rate
+- `crab prune` — Evict oldest cache objects until cache budgets are satisfied
+- `crab cache clean` — Clear the entire cache
+
+You can also set a maximum cache size in `.crab/config.toml`:
+
+```toml
+[cache]
+max_size = "50GB"
+```
+
+When the cache exceeds this limit, least-recently-used objects are evicted.
+
+## Fetch vs. Pull
+
+`crab fetch` is not the same as `git pull`:
+
+- `git pull` (or `git fetch`) downloads git objects (commits, trees, pointer blobs) and updates refs.
+- `crab fetch` downloads chunk data (xorbs) into the local cache for faster hydration.
+
+You typically need both: `git pull` to get the latest pointers, then `crab fetch` + `crab hydrate` to get the actual file content.
+
+## CLI Reference
+
+For complete command syntax, all options, and JSON output format, see the [crab fetch reference](/docs/cli/reference/crab-fetch).

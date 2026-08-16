@@ -1,0 +1,132 @@
+---
+title: "crab repo"
+description: "Create, list, inspect, rename, archive, delete, and restore logical managed repositories."
+---
+
+# crab repo
+
+Manage logical repositories on a Crab managed service. Repository arguments
+use `ORGANIZATION/REPOSITORY`, not a bucket or physical prefix.
+
+## Synopsis
+
+```text
+crab repo [OPTIONS] <COMMAND>
+```
+
+## Common options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--service <AUTHORITY>` | Active profile | Target an exact installed managed-service authority |
+| `--json` | `false` | Emit one structured JSON envelope |
+
+## Commands
+
+### create
+
+```text
+crab repo create [OPTIONS] <REPOSITORY>
+```
+
+```bash
+crab repo create acme/models
+```
+
+The service owns placement and begins repository provisioning. Inspect the
+repository until it is active before clone or push.
+
+### list
+
+```text
+crab repo list [OPTIONS] <ORGANIZATION>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--cursor <CURSOR>` | None | Opaque cursor returned by the preceding page |
+| `--limit <LIMIT>` | `50` | Page size from 1 through 100 |
+
+```bash
+crab repo list acme --limit 25 --json
+```
+
+### info
+
+```text
+crab repo info [OPTIONS] <REPOSITORY>
+```
+
+```bash
+crab repo info acme/models --json
+```
+
+The response contains logical IDs, canonical URL, lifecycle state, transfer
+capabilities, and revision. It contains no permanent storage credential.
+
+### rename
+
+```text
+crab repo rename [OPTIONS] --revision <REVISION> <REPOSITORY> <NEW_SLUG>
+```
+
+```bash
+crab repo rename acme/models foundation-models --revision 3
+```
+
+Rename preserves the immutable repository ID and physical placement.
+
+### archive
+
+```text
+crab repo archive [OPTIONS] --revision <REVISION> <REPOSITORY>
+```
+
+```bash
+crab repo archive acme/models --revision 3
+```
+
+Archived repositories reject managed writes.
+
+### delete
+
+```text
+crab repo delete [OPTIONS] --revision <REVISION> <REPOSITORY>
+```
+
+```bash
+deleted=$(crab repo delete acme/models --revision 4 --json)
+deleted_revision=$(printf '%s\n' "$deleted" | jq -er '.data.revision')
+```
+
+Deletion first enters the managed retention lifecycle. The client cannot
+request bucket-wide or arbitrary-prefix deletion.
+
+### restore
+
+```text
+crab repo restore [OPTIONS] --revision <REVISION> <REPOSITORY>
+```
+
+```bash
+crab repo restore acme/models --revision "$deleted_revision"
+```
+
+Restore is available only while retained data and metadata still satisfy the
+service lifecycle policy.
+
+## Revision safety
+
+All lifecycle mutations require the current revision:
+
+```bash
+revision=$(crab repo info acme/models --json | jq -er '.data.revision')
+crab repo archive acme/models --revision "$revision"
+```
+
+## Related
+
+- [Managed Service Quickstart](/docs/cli/managed-service)
+- [Access Management](/docs/cli/managed-service/access-management)
+- [`crab clone`](/docs/cli/reference/crab-clone)
+- [`crab push`](/docs/cli/reference/crab-push)

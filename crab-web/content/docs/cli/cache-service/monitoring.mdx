@@ -1,0 +1,362 @@
+---
+title: "Monitoring"
+description: "Health checks, metrics, dashboards, and alerts for the cache service."
+---
+
+# Monitoring
+
+The cache service exposes health endpoints, Prometheus metrics, and structured logs. Monitor it as an acceleration layer: cache failures matter, but origin availability remains the correctness boundary.
+
+## Health Endpoints
+
+| Endpoint | Use |
+|----------|-----|
+| `/v1/health/live` | Liveness. Returns `ok` when the process is running. |
+| `/v1/health` | Readiness. Returns `ok` when the service can reach origin. |
+| `/health/live` | Compatibility alias. |
+| `/health` | Compatibility alias. |
+
+Use liveness for restarts. Use readiness for load-balancer rotation.
+
+## Prometheus
+
+Scrape:
+
+```yaml
+scrape_configs:
+  - job_name: crab-cache
+    static_configs:
+      - targets: ["crab-cache.example.com:8443"]
+    metrics_path: /v1/metrics
+```
+
+For Prometheus Operator, apply
+`crab/deploy/cache-service/kubernetes/service-monitor.yaml`. It selects the
+`app=crab-cache-server` Service and scrapes `/v1/metrics` on the Service port
+named `https`. If native TLS terminates inside `crab-cache-server`, add the
+appropriate ServiceMonitor TLS settings for your cluster trust bundle.
+
+Important metrics:
+
+| Metric | Meaning |
+|--------|---------|
+| `cache_hit_total` | Cache hits by object type. |
+| `origin_avoided_reads_total` | Object-store reads avoided by cache hits, by object type. |
+| `cache_miss_total` | Cache misses by object type. |
+| `cache_miss_coalesced_total` | Duplicate cold misses served by an in-flight fill instead of a second origin fetch. |
+| `cache_inflight_misses` | Current object fills in progress. |
+| `active_connections` | Current active HTTP connections. |
+| `cache_bytes_served` | Bytes served to clients, split by hit/miss and object type. |
+| `cache_bytes_stored` | Current cache size. |
+| `cache_max_bytes` | Configured cache byte budget. |
+| `cache_max_object_bytes` | Maximum accepted immutable object request body size for push warming. |
+| `origin_fetch_total` | Misses that required origin reads, by object type. |
+| `origin_fetch_bytes` | Bytes fetched from origin, by object type. |
+| `push_warming_total` | Successful push-warming writes, by object type. |
+| `mutable_path_rejection_total` | Strict-mode mutable read/write requests rejected before origin. |
+| `mutable_path_proxy_read_total` | Transparent-mode mutable reads proxied to origin without cache, split by method. |
+| `mutable_path_proxy_bytes` | Transparent-mode mutable GET response bytes proxied from origin without cache. |
+| `mutable_path_proxy_stream_error_total` | Transparent-mode mutable proxy body streams that failed after the response started. |
+| `cache_integrity_repair_total` | Cache metadata repairs, split by `phase` and `event`. |
+| `dedup_query_total` | Dedup query count. |
+| `dedup_chunks_known` | Chunks reported as already known. |
+| `dedup_chunks_unknown` | Chunks reported as unknown. |
+| `cache_eviction_total` | Evicted objects by type. |
+
+## Admin Stats
+
+Use `/v1/admin/stats` for an authenticated JSON snapshot during incidents or
+smoke tests:
+
+```bash
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  https://crab-cache.example.com:8443/v1/admin/stats
+```
+
+The top-level fields report cache size and object counts. The nested `limits`
+object reports `max_cache_bytes` and `max_object_bytes`, which clients and
+operators can use to avoid or diagnose oversized push-warming requests. The
+nested `traffic` object reports `cache_hits`, `cache_misses`, `origin_avoided_reads`,
+`origin_fetches`, `origin_fetch_bytes`, `coalesced_misses`,
+`bytes_served_from_cache`, `bytes_served_from_origin`, `inflight_misses`,
+`mutable_read_rejections`, `mutable_write_rejections`, and
+`mutable_proxy_reads`. Transparent-mode proxy traffic is further split into
+`mutable_proxy_gets`, `mutable_proxy_heads`, `mutable_proxy_bytes`, and
+`mutable_proxy_stream_errors` so it can be monitored separately from immutable
+cache traffic. `/v1/metrics` exports the same origin-avoidance count through
+`origin_avoided_reads_total` with `object_type` labels, so dashboards can show
+S3/object-store requests avoided without deriving that value from cache hits.
+The `startup_integrity` object reports cache-store open-time
+repairs: `metadata_entries_removed`, `metadata_size_corrections`,
+`unindexed_objects_indexed`, and `unindexed_paths_removed`. The
+`runtime_integrity` object reports repairs since startup:
+`missing_files_repaired`, `invalid_objects_evicted`, and
+`metadata_entries_recreated`. These repair events are also exported through
+`cache_integrity_repair_total` with matching `phase` and `event` labels.
+The `eviction` object reports process-lifetime LRU, emergency, startup, and
+admin eviction counts split by object type. `/v1/metrics` exports the same
+counts through `cache_eviction_total`, and the RustFS smoke checks that both
+surfaces agree after cache-pressure eviction.
+Use `traffic.by_object_type` to confirm whether `xorb`, `shard`, `pack`,
+`pack_index`, or `metadata` reads are still falling through to origin.
+
+The nested `dedup_index` object reports `indexed_chunks`, configured `scope`,
+whether restricted scopes require repo context, startup rebuild status, and the
+last non-fatal shard-ingestion error if one occurred.
+
+## Capabilities
+
+Use `/v1/capabilities` for authenticated, non-admin client capabilities:
+
+```bash
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  https://crab-cache.example.com:8443/v1/capabilities
+```
+
+The response includes `limits.max_cache_bytes`, `limits.max_object_bytes`, and
+`routes`. Crab clients use `max_object_bytes` to skip push-warming uploads that
+the cache server would reject, avoiding wasted client-to-cache traffic while
+preserving the origin upload path.
+
+`routes` is the machine-readable cacheability contract. It lists the
+immutable patterns the cache server may retain without invalidation and the
+mutable patterns it must proxy or reject. `crab doctor` and the
+enterprise onboarding active probe compare this route contract with the local
+CLI build so a mismatched cache server is caught before repository traffic is
+wired through it.
+
+## Authorization Check
+
+Use `/v1/authz/check` from a configured repo to confirm the authenticated
+principal has the actions that Crab will need for that repo:
+
+```bash
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path":"org/repo"}' \
+  https://crab-cache.example.com:8443/v1/authz/check
+```
+
+The response reports the normalized `repo_path`, whether a policy is
+configured, and boolean decisions for `read`, `write`, `dedup`, and `admin`.
+Crab uses `read` for cached fetch/hydrate traffic, `write` for push warming,
+`dedup` for dedup queries, and `admin` for support bundles, manual eviction,
+and the active doctor probe.
+
+## Traffic Reduction Smoke
+
+For S3-compatible staging environments such as RustFS or MinIO, run the
+RustFS smoke before rollout:
+
+```bash
+cd crab
+make cache-service-rustfs-smoke
+```
+
+Override the defaults when your endpoint, bucket, or credentials differ:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+make cache-service-rustfs-smoke \
+  CACHE_SERVICE_RUSTFS_ENDPOINT=http://127.0.0.1:9000 \
+  CACHE_SERVICE_RUSTFS_BUCKET=crab
+```
+
+The underlying harness can also be run directly:
+
+```bash
+python3 scripts/e2e/run_cache_service_rustfs_smoke.py \
+  --endpoint-url http://127.0.0.1:9000 \
+  --bucket crab
+```
+
+The smoke starts a real `crab-cache-server`, places a counting proxy between
+the server and object storage, and drives both direct immutable-object reads
+and Crab CLI push/hydrate flows. Passing output proves repeated reads hit the
+cache service while origin GET counts and `traffic.origin_fetches` stay flat.
+The CLI dedup section also splits proxy-observed origin GETs into cacheable
+immutable data and mutable control-plane reads. Its passing gate requires
+`cacheable_origin_gets_delta = 0`; the remaining `{repo}/manifest` GET is the
+mutable CAS base read that must stay outside immutable object caching.
+CLI hydrate and dedup sections also require strict-mode
+`mutable_read_rejections` and `mutable_write_rejections` to stay flat, proving
+real CLI traffic is not accidentally using the cache-service immutable-object
+route for mutable repository state.
+It also runs `crab-cache-server check --profile enterprise` with a generated
+policy and explicit trusted-proxy-boundary assertion, so the same smoke gates
+cache effectiveness and production posture. A secondary transparent-mode
+server verifies policy-authorized mutable reads proxy to object storage while
+out-of-scope and ambiguous mutable paths are rejected before origin. The smoke
+also drives a cache-pressure sequence that crosses the configured cache budget
+and proves a recently touched hot object remains served from cache without
+another origin GET. The smoke report includes a post-traffic
+`crab doctor --support-bundle`
+artifact; use it as the redacted evidence bundle when comparing cache hit
+rate, origin fallback rate, push warming, pressure behavior, and admin/metrics
+probes during rollout.
+
+## Release Evidence Gate
+
+Enterprise releases require retained cache-service RustFS smoke evidence from
+the exact release commit. Use the protected `Cache Service Tests` GitHub
+workflow before starting a release:
+
+1. Run `.github/workflows/cache-service.yml` with `workflow_dispatch` on the
+   release commit.
+2. Wait for the `RustFS cache-service smoke` job to pass.
+3. Keep the workflow run ID. Release CI derives the expected report run ID as
+   `gha-<run-id>-<attempt>` and downloads the default artifact
+   `cache-service-rustfs-smoke-<run-id>-<attempt>`.
+4. Start `.github/workflows/release.yml` with
+   `cache_service_evidence_run_id=<run-id>`. For tag-triggered releases, set
+   `CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID` to the same GitHub run ID. Set
+   `cache_service_evidence_artifact` or
+   `CRAB_CACHE_SERVICE_RELEASE_EVIDENCE_ARTIFACT` only when the smoke workflow
+   uploaded a custom artifact name.
+
+Release CI rejects evidence from the wrong workflow, a failed workflow run, a
+non-manual workflow event, a different commit SHA, or a different workflow run
+attempt. To reproduce the same product gate locally after downloading the
+retained artifact:
+
+```bash
+cd crab
+make cache-service-release-gate \
+  CACHE_SERVICE_RELEASE_EVIDENCE_DIR=../cache-service-release-evidence \
+  CACHE_SERVICE_RELEASE_EXPECTED_RUN_ID=gha-<run-id>-<attempt>
+```
+
+The target builds `crab-cache-server` and runs:
+
+```bash
+crab-cache-server evidence gate \
+  --evidence-dir ../cache-service-release-evidence \
+  --expected-run-id gha-<run-id>-<attempt> \
+  --output cache-service-release-evidence-verify.json \
+  --summary-output cache-service-release-evidence-summary.json \
+  --doctor-output cache-service-release-evidence-doctor.json \
+  --doctor-text-output cache-service-release-evidence-doctor.txt
+```
+
+When release verification fails, the gate writes doctor output and CI uploads
+`cache-service-release-evidence-doctor.json` and
+`cache-service-release-evidence-doctor.txt` in the
+`cache-service-release-evidence-gate-<release-run-id>-<attempt>` artifact. If
+you only have the verification JSON, run the lower-level doctor command:
+
+```bash
+crab-cache-server evidence doctor \
+  --verification cache-service-release-evidence-verify.json
+```
+
+Use the same gate command locally when auditing a downloaded smoke artifact.
+The verifier recursively finds exactly one `report.json`, verifies the evidence
+manifest and retained artifacts, requires zero cacheable origin reads in the
+dedup push proof, checks that the only origin read is the mutable manifest CAS
+base read, and writes a compact summary for release notes or customer audit
+handoff. If the gate fails, start with the doctor output, then use the
+[release evidence gate runbook](/docs/cli/cache-service/runbooks#cache-service-release-evidence-gate-failed).
+
+## Useful Dashboard Panels
+
+Import `crab/deploy/cache-service/grafana-dashboard.json` for a starter
+Grafana dashboard backed by the Prometheus datasource you select during import.
+The dashboard covers the panels below and is checked by the cache-service
+manifest validation gate.
+
+Track:
+
+- Cache hit rate.
+- Object-store reads avoided versus origin fetches.
+- Bytes served from cache versus origin.
+- Cache utilization versus configured budget.
+- Maximum accepted push-warming object body size.
+- Eviction pressure against hit rate.
+- Origin fetch latency.
+- Push warming rate.
+- Dedup known/unknown ratio.
+- 4xx and 5xx response rate.
+
+## Example Queries
+
+Cache hit rate:
+
+```promql
+sum(rate(cache_hit_total[5m])) /
+  (sum(rate(cache_hit_total[5m])) + sum(rate(cache_miss_total[5m])))
+```
+
+Bytes served from cache:
+
+```promql
+sum(rate(cache_bytes_served{hit="true"}[1h]))
+```
+
+Object-store reads avoided:
+
+```promql
+sum(rate(origin_avoided_reads_total[5m]))
+```
+
+Dedup ratio:
+
+```promql
+sum(rate(dedup_chunks_known[5m])) /
+  (sum(rate(dedup_chunks_known[5m])) + sum(rate(dedup_chunks_unknown[5m])))
+```
+
+Cache utilization:
+
+```promql
+max(cache_bytes_stored / clamp_min(cache_max_bytes, 1))
+```
+
+## Alerts
+
+Recommended alerts:
+
+| Alert | Condition |
+|-------|-----------|
+| Cache down | Prometheus cannot scrape the service. |
+| Origin unreachable | Readiness fails for several minutes. |
+| Hit rate low | Hit rate remains low after the cache should be warm. |
+| Cache near full | Cache usage exceeds the planned high-water point. |
+| Eviction pressure | Cache eviction continues while utilization is high and hit rate remains low. |
+| Origin latency high | Origin miss path becomes slow. |
+| Mutable route rejects | `mutable_path_rejection_total` increases after clients should be wired to direct mutable paths to origin. |
+| Auth failures spike | 401 or 403 rate increases unexpectedly. |
+
+Starter Prometheus rules are checked in at
+`crab/deploy/cache-service/kubernetes/prometheus-rules.yaml` for Prometheus
+Operator deployments. Apply that manifest when your Prometheus instance selects
+rules with `app=crab-cache-server`. Each bundled rule includes a `runbook_url`
+annotation that points to [Cache Service Runbooks](/docs/cli/cache-service/runbooks).
+
+The manifest includes:
+
+- CrabCacheRuntimeIntegrityRepair
+- CrabCacheStartupIntegrityRepair
+- CrabCacheOriginFallbackHigh
+- CrabCacheHitRateLow
+- CrabCacheEvictionPressure
+- CrabCacheMutableProxyActive
+
+Do not page on a low hit rate immediately after a new deployment or after replacing the cache volume. The cache needs time to warm.
+
+## Logs
+
+Use JSON logs in production:
+
+```toml
+[logging]
+format = "json"
+level = "info"
+```
+
+Use logs to answer:
+
+- Are clients reaching the service?
+- Are requests hitting cache or falling through to origin?
+- Are push-warming requests arriving?
+- Are auth failures caused by missing credentials or policy denial?

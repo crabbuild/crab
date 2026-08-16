@@ -1,0 +1,90 @@
+name: Replica Enterprise Gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/replica-enterprise.yml"
+      - ".github/workflows/replica-live-evidence.yml"
+      - "Cargo.lock"
+      - "crab/Makefile"
+      - "crab/Cargo.toml"
+      - "crab/docs/design/replica-enterprise-readiness.md"
+      - "crab/docs/guides/gitiox-replica.md"
+      - "crab/scripts/check-replica-feature-matrix.sh"
+      - "crab/scripts/check-replica-live-env.sh"
+      - "crab/schemas/replica*.json"
+      - "crab/src/cmd/replica.rs"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/coordination/**"
+      - "crab/src/git/**"
+      - "crab/src/replication/**"
+      - "crab/tests/replica*"
+  pull_request:
+    paths:
+      - ".github/workflows/replica-enterprise.yml"
+      - ".github/workflows/replica-live-evidence.yml"
+      - "Cargo.lock"
+      - "crab/Makefile"
+      - "crab/Cargo.toml"
+      - "crab/docs/design/replica-enterprise-readiness.md"
+      - "crab/docs/guides/gitiox-replica.md"
+      - "crab/scripts/check-replica-feature-matrix.sh"
+      - "crab/scripts/check-replica-live-env.sh"
+      - "crab/schemas/replica*.json"
+      - "crab/src/cmd/replica.rs"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/coordination/**"
+      - "crab/src/git/**"
+      - "crab/src/replication/**"
+      - "crab/tests/replica*"
+  workflow_dispatch:
+    inputs:
+      include_all_cloud:
+        description: "Run the combined all-cloud feature slice"
+        required: true
+        default: true
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  offline:
+    name: Offline feature and evidence gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Run replica feature matrix
+        working-directory: crab
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.include_all_cloud }}" != "true" ]; then
+            make replica-feature-matrix-locked
+          else
+            make replica-feature-matrix-all-locked
+          fi
+
+      - name: Validate replica evidence schemas
+        run: cargo test --manifest-path crab/Cargo.toml --test schema_validate replica
+
+      - name: Validate retained evidence recorder contracts
+        run: |
+          cargo test --manifest-path crab/Cargo.toml --test replica_live_control_plane evidence_recorder
+          cargo test --manifest-path crab/Cargo.toml --test replica_binary_hydrate_live evidence_recorder
+          cargo test --manifest-path crab/Cargo.toml --test replica_live_cross_region evidence_recorder

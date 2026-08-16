@@ -1,0 +1,155 @@
+---
+title: "DVC Migration"
+description: "Move DVC pipelines and experiments to Crab Workflow with command mappings, migration steps, and behavior notes."
+---
+
+# DVC Migration
+
+Crab Workflow intentionally keeps the familiar DVC shape: stages, deps, outs,
+params, metrics, plots, experiments, queues, and `repro`-style execution. The
+main difference is the storage model. Crab uses your Crab remote and object
+store rather than a separate DVC remote.
+
+For the automated migration command, see the full
+[Migrating from DVC guide](/docs/cli/guides/migrating-from-dvc).
+
+## Command Mapping
+
+| DVC command | Crab command |
+|-------------|--------------|
+| `dvc stage add` | `crab stage add` |
+| `dvc repro` | `crab repro` or `crab run` |
+| `dvc dag` | `crab workflow dag` |
+| `dvc status` | `crab workflow status` |
+| `dvc params show` | `crab params show` |
+| `dvc params diff` | `crab params diff` |
+| `dvc metrics show` | `crab metrics show` |
+| `dvc metrics diff` | `crab metrics diff` |
+| `dvc plots show` | `crab plots show` |
+| `dvc plots diff` | `crab plots diff` |
+| `dvc exp run` | `crab exp run` |
+| `dvc exp show` | `crab exp show` |
+| `dvc exp diff` | `crab exp diff` |
+| `dvc exp apply` | `crab exp apply` |
+| `dvc exp push` | `crab exp push` |
+| `dvc exp pull` | `crab exp pull` |
+| `dvc queue start` | `crab queue start` |
+
+## Migration Checklist
+
+1. Commit or stash current DVC work.
+2. Initialize Crab and enable Workflow:
+
+   ```bash
+   crab init crab://my-bucket/ml-project
+   crab config set workflow.enabled true
+   ```
+
+3. Convert `dvc.yaml`:
+
+   ```bash
+   crab migrate from-dvc
+   ```
+
+4. Validate:
+
+   ```bash
+   crab run --validate
+   crab workflow dag
+   ```
+
+5. Run once to create `crab.lock`:
+
+   ```bash
+   crab run
+   ```
+
+6. Push git state and stage cache:
+
+   ```bash
+   git add crab.yaml crab.lock params.yaml
+   git commit -m "migrate workflow to crab"
+   crab push
+   crab workflow push-cache --all
+   ```
+
+7. Remove DVC files after the Crab workflow is verified.
+
+## YAML Compatibility
+
+Most DVC fields map directly:
+
+| DVC field | Crab support |
+|-----------|--------------|
+| `cmd` | Supported as string or command list. |
+| `deps` | Supported for local paths and supported external deps. |
+| `outs` | Supported for path entries and DVC-style path-key maps. |
+| `params` | Supported with dotted keys. |
+| `metrics` | Supported at top level and stage level. |
+| `plots` | Supported at top level and stage level. |
+| `wdir` | Supported. |
+| `frozen` | Supported with `crab freeze` and `crab unfreeze`. |
+| `foreach` | Supported. |
+| `matrix` | Supported. |
+| `vars` and `${...}` | Supported for templating. |
+| `always_changed` | Supported as DVC-compatible spelling for nondeterministic stages. |
+
+## Behavior Differences
+
+- Crab Workflow must be enabled with `crab config set workflow.enabled true`.
+- Stage cache is shared through the Crab remote with `crab run --cache-push` or
+  `crab workflow push-cache --all`.
+- Large files should be tracked with Crab's file layer, not a DVC remote.
+- Local experiment metadata lives under `.crab/workflow/exp/`.
+- Run journals live under `.crab/workflow/runs/`.
+- Split workflow files can use `workflow.discover recursive` and
+  `workflow.lockfile split`.
+
+## Hydra
+
+Enable Hydra-style composition before migrating Hydra-heavy experiments:
+
+```bash
+crab config set hydra.enabled true
+crab config set hydra.config_dir conf
+crab config set hydra.config_name config.yaml
+```
+
+Then run experiments with group and scalar overrides:
+
+```bash
+crab exp run -S train/model=efficientnet -S train.optimizer.lr=0.0005
+```
+
+See [Hydra Workflows](./hydra) for the recommended layout and precedence model.
+
+## CI Migration
+
+Replace DVC cache commands with Crab cache commands:
+
+```bash
+crab run --validate
+crab run --pull --allow-missing --cache-push --jsonl
+crab workflow push-cache --all --json
+```
+
+For strict read-only verification:
+
+```bash
+crab run --cache-only --json
+```
+
+## Final Cutover
+
+Only remove DVC files after a clean Crab run, metrics check, and remote cache
+push:
+
+```bash
+crab run
+crab metrics show
+crab plots show
+crab workflow push-cache --all
+```
+
+Then remove DVC-specific files and update CI scripts. Keep the DVC branch around
+until the first Crab-backed release is reproducible from a fresh clone.

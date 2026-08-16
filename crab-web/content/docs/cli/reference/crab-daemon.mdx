@@ -1,0 +1,280 @@
+---
+title: "crab daemon"
+description: "Run and manage DaemonService mode for persistent multi-repo virtual filesystem mounts."
+---
+
+# crab daemon
+
+Run and manage DaemonService mode, Crab's persistent multi-repo virtual
+filesystem service.
+
+DaemonService mode is separate from the default coordinator-style `crab mount`
+workflow. Use it when you want to register repositories by name and have a
+long-running service mount and reconcile them.
+
+For a conceptual comparison, see [Mount Modes](/docs/cli/virtual-filesystem/mount-modes).
+
+## Synopsis
+
+```bash
+crab daemon [OPTIONS]
+crab daemon [OPTIONS] add-repo --name <NAME> --remote <URL> [--branch <BRANCH>] --mount-root <PATH> [--backend <BACKEND>]
+crab daemon [OPTIONS] remove-repo --name <NAME>
+crab daemon [OPTIONS] list [--json]
+crab daemon [OPTIONS] status --name <NAME> [--json]
+crab daemon [OPTIONS] set-refresh --name <NAME> --interval <SECONDS>
+crab daemon [OPTIONS] remount --name <NAME> [--clean-overlay]
+crab daemon [OPTIONS] fetch --name <NAME>
+crab daemon [OPTIONS] enable --name <NAME>
+crab daemon [OPTIONS] disable --name <NAME>
+crab daemon [OPTIONS] commit --name <NAME> -m <MESSAGE> [--push] [--json]
+```
+
+## Top-Level Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--root <PATH>` | `~/.crab/daemon` | Root directory for daemon registry, repo state, snapshots, overlays, and cache. |
+| `--hydration-concurrency <N>` | `4` | Number of hydration worker tasks. |
+
+## Description
+
+With no subcommand, `crab daemon` starts the service in the foreground. The
+service reads the repo registry, mounts enabled repos, and continues reconciling
+the registry until it receives SIGINT or SIGTERM.
+
+```bash
+crab daemon
+```
+
+For a persistent workstation, shared host, agent environment, or service
+supervisor, run this process under your normal service supervisor.
+
+## Registry Model
+
+DaemonService repos are registered before they are mounted. A repo registration
+contains:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Stable repo name used by daemon commands. |
+| `remote` | Remote URL to clone from. |
+| `branch` | Branch to track. Defaults to `main`. |
+| `mount_root` | Parent directory for the mount. The repo mounts at `<mount-root>/<name>`. |
+| `backend` | Filesystem backend: `fuse` or `nfs`. Defaults to `fuse`. |
+| `refresh_interval_secs` | Refresh interval stored in the registry. Defaults to 30 seconds. |
+| `enabled` | Whether the service should mount the repo. |
+
+Daemon state lives under `~/.crab/daemon` unless `--root` is provided.
+
+| State | Default location |
+| --- | --- |
+| Registry | `~/.crab/daemon/config/repos.sqlite` |
+| Repo state | `~/.crab/daemon/repos/<name>/` |
+| Blobless clone | `~/.crab/daemon/repos/<name>/.git` |
+| Snapshot database | `~/.crab/daemon/repos/<name>/snapshot.sqlite` |
+| Overlay database | `~/.crab/daemon/repos/<name>/overlay.db` |
+| Overlay files | `~/.crab/daemon/repos/<name>/overlay/upper/` |
+| Shared chunk cache | `~/.crab/daemon/cache/chunks/` |
+| Live NFS control endpoint | `~/.crab/daemon/repos/<name>/nfs-control-endpoint` |
+
+The NFS control endpoint is private, exists only while the mount is live, and
+lets daemon commands drain pending writes and update the live snapshot safely.
+Registrations created before backend selection was introduced remain on FUSE.
+
+## Subcommands
+
+### add-repo
+
+Register a repository for the daemon to manage.
+
+```bash
+crab daemon add-repo \
+  --name ml-models \
+  --remote crab://bucket/ml-models \
+  --branch main \
+  --mount-root /mnt/repos \
+  --backend nfs
+```
+
+The mount path will be `/mnt/repos/ml-models`.
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `--name <NAME>` | Yes | Unique name for this repo in the daemon registry. |
+| `--remote <URL>` | Yes | Remote URL to clone from. |
+| `--branch <BRANCH>` | No | Branch to track. Defaults to `main`. |
+| `--mount-root <PATH>` | Yes | Parent directory for daemon-managed mounts. |
+| `--backend <BACKEND>` | No | `fuse` or `nfs`. Defaults to `fuse`. |
+
+Re-running `add-repo` with an existing name updates its registration. The
+running daemon detects backend and other configuration changes and remounts the
+repository.
+
+### remove-repo
+
+Deregister a repository and unmount it if the service is running.
+
+```bash
+crab daemon remove-repo --name ml-models
+```
+
+### list
+
+List registered repositories.
+
+```bash
+crab daemon list
+crab daemon list --json
+```
+
+Text output includes the repo name, redacted remote, branch, refresh interval,
+enabled state, backend, and mode.
+
+### status
+
+Show status for one registered repo.
+
+```bash
+crab daemon status --name ml-models
+crab daemon status --name ml-models --json
+```
+
+Status includes repo configuration, HEAD state when available, mount state, and
+overlay dirty count.
+
+### set-refresh
+
+Update the refresh interval stored for a repo.
+
+```bash
+crab daemon set-refresh --name ml-models --interval 60
+```
+
+### remount
+
+Unmount and remount a repo with a fresh snapshot.
+
+```bash
+crab daemon remount --name ml-models
+```
+
+Discard local overlay changes before remounting:
+
+```bash
+crab daemon remount --name ml-models --clean-overlay
+```
+
+Use `--clean-overlay` only when you intentionally want to discard local writes
+that have not been committed.
+
+### fetch
+
+Trigger an immediate fetch for a registered repo.
+
+```bash
+crab daemon fetch --name ml-models
+```
+
+### enable and disable
+
+Disable a repo without deleting its registration:
+
+```bash
+crab daemon disable --name ml-models
+```
+
+Enable it again:
+
+```bash
+crab daemon enable --name ml-models
+```
+
+The running daemon reconciles enabled and disabled repos from the registry.
+
+### commit
+
+Commit copy-on-write overlay changes for a daemon-managed repo.
+
+```bash
+crab daemon commit --name ml-models -m "Update generated artifacts"
+crab daemon commit --name ml-models -m "Update generated artifacts" --push
+crab daemon commit --name ml-models -m "Update generated artifacts" --json
+```
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `--name <NAME>` | Yes | Registered repo name. |
+| `--message`, `-m <MESSAGE>` | Yes | Git commit message. |
+| `--push` | No | Push the new commit to origin after the local commit succeeds. |
+| `--json` | No | Emit structured JSON output. |
+
+During commit, Crab freezes overlay writes, checks that the tracked branch has
+not moved since the mounted snapshot, creates a Git commit from the overlay,
+refreshes the live snapshot, and clears the overlay after a successful local
+commit. NFS commits first drain unstable writes through the mount's private
+control endpoint. If `--push` fails, the local commit is recorded and the
+overlay remains available for recovery.
+
+## Backend Prerequisites
+
+Check the selected backend against the final mountpoint before registration:
+
+```bash
+crab mount doctor --backend nfs --mountpoint /mnt/repos/ml-models
+crab mount doctor --backend fuse --mountpoint /mnt/repos/ml-models
+```
+
+NFS starts one loopback NFSv3 server per registered repository and mounts it
+through the operating system's native NFS client. FUSE uses an in-process FUSE
+session. Both use the same daemon-owned clone, snapshot, overlay, hydration,
+refresh, and publish pipeline.
+
+## Common Workflow
+
+Register repos:
+
+```bash
+crab daemon add-repo --name repo-a --remote crab://bucket/repo-a --branch main --mount-root /mnt/repos
+crab daemon add-repo --name repo-b --remote crab://bucket/repo-b --branch main --mount-root /mnt/repos
+```
+
+Start the service:
+
+```bash
+crab daemon
+```
+
+Inspect state:
+
+```bash
+crab daemon list
+crab daemon status --name repo-a
+```
+
+Publish local overlay changes:
+
+```bash
+crab daemon commit --name repo-a -m "Update generated artifacts" --push
+```
+
+Stop the foreground service with Ctrl+C, or stop it through your supervisor.
+
+## When to Use `crab daemon`
+
+Use DaemonService mode when:
+
+- The same repos should be mounted repeatedly.
+- Scripts or applications should address repos by stable names.
+- An agent runtime or service supervisor owns the lifecycle.
+- You need a persistent registry with enable, disable, fetch, status, and
+  remount operations.
+
+Use [crab mount](/docs/cli/reference/crab-mount) instead when you want a quick
+one-off mount by path.
+
+## Related Commands
+
+- [crab mount](/docs/cli/reference/crab-mount) - default coordinator-style mount workflow.
+- [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) - compare coordinator-style mounts and DaemonService mode.
+- [Mount Management](/docs/cli/virtual-filesystem/mount-management) - day-to-day mountpoint operations.

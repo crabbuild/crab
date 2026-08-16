@@ -1,0 +1,202 @@
+---
+title: "Project Configuration"
+description: "Reference for .crab.toml — the project-level config file that travels with your repository and auto-configures collaborators."
+---
+
+# Project Configuration (`.crab.toml`)
+
+The `.crab.toml` file lives in your repository root and declares how Crab should behave for this project. It's committed to git so every collaborator inherits the same configuration.
+
+## Full Schema
+
+```toml
+# Required: cloud storage location for xorbs and manifests
+[remote]
+url = "crab://my-bucket/my-repo"
+
+# Optional: file patterns to track with Crab
+[track]
+patterns = ["*.bin", "*.safetensors", "*.parquet", "datasets/**"]
+
+# Optional: hydration behavior on clone/checkout
+[hydrate]
+default = "lazy"                    # "lazy" | "eager"
+auto_patterns = ["*.py", "*.rs", "*.toml", "README*", "LICENSE*"]
+
+# Optional: mirror mode (GitHub + Crab coexistence)
+[mirror]
+origin_remote = "origin"
+crab_remote = "crab"
+
+# Optional: credential hints
+[auth]
+storage_provider = "s3"             # "s3" | "gcs" | "azure" | "auto"
+profile = "my-profile"
+
+```
+
+## Sections
+
+### `[remote]` (required)
+
+The only required section. Specifies where Crab stores chunked file data.
+
+```toml
+[remote]
+url = "crab://my-bucket/my-repo"
+```
+
+Supported URL schemes:
+- `crab://` — AWS S3 (or S3-compatible)
+- `gs://` — Google Cloud Storage
+- `az://` — Azure Blob Storage
+
+### `[track]` (optional)
+
+Declares which file patterns Crab manages. These are synced to `.gitattributes` with the `filter=crab` attribute.
+
+```toml
+[track]
+patterns = ["*.bin", "*.safetensors", "*.onnx", "datasets/**"]
+```
+
+If omitted, `crab setup` auto-detects large files (>1 MiB) and well-known binary extensions.
+
+### `[hydrate]` (optional)
+
+Controls what happens after clone or checkout.
+
+```toml
+[hydrate]
+default = "lazy"
+auto_patterns = ["*.py", "*.rs", "*.toml", "README*"]
+```
+
+| Field | Values | Default | Description |
+|-------|--------|---------|-------------|
+| `default` | `"lazy"`, `"eager"` | `"lazy"` | Whether to hydrate all files on clone |
+| `auto_patterns` | Array of globs | `[]` | Always hydrate these patterns regardless of default |
+
+With `default = "lazy"`, files remain as pointers until explicitly hydrated. With `default = "eager"`, all tracked files are hydrated immediately after clone.
+
+### `[mirror]` (optional)
+
+Enables mirror mode for GitHub/GitLab + Crab coexistence. See [Mirror Mode](/docs/cli/getting-started/mirror-mode) for the full guide.
+
+```toml
+[mirror]
+origin_remote = "origin"
+crab_remote = "crab"
+```
+
+When present, `crab init` (re-apply mode) installs pre-push and post-checkout hooks automatically.
+
+### `[auth]` (optional)
+
+Explicit credential hints. Rarely needed — Crab's credential discovery chain finds credentials automatically from environment variables, cloud SDK configs, and instance metadata.
+
+```toml
+[auth]
+storage_provider = "s3"
+profile = "ml-team"
+```
+
+Use this when your team uses a non-default AWS profile or needs to override auto-detection.
+
+## Precedence
+
+Configuration resolves in this order (highest priority first):
+
+1. **CLI flags** — `--pattern`, `--eager`, `--mirror`, etc.
+2. **`.crab.toml`** — project-level defaults
+3. **Built-in defaults** — lazy hydration, auto-detection
+
+## `.crab.toml` vs `.crab/config.toml`
+
+| | `.crab.toml` | `.crab/config.toml` |
+|---|---|---|
+| Location | Repo root | `.crab/` directory |
+| Purpose | Project config (shared) | Internal state (local) |
+| Committed to git | Yes | No |
+| Edited by | Users, `crab init` | Crab automatically |
+
+Think of `.crab.toml` as "what this repo needs" and `.crab/config.toml` as "what this machine has done."
+
+## Examples
+
+### ML Repository
+
+```toml
+[remote]
+url = "crab://ml-artifacts/bert-finetune"
+
+[track]
+patterns = ["*.safetensors", "*.bin", "*.onnx", "*.pt", "datasets/**"]
+
+[hydrate]
+default = "lazy"
+auto_patterns = ["*.py", "*.yaml", "requirements.txt", "README*"]
+```
+
+Collaborators clone instantly (pointers only), then hydrate the specific model checkpoint they need.
+
+### Monorepo with Large Assets
+
+```toml
+[remote]
+url = "crab://company-assets/monorepo"
+
+[track]
+patterns = [
+  "assets/**/*.psd",
+  "assets/**/*.fbx",
+  "assets/**/*.blend",
+  "builds/**"
+]
+
+[hydrate]
+default = "lazy"
+auto_patterns = ["*.ts", "*.tsx", "*.json", "*.md", "*.css"]
+```
+
+Developers get code hydrated immediately. Designers hydrate asset files on demand.
+
+### Mirror Mode (GitHub + Crab)
+
+```toml
+[remote]
+url = "crab://team-bucket/our-project"
+
+[track]
+patterns = ["*.bin", "*.parquet", "models/**"]
+
+[mirror]
+origin_remote = "origin"
+crab_remote = "crab"
+
+[hydrate]
+default = "lazy"
+auto_patterns = ["*.py", "*.rs", "*.toml"]
+
+[auth]
+storage_provider = "s3"
+profile = "ml-team"
+```
+
+Code goes to GitHub via `origin`. Large files go to S3 via `crab`. The team's PR workflow stays unchanged.
+
+## How It's Generated
+
+`crab init <url>` creates `.crab.toml` automatically with:
+- `[remote]` from the provided URL
+- `[auth]` when a storage provider is selected
+- `[mirror]` if `--mirror` flag was used
+
+Run `crab setup` to add or refresh `[track]` patterns and the matching
+`.gitattributes` entries.
+
+## Related
+
+- [Mirror Mode](/docs/cli/getting-started/mirror-mode) — GitHub + Crab coexistence
+- [`crab init`](/docs/cli/reference/crab-init) — generates `.crab.toml`
+- [`crab track`](/docs/cli/reference/crab-track) — updates tracked file patterns

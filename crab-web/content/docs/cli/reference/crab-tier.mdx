@@ -1,0 +1,38 @@
+---
+title: "crab tier"
+description: "Plan and roll back lifecycle tiering rules for a Crab bucket."
+---
+
+# crab tier
+
+Manage storage tier assignments.
+
+## Synopsis
+
+```
+crab tier [OPTIONS] <COMMAND>
+```
+
+## Description
+
+`crab tier` manages bucket lifecycle rules. It currently exposes `plan` to
+generate a lifecycle plan and `rollback` to restore a prior configuration from
+a backup file.
+
+For conceptual background, see [Storage Tiers](/docs/cli/storage/storage-tiers).
+
+Each subcommand exposes its own provider-specific options. Use
+`crab tier <command> --help` for details.
+
+## Examples
+
+```bash
+crab tier plan
+crab tier plan --help
+crab tier rollback --help
+```
+
+## Related Commands
+
+- [`crab optimize xorbs`](/docs/cli/reference/crab-optimize) — rewrite xorbs to a target size profile.
+- [`crab du`](/docs/cli/reference/crab-du) — disk usage by tier.

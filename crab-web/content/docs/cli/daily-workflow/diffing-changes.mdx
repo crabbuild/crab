@@ -1,0 +1,116 @@
+---
+title: "Comparing Changes"
+description: "How Crab provides chunk-level diffs for large binary files using only metadata — no data transfer required."
+---
+
+# Comparing Changes
+
+Traditional `git diff` needs the full file content to show differences. For a 10 GB model file, that means downloading and reconstructing both versions just to see what changed. Crab takes a different approach: it compares files at the chunk level using only metadata, showing you exactly which parts changed with zero data transfer.
+
+## Why Chunk-Level Diffs?
+
+When Crab stores a file, it splits it into content-defined chunks. Each chunk has a hash. To compare two versions of a file, Crab only needs to compare their chunk lists — no need to download the actual data.
+
+This means you can:
+
+- **Diff multi-GB files instantly** — Compare two versions of a 50 GB dataset in milliseconds.
+- **See exactly what changed** — Know which byte ranges were modified, added, or removed.
+- **Work offline** — Diffs use cached metadata, not file content.
+- **Understand dedup efficiency** — See how many chunks are shared between versions.
+
+## How It Works
+
+When you run a diff between two refs, Crab:
+
+1. Resolves both refs to their tree objects.
+2. Finds Crab-tracked files that differ between the two trees.
+3. Parses the pointer blobs to get file hashes and shard hints.
+4. Resolves chunk lists from shard metadata (lightweight, cached locally).
+5. Compares chunk lists to identify added, removed, and modified segments.
+6. Reports the differences without ever downloading file content.
+
+## Common Usage
+
+### Compare with the previous commit
+
+```bash
+crab diff HEAD~1
+```
+
+### Compare two branches
+
+```bash
+crab diff main feature/new-model
+```
+
+### Compare two tags (release comparison)
+
+```bash
+crab diff v1.0 v2.0
+```
+
+### Summary view (like `git diff --stat`)
+
+```bash
+crab diff --stat HEAD~3
+```
+
+```
+ models/weights.bin    | 423 chunks changed (+312, -111), +1.2 GB
+ data/train.bin        | 12 chunks changed (+12, -0), +45 MB
+ 2 files changed, 435 segments, +1.245 GB delta
+```
+
+### Just file names
+
+```bash
+crab diff --name-only v1.0 v2.0
+```
+
+### Restrict to specific paths
+
+```bash
+crab diff HEAD~1 -- models/
+```
+
+## Understanding the Output
+
+The default output shows:
+
+- **Chunks changed** — How many chunks differ between versions
+- **Chunks added/removed** — Net change in chunk count
+- **Bytes delta** — Approximate size difference
+
+With `--verbose`, you also see individual xorb hashes and chunk ranges. With `--byte-ranges`, you see the exact byte offsets within each file that changed.
+
+## Use Cases
+
+### Code review for data changes
+
+Before merging a PR that updates training data:
+
+```bash
+crab diff main feature/updated-dataset --stat
+```
+
+Instantly see how much data changed without downloading anything.
+
+### Release notes
+
+Compare what changed between releases:
+
+```bash
+crab diff v1.0 v2.0 --name-only
+```
+
+### Debugging hydration issues
+
+If a file hydrates differently than expected, compare the chunk lists:
+
+```bash
+crab diff HEAD~1 --verbose -- problematic-file.bin
+```
+
+## CLI Reference
+
+For complete command syntax, all output modes, and JSON format, see the [crab diff reference](/docs/cli/reference/crab-diff).

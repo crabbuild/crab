@@ -1,0 +1,19 @@
+{
+  "title": "Architecture",
+  "pages": [
+    "index",
+    "system-overview",
+    "engine-chunking-dedup",
+    "storage-layer",
+    "metadata-subsystem",
+    "git-integration",
+    "gitoxide",
+    "caching-architecture",
+    "configuration-system",
+    "coordination-consistency",
+    "diff-engine",
+    "error-observability",
+    "lfs-compatibility",
+    "shellout-baseline"
+  ]
+}
