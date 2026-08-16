@@ -14,8 +14,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::cmd::add::{AddArgs, run_add};
-use crate::cmd::push::{PushArgs, run_push};
+use crate::cmd::add::{AddArgs, AddSummary, run_add_without_terminal_output};
+use crate::cmd::push::{PushArgs, PushSummaryPayload, run_push_without_terminal_output};
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::core::style::CliStyle;
@@ -24,11 +24,11 @@ use crate::core::style::CliStyle;
 // Per-phase timing
 // ---------------------------------------------------------------------------
 
-/// Schema name for the ship timing JSON envelope.
-const SHIP_TIMING_SCHEMA: &str = "ship.timing";
+/// Schema name for the terminal ship JSON envelope.
+const SHIP_SCHEMA: &str = "ship";
 
-/// Schema version for the ship timing payload.
-const SHIP_TIMING_VERSION: &str = "1.0";
+/// Schema version for the terminal ship payload.
+const SHIP_VERSION: &str = "1.0";
 
 /// Per-phase timing results for the ship command.
 ///
@@ -80,6 +80,19 @@ impl From<&ShipTimings> for ShipTimingPayload {
     }
 }
 
+/// Structured terminal result for the complete ship operation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ShipPayload {
+    pub add: AddSummary,
+    pub dry_run: bool,
+    pub committed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushSummaryPayload>,
+    pub timings: ShipTimingPayload,
+}
+
 /// Arguments for the `crab ship` command.
 pub struct ShipArgs {
     /// Glob patterns to ship (e.g. `*.safetensors`, `.`).
@@ -128,7 +141,7 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
     if !args.mode.is_machine() {
         eprintln!("Staging files...");
     }
-    run_add(&add_args, cancel).await?;
+    let add_summary = run_add_without_terminal_output(&add_args, cancel).await?;
 
     let staging_ms = staging_start.elapsed().as_millis() as u64;
 
@@ -144,24 +157,14 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
         .parent()
         .ok_or_else(|| CrabError::Internal("git dir has no parent".into()))?;
 
-    // Also add .gitattributes if it was modified (auto-tracking may have
-    // updated it during the add step).
-    let ga_path = repo_root.join(".gitattributes");
-    if ga_path.exists() {
-        let _ = Command::new("git")
-            .args(["add", ".gitattributes"])
-            .current_dir(repo_root)
-            .output();
+    let mut metadata_paths = Vec::with_capacity(2);
+    if repo_root.join(".gitattributes").exists() {
+        metadata_paths.push(".gitattributes");
     }
-
-    // Also add .crab.toml if it exists and has changes.
-    let crab_toml_path = repo_root.join(".crab.toml");
-    if crab_toml_path.exists() {
-        let _ = Command::new("git")
-            .args(["add", ".crab.toml"])
-            .current_dir(repo_root)
-            .output();
+    if repo_root.join(".crab.toml").exists() {
+        metadata_paths.push(".crab.toml");
     }
+    crate::git::index::stage_paths(repo_root, &metadata_paths)?;
 
     let commit_output = Command::new("git")
         .args(["commit", "-m", &args.message])
@@ -184,9 +187,6 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
                     eprintln!("Nothing to commit; pushing existing HEAD...");
                 }
             }
-            if args.no_push {
-                return Ok(());
-            }
         } else {
             return Err(CrabError::Internal(format!(
                 "git commit failed: {}",
@@ -196,27 +196,17 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
     }
 
     let commit_ms = commit_start.elapsed().as_millis() as u64;
+    let commit_oid = resolve_head_oid(repo_root)?;
 
     // --- Phase 3: Push (native concurrent push pipeline) ---
-    let push_ms = if args.no_push {
-        None
+    let (push_summary, push_ms) = if args.no_push {
+        (None, None)
     } else {
         let push_start = Instant::now();
 
         if !args.mode.is_machine() {
             eprintln!("Pushing...");
         }
-
-        // Before pushing, ensure the remote manifest exists. If this is
-        // the first push, create an initial manifest so the push pipeline
-        // has something to CAS against.
-        let target_ref = args
-            .branch
-            .as_deref()
-            .map(branch_to_ref)
-            .or_else(|| current_branch_ref(repo_root))
-            .unwrap_or_else(|| "refs/heads/main".to_owned());
-        ensure_manifest_exists(cancel, &target_ref).await;
 
         let refspec = match &args.branch {
             Some(b) => vec![b.clone()],
@@ -241,9 +231,9 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
             jsonl: args.mode == OutputMode::Jsonl,
         };
 
-        run_push(&push_args, cancel).await?;
+        let summary = run_push_without_terminal_output(&push_args, cancel).await?;
 
-        Some(push_start.elapsed().as_millis() as u64)
+        (Some(summary), Some(push_start.elapsed().as_millis() as u64))
     };
 
     // --- Timing summary ---
@@ -285,8 +275,15 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
             }
         }
         OutputMode::Json | OutputMode::Jsonl => {
-            let payload = ShipTimingPayload::from(&timings);
-            emit_json(SHIP_TIMING_SCHEMA, SHIP_TIMING_VERSION, payload);
+            let payload = ShipPayload {
+                add: add_summary,
+                dry_run: false,
+                committed,
+                commit_oid: Some(commit_oid),
+                push: push_summary,
+                timings: ShipTimingPayload::from(&timings),
+            };
+            emit_json(SHIP_SCHEMA, SHIP_VERSION, payload);
         }
     }
 
@@ -318,25 +315,28 @@ fn git_command_diagnostics(stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn branch_to_ref(branch: &str) -> String {
-    if branch.starts_with("refs/") {
-        branch.to_owned()
-    } else {
-        format!("refs/heads/{branch}")
-    }
-}
-
-fn current_branch_ref(repo_root: &std::path::Path) -> Option<String> {
+fn resolve_head_oid(repo_root: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
-        .args(["symbolic-ref", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
-        .output()
-        .ok()?;
+        .output()?;
     if !output.status.success() {
-        return None;
+        return Err(CrabError::Internal(format!(
+            "failed to resolve shipped commit: {}",
+            git_command_diagnostics(
+                &String::from_utf8_lossy(&output.stdout),
+                &String::from_utf8_lossy(&output.stderr),
+            )
+        )));
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        Err(CrabError::Internal(
+            "git rev-parse HEAD returned an empty object id".to_owned(),
+        ))
+    } else {
+        Ok(value)
+    }
 }
 
 /// Dry-run mode: show what would be staged, committed, and pushed.
@@ -350,9 +350,32 @@ async fn run_ship_dry_run(args: &ShipArgs, cancel: &CancellationToken) -> Result
         mode: args.mode,
     };
 
-    eprintln!("Dry run — showing what would be shipped:\n");
-    eprintln!("=== Files to stage ===");
-    run_add(&add_args, cancel).await?;
+    if !args.mode.is_machine() {
+        eprintln!("Dry run — showing what would be shipped:\n");
+        eprintln!("=== Files to stage ===");
+    }
+    let add_summary = run_add_without_terminal_output(&add_args, cancel).await?;
+
+    if args.mode.is_machine() {
+        emit_json(
+            SHIP_SCHEMA,
+            SHIP_VERSION,
+            ShipPayload {
+                add: add_summary,
+                dry_run: true,
+                committed: false,
+                commit_oid: None,
+                push: None,
+                timings: ShipTimingPayload {
+                    staging_ms: 0,
+                    commit_ms: 0,
+                    push_ms: None,
+                    total_ms: 0,
+                },
+            },
+        );
+        return Ok(());
+    }
 
     // Show current git status for context.
     eprintln!("\n=== Git status ===");
@@ -379,55 +402,6 @@ async fn run_ship_dry_run(args: &ShipArgs, cancel: &CancellationToken) -> Result
     }
 
     Ok(())
-}
-
-/// Attempt to ensure the remote manifest exists before pushing.
-///
-/// If `read_manifest` returns a not-found error, creates an initial manifest.
-/// Errors are logged but not propagated — the push pipeline will surface
-/// its own errors if the manifest is truly missing.
-async fn ensure_manifest_exists(cancel: &CancellationToken, initial_head_ref: &str) {
-    use crate::git::url::CrabUrl;
-
-    let Some(crab_dir) = crate::git::discover::resolve_crab_dir() else {
-        return;
-    };
-    let remote_path = crab_dir.join("remote");
-
-    let Ok(raw) = std::fs::read_to_string(&remote_path) else {
-        return;
-    };
-    let url = raw.trim();
-
-    if url.is_empty() || !url.starts_with("crab://") {
-        return;
-    }
-
-    let Ok(parsed) = CrabUrl::parse(url) else {
-        return;
-    };
-
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
-
-    let Ok(store) = crate::auth::build_store(&config, &parsed, "ship:manifest-check", cancel).await
-    else {
-        return;
-    };
-
-    let router = crate::storage::StoreLayout::new(store.clone(), parsed.repo_path.clone());
-
-    // Try to read the manifest. If it exists, nothing to do.
-    if let Err(CrabError::NotFound { .. }) =
-        crate::metadata::manifest::read_manifest(&store, &router).await
-    {
-        // First push — create the initial manifest.
-        tracing::info!("no manifest found, creating initial manifest for first push");
-        if let Err(e) =
-            crate::cmd::init::create_initial_manifest(&store, &router, initial_head_ref).await
-        {
-            tracing::debug!(error = %e, "create_initial_manifest failed (may already exist)");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -457,13 +431,6 @@ mod tests {
             "",
             "fatal: unable to auto-detect email address\n"
         ));
-    }
-
-    #[test]
-    fn branch_to_ref_preserves_full_refs_and_expands_branch_names() {
-        assert_eq!(branch_to_ref("mainline"), "refs/heads/mainline");
-        assert_eq!(branch_to_ref("refs/heads/release"), "refs/heads/release");
-        assert_eq!(branch_to_ref("refs/tags/v1"), "refs/tags/v1");
     }
 
     #[test]

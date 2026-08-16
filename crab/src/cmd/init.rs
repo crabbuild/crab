@@ -235,10 +235,7 @@ pub async fn run_init_with_storage_provider(
     // a URL update the driver is already registered but `.crab.toml`
     // doesn't match any `filter=crab` pattern, so no filter spawns.
     if config_written && root.join(".git").exists() {
-        let _ = Command::new("git")
-            .args(["add", ".crab.toml"])
-            .current_dir(root)
-            .output();
+        crate::git::index::stage_paths(root, &[".crab.toml"])?;
     }
 
     // Register the git drivers so `*.ext filter=crab diff=crab` in
@@ -481,9 +478,9 @@ pub(crate) const WELL_KNOWN_LARGE_EXTENSIONS: &[&str] = &[
 
 /// Scan the working tree for large files and auto-track their extensions.
 ///
-/// Returns the number of new extensions tracked. Skips extensions that
-/// are already in `.gitattributes`.
-pub fn auto_track_large_files(root: &Path) -> Result<usize> {
+/// Returns the new patterns tracked. Skips extensions that are already in
+/// `.gitattributes`.
+pub fn auto_track_large_files(root: &Path) -> Result<Vec<String>> {
     use std::collections::BTreeSet;
 
     let ga_path = root.join(".gitattributes");
@@ -501,25 +498,17 @@ pub fn auto_track_large_files(root: &Path) -> Result<usize> {
     scan_for_large_files(root, &already_tracked, &mut new_exts)?;
 
     if new_exts.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
-
-    // Append new tracking rules to .gitattributes.
-    let mut content = existing_content;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    for ext in &new_exts {
-        use std::fmt::Write as _;
-        let _ = writeln!(content, "*.{ext} filter=crab diff=crab merge=crab -text");
-    }
-    std::fs::write(&ga_path, content)?;
 
     let joined: Vec<String> = new_exts.iter().map(|e| format!("*.{e}")).collect();
+    for pattern in &joined {
+        crate::cmd::track::run_track_in(pattern, root)?;
+    }
     eprintln!("Detected large files — tracking: {}", joined.join(", "),);
     tracing::info!(extensions = ?new_exts, "auto-tracked large file extensions");
 
-    Ok(new_exts.len())
+    Ok(joined)
 }
 
 /// Collect the patterns that auto-tracking would produce, without writing

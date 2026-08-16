@@ -19,7 +19,7 @@ use crate::core::output::{OutputMode, emit_json};
 const ATTRS_SUFFIX: &str = "filter=crab diff=crab merge=crab -text";
 
 /// Build the full `.gitattributes` line for a given glob pattern.
-fn attrs_line(glob: &str) -> String {
+pub(crate) fn attrs_line(glob: &str) -> String {
     format!("{glob} {ATTRS_SUFFIX}")
 }
 

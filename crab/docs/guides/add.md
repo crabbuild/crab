@@ -59,6 +59,10 @@ size, and modification time are checked again before publication. Pointer and
 `.gitattributes` deltas are applied to a freshly reread Git index under its
 lock, so unrelated concurrent index entries are preserved. `--dry-run` performs
 discovery only and does not create staging, object, attribute, or index state.
+When an indexed pointer appears clean by Git's stat cache, Crab hashes the
+working-tree bytes and compares the Blake3 identity before skipping CDC and
+staging. This keeps same-size, same-stat replacements from reusing a stale
+pointer.
 
 Only files that match patterns listed in `.gitattributes` with `filter=crab`
 are processed. If a file matches the command-line glob but is not tracked by

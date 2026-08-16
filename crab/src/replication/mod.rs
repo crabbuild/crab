@@ -13316,11 +13316,6 @@ mod tests {
                 reason: "restripe reads and rewrites storage layout state and must not use a stale replica",
             },
             DirectStoreClassification {
-                call: "src/cmd/ship.rs::ensure_manifest_exists",
-                class: "primary-write-authority",
-                reason: "ship checks manifest presence before publish behavior and must see primary write authority",
-            },
-            DirectStoreClassification {
                 call: "src/cmd/workflow.rs::build_remote_store_for",
                 class: "primary-write-authority",
                 reason: "workflow cache push uploads cache artifacts and must write to the primary remote",

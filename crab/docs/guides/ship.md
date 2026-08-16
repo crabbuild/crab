@@ -39,13 +39,22 @@ Uses the native `crab push` pipeline for concurrent xorb uploads rather than
 ## What It Does
 
 1. Runs `crab add <patterns>` (parallel chunking + dedup + staging).
-2. Stages `.gitattributes` if it was modified by auto-tracking.
+2. Publishes auto-generated `.gitattributes` rules in the same locked Git-index
+   update as the pointers, then checked-stages `.gitattributes` and `.crab.toml`.
+   If Git rejects metadata staging, ship stops before committing.
 3. Runs `git commit -m <message>`.
 4. Runs `crab push <remote>` (native concurrent push pipeline).
 
 If no tracking patterns exist in `.gitattributes`, `crab ship` auto-detects
 large file extensions and tracks them before staging — the same auto-track
 behavior as `crab add`.
+
+## JSON Output
+
+`--json` emits one terminal `ship` envelope. Its payload contains the add
+summary, whether a new commit was created, the commit object ID, the optional
+push summary, and per-phase timings. Child `add` and `push` operations do not
+emit separate envelopes.
 
 ## Examples
 
