@@ -66,7 +66,7 @@ pub struct AddArgs {
 }
 
 /// Summary of a completed add operation.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, schemars::JsonSchema)]
 pub struct AddSummary {
     pub files_staged: u64,
     pub files_skipped: u64,
@@ -871,6 +871,25 @@ fn clear_tty_lines<W: Write>(writer: &mut W, prev_lines: &mut usize) {
 /// Discovers the repo root, resolves patterns against crab-tracked
 /// files, processes matching files in parallel, and updates git's index.
 pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
+    execute_add(args, cancel, true).await.map(|_| ())
+}
+
+/// Run add without emitting its terminal result.
+///
+/// Composite commands use this so the outer command owns the sole terminal
+/// machine-readable envelope.
+pub(crate) async fn run_add_without_terminal_output(
+    args: &AddArgs,
+    cancel: &CancellationToken,
+) -> Result<AddSummary> {
+    execute_add(args, cancel, false).await
+}
+
+async fn execute_add(
+    args: &AddArgs,
+    cancel: &CancellationToken,
+    emit_terminal: bool,
+) -> Result<AddSummary> {
     let start = Instant::now();
 
     let worktree_ctx = crate::git::worktree::WorktreeContext::resolve()?;
@@ -878,13 +897,14 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
 
     // Open the consolidated .gitattributes classifier (gix_attributes
     // under the `gix-pathmatch` feature, simple-suffix legacy otherwise).
+    let mut generated_tracking_patterns = Vec::new();
     let mut classifier = TrackedClassifier::open(&repo_root)?;
     if classifier.is_empty() {
         if args.dry_run {
             if !args.mode.is_machine() {
                 println!("No crab-tracked patterns in .gitattributes; dry-run made no changes.");
             }
-            return Ok(());
+            return Ok(empty_add_summary(start));
         }
         // Approach 2: Auto-track large files when no patterns exist yet.
         // Instead of failing with "run crab track first", scan the working
@@ -892,15 +912,15 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
         if !args.mode.is_machine() {
             eprintln!("No crab-tracked patterns in .gitattributes. Scanning for large files...");
         }
-        let tracked_count = crate::cmd::init::auto_track_large_files(&repo_root)?;
-        if tracked_count == 0 {
+        generated_tracking_patterns = crate::cmd::init::auto_track_large_files(&repo_root)?;
+        if generated_tracking_patterns.is_empty() {
             if !args.mode.is_machine() {
                 println!(
                     "No crab-tracked patterns in .gitattributes and no large files found.\n\
                      Run `crab track <glob>` to configure tracking patterns."
                 );
             }
-            return Ok(());
+            return Ok(empty_add_summary(start));
         }
         // Re-open the classifier now that we've added patterns.
         classifier = TrackedClassifier::open(&repo_root)?;
@@ -910,7 +930,7 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
                     "No crab-tracked patterns in .gitattributes. Run `crab track <glob>` first."
                 );
             }
-            return Ok(());
+            return Ok(empty_add_summary(start));
         }
     }
 
@@ -925,7 +945,7 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
             if !args.mode.is_machine() {
                 println!("No matching files found; dry-run made no changes.");
             }
-            return Ok(());
+            return Ok(empty_add_summary(start));
         }
         if !args.mode.is_machine() {
             // Provide actionable diagnostics: figure out WHY nothing matched.
@@ -941,9 +961,11 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
                     untracked_exts.len()
                 );
                 for ext in &untracked_exts {
-                    if let Err(e) = crate::cmd::track::run_track_in(&format!("*.{ext}"), &repo_root)
-                    {
+                    let pattern = format!("*.{ext}");
+                    if let Err(e) = crate::cmd::track::run_track_in(&pattern, &repo_root) {
                         warn!(ext = %ext, error = %e, "failed to auto-track extension");
+                    } else {
+                        generated_tracking_patterns.push(pattern);
                     }
                 }
                 eprintln!(
@@ -957,7 +979,10 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
                 eprintln!("Re-run `crab add` to stage the matching files.");
             }
         }
-        return Ok(());
+        if !args.skip_git_add && !generated_tracking_patterns.is_empty() {
+            publish_generated_tracking_rules(&repo_root, &generated_tracking_patterns)?;
+        }
+        return Ok(empty_add_summary(start));
     }
 
     if args.dry_run {
@@ -968,18 +993,19 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
                 println!("  {} ({})", rel.display(), format_bytes(*size));
             }
         }
-        return Ok(());
+        return Ok(empty_add_summary(start));
     }
 
     let total_candidate_files = candidates.len() as u64;
     let total_candidate_bytes: u64 = candidates.iter().map(|(_, s)| *s).sum();
-    let (candidates, clean_skipped) = filter_clean_indexed_candidates(&repo_root, candidates);
+    let jobs = effective_add_jobs(args.jobs);
+    let (candidates, clean_skipped) =
+        filter_clean_indexed_candidates(&repo_root, candidates, jobs, cancel).await?;
 
     // Open the staging area.
     let staging_root = worktree_ctx.shared_staging_dir();
     let staging = Arc::new(StagingArea::open(staging_root.clone()).await?);
 
-    let jobs = effective_add_jobs(args.jobs);
     if jobs != args.jobs {
         warn!(
             configured_jobs = args.jobs,
@@ -1000,7 +1026,7 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
 
     // Build the optional JSONL stream for streaming mode.
     let jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>> = match args.mode {
-        OutputMode::Jsonl => Some(Arc::new(Mutex::new(JsonlStream::new(
+        OutputMode::Jsonl if emit_terminal => Some(Arc::new(Mutex::new(JsonlStream::new(
             "add.event",
             "1.0",
             std::io::stdout(),
@@ -1316,11 +1342,15 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
         });
 
         let progress_cb = Arc::clone(&progress);
-        if let Err(e) =
-            write_pointers_to_git_index(&staged_entries, &repo_root, &shard_hints, || {
+        if let Err(e) = write_pointers_and_tracking_to_git_index(
+            &staged_entries,
+            &repo_root,
+            &shard_hints,
+            &generated_tracking_patterns,
+            || {
                 progress_cb.files_done.fetch_add(1, Relaxed);
-            })
-        {
+            },
+        ) {
             let error = handle_git_index_write_error(&staging_root, &staged_entries, e).await;
             stop_progress_ticker(ticker.take(), &ticker_cancel).await;
             return Err(error);
@@ -1343,37 +1373,6 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
     let elapsed = start.elapsed();
     summary.duration_ms = elapsed.as_millis() as u64;
 
-    match args.mode {
-        OutputMode::Text => {
-            println!(
-                "Added {} file(s) ({}, {} chunks) in {:.1}s",
-                summary.files_staged,
-                format_bytes(summary.bytes_processed),
-                summary.chunks_staged,
-                elapsed.as_secs_f64(),
-            );
-            if summary.files_skipped > 0 {
-                println!(
-                    "  {} skipped (already staged and clean)",
-                    summary.files_skipped
-                );
-            }
-            if summary.files_failed > 0 {
-                println!("  {} failed", summary.files_failed);
-            }
-        }
-        OutputMode::Json => {
-            emit_json("add", "1.0", &summary);
-        }
-        OutputMode::Jsonl => {
-            if let Some(ref stream) = jsonl_stream
-                && let Ok(mut s) = stream.lock()
-            {
-                s.emit_result(&summary);
-            }
-        }
-    }
-
     if summary.files_failed > 0 {
         return Err(CrabError::Internal(format!(
             "{} file(s) failed during add",
@@ -1381,7 +1380,47 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
         )));
     }
 
-    Ok(())
+    if emit_terminal {
+        match args.mode {
+            OutputMode::Text => {
+                println!(
+                    "Added {} file(s) ({}, {} chunks) in {:.1}s",
+                    summary.files_staged,
+                    format_bytes(summary.bytes_processed),
+                    summary.chunks_staged,
+                    elapsed.as_secs_f64(),
+                );
+                if summary.files_skipped > 0 {
+                    println!(
+                        "  {} skipped (already staged and clean)",
+                        summary.files_skipped
+                    );
+                }
+                if summary.files_failed > 0 {
+                    println!("  {} failed", summary.files_failed);
+                }
+            }
+            OutputMode::Json => {
+                emit_json("add", "1.0", &summary);
+            }
+            OutputMode::Jsonl => {
+                if let Some(ref stream) = jsonl_stream
+                    && let Ok(mut s) = stream.lock()
+                {
+                    s.emit_result(&summary);
+                }
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+fn empty_add_summary(start: Instant) -> AddSummary {
+    AddSummary {
+        duration_ms: start.elapsed().as_millis() as u64,
+        ..AddSummary::default()
+    }
 }
 
 struct AddResultAccounting<'a> {
@@ -2419,24 +2458,26 @@ fn collect_candidates(
     Ok(candidates)
 }
 
-fn filter_clean_indexed_candidates(
+async fn filter_clean_indexed_candidates(
     repo_root: &Path,
     candidates: Vec<(PathBuf, u64)>,
-) -> (Vec<(PathBuf, u64)>, CleanIndexedSkipSummary) {
+    jobs: usize,
+    cancel: &CancellationToken,
+) -> Result<(Vec<(PathBuf, u64)>, CleanIndexedSkipSummary)> {
     if candidates.is_empty() {
-        return (candidates, CleanIndexedSkipSummary::default());
+        return Ok((candidates, CleanIndexedSkipSummary::default()));
     }
 
     let ctx = match crate::git::worktree::WorktreeContext::resolve_from_path(repo_root) {
         Ok(ctx) => ctx,
         Err(e) => {
             debug!(error = %e, "clean-index add fast path disabled: worktree context unavailable");
-            return (candidates, CleanIndexedSkipSummary::default());
+            return Ok((candidates, CleanIndexedSkipSummary::default()));
         }
     };
     let index_path = ctx.index_path();
     if !index_path.exists() {
-        return (candidates, CleanIndexedSkipSummary::default());
+        return Ok((candidates, CleanIndexedSkipSummary::default()));
     }
 
     let index = match gix_index::File::at(
@@ -2448,29 +2489,42 @@ fn filter_clean_indexed_candidates(
         Ok(index) => index,
         Err(e) => {
             debug!(error = %e, "clean-index add fast path disabled: failed to open index");
-            return (candidates, CleanIndexedSkipSummary::default());
+            return Ok((candidates, CleanIndexedSkipSummary::default()));
         }
     };
     let repo = match gix::open(repo_root) {
         Ok(repo) => repo,
         Err(e) => {
             debug!(error = %e, "clean-index add fast path disabled: failed to open git repository");
-            return (candidates, CleanIndexedSkipSummary::default());
+            return Ok((candidates, CleanIndexedSkipSummary::default()));
         }
     };
     let honor_filemode = git_honors_filemode(repo_root);
+    let candidates = candidates
+        .into_iter()
+        .map(|(abs_path, size)| {
+            let expected_hash =
+                clean_index_pointer_hash(repo_root, &repo, &index, &abs_path, size, honor_filemode);
+            (abs_path, size, expected_hash)
+        })
+        .collect::<Vec<_>>();
+    let mut checks = futures_util::stream::iter(candidates)
+        .map(|(abs_path, size, expected_hash)| async move {
+            let matches = match expected_hash {
+                Some(expected_hash) => {
+                    worktree_content_matches_pointer(&abs_path, size, expected_hash, cancel).await?
+                }
+                None => false,
+            };
+            Ok::<_, CrabError>((abs_path, size, matches))
+        })
+        .buffered(jobs.max(1));
 
-    let mut to_process = Vec::with_capacity(candidates.len());
+    let mut to_process = Vec::new();
     let mut skipped = CleanIndexedSkipSummary::default();
-    for (abs_path, size) in candidates {
-        if clean_index_entry_matches_worktree(
-            repo_root,
-            &repo,
-            &index,
-            &abs_path,
-            size,
-            honor_filemode,
-        ) {
+    while let Some(result) = checks.next().await {
+        let (abs_path, size, matches) = result?;
+        if matches {
             skipped.files += 1;
             skipped.bytes += size;
         } else {
@@ -2482,50 +2536,54 @@ fn filter_clean_indexed_candidates(
         debug!(
             files = skipped.files,
             bytes = skipped.bytes,
-            "skipped clean indexed files during add"
+            "skipped content-verified indexed files during add"
         );
     }
 
-    (to_process, skipped)
+    Ok((to_process, skipped))
 }
 
-fn clean_index_entry_matches_worktree(
+async fn worktree_content_matches_pointer(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let (actual_hash, actual_size) =
+        crate::cmd::stream_stage::stream_hash_file(path, None, cancel).await?;
+    Ok(actual_size == expected_size && actual_hash == expected_hash)
+}
+
+fn clean_index_pointer_hash(
     repo_root: &Path,
     repo: &gix::Repository,
     index: &gix_index::File,
     abs_path: &Path,
     size: u64,
     honor_filemode: bool,
-) -> bool {
+) -> Option<[u8; 32]> {
     use bstr::ByteSlice;
     use gix_index::entry;
 
     let rel_path = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
     let rel_bstr = git_index_path_bstring(rel_path);
-    let Some(entry) = index.entry_by_path_and_stage(rel_bstr.as_bstr(), entry::Stage::Unconflicted)
-    else {
-        return false;
-    };
+    let entry = index.entry_by_path_and_stage(rel_bstr.as_bstr(), entry::Stage::Unconflicted)?;
 
     let expected_mode = index_mode_for_worktree_file(abs_path, honor_filemode);
     if entry.mode != expected_mode {
-        return false;
+        return None;
     }
 
-    let Some(current_stat) =
-        crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(abs_path)
-    else {
-        return false;
-    };
+    let current_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(abs_path)?;
     if current_stat.len != size {
-        return false;
+        return None;
     }
 
     let stat_options = gix_index::entry::stat::Options::default();
     if !current_stat.stat.matches(&entry.stat, stat_options)
         || current_stat.stat.is_racy(index.timestamp(), stat_options)
     {
-        return false;
+        return None;
     }
 
     let pointer = match repo.find_blob(entry.id) {
@@ -2539,12 +2597,8 @@ fn clean_index_entry_matches_worktree(
             );
             None
         }
-    };
-    let Some(pointer) = pointer else {
-        return false;
-    };
-
-    pointer.size == size
+    }?;
+    (pointer.size == size).then_some(pointer.file_hash)
 }
 
 /// Recursive directory walker that collects `(abs_path, file_size)` pairs.
@@ -2957,10 +3011,27 @@ enum GitIndexWriteError {
 /// The clean filter is still correct on its own — a `git add` on a
 /// crab-tracked path at the shell (outside `crab add`) will still
 /// produce the same pointer via the filter.
+#[cfg(test)]
 fn write_pointers_to_git_index(
     entries: &[StagedEntry],
     repo_root: &Path,
     shard_hints: &crate::cache::ShardHintCache,
+    mut on_file_done: impl FnMut(),
+) -> std::result::Result<(), GitIndexWriteError> {
+    write_pointers_and_tracking_to_git_index(
+        entries,
+        repo_root,
+        shard_hints,
+        &[],
+        &mut on_file_done,
+    )
+}
+
+fn write_pointers_and_tracking_to_git_index(
+    entries: &[StagedEntry],
+    repo_root: &Path,
+    shard_hints: &crate::cache::ShardHintCache,
+    tracking_patterns: &[String],
     mut on_file_done: impl FnMut(),
 ) -> std::result::Result<(), GitIndexWriteError> {
     let honor_filemode = git_honors_filemode(repo_root);
@@ -2996,7 +3067,7 @@ fn write_pointers_to_git_index(
         on_file_done();
     }
 
-    publish_git_index_entries(&index_entries, repo_root)?;
+    publish_git_index_entries_with_tracking(&index_entries, repo_root, tracking_patterns)?;
 
     Ok(())
 }
@@ -3018,13 +3089,29 @@ fn write_pointer_blob(repo_root: &Path, payload: &[u8]) -> Result<String> {
     Ok(oid.to_string())
 }
 
+#[cfg(test)]
 fn publish_git_index_entries(
     entries: &[GitIndexEntry],
     repo_root: &Path,
 ) -> std::result::Result<(), GitIndexWriteError> {
+    publish_git_index_entries_with_tracking(entries, repo_root, &[])
+}
+
+fn publish_generated_tracking_rules(repo_root: &Path, patterns: &[String]) -> Result<()> {
+    publish_git_index_entries_with_tracking(&[], repo_root, patterns).map_err(|error| match error {
+        GitIndexWriteError::BeforeIndexMutation(error)
+        | GitIndexWriteError::IndexMutationUncertain(error) => error,
+    })
+}
+
+fn publish_git_index_entries_with_tracking(
+    entries: &[GitIndexEntry],
+    repo_root: &Path,
+    tracking_patterns: &[String],
+) -> std::result::Result<(), GitIndexWriteError> {
     use bstr::ByteSlice;
     use gix_index::{File, decode, entry};
-    if entries.is_empty() {
+    if entries.is_empty() && tracking_patterns.is_empty() {
         return Ok(());
     }
 
@@ -3053,7 +3140,15 @@ fn publish_git_index_entries(
         )))
     })?;
 
-    let mut prepared = Vec::with_capacity(entries.len());
+    struct PreparedIndexEntry {
+        rel_path: bstr::BString,
+        oid: gix_hash::ObjectId,
+        stat: gix_index::entry::Stat,
+        mode: gix_index::entry::Mode,
+    }
+
+    let mut prepared =
+        Vec::with_capacity(entries.len() + usize::from(!tracking_patterns.is_empty()));
     for selected in entries {
         let current =
             crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&selected.abs_path);
@@ -3080,25 +3175,117 @@ fn publish_git_index_entries(
                 selected.sha
             )))
         })?;
-        prepared.push((selected, rel_path, oid));
+        prepared.push(PreparedIndexEntry {
+            rel_path,
+            oid,
+            stat: selected.index_stat.stat,
+            mode: selected.mode,
+        });
+    }
+
+    if !tracking_patterns.is_empty() {
+        let attributes_path = repo_root.join(".gitattributes");
+        let worktree_bytes = std::fs::read(&attributes_path)
+            .map_err(|error| GitIndexWriteError::BeforeIndexMutation(CrabError::Io(error)))?;
+        let worktree_content = std::str::from_utf8(&worktree_bytes).map_err(|error| {
+            GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                ".gitattributes is not valid UTF-8: {error}"
+            )))
+        })?;
+        let lines = tracking_patterns
+            .iter()
+            .map(|pattern| crate::cmd::track::attrs_line(pattern))
+            .collect::<Vec<_>>();
+        for line in &lines {
+            if !worktree_content.lines().any(|current| current == line) {
+                return Err(GitIndexWriteError::BeforeIndexMutation(
+                    CrabError::Internal(format!(
+                        "generated tracking rule disappeared before index publication: {line}"
+                    )),
+                ));
+            }
+        }
+
+        let rel_path = bstr::BString::from(".gitattributes");
+        let existing_entry = index
+            .entry_by_path_and_stage(rel_path.as_bstr(), entry::Stage::Unconflicted)
+            .cloned();
+        let mut indexed_content = match existing_entry.as_ref() {
+            Some(existing) => {
+                let repo = gix::open(repo_root).map_err(|error| {
+                    GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                        "failed to open Git repository for .gitattributes publication: {error}"
+                    )))
+                })?;
+                let blob = repo.find_blob(existing.id).map_err(|error| {
+                    GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                        "failed to read indexed .gitattributes: {error}"
+                    )))
+                })?;
+                String::from_utf8(blob.data.to_vec()).map_err(|error| {
+                    GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                        "indexed .gitattributes is not valid UTF-8: {error}"
+                    )))
+                })?
+            }
+            None => String::new(),
+        };
+        let mut changed = false;
+        for line in &lines {
+            if indexed_content.lines().any(|current| current == line) {
+                continue;
+            }
+            if !indexed_content.is_empty() && !indexed_content.ends_with('\n') {
+                indexed_content.push('\n');
+            }
+            indexed_content.push_str(line);
+            indexed_content.push('\n');
+            changed = true;
+        }
+        if changed {
+            let repo = gix::open(repo_root).map_err(|error| {
+                GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                    "failed to open Git repository for .gitattributes blob write: {error}"
+                )))
+            })?;
+            let oid = repo
+                .write_blob(indexed_content.as_bytes())
+                .map_err(|error| {
+                    GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                        "failed to write .gitattributes blob: {error}"
+                    )))
+                })?;
+            let stat = if indexed_content.as_bytes() == worktree_bytes {
+                crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&attributes_path)
+                    .map_or_else(gix_index::entry::Stat::default, |value| value.stat)
+            } else {
+                gix_index::entry::Stat::default()
+            };
+            prepared.push(PreparedIndexEntry {
+                rel_path,
+                oid: oid.into(),
+                stat,
+                mode: existing_entry.map_or(gix_index::entry::Mode::FILE, |value| value.mode),
+            });
+        }
     }
 
     // Path lookups require sorted entries. Remove every old entry before
     // dangerously_push_entry invalidates that ordering for subsequent lookups.
-    for (_, rel_path, _) in &prepared {
-        while let Some(range) = index.entry_range(rel_path.as_bstr()) {
+    for selected in &prepared {
+        while let Some(range) = index.entry_range(selected.rel_path.as_bstr()) {
             for position in range.rev() {
                 index.remove_entry_at_index(position);
             }
         }
     }
-    for (selected, rel_path, oid) in prepared {
+    for selected in prepared {
         index.dangerously_push_entry(
-            selected.index_stat.stat,
-            oid,
+            selected.stat,
+            selected.oid,
             entry::Flags::from_stage(entry::Stage::Unconflicted),
             selected.mode,
-            rel_path.as_bstr(),
+            selected.rel_path.as_bstr(),
         );
     }
     index.sort_entries();
@@ -4008,6 +4195,57 @@ mod tests {
     }
 
     #[test]
+    fn direct_index_writer_stages_only_generated_tracking_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let attributes = dir.path().join(".gitattributes");
+        std::fs::write(&attributes, "# staged\n").unwrap();
+        let status = std::process::Command::new("git")
+            .args(["add", "--", ".gitattributes"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(&attributes, "# staged\n# unstaged\n").unwrap();
+        crate::cmd::track::run_track_in("*.bin", dir.path()).unwrap();
+
+        let path = dir.path().join("model.bin");
+        let payload = b"model payload";
+        std::fs::write(&path, payload).unwrap();
+        write_pointers_and_tracking_to_git_index(
+            &[staged_entry(
+                path,
+                *blake3::hash(payload).as_bytes(),
+                payload.len() as u64,
+            )],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            &["*.bin".to_owned()],
+            || {},
+        )
+        .unwrap();
+
+        let indexed = std::process::Command::new("git")
+            .args(["show", ":.gitattributes"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(indexed.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&indexed.stdout),
+            "# staged\n*.bin filter=crab diff=crab merge=crab -text\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(attributes).unwrap(),
+            "# staged\n# unstaged\n*.bin filter=crab diff=crab merge=crab -text\n"
+        );
+    }
+
+    #[test]
     fn direct_index_writer_replaces_multiple_entries_without_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         if !init_git_repo(dir.path()) {
@@ -4157,8 +4395,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clean_index_filter_skips_non_racy_crab_pointer_entry() {
+    #[tokio::test]
+    async fn clean_index_filter_skips_non_racy_crab_pointer_entry() {
         let dir = tempfile::tempdir().unwrap();
         if !init_git_repo(dir.path()) {
             eprintln!("SKIP: git init failed");
@@ -4183,17 +4421,23 @@ mod tests {
         )
         .unwrap();
 
-        let (to_process, skipped) =
-            filter_clean_indexed_candidates(dir.path(), vec![(path, payload.len() as u64)]);
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert!(to_process.is_empty());
         assert_eq!(skipped.files, 1);
         assert_eq!(skipped.bytes, payload.len() as u64);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn clean_index_filter_does_not_skip_mode_only_change() {
+    async fn clean_index_filter_does_not_skip_mode_only_change() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -4229,8 +4473,55 @@ mod tests {
         std::fs::set_permissions(&path, perms).unwrap();
         make_file_mtime_old(&path);
 
-        let (to_process, skipped) =
-            filter_clean_indexed_candidates(dir.path(), vec![(path, payload.len() as u64)]);
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(to_process.len(), 1);
+        assert_eq!(skipped.files, 0);
+        assert_eq!(skipped.bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn clean_index_filter_does_not_trust_matching_stat_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let original = b"original payload";
+        let replacement = b"replaced payload";
+        assert_eq!(original.len(), replacement.len());
+        std::fs::write(&path, replacement).unwrap();
+        make_file_mtime_old(&path);
+
+        write_pointers_to_git_index(
+            &[staged_entry(
+                path.clone(),
+                *blake3::hash(original).as_bytes(),
+                original.len() as u64,
+            )],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, replacement.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(to_process.len(), 1);
         assert_eq!(skipped.files, 0);

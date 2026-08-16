@@ -171,7 +171,7 @@ struct PushTarget {
 }
 
 enum PushAttempt {
-    Done,
+    Done(PushSummaryPayload),
     Failed(Box<PushAttemptFailure>),
 }
 
@@ -186,12 +186,28 @@ struct PushIntegrationSummary {
 /// Resolves the remote, validates the URL, opens staging, resolves refspecs,
 /// and runs the push pipeline. Updates push state on success.
 pub async fn run_push(args: &PushArgs, cancel: &CancellationToken) -> Result<()> {
+    execute_push(args, cancel, true).await.map(|_| ())
+}
+
+/// Run push without emitting its terminal result envelope.
+pub(crate) async fn run_push_without_terminal_output(
+    args: &PushArgs,
+    cancel: &CancellationToken,
+) -> Result<PushSummaryPayload> {
+    execute_push(args, cancel, false).await
+}
+
+async fn execute_push(
+    args: &PushArgs,
+    cancel: &CancellationToken,
+    emit_terminal: bool,
+) -> Result<PushSummaryPayload> {
     let mode = OutputMode::from_flags(args.json, args.jsonl);
     let mut retry_attempts = 0u32;
 
     loop {
-        match run_push_once(args, cancel, retry_attempts).await? {
-            PushAttempt::Done => return Ok(()),
+        match run_push_once(args, cancel, retry_attempts, emit_terminal).await? {
+            PushAttempt::Done(summary) => return Ok(summary),
             PushAttempt::Failed(mut failure) => {
                 if args.rebase_on_non_fast_forward
                     && retry_attempts < args.rebase_retry_limit
@@ -206,7 +222,13 @@ pub async fn run_push(args: &PushArgs, cancel: &CancellationToken) -> Result<()>
                             failure.remote_name, branch, retry_attempts, args.rebase_retry_limit
                         );
                     }
-                    rebase_for_integration(&mut failure, &branch, retry_attempts, mode)?;
+                    rebase_for_integration(
+                        &mut failure,
+                        &branch,
+                        retry_attempts,
+                        mode,
+                        emit_terminal,
+                    )?;
                     tokio::time::sleep(integration_retry_delay(retry_attempts)).await;
                     continue;
                 }
@@ -229,13 +251,21 @@ pub async fn run_push(args: &PushArgs, cancel: &CancellationToken) -> Result<()>
                         );
                     }
                     if !failure.agent_integration_lock {
-                        rebase_for_integration(&mut failure, &branch, retry_attempts, mode)?;
+                        rebase_for_integration(
+                            &mut failure,
+                            &branch,
+                            retry_attempts,
+                            mode,
+                            emit_terminal,
+                        )?;
                     }
                     tokio::time::sleep(integration_retry_delay(retry_attempts)).await;
                     continue;
                 }
 
-                emit_push_failure(&failure, mode);
+                if emit_terminal || mode == OutputMode::Text {
+                    emit_push_failure(&failure, mode);
+                }
                 return Err(CrabError::Internal(
                     "push failed for one or more refs".into(),
                 ));
@@ -378,6 +408,7 @@ async fn run_push_once(
     args: &PushArgs,
     cancel: &CancellationToken,
     integration_retries: u32,
+    emit_terminal: bool,
 ) -> Result<PushAttempt> {
     let start = Instant::now();
     let mode = OutputMode::from_flags(args.json, args.jsonl);
@@ -415,20 +446,21 @@ async fn run_push_once(
     if specs.is_empty() {
         if mode == OutputMode::Text {
             println!("Everything up-to-date");
-        } else {
-            let integration = push_integration_summary(args, integration_retries);
-            let summary = PushSummaryPayload {
-                refs_pushed: 0,
-                refs: vec![],
-                duration_ms: start.elapsed().as_millis() as u64,
-                remote_url: remote_url.clone(),
-                integration_retries: integration.map(|summary| summary.retries),
-                integration_retry_limit: integration.map(|summary| summary.retry_limit),
-                operation_id: None,
-                coordinator_epoch: None,
-                writer_region: None,
-                commit_state: None,
-            };
+        }
+        let integration = push_integration_summary(args, integration_retries);
+        let summary = PushSummaryPayload {
+            refs_pushed: 0,
+            refs: vec![],
+            duration_ms: start.elapsed().as_millis() as u64,
+            remote_url: remote_url.clone(),
+            integration_retries: integration.map(|summary| summary.retries),
+            integration_retry_limit: integration.map(|summary| summary.retry_limit),
+            operation_id: None,
+            coordinator_epoch: None,
+            writer_region: None,
+            commit_state: None,
+        };
+        if emit_terminal && mode != OutputMode::Text {
             match mode {
                 OutputMode::Json => emit_json("push", "1.0", &summary),
                 OutputMode::Jsonl => {
@@ -438,7 +470,7 @@ async fn run_push_once(
                 OutputMode::Text => unreachable!(),
             }
         }
-        return Ok(PushAttempt::Done);
+        return Ok(PushAttempt::Done(summary));
     }
 
     info!(
@@ -453,7 +485,19 @@ async fn run_push_once(
     // Dry-run: print what would be pushed and return.
     if args.dry_run {
         print_dry_run(&remote_name, &remote_url, &specs);
-        return Ok(PushAttempt::Done);
+        let integration = push_integration_summary(args, integration_retries);
+        return Ok(PushAttempt::Done(PushSummaryPayload {
+            refs_pushed: 0,
+            refs: Vec::new(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            remote_url,
+            integration_retries: integration.map(|summary| summary.retries),
+            integration_retry_limit: integration.map(|summary| summary.retry_limit),
+            operation_id: None,
+            coordinator_epoch: None,
+            writer_region: None,
+            commit_state: None,
+        }));
     }
 
     // Build push config from resolved Config + CLI overrides.
@@ -499,7 +543,7 @@ async fn run_push_once(
 
     // Build the optional JSONL stream for streaming mode.
     let jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>> = match mode {
-        OutputMode::Jsonl => Some(Arc::new(Mutex::new(JsonlStream::new(
+        OutputMode::Jsonl if emit_terminal => Some(Arc::new(Mutex::new(JsonlStream::new(
             "push.event",
             "1.0",
             std::io::stdout(),
@@ -560,7 +604,9 @@ async fn run_push_once(
                         integration: push_integration_summary(args, integration_retries),
                         agent_integration_lock: true,
                     };
-                    emit_push_failure(&failure, mode);
+                    if emit_terminal || mode == OutputMode::Text {
+                        emit_push_failure(&failure, mode);
+                    }
                     return Err(CrabError::PushIntegrationFailed { command, message });
                 }
 
@@ -633,50 +679,49 @@ async fn run_push_once(
         let elapsed = start.elapsed();
         let integration = push_integration_summary(args, integration_retries);
 
+        let summary = build_push_summary(&specs, &result, &remote_url, elapsed, integration);
         match mode {
             OutputMode::Text => {
                 print_push_summary(&remote_name, &remote_url, &specs, &result, elapsed);
             }
             OutputMode::Json => {
-                let summary =
-                    build_push_summary(&specs, &result, &remote_url, elapsed, integration);
-                emit_json("push", "1.0", &summary);
+                if emit_terminal {
+                    emit_json("push", "1.0", &summary);
+                }
             }
             OutputMode::Jsonl => {
-                let summary =
-                    build_push_summary(&specs, &result, &remote_url, elapsed, integration);
-                if let Some(ref stream) = jsonl_stream
+                if emit_terminal
+                    && let Some(ref stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
                     s.emit_result(&summary);
                 }
             }
         }
-    } else {
-        let elapsed = start.elapsed();
-        if let Err(err) = record_push_audit_event(
-            &repo_root.join(default_log_path()),
-            Some(&remote_url),
-            &repo_prefix,
-            &specs,
-            &result,
-            Some(elapsed.as_millis() as u64),
-        ) {
-            warn!(%err, "failed to append push audit event");
-        }
-        return Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
-            repo_root,
-            remote_name,
-            remote_url,
-            specs,
-            result,
-            elapsed,
-            integration: push_integration_summary(args, integration_retries),
-            agent_integration_lock: false,
-        })));
+        return Ok(PushAttempt::Done(summary));
     }
 
-    Ok(PushAttempt::Done)
+    let elapsed = start.elapsed();
+    if let Err(err) = record_push_audit_event(
+        &repo_root.join(default_log_path()),
+        Some(&remote_url),
+        &repo_prefix,
+        &specs,
+        &result,
+        Some(elapsed.as_millis() as u64),
+    ) {
+        warn!(%err, "failed to append push audit event");
+    }
+    Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
+        repo_root,
+        remote_name,
+        remote_url,
+        specs,
+        result,
+        elapsed,
+        integration: push_integration_summary(args, integration_retries),
+        agent_integration_lock: false,
+    })))
 }
 
 fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
@@ -863,11 +908,14 @@ fn rebase_for_integration(
     branch: &str,
     retries: u32,
     mode: OutputMode,
+    emit_terminal: bool,
 ) -> Result<()> {
     if let Err(message) = run_git_pull_rebase(&failure.repo_root, &failure.remote_name, branch) {
         let command = integration_command(&failure.remote_name, branch);
         mark_integration_failed(failure, command.clone(), message.clone(), retries);
-        emit_push_failure(failure, mode);
+        if emit_terminal || mode == OutputMode::Text {
+            emit_push_failure(failure, mode);
+        }
         return Err(CrabError::PushIntegrationFailed { command, message });
     }
 

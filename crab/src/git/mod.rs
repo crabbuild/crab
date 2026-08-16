@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod fetch_transport;
 pub mod filter_process;
 pub mod incremental_walk;
+pub(crate) mod index;
 pub mod pack;
 #[cfg(feature = "gix-pack-native")]
 pub mod pack_native;

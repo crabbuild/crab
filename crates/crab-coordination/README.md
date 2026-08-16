@@ -23,7 +23,7 @@ Single repository mutation                 Active-active mutation
         ▼                                          ▼
 PushLock: short-TTL CAS lease          WriteCoordinator: durable state machine
         │                                          │
-        └── object-store lock                    ├─ Pending
+        └── object-store lock                      ├─ Pending
                                                    ├─ ObjectsUploaded
                                                    ├─ Committed
                                                    ├─ Materialized

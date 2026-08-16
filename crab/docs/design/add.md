@@ -260,7 +260,10 @@ The JSONL `push-plan` event reports completed files as `current`, total files as
 ## Git Pointer Publication
 
 `write_pointers_to_git_index` publishes only after staging and plan preparation
-succeed.
+succeed. When add generated tracking rules, the publisher applies those exact
+rules to the currently indexed `.gitattributes` blob and commits the metadata
+and pointer entries through the same index lock. Unrelated unstaged attribute
+edits remain in the worktree rather than being swept into the commit.
 
 ```mermaid
 flowchart TD
@@ -356,11 +359,11 @@ segment write is removed from `crab add`.
 
 ## Improvement Ideas
 
-1. **Stronger mutation detection.** The current single-pass path compares
-   before/after verified stat. A malicious or unusual writer that preserves the
-   same stat fields could evade that check. A stronger path could combine file
-   descriptor metadata, platform generation fields where available, or an
-   optional verification mode.
+1. **Stronger concurrent mutation exclusion.** Clean indexed files are hashed
+   before Crab reuses their pointer, and streamed files compare descriptor and
+   path stat before publication. A malicious writer that changes bytes after a
+   verified read while preserving every observed stat field still requires
+   cooperative file locking or filesystem snapshots to exclude completely.
 2. **Plan progress inside large single files.** The planning phase reports per
    completed file. If one file packs many chunks, an additional per-batch
    callback from `prepare_one_file_plan` would make `push-plan` progress more

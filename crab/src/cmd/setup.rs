@@ -222,16 +222,12 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
     // ---- Step 4: Stage files ----
     let needs_git_add = !args.dry_run && root.join(".git").exists();
     if needs_git_add {
+        let mut paths = Vec::with_capacity(2);
         if root.join(".gitattributes").exists() {
-            let _ = std::process::Command::new("git")
-                .args(["add", ".gitattributes"])
-                .current_dir(root)
-                .output();
+            paths.push(".gitattributes");
         }
-        let _ = std::process::Command::new("git")
-            .args(["add", ".crab.toml"])
-            .current_dir(root)
-            .output();
+        paths.push(".crab.toml");
+        crate::git::index::stage_paths(root, &paths)?;
     }
 
     // ---- Step 5: Output summary ----

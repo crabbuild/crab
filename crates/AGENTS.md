@@ -82,7 +82,7 @@ crab-types
 - Staged xorbs flush before bundle publication. Recovery, compaction, and multipart resume must remain idempotent after interruption.
 - Every acquired push/write lock is released on success, error, cancellation, and timeout. Active-active coordination must preserve per-ref serialization.
 - Cache hits are verified and cache failures cannot corrupt origin data. Cache fallback behavior is owned by `crab-cache-store`, not copied into consumers.
-- Hydration, fetch, SDK reads, and VFS reads share canonical selection and reconstruction behavior. One-sided fixes require sibling-surface proof.
+- Hydration, fetch, and VFS reads share canonical selection and reconstruction behavior. One-sided fixes require sibling-surface proof.
 - Mount teardown releases leases, IPC resources, background tasks, and filesystem handles on every exit path.
 - Credentials and tokens never enter logs, errors, cache keys, fixtures, or persisted config unless the format explicitly encrypts them.
 - Public contract changes require consumer proof across `crab/` and sibling crates as applicable.
@@ -92,10 +92,10 @@ crab-types
 Start narrow from the repository root:
 
 ```bash
-cargo fmt --check -p crab-types -p crab-storage
-cargo check -p crab-storage
-cargo test -p crab-storage
-cargo clippy -p crab-storage --all-targets -- -D warnings
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo fmt --check -p crab-types -p crab-storage
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo check -p crab-storage
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab-storage
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo clippy -p crab-storage --all-targets -- -D warnings
 ```
 
 - Replace the example packages with every changed crate and direct consumer needed to prove the contract.
