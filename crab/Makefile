@@ -318,7 +318,7 @@ all: build
 # --- Build ---
 
 build:
-	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+	@set -e; if [ "$(UNAME_S)" = "Darwin" ]; then \
 		$(CARGO) build $(RELEASE_FLAGS) -p crab --bin $(BINARY_NAME) --no-default-features --features "$(CRAB_CLI_FEATURES_WITH_FUSE)"; \
 		cp "$(RELEASE_BIN)" "$(FUSE_MOUNT_RELEASE_BIN)"; \
 		$(CARGO) build $(RELEASE_FLAGS) -p crab --bin $(BINARY_NAME) --no-default-features --features "$(CRAB_CLI_FEATURES_NO_FUSE)"; \
