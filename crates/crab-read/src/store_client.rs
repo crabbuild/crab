@@ -11,15 +11,16 @@ use crab_xet::hash::MerkleHash;
 use crab_xet::shard::{MDBFileInfo, ShardReader};
 use crab_xet::xorb::format::SerializedXorbObject;
 use tracing::{debug, warn};
+use xet_client::cas_client::ShardUploadProgressCallback;
 use xet_client::cas_client::adaptive_concurrency::{
     AdaptiveConcurrencyController, ConnectionPermit,
 };
 use xet_client::cas_client::progress_tracked_streams::ProgressCallback;
 use xet_client::cas_client::{Client, URLProvider};
 use xet_client::cas_types::{
-    BatchQueryReconstructionResponse, ChunkRange, FileRange, HexMerkleHash, HttpRange,
-    QueryReconstructionResponseV2, XorbMultiRangeFetch, XorbRangeDescriptor,
-    XorbReconstructionFetchInfo, XorbReconstructionTerm,
+    BatchQueryReconstructionResponse, ChunkRange, FileChunkHashesResponse, FileRange,
+    HexMerkleHash, HttpRange, QueryReconstructionResponseV2, XorbMultiRangeFetch,
+    XorbRangeDescriptor, XorbReconstructionFetchInfo, XorbReconstructionTerm,
 };
 use xet_client::error::{ClientError, Result as ClientResult};
 
@@ -520,9 +521,21 @@ impl Client for StoreClient {
         &self,
         _shard_data: Bytes,
         _upload_permit: ConnectionPermit,
-    ) -> ClientResult<bool> {
+        _progress_callback: Option<ShardUploadProgressCallback>,
+    ) -> ClientResult<()> {
         Err(ClientError::Other(
             "StoreClient is read-only; shard uploads go through the crab push pipeline".into(),
+        ))
+    }
+
+    async fn get_file_chunk_hashes(
+        &self,
+        _file_id: &MerkleHash,
+        _dirty_ranges: Vec<FileRange>,
+    ) -> ClientResult<FileChunkHashesResponse> {
+        Err(ClientError::Other(
+            "StoreClient is read-only; file chunk hash queries go through the crab push pipeline"
+                .into(),
         ))
     }
 

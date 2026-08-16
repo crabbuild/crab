@@ -29,6 +29,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 xet-client = { workspace = true }
 xet-data = { workspace = true }
+xet-runtime = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

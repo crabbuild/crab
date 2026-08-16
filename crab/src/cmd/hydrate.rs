@@ -615,7 +615,7 @@ impl ShardHydrator {
     pub fn new(store: crab_cache_store::CachingStore, router: HydrateStoreLayout) -> Result<Self> {
         let concurrency = fixed_hydrate_concurrency(
             crate::core::config::HydrateConfig::default().download_concurrency,
-        );
+        )?;
         Ok(Self::with_concurrency(store, router, concurrency))
     }
 
@@ -671,7 +671,7 @@ impl ShardHydrator {
         router: HydrateStoreLayout,
         config: &Config,
     ) -> Result<Self> {
-        let concurrency = fixed_hydrate_concurrency(config.hydrate.download_concurrency);
+        let concurrency = fixed_hydrate_concurrency(config.hydrate.download_concurrency)?;
         let mut hydrator = Self::with_concurrency(store, router, concurrency);
         hydrator.buffer_semaphore = hydrate_buffer_semaphore(config.hydrate.prefetch_budget);
         hydrator.file_concurrency = hydrate_file_concurrency(config.hydrate.download_concurrency);
@@ -1207,8 +1207,9 @@ impl ShardHydrator {
         let shared = Arc::new(std::sync::Mutex::new(buffer));
         let writer = SharedCursorWriter(shared.clone());
 
+        let xet_context = new_xet_context()?;
         let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&client, file_hash)
+            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore));
         // Chunk cache and prefetch share the same concurrency
         // controller via `StoreClient::acquire_download_permit`. The
@@ -1347,8 +1348,9 @@ impl ShardHydrator {
             shared: tap_state.clone(),
         };
 
+        let xet_context = new_xet_context()?;
         let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&client, file_hash)
+            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore));
         let reconstructor = match self.chunk_cache.clone() {
             Some(cache) => reconstructor.with_chunk_cache(cache),
@@ -1474,8 +1476,9 @@ impl ShardHydrator {
             shared: tap_state.clone(),
         };
 
+        let xet_context = new_xet_context()?;
         let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&client, file_hash)
+            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
                 .with_cancellation_token(cancel.clone());
         let reconstructor = match self.chunk_cache.clone() {
@@ -1624,8 +1627,9 @@ impl ShardHydrator {
         let writer = SharedCursorWriter(shared.clone());
 
         let range = xet_client::cas_types::FileRange::new(start, end);
+        let xet_context = new_xet_context()?;
         let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&client, file_hash)
+            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
                 .with_byte_range(range);
         let reconstructor = match self.chunk_cache.clone() {
@@ -1860,12 +1864,22 @@ impl ShardHydrator {
     }
 }
 
+fn new_xet_context() -> Result<xet_runtime::core::XetContext> {
+    xet_runtime::core::XetContext::default().map_err(|error| {
+        error::CrabError::Internal(format!("failed to initialize xet context: {error}"))
+    })
+}
+
 fn fixed_hydrate_concurrency(
     concurrency: usize,
-) -> Arc<xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController> {
-    xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController::new_fixed(
-        HYDRATE_CONCURRENCY_TAG,
-        concurrency,
+) -> Result<Arc<xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController>> {
+    let context = new_xet_context()?;
+    Ok(
+        xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController::new_fixed(
+            context,
+            HYDRATE_CONCURRENCY_TAG,
+            concurrency,
+        ),
     )
 }
 

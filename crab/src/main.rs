@@ -3599,9 +3599,12 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                             "would clean shard cache (dry-run)"
                                         );
                                     } else {
+                                        let shard_file_cache =
+                                            crab_xet::shard::new_shard_file_cache();
                                         match crab_xet::shard::MDBShardFile::clean_shard_cache(
                                             &shards_dir,
                                             expiration_secs,
+                                            &shard_file_cache,
                                         ) {
                                             Ok(()) => {
                                                 tracing::debug!(

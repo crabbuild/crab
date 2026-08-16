@@ -47,10 +47,10 @@ crab-vfs = { path = "crates/crab-vfs", default-features = false }
 crab-workflow = { path = "crates/crab-workflow", default-features = false }
 crab-xet = { path = "crates/crab-xet", default-features = false }
 
-xet-client = "1.5.2"
-xet-core-structures = "1.5.2"
-xet-data = "1.5.2"
-xet-runtime = "1.5.2"
+xet-client = "1.6.0"
+xet-core-structures = "1.6.0"
+xet-data = "1.6.0"
+xet-runtime = "1.6.0"
 
 gix = "0.83.0"
 gix-attributes = "0.33.0"

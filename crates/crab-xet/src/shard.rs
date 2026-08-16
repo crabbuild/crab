@@ -22,7 +22,9 @@ pub use xet_core_structures::metadata_shard::file_structs::{
 };
 pub use xet_core_structures::metadata_shard::session_directory::merge_shards;
 pub use xet_core_structures::metadata_shard::set_operations::shard_set_union;
-pub use xet_core_structures::metadata_shard::shard_file_handle::MDBShardFile;
+pub use xet_core_structures::metadata_shard::shard_file_handle::{
+    MDBShardFile, ShardFileCache, new_shard_file_cache,
+};
 pub use xet_core_structures::metadata_shard::shard_format::MDBShardInfo;
 use xet_core_structures::metadata_shard::shard_in_memory::MDBInMemoryShard;
 pub use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
