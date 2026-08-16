@@ -153,13 +153,6 @@ static SKILL_ASSETS: &[SkillAsset] = &[
         )),
     },
     SkillAsset {
-        name: "crab-cli-verification",
-        content: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/skills/crab-cli-verification/SKILL.md"
-        )),
-    },
-    SkillAsset {
         name: "crab-diagnostics-recovery",
         content: include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -488,7 +481,6 @@ mod tests {
     fn catalog_contains_all_crab_skill_domains() {
         for name in [
             "crab-cli-core",
-            "crab-cli-verification",
             "crab-diagnostics-recovery",
             "crab-git-sync",
             "crab-large-files",
@@ -503,6 +495,11 @@ mod tests {
         ] {
             assert!(find_skill(name).is_ok(), "missing catalog entry: {name}");
         }
+    }
+
+    #[test]
+    fn local_verification_skill_is_not_packaged() {
+        assert!(find_skill("crab-cli-verification").is_err());
     }
 
     #[test]
