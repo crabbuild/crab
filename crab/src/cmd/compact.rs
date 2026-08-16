@@ -23,7 +23,10 @@ use crate::storage::store::Store;
 use crab_metadata::manifests::ShardList;
 use crab_metadata::ref_registry::RefRegistry;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
-use crab_xet::shard::{MDBMinimalShard, MDBShardFile, merge_shards, shard_set_union};
+use crab_xet::shard::{
+    MDBMinimalShard, MDBShardFile, merge_shards, new_shard_file_cache, shard_set_union,
+};
+use xet_runtime::core::XetContext;
 
 /// Default maximum compacted shard size (100 MiB).
 pub const DEFAULT_MAX_SHARD_SIZE: u64 = 100 * 1024 * 1024;
@@ -131,11 +134,25 @@ pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOut
     download_shards(store, &source_hashes, source_dir.path()).await?;
 
     // Step 3: Merge shards via xet-core.
+    let xet_context = XetContext::default().map_err(|error| {
+        CrabError::Internal(format!("failed to initialize xet context: {error}"))
+    })?;
+    let runtime = Arc::clone(&xet_context.runtime);
+    let shard_file_cache = new_shard_file_cache();
     let merge_result = tokio::task::spawn_blocking({
         let source_path = source_dir.path().to_owned();
         let target_path = target_dir.path().to_owned();
         let max_size = args.max_shard_size;
-        move || merge_shards(source_path, target_path, max_size, false)
+        move || {
+            merge_shards(
+                &runtime,
+                source_path,
+                target_path,
+                max_size,
+                false,
+                &shard_file_cache,
+            )
+        }
     })
     .await
     .map_err(|e| CrabError::Internal(format!("merge_shards join error: {e}")))?
@@ -272,6 +289,7 @@ async fn download_shards(
     shard_hashes: &[String],
     target_dir: &std::path::Path,
 ) -> Result<()> {
+    let shard_file_cache = new_shard_file_cache();
     for hash_hex in shard_hashes {
         let shard_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/shards/{hash_hex}"));
 
@@ -285,9 +303,9 @@ async fn download_shards(
 
         // Write shard bytes to the temp directory via MDBShardFile.
         let mut cursor = std::io::Cursor::new(data.as_ref());
-        MDBShardFile::write_out_from_reader(target_dir, &mut cursor).map_err(|e| {
-            CrabError::Internal(format!("failed to write shard {hash_hex} to temp dir: {e}"))
-        })?;
+        MDBShardFile::write_out_from_reader(target_dir, &mut cursor, &shard_file_cache).map_err(
+            |e| CrabError::Internal(format!("failed to write shard {hash_hex} to temp dir: {e}")),
+        )?;
 
         debug!(shard = %hash_hex, size = data.len(), "downloaded shard");
     }
@@ -305,6 +323,7 @@ fn filter_unreferenced_xorbs(
     merged: &[Arc<MDBShardFile>],
     output_dir: &std::path::Path,
 ) -> std::result::Result<Vec<Arc<MDBShardFile>>, CrabError> {
+    let shard_file_cache = new_shard_file_cache();
     let mut result = Vec::with_capacity(merged.len());
 
     for shard_file in merged {
@@ -372,11 +391,13 @@ fn filter_unreferenced_xorbs(
         let file_only_handle = MDBShardFile::write_out_from_reader(
             output_dir,
             &mut std::io::Cursor::new(&file_only_buf),
+            &shard_file_cache,
         )
         .map_err(|e| CrabError::Internal(format!("write file-only shard: {e}")))?;
         let xorb_only_handle = MDBShardFile::write_out_from_reader(
             output_dir,
             &mut std::io::Cursor::new(&xorb_only_buf),
+            &shard_file_cache,
         )
         .map_err(|e| CrabError::Internal(format!("write xorb-only shard: {e}")))?;
 
@@ -402,6 +423,7 @@ fn filter_unreferenced_xorbs(
         let filtered_handle = MDBShardFile::write_out_from_reader(
             output_dir,
             &mut std::io::Cursor::new(&combined_buf),
+            &shard_file_cache,
         )
         .map_err(|e| CrabError::Internal(format!("write filtered shard: {e}")))?;
 
@@ -614,9 +636,11 @@ mod tests {
         // Write shard to a temp dir and load as MDBShardFile.
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
+        let shard_file_cache = new_shard_file_cache();
         let shard_file = MDBShardFile::write_out_from_reader(
             source_dir.path(),
             &mut std::io::Cursor::new(&shard_bytes),
+            &shard_file_cache,
         )
         .unwrap();
 
@@ -697,9 +721,11 @@ mod tests {
 
         let source_dir = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
+        let shard_file_cache = new_shard_file_cache();
         let shard_file = MDBShardFile::write_out_from_reader(
             source_dir.path(),
             &mut std::io::Cursor::new(&shard_bytes),
+            &shard_file_cache,
         )
         .unwrap();
 

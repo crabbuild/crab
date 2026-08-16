@@ -33,7 +33,7 @@ use crab_metadata::chunk_index::ChunkIndex;
 use crab_metadata::manifests::ShardList;
 use crab_metadata::persistent_chunk_index::PersistentChunkIndex;
 use crab_xet::hash::compute_data_hash;
-use crab_xet::shard::{MDBMinimalShard, MDBShardFile};
+use crab_xet::shard::{MDBMinimalShard, MDBShardFile, new_shard_file_cache};
 use crab_xet::xorb::format::{MerkleHash, XorbRef};
 
 static SHARD_GEN_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -858,7 +858,9 @@ impl ShardSynchronizer {
         }
 
         let mut cursor = std::io::Cursor::new(strip_v2_trailer(data));
-        let shard_file = MDBShardFile::write_out_from_reader(dir, &mut cursor).map_err(|e| {
+        let shard_file_cache = new_shard_file_cache();
+        let shard_file = MDBShardFile::write_out_from_reader(dir, &mut cursor, &shard_file_cache)
+            .map_err(|e| {
             CrabError::Internal(format!("failed to write shard {} to disk: {e}", hash.hex()))
         })?;
 

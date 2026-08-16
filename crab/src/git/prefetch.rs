@@ -42,6 +42,7 @@ use tracing::{debug, warn};
 use xet_client::cas_client::Client;
 use xet_client::chunk_cache::ChunkCache;
 use xet_data::file_reconstruction::FileReconstructor;
+use xet_runtime::core::XetContext;
 use xet_runtime::utils::adjustable_semaphore::AdjustableSemaphore;
 
 use crate::core::error::{CrabError, Result};
@@ -211,7 +212,11 @@ impl PrefetchQueue {
                 m.inc_prefetch_started();
             }
 
-            let mut reconstructor = FileReconstructor::new(&client, file_hash)
+            let xet_context = match XetContext::default() {
+                Ok(context) => context,
+                Err(error) => return Err(format!("failed to initialize xet context: {error}")),
+            };
+            let mut reconstructor = FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(semaphore)
                 .with_cancellation_token(cancel);
             if let Some(cache) = chunk_cache {
@@ -464,11 +469,13 @@ mod tests {
     use bytes::Bytes;
     use crab_xet::shard::MDBFileInfo;
     use crab_xet::xorb::format::SerializedXorbObject;
+    use xet_client::cas_client::ShardUploadProgressCallback;
     use xet_client::cas_client::adaptive_concurrency::ConnectionPermit;
     use xet_client::cas_client::progress_tracked_streams::ProgressCallback;
     use xet_client::cas_client::{Client, URLProvider};
     use xet_client::cas_types::{
-        BatchQueryReconstructionResponse, FileRange, QueryReconstructionResponseV2,
+        BatchQueryReconstructionResponse, FileChunkHashesResponse, FileRange,
+        QueryReconstructionResponseV2,
     };
     use xet_client::error::{ClientError, Result as ClientResult};
 
@@ -532,7 +539,16 @@ mod tests {
             &self,
             _shard_data: Bytes,
             _upload_permit: ConnectionPermit,
-        ) -> ClientResult<bool> {
+            _progress_callback: Option<ShardUploadProgressCallback>,
+        ) -> ClientResult<()> {
+            Err(ClientError::Other("read-only".to_string()))
+        }
+
+        async fn get_file_chunk_hashes(
+            &self,
+            _file_id: &MerkleHash,
+            _dirty_ranges: Vec<FileRange>,
+        ) -> ClientResult<FileChunkHashesResponse> {
             Err(ClientError::Other("read-only".to_string()))
         }
 

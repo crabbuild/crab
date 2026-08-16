@@ -6,6 +6,7 @@ use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController;
 use xet_client::cas_types::FileRange;
+use xet_runtime::core::XetContext;
 
 use crate::{ReadError, Result, StoreClient};
 
@@ -220,8 +221,11 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
+        let xet_context = XetContext::default().map_err(|error| {
+            ReadError::internal(format!("failed to initialize xet context: {error}"))
+        })?;
         let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&client, file_hash);
+            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash);
         let reconstructor = match range {
             Some(range) => reconstructor.with_byte_range(range),
             None => reconstructor,
@@ -277,7 +281,11 @@ impl ShardHydrator {
 }
 
 pub fn fixed_hydrate_concurrency(concurrency: usize) -> Result<Arc<AdaptiveConcurrencyController>> {
+    let context = XetContext::default().map_err(|error| {
+        ReadError::internal(format!("failed to initialize xet context: {error}"))
+    })?;
     Ok(AdaptiveConcurrencyController::new_fixed(
+        context,
         HYDRATE_CONCURRENCY_TAG,
         concurrency,
     ))

@@ -27,15 +27,16 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use tracing::{debug, warn};
+use xet_client::cas_client::ShardUploadProgressCallback;
 use xet_client::cas_client::adaptive_concurrency::{
     AdaptiveConcurrencyController, ConnectionPermit,
 };
 use xet_client::cas_client::progress_tracked_streams::ProgressCallback;
 use xet_client::cas_client::{Client, URLProvider};
 use xet_client::cas_types::{
-    BatchQueryReconstructionResponse, ChunkRange, FileRange, HexMerkleHash, HttpRange,
-    QueryReconstructionResponseV2, XorbMultiRangeFetch, XorbRangeDescriptor,
-    XorbReconstructionFetchInfo, XorbReconstructionTerm,
+    BatchQueryReconstructionResponse, ChunkRange, FileChunkHashesResponse, FileRange,
+    HexMerkleHash, HttpRange, QueryReconstructionResponseV2, XorbMultiRangeFetch,
+    XorbRangeDescriptor, XorbReconstructionFetchInfo, XorbReconstructionTerm,
 };
 use xet_client::error::{ClientError, Result as ClientResult};
 
@@ -690,9 +691,21 @@ impl Client for StoreClient {
         &self,
         _shard_data: Bytes,
         _upload_permit: ConnectionPermit,
-    ) -> ClientResult<bool> {
+        _progress_callback: Option<ShardUploadProgressCallback>,
+    ) -> ClientResult<()> {
         Err(ClientError::Other(
             "StoreClient is read-only; shard uploads go through the crab push pipeline".into(),
+        ))
+    }
+
+    async fn get_file_chunk_hashes(
+        &self,
+        _file_id: &MerkleHash,
+        _dirty_ranges: Vec<FileRange>,
+    ) -> ClientResult<FileChunkHashesResponse> {
+        Err(ClientError::Other(
+            "StoreClient is read-only; file chunk hash queries go through the crab push pipeline"
+                .into(),
         ))
     }
 
@@ -754,7 +767,10 @@ mod tests {
                 .expect("CachingStore builds with default config");
         let router = StoreLayout::new(caching.origin().clone(), "org/test".to_string());
 
-        let concurrency = AdaptiveConcurrencyController::new_download("crab-hydrate-test");
+        let concurrency = AdaptiveConcurrencyController::new_download(
+            xet_runtime::core::XetContext::default().expect("xet context"),
+            "crab-hydrate-test",
+        );
         let client = StoreClient::new(caching, router, concurrency);
         (client, cache_dir)
     }
@@ -771,7 +787,10 @@ mod tests {
                 .expect("caching store");
         let expected = Arc::clone(caching.local_cache());
         let router = StoreLayout::new(caching.origin().clone(), "org/cache-owner".to_owned());
-        let concurrency = AdaptiveConcurrencyController::new_download("crab-cache-owner-test");
+        let concurrency = AdaptiveConcurrencyController::new_download(
+            xet_runtime::core::XetContext::default().expect("xet context"),
+            "crab-cache-owner-test",
+        );
 
         let client = StoreClient::new(caching, router, concurrency);
 
@@ -1081,7 +1100,7 @@ mod tests {
 
         let permit = client.acquire_download_permit().await.unwrap();
         let err = client
-            .upload_shard(Bytes::new(), permit)
+            .upload_shard(Bytes::new(), permit, None)
             .await
             .expect_err("upload_shard must report unsupported");
         assert!(matches!(err, ClientError::Other(_)));
@@ -1202,7 +1221,11 @@ mod tests {
             CachingStore::new_with_local_cache(origin, &CacheConfig::default(), local_cache)
                 .expect("CachingStore builds with default config");
         let router = StoreLayout::new(caching.origin().clone(), "org/test".to_string());
-        let concurrency = AdaptiveConcurrencyController::new_fixed("crab-term-test", 1);
+        let concurrency = AdaptiveConcurrencyController::new_fixed(
+            xet_runtime::core::XetContext::default().expect("xet context"),
+            "crab-term-test",
+            1,
+        );
 
         let xorb_path = router.xorb_path(&xorb.hash);
         caching
@@ -1286,8 +1309,11 @@ mod tests {
                 .expect("CachingStore builds with default config");
         let store_cache = Arc::clone(caching.local_cache());
         let router = StoreLayout::new(caching.origin().clone(), "org/test".to_string());
-        let concurrency =
-            AdaptiveConcurrencyController::new_fixed("crab-term-cache-repair-test", 1);
+        let concurrency = AdaptiveConcurrencyController::new_fixed(
+            xet_runtime::core::XetContext::default().expect("xet context"),
+            "crab-term-cache-repair-test",
+            1,
+        );
 
         let xorb_path = router.xorb_path(&xorb.hash);
         caching

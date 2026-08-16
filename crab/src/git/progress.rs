@@ -22,8 +22,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use xet_data::deduplication::DeduplicationMetrics;
-use xet_data::progress_tracking::GroupProgress;
 use xet_data::progress_tracking::upload_tracking::CompletionTracker;
+use xet_data::progress_tracking::{GroupProgress, UploadGroupProgress};
 
 use crate::core::output::event_payloads::ProgressPayload;
 use crate::core::output::{JsonlStream, OutputMode};
@@ -602,8 +602,9 @@ impl NativePushProgress {
     /// Prefer [`NativePushProgress::with_mode`] for new call sites.
     #[must_use]
     pub fn new(enabled: bool, color: bool, verbose: bool) -> Self {
-        let group_progress = GroupProgress::new();
-        let completion_tracker = Arc::new(CompletionTracker::new(Arc::clone(&group_progress)));
+        let upload_progress = UploadGroupProgress::new();
+        let group_progress = Arc::clone(&upload_progress.file_data);
+        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let backend = if !enabled {
             ProgressBackend::Silent
         } else if is_tty() {
@@ -654,8 +655,9 @@ impl NativePushProgress {
         mode: OutputMode,
         stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>,
     ) -> Self {
-        let group_progress = GroupProgress::new();
-        let completion_tracker = Arc::new(CompletionTracker::new(Arc::clone(&group_progress)));
+        let upload_progress = UploadGroupProgress::new();
+        let group_progress = Arc::clone(&upload_progress.file_data);
+        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let (enabled, backend) = match mode {
             OutputMode::Text => {
                 let backend = if is_tty() {
@@ -717,8 +719,9 @@ impl NativePushProgress {
         mode: OutputMode,
         stream: Option<Arc<Mutex<JsonlStream<Stderr>>>>,
     ) -> Self {
-        let group_progress = GroupProgress::new();
-        let completion_tracker = Arc::new(CompletionTracker::new(Arc::clone(&group_progress)));
+        let upload_progress = UploadGroupProgress::new();
+        let group_progress = Arc::clone(&upload_progress.file_data);
+        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let (enabled, backend) = match mode {
             OutputMode::Text => {
                 let backend = if is_tty() {
