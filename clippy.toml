@@ -1,6 +1,6 @@
 # Crab workspace-wide Clippy configuration
 #
-# See .kiro/steering/code-style.md for the full rationale.
+# See AGENTS.md for the workspace coding guidance and rationale.
 
 # Flag functions with excessive boolean parameters — these are hard to
 # call correctly without named arguments.

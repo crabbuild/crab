@@ -4,7 +4,7 @@ _Updated: 2026-05-06_
 
 ## All Specs — Status Overview
 
-Spec directories under `.kiro/specs/` are listed below. "Done" means all
+Historical spec directories are listed below. "Done" means all
 required (non-`*`) tasks are complete. "Remaining" describes what's left.
 "🆕 Proposed" specs have requirements + design + tasks drafted but no
 implementation started. Task counts come from manual audit of each

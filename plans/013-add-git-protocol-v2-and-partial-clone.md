@@ -15,10 +15,7 @@
 >   crab/src/git crab/src/cmd/clone.rs crab/tests \
 >   crates/crab-read crates/crab-remote-git crates/crab-metadata \
 >   crates/crab-git crates/crab-vfs \
->   crab/docs/architecture crab/docs/design crab/docs/guides/mount.md \
->   .kiro/specs/gitiox-gitoxide-adoption \
->   .kiro/specs/gitiox-smart-http-parity \
->   .kiro/specs/gitiox-transport-gaps
+>   crab/docs/architecture crab/docs/design crab/docs/guides/mount.md
 > ```
 >
 > If an in-scope surface drifted, reconcile the current-state evidence and

@@ -1245,7 +1245,7 @@ the originals.
 
 See [`crab import`](../guides/crab-import.md) for the full
 command reference and recipes. Phases 1–10 of the
-`.kiro/specs/crab-bucket-import` spec are complete.
+The bucket-import design spec is complete.
 
 **Extension points (for the follow-up specs):**
 

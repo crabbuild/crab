@@ -1,8 +1,8 @@
 # Gitoxide Adoption — Architecture One-Pager
 
 This doc captures the architectural shape of crab's `gix-*` adoption.
-For the per-site decisions and LOC targets see
-[`.kiro/specs/crab-gitoxide-adoption/`](../../.kiro/specs/crab-gitoxide-adoption/).
+For the per-site decisions and LOC targets see the related design notes in
+`plans/designs/client-side-git-v2-partial-clone.md`.
 This file focuses on the cross-cutting design decisions that span
 multiple requirements — the ones worth reading once rather than
 rediscovering inside a task thread.
@@ -134,8 +134,7 @@ allocate the synthetic tree; operators opt in with
 
 ## Module-by-module mapping (summary)
 
-See `.kiro/specs/crab-gitoxide-adoption/design.md` §Module-by-module
-plan for the full per-file table. The highlights relevant to this
+See the related design notes for the full per-file table. The highlights relevant to this
 one-pager:
 
 - `cmd/hydrate.rs`, `cmd/dehydrate.rs`, `vfs/engine.rs` — worktree
@@ -162,7 +161,7 @@ one cycle after the flag flips, then delete.
 
 ## Cross-references
 
-- Spec: `.kiro/specs/crab-gitoxide-adoption/{requirements,design,tasks}.md`
+- Related design notes: `plans/designs/client-side-git-v2-partial-clone.md`
 - Shellout baseline: [`shellout-baseline.md`](shellout-baseline.md)
 - ODB adapter source: `crates/crab-git/src/odb_adapter.rs`
 - Streaming hydration path: `crates/crab-vfs/src/engine.rs`

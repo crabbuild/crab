@@ -19,8 +19,8 @@ interface MermaidDiagramProps {
  *   - slate background and text
  *   - Inter typography
  *
- * The values mirror `.kiro/steering/crab-web.md` so docs/blog diagrams stay
- * consistent with the rest of the marketing surface.
+ * The values follow the repository's documented sky/slate design tokens so
+ * docs/blog diagrams stay consistent with the rest of the marketing surface.
  */
 const lightThemeVariables = {
   primaryColor: "#0ea5e9",

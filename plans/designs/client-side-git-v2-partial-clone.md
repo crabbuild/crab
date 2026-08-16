@@ -290,15 +290,15 @@ documentation commit before implementation proceeds:
 | `crab/docs/design/technical-design.md:2278` | Replace the unresolved partial-clone note with the phased client-side design and release gate. |
 | `crab/docs/architecture/gitoxide.md:24` | Replace “fetch via gix-protocol” with the local upload-pack state machine plus server-neutral gitoxide mechanics. |
 | `crab/docs/architecture/git-integration.md:181` | Add separate legacy complete-pack and future client-side v2/range-pack flows. |
-| `.kiro/specs/gitiox-gitoxide-adoption/design.md:177` | Remove `gix_transport::client` as stateless-connect glue; diagram Git and local helper on the same machine. |
-| `.kiro/specs/gitiox-gitoxide-adoption/requirements.md:315` | Rewrite Req 2 around a Crab-owned local upload-pack session; `gix-protocol`/`gix-negotiate` client APIs are not owners. |
-| `.kiro/specs/gitiox-gitoxide-adoption/tasks.md:163` | Replace task 5 with local pkt-line, session, planner, pack, and E2E tasks. |
-| `.kiro/specs/gitiox-smart-http-parity/design.md:479` | Remove `connect`/receive-pack and the claim that v2 changes the outer helper command set; scope to `stateless-connect git-upload-pack`. |
-| `.kiro/specs/gitiox-smart-http-parity/requirements.md:277` | Prohibit advertising an incomplete capability or graceful full-fetch fallback after takeover. Separate SHA-256 work. |
-| `.kiro/specs/gitiox-smart-http-parity/tasks.md:258` | Keep v2 fetch in Plan 002 and move SHA-256 to its own follow-up. |
-| `.kiro/specs/gitiox-transport-gaps/design.md:154` | Delete the claim that filtering while indexing a downloaded complete pack is partial clone. Point to the range reader and promisor flow. |
-| `.kiro/specs/gitiox-transport-gaps/requirements.md:128` | Require actual omitted bytes, lazy retrieval, promisor metadata, and measured savings. Remove client-side `gix-protocol` ownership. |
-| `.kiro/specs/gitiox-transport-gaps/tasks.md:73` | Reopen falsely completed filter tasks until real Git and RustFS lifecycle gates pass. |
+| Historical Gitoxide adoption design | Remove `gix_transport::client` as stateless-connect glue; diagram Git and local helper on the same machine. |
+| Historical Gitoxide adoption requirements | Rewrite Req 2 around a Crab-owned local upload-pack session; `gix-protocol`/`gix-negotiate` client APIs are not owners. |
+| Historical Gitoxide adoption tasks | Replace task 5 with local pkt-line, session, planner, pack, and E2E tasks. |
+| Historical smart-HTTP parity design | Remove `connect`/receive-pack and the claim that v2 changes the outer helper command set; scope to `stateless-connect git-upload-pack`. |
+| Historical smart-HTTP parity requirements | Prohibit advertising an incomplete capability or graceful full-fetch fallback after takeover. Separate SHA-256 work. |
+| Historical smart-HTTP parity tasks | Keep v2 fetch in Plan 002 and move SHA-256 to its own follow-up. |
+| Historical transport-gap design | Delete the claim that filtering while indexing a downloaded complete pack is partial clone. Point to the range reader and promisor flow. |
+| Historical transport-gap requirements | Require actual omitted bytes, lazy retrieval, promisor metadata, and measured savings. Remove client-side `gix-protocol` ownership. |
+| Historical transport-gap tasks | Reopen falsely completed filter tasks until real Git and RustFS lifecycle gates pass. |
 | `crab/docs/guides/mount.md:51` | Until release, state that Crab remotes do not yet satisfy the promised blobless flow; after release, link to the exact support matrix. |
 
 The reconciled docs must distinguish Git wire protocol v2 from Git's

@@ -51,6 +51,8 @@ fn schema_registry() -> BTreeMap<String, String> {
         ("stat.classes", "1.0"),
         ("stat.perf", "1.0"),
         ("stat.push-plan", "1.0"),
+        ("skills.install", "1.0"),
+        ("skills.list", "1.0"),
         ("status", "1.0"),
         ("tier.plan", "1.0"),
         ("track", "1.0"),
@@ -191,6 +193,8 @@ mod tests {
             "stat.classes",
             "stat.perf",
             "stat.push-plan",
+            "skills.install",
+            "skills.list",
             "status",
             "tier.plan",
             "track",
@@ -261,8 +265,8 @@ mod tests {
             "missing error schema"
         );
 
-        // Total count: 8 migrated + 23 new json + 12 streaming + 14 events + 1 error = 58
-        assert_eq!(schemas.len(), 58, "unexpected schema count");
+        // Total count: 8 migrated + 25 new json + 12 streaming + 14 events + 1 error = 60
+        assert_eq!(schemas.len(), 60, "unexpected schema count");
     }
 
     #[test]

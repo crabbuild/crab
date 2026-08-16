@@ -35,8 +35,9 @@ starting point while the private historical repository remains intact.
   including auth/cache clients and adapters.
 - Private source includes `crates/crab-auth-server`,
   `crates/crab-cache-server`, `crab/deploy/auth`, and cache deployment code.
-- Internal planning/design material exists under `.kiro/specs`, `openspec`,
-  `crab/roadmap`, and named managed-service architecture documents.
+- Internal planning/design material exists under historical planning/spec
+  material, `openspec`, `crab/roadmap`, and named managed-service architecture
+  documents.
 - `.gitmodules` points at optional `xet-core` reference material, while
   `Cargo.toml:49` uses published Xet crates. The submodule is not required in
   public Core.
@@ -65,8 +66,9 @@ Include:
 Exclude:
 
 - both server crates and `crab/deploy/auth`/cache-service deployment code;
-- `crab-desktop`, `crab-web`, `.kiro/specs`, private steering, `openspec`,
-  `crab/roadmap`, managed-platform/cache-server/enterprise designs and evidence;
+- `crab-desktop`, `crab-web`, historical planning/spec material, private
+  planning, `openspec`, `crab/roadmap`, managed-platform/cache-server/enterprise
+  designs and evidence;
 - `.git`, `.gitmodules`, `xet-core`, build outputs, `.env*`, credentials,
   caches, logs, test evidence containing environment identifiers, and compiled
   Python/Rust/native binaries;

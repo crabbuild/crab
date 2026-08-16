@@ -1,7 +1,7 @@
 //! Regression tests for the typed ref-edit model (Req 4).
 //!
 //! Covers the five named tests from the
-//! `.kiro/specs/crab-gitoxide-adoption/` Task 1.5 list:
+//! Original task list for the Gitoxide adoption work:
 //!
 //! - `delete_ref_removes_s3_object`
 //! - `delete_nonexistent_ref_is_noop`
