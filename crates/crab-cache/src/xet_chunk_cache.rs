@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 use xet_client::chunk_cache::{CacheConfig, ChunkCache, DiskCache, get_cache};
+use xet_runtime::config::XetConfig;
 
 use crate::{CacheError, Result};
 
@@ -69,10 +70,12 @@ impl XetChunkCacheHandle {
             cache_size: size_bytes,
         };
 
-        let cache = get_cache(&cache_config).map_err(|source| CacheError::XetChunkCache {
-            path: directory.display().to_string(),
-            source: Box::new(source),
-        })?;
+        let xet_config = XetConfig::new();
+        let cache =
+            get_cache(&xet_config, &cache_config).map_err(|source| CacheError::XetChunkCache {
+                path: directory.display().to_string(),
+                source: Box::new(source),
+            })?;
 
         debug!(
             directory = %directory.display(),
@@ -98,7 +101,8 @@ impl XetChunkCacheHandle {
             cache_size: self.size_bytes,
         };
 
-        match DiskCache::initialize(&config) {
+        let xet_config = XetConfig::new();
+        match DiskCache::initialize(&xet_config, &config) {
             Ok(disk) => XetChunkCacheStats {
                 entries: disk.num_items().await,
                 total_bytes: disk.total_bytes().await,
