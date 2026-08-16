@@ -23,7 +23,7 @@ use bytes::Bytes;
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 use xet_client::cas_types::{ChunkRange, Key};
-use xet_client::chunk_cache::{CacheConfig, ChunkCache as XetChunkCacheTrait, get_cache};
+use xet_client::chunk_cache::ChunkCache as XetChunkCacheTrait;
 
 use crate::core::error::{CrabError, Result};
 use crab_xet::xorb::format::MerkleHash;
@@ -82,24 +82,14 @@ impl ChunkCache {
     pub fn open(dir: PathBuf, max_bytes: Option<u64>) -> Result<Self> {
         let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
 
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            CrabError::Internal(format!(
-                "failed to create chunk cache directory {}: {e}",
-                dir.display(),
-            ))
-        })?;
-
-        let config = CacheConfig {
-            cache_directory: dir.clone(),
-            cache_size: max_bytes,
-        };
-
-        let inner = get_cache(&config).map_err(|e| {
-            CrabError::Internal(format!(
-                "failed to initialize chunk cache at {}: {e}",
-                dir.display(),
-            ))
-        })?;
+        let inner = crab_cache::XetChunkCacheHandle::open(dir.clone(), max_bytes)
+            .map_err(|e| {
+                CrabError::Internal(format!(
+                    "failed to initialize chunk cache at {}: {e}",
+                    dir.display(),
+                ))
+            })?
+            .cache;
 
         debug!(
             dir = %dir.display(),

@@ -20,7 +20,7 @@ path = "src/lib.rs"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
-crab-cache = { workspace = true, features = ["local-cache"] }
+crab-cache = { workspace = true, features = ["local-cache", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true }
 crab-git = { workspace = true }
 crab-read = { workspace = true }

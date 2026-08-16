@@ -15,7 +15,7 @@ default = []
 active-probe = ["dep:reqwest"]
 local-cache = ["dep:filetime", "dep:rusqlite", "dep:tokio"]
 remote-client = ["active-probe", "dep:tokio"]
-xet-chunk-cache = ["dep:tokio", "dep:xet-client"]
+xet-chunk-cache = ["dep:tokio", "dep:xet-client", "dep:xet-runtime"]
 
 [dependencies]
 blake3 = { workspace = true, features = ["rayon"] }
@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", 
 toml = { workspace = true }
 tracing = { workspace = true }
 xet-client = { workspace = true, optional = true }
+xet-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json", "matched-path"] }
