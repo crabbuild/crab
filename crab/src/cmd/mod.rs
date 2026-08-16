@@ -62,6 +62,7 @@ pub mod restripe;
 pub mod run;
 pub mod setup;
 pub mod ship;
+pub mod skills;
 pub mod stage;
 pub mod staging;
 pub mod stat;

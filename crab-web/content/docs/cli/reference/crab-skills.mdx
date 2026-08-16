@@ -1,0 +1,33 @@
+---
+title: "crab skills"
+description: "List and install the self-contained Crab CLI skill catalog."
+---
+
+# crab skills
+
+List the skill catalog embedded in the Crab binary or install one skill into an
+agent provider’s skill directory.
+
+## Synopsis
+
+```bash
+crab skills list [--json]
+crab skills install <PROVIDER> <NAME> --skill <SKILL> [OPTIONS]
+```
+
+Supported providers are `codex`, `claude`, and `gemini`. The default destination
+is the provider home’s `skills/` directory. `CODEX_HOME`, `CLAUDE_HOME`, or
+`GEMINI_HOME` can override the provider home.
+
+```bash
+crab skills list
+crab skills install codex crab-large-files --skill=crab-large-files
+crab skills install claude large-files --skill=crab-large-files --force
+crab skills install gemini crab-workflow --skill=crab-workflow --root /tmp/skills
+```
+
+`NAME` is the directory created under the selected skills root. The destination
+must not already exist unless `--force` is supplied. Use `--root` for an
+isolated or scripted installation; it is the final skills directory, not the
+provider home. `--json` emits a structured result containing the provider,
+source skill, destination name, and installed path.

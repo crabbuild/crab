@@ -424,6 +424,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List and install the self-contained skills shipped with Crab.
+    #[command(subcommand)]
+    Skills(crab::cmd::skills::SkillsCommand),
     /// Update crab from the latest GitHub release.
     Update {
         /// Only check whether an update is available.
@@ -2001,6 +2004,7 @@ impl Cmd {
             | Self::Version { json, .. }
             | Self::Update { json, .. }
             | Self::Track { json, .. } => OutputMode::from_flags(*json, false),
+            Self::Skills(command) => command.output_mode(),
             Self::Stat {
                 json,
                 sub:
@@ -2361,6 +2365,8 @@ impl Cmd {
             Self::Daemon { .. } => "daemon",
             Self::FilterProcess => "filter-process",
             Self::Version { .. } => "version",
+            Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
+            Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
             Self::Update { .. } => "update",
             Self::Login { .. } => "login",
             Self::Logout { .. } => "logout",
@@ -2940,6 +2946,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let _span = tracing::info_span!("version").entered();
             let mode = OutputMode::from_flags(json, false);
             crab::cmd::version::run_version(mode)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Cmd::Skills(sub)) => {
+            let _span = tracing::info_span!("skills").entered();
+            crab::cmd::skills::run(sub)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Update {
