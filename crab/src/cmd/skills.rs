@@ -17,6 +17,133 @@ struct SkillAsset {
     content: &'static str,
 }
 
+struct ProviderSpec {
+    name: &'static str,
+    home_env: Option<&'static str>,
+    env_dir: Option<&'static str>,
+    default_dir: Option<&'static str>,
+}
+
+impl ProviderSpec {
+    const fn global(name: &'static str, default_dir: &'static str) -> Self {
+        Self {
+            name,
+            home_env: None,
+            env_dir: None,
+            default_dir: Some(default_dir),
+        }
+    }
+
+    const fn env(
+        name: &'static str,
+        home_env: &'static str,
+        env_dir: &'static str,
+        default_dir: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            home_env: Some(home_env),
+            env_dir: Some(env_dir),
+            default_dir: Some(default_dir),
+        }
+    }
+
+    const fn project_only(name: &'static str) -> Self {
+        Self {
+            name,
+            home_env: None,
+            env_dir: None,
+            default_dir: None,
+        }
+    }
+}
+
+static PROVIDER_SPECS: &[ProviderSpec] = &[
+    ProviderSpec::global("aider-desk", ".aider-desk/skills"),
+    ProviderSpec::global("adal", ".adal/skills"),
+    ProviderSpec::global("amp", ".config/agents/skills"),
+    ProviderSpec::global("antigravity", ".gemini/antigravity/skills"),
+    ProviderSpec::global("antigravity-cli", ".gemini/antigravity-cli/skills"),
+    ProviderSpec::global("astrbot", ".astrbot/data/skills"),
+    ProviderSpec::global("autohand-code", ".autohand/skills"),
+    ProviderSpec::global("augment", ".augment/skills"),
+    ProviderSpec::global("bob", ".bob/skills"),
+    ProviderSpec::env("claude", "CLAUDE_HOME", "skills", ".claude/skills"),
+    ProviderSpec::env("claude-code", "CLAUDE_HOME", "skills", ".claude/skills"),
+    ProviderSpec::global("cline", ".cline/skills"),
+    ProviderSpec::global("codearts-agent", ".codeartsdoer/skills"),
+    ProviderSpec::global("codebuddy", ".codebuddy/skills"),
+    ProviderSpec::global("codemaker", ".codemaker/skills"),
+    ProviderSpec::global("codestudio", ".codestudio/skills"),
+    ProviderSpec::env("codex", "CODEX_HOME", "skills", ".codex/skills"),
+    ProviderSpec::global("command-code", ".commandcode/skills"),
+    ProviderSpec::global("continue", ".continue/skills"),
+    ProviderSpec::global("copilot", ".copilot/skills"),
+    ProviderSpec::global("crush", ".config/crush/skills"),
+    ProviderSpec::global("cortex", ".snowflake/cortex/skills"),
+    ProviderSpec::global("cursor", ".cursor/skills"),
+    ProviderSpec::global("deepagents", ".deepagents/agent/skills"),
+    ProviderSpec::global("dexto", ".agents/skills"),
+    ProviderSpec::global("devin", ".config/devin/skills"),
+    ProviderSpec::global("droid", ".factory/skills"),
+    ProviderSpec::project_only("eve"),
+    ProviderSpec::global("firebender", ".firebender/skills"),
+    ProviderSpec::global("forgecode", ".forge/skills"),
+    ProviderSpec::env("gemini", "GEMINI_HOME", "skills", ".gemini/skills"),
+    ProviderSpec::env("gemini-cli", "GEMINI_HOME", "skills", ".gemini/skills"),
+    ProviderSpec::global("github-copilot", ".copilot/skills"),
+    ProviderSpec::global("goose", ".config/goose/skills"),
+    ProviderSpec::global("grok", ".grok/skills"),
+    ProviderSpec::global("hermes-agent", ".hermes/skills"),
+    ProviderSpec::global("iflow-cli", ".iflow/skills"),
+    ProviderSpec::global("inference-sh", ".inferencesh/skills"),
+    ProviderSpec::global("jazz", ".jazz/skills"),
+    ProviderSpec::global("junie", ".junie/skills"),
+    ProviderSpec::global("kilo", ".kilocode/skills"),
+    ProviderSpec::global("kimchi", ".config/kimchi/harness/skills"),
+    ProviderSpec::global("kimi", ".agents/skills"),
+    ProviderSpec::global("kimi-code-cli", ".agents/skills"),
+    ProviderSpec::global("kiro", ".kiro/skills"),
+    ProviderSpec::global("kiro-cli", ".kiro/skills"),
+    ProviderSpec::global("kode", ".kode/skills"),
+    ProviderSpec::global("lingma", ".lingma/skills"),
+    ProviderSpec::global("loaf", ".agents/skills"),
+    ProviderSpec::global("mcpjam", ".mcpjam/skills"),
+    ProviderSpec::global("minimax-code", ".minimax/skills"),
+    ProviderSpec::global("mistral-vibe", ".vibe/skills"),
+    ProviderSpec::global("moxby", ".moxby/skills"),
+    ProviderSpec::global("mux", ".mux/skills"),
+    ProviderSpec::global("neovate", ".neovate/skills"),
+    ProviderSpec::global("ona", ".ona/skills"),
+    ProviderSpec::global("openclaw", ".openclaw/skills"),
+    ProviderSpec::global("opencode", ".config/opencode/skills"),
+    ProviderSpec::global("openhands", ".openhands/skills"),
+    ProviderSpec::global("pi", ".pi/agent/skills"),
+    ProviderSpec::global("pochi", ".pochi/skills"),
+    ProviderSpec::project_only("promptscript"),
+    ProviderSpec::global("qoder", ".qoder/skills"),
+    ProviderSpec::global("qoder-cn", ".qoder-cn/skills"),
+    ProviderSpec::global("qwen", ".qwen/skills"),
+    ProviderSpec::global("qwen-code", ".qwen/skills"),
+    ProviderSpec::global("reasonix", ".reasonix/skills"),
+    ProviderSpec::global("replit", ".config/agents/skills"),
+    ProviderSpec::global("roo", ".roo/skills"),
+    ProviderSpec::global("roo-code", ".roo/skills"),
+    ProviderSpec::global("rovodev", ".rovodev/skills"),
+    ProviderSpec::global("tabnine-cli", ".tabnine/agent/skills"),
+    ProviderSpec::global("terramind", ".terramind/skills"),
+    ProviderSpec::global("tinycloud", ".tinycloud/skills"),
+    ProviderSpec::global("trae", ".trae/skills"),
+    ProviderSpec::global("trae-cn", ".trae-cn/skills"),
+    ProviderSpec::global("universal", ".config/agents/skills"),
+    ProviderSpec::global("warp", ".agents/skills"),
+    ProviderSpec::global("windsurf", ".codeium/windsurf/skills"),
+    ProviderSpec::global("zcode", ".zcode/skills"),
+    ProviderSpec::global("zed", ".agents/skills"),
+    ProviderSpec::global("zencoder", ".zencoder/skills"),
+    ProviderSpec::global("zenflow", ".zencoder/skills"),
+];
+
 static SKILL_ASSETS: &[SkillAsset] = &[
     SkillAsset {
         name: "crab-cli-core",
@@ -127,7 +254,7 @@ pub enum SkillsCommand {
 /// Arguments for `crab skills install`.
 #[derive(Debug, Args)]
 pub struct InstallArgs {
-    /// Agent provider: codex, claude, or gemini.
+    /// Agent Skills provider ID, such as codex, claude-code, cursor, or opencode.
     #[arg(value_name = "PROVIDER")]
     pub provider: String,
     /// Directory name to create under the provider's skills directory.
@@ -257,29 +384,48 @@ fn validate_name(name: &str, field: &str) -> Result<()> {
 
 fn resolve_provider(provider: &str, root: Option<&Path>) -> Result<(String, PathBuf)> {
     let normalized = provider.to_ascii_lowercase();
-    let (name, env_var, default_dir) = match normalized.as_str() {
-        "codex" => ("codex", "CODEX_HOME", ".codex"),
-        "claude" => ("claude", "CLAUDE_HOME", ".claude"),
-        "gemini" => ("gemini", "GEMINI_HOME", ".gemini"),
-        _ => {
-            return Err(config_error(
+    let spec = PROVIDER_SPECS
+        .iter()
+        .find(|candidate| candidate.name == normalized)
+        .ok_or_else(|| {
+            config_error(
                 "provider",
-                format!("unsupported provider '{provider}'; expected codex, claude, or gemini"),
-            ));
-        }
-    };
+                format!("unsupported provider '{provider}'; see the supported Agent Skills providers in the Crab documentation"),
+            )
+        })?;
 
     let skills_root = match root {
         Some(path) => path.to_owned(),
-        None => provider_home(env_var, default_dir)?.join("skills"),
+        None => default_provider_root(spec)?,
     };
-    Ok((name.to_owned(), skills_root))
+    Ok((spec.name.to_owned(), skills_root))
 }
 
-fn provider_home(env_var: &str, default_dir: &str) -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
+fn default_provider_root(spec: &ProviderSpec) -> Result<PathBuf> {
+    if let Some(env_var) = spec.home_env {
+        if let Some(path) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
+            let Some(env_dir) = spec.env_dir else {
+                return Err(config_error(
+                    "provider",
+                    format!(
+                        "provider '{}' has an invalid environment configuration",
+                        spec.name
+                    ),
+                ));
+            };
+            return Ok(PathBuf::from(path).join(env_dir));
+        }
     }
+
+    let Some(default_dir) = spec.default_dir else {
+        return Err(config_error(
+            "provider",
+            format!(
+                "provider '{}' has no global skills directory; pass --root PATH for a project",
+                spec.name
+            ),
+        ));
+    };
 
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -357,6 +503,56 @@ mod tests {
         ] {
             assert!(find_skill(name).is_ok(), "missing catalog entry: {name}");
         }
+    }
+
+    #[test]
+    fn provider_registry_covers_major_agent_hosts() {
+        for provider in [
+            "codex",
+            "claude-code",
+            "gemini-cli",
+            "cursor",
+            "windsurf",
+            "cline",
+            "roo",
+            "github-copilot",
+            "opencode",
+            "openhands",
+            "goose",
+            "continue",
+            "amp",
+            "replit",
+            "antigravity",
+            "kiro-cli",
+            "qwen-code",
+            "kimi-code-cli",
+            "junie",
+            "droid",
+            "trae",
+            "qoder",
+            "pi",
+            "crush",
+            "zed",
+        ] {
+            assert!(
+                resolve_provider(provider, Some(Path::new("skills"))).is_ok(),
+                "missing provider: {provider}"
+            );
+        }
+        assert!(PROVIDER_SPECS.len() >= 70);
+    }
+
+    #[test]
+    fn provider_names_are_case_insensitive_and_project_roots_are_supported() -> Result<()> {
+        let root = Path::new("project/.agents/skills");
+        let (provider, resolved) = resolve_provider("OpenCode", Some(root))?;
+        assert_eq!(provider, "opencode");
+        assert_eq!(resolved, root);
+
+        assert!(resolve_provider("eve", None).is_err());
+        let (_, resolved) = resolve_provider("eve", Some(root))?;
+        assert_eq!(resolved, root);
+        Ok(())
     }
 
     #[test]

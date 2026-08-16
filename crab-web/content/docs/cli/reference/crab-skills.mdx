@@ -15,15 +15,43 @@ crab skills list [--json]
 crab skills install <PROVIDER> <NAME> --skill <SKILL> [OPTIONS]
 ```
 
-Supported providers are `codex`, `claude`, and `gemini`. The default destination
-is the provider home’s `skills/` directory. `CODEX_HOME`, `CLAUDE_HOME`, or
-`GEMINI_HOME` can override the provider home.
+Crab supports the current Agent Skills provider registry, including major
+coding agents, IDE agents, terminal agents, and compatible local hosts. The
+accepted provider IDs are:
+
+```text
+aider-desk  adal             amp              antigravity
+antigravity-cli              astrbot          autohand-code    augment
+bob         claude           claude-code      cline            codearts-agent
+codebuddy   codemaker        codestudio       codex            command-code
+continue    copilot          crush            cortex            cursor
+deepagents  dexto            devin            droid            eve
+firebender  forgecode        gemini           gemini-cli        github-copilot
+goose       grok             hermes-agent     iflow-cli         inference-sh
+jazz        junie            kilo             kimchi            kimi
+kimi-code-cli                kiro             kiro-cli          kode
+lingma      loaf             mcpjam           minimax-code      mistral-vibe
+moxby       mux              neovate          ona               openclaw
+opencode    openhands        pi               pochi             promptscript
+qoder       qoder-cn         qwen             qwen-code         reasonix
+replit      roo              roo-code         rovodev           tabnine-cli
+terramind   tinycloud        trae             trae-cn            universal
+warp        windsurf         zcode            zed               zencoder
+zenflow
+```
+
+The default destination follows each provider’s documented global skills
+directory. `CODEX_HOME`, `CLAUDE_HOME`, and `GEMINI_HOME` override the
+corresponding provider home. Use `--root` to install into a project-scoped
+directory such as `.cursor/skills` or `.agents/skills`; providers without a
+global directory, such as `eve` and `promptscript`, require `--root`.
 
 ```bash
 crab skills list
 crab skills install codex crab-large-files --skill=crab-large-files
-crab skills install claude large-files --skill=crab-large-files --force
-crab skills install gemini crab-workflow --skill=crab-workflow --root /tmp/skills
+crab skills install cursor crab-large-files --skill=crab-large-files
+crab skills install github-copilot crab-workflow --skill=crab-workflow
+crab skills install eve crab-workflow --skill=crab-workflow --root .agents/skills
 ```
 
 `NAME` is the directory created under the selected skills root. The destination
