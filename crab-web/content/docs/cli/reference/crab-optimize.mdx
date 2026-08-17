@@ -47,6 +47,10 @@ crab optimize replicas status
 crab optimize repo --json
 ```
 
+`crab optimize repo` and `crab doctor --cost` require a configured Crab remote
+and currently use live inventory. The explicit provider-report source is
+reserved until report discovery and freshness metadata are wired.
+
 ## Related Commands
 
 - [`crab repack`](/docs/cli/reference/crab-repack) — legacy top-level entry for pack consolidation.

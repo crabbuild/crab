@@ -185,6 +185,29 @@ impl Profile {
     pub fn to_json(&self) -> String {
         serde_json::to_string(&ProfileJson::from(self)).unwrap_or_else(|_| "{}".to_string())
     }
+
+    /// Restore a profile recorded in a restripe journal.
+    pub fn from_json(raw: &str) -> Result<Self> {
+        let stored: ProfileJson =
+            serde_json::from_str(raw).map_err(|error| CrabError::Configuration {
+                key: "restripe journal profile".to_string(),
+                origin: format!("invalid profile JSON: {error}"),
+            })?;
+        let group_by =
+            GroupBy::from_str_value(&stored.group_by).ok_or_else(|| CrabError::Configuration {
+                key: "restripe journal profile.group_by".to_string(),
+                origin: format!("unknown grouping strategy: {}", stored.group_by),
+            })?;
+        let compression = parse_compression_str(&stored.compression, "journal")?;
+        let profile = Self {
+            target_xorb_bytes: stored.target_xorb_bytes,
+            max_xorbs_per_file: stored.max_xorbs_per_file,
+            group_by,
+            compression,
+        };
+        profile.validate_with_name("journal")?;
+        Ok(profile)
+    }
 }
 
 /// Check whether a profile name is reserved (built-in).
@@ -311,6 +334,25 @@ mod tests {
         assert_eq!(p.max_xorbs_per_file, u32::MAX);
         assert_eq!(p.group_by, GroupBy::Hash);
         assert_eq!(p.compression, CompressionConfig::Zstd { level: 9 });
+    }
+
+    #[test]
+    fn journal_profile_round_trips() {
+        let profile = Profile::dataset();
+
+        let restored = Profile::from_json(&profile.to_json()).unwrap();
+
+        assert_eq!(restored, profile);
+    }
+
+    #[test]
+    fn journal_profile_rejects_unknown_grouping() {
+        let error = Profile::from_json(
+            r#"{"target_xorb_bytes":67108864,"max_xorbs_per_file":4294967295,"group_by":"bucket","compression":"zstd:5"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown grouping strategy"));
     }
 
     #[test]

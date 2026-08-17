@@ -14,6 +14,7 @@
 //! - `recommendations` — rule engine and built-in rules.
 //! - `report` — human (`comfy-table`) and JSON formatters.
 
+pub mod engine;
 pub mod inventory;
 pub mod pricing;
 pub mod recommendations;

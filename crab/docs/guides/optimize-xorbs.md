@@ -43,11 +43,19 @@ crab optimize xorbs --profile ml --dry-run
 crab optimize xorbs --profile ml --dry-run --json
 ```
 
+`--dry-run` is the supported optimization path today. It lists the live
+source xorbs, obtains their sizes and storage classes, and produces an
+estimate without writing remote objects.
+
 Apply the rewrite:
 
 ```bash
 crab optimize xorbs --profile ml --apply
 ```
+
+Apply currently fails closed after configuration validation. The executor can
+write destination xorbs, but the file-index/shard manifest reconciliation
+needed for readers to resolve those destinations is not implemented yet.
 
 Resume an interrupted run:
 
@@ -85,4 +93,4 @@ Archive-class source xorbs are restored before processing when included:
 
 - Two `crab optimize xorbs` runs: second fails with `CRAB-E0332`.
 - `crab gc` + `crab optimize xorbs`: `ConcurrentMaintenance [E0333]`.
-- `crab push` + `crab optimize xorbs`: safe; reconciliation leaves concurrent-push xorbs untouched.
+- `crab push` + `crab optimize xorbs --dry-run`: safe; dry-run performs no writes.

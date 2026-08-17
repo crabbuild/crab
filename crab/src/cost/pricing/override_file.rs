@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -259,6 +260,97 @@ pub fn from_embedded_only(
         override_version: None,
         entries: map,
     }
+}
+
+/// Load the generated price table and optionally apply a user override.
+pub fn load_resolved_table(path: Option<&Path>) -> Result<ResolvedTable> {
+    let mut entries = Vec::new();
+
+    for entry in super::embedded::embedded_price_table() {
+        let schedule = &entry.schedule;
+        entries.push((
+            entry.provider.to_string(),
+            entry.region.to_string(),
+            entry.class.to_string(),
+            ResolvedPriceSchedule {
+                gb_month_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "gb_month_usd",
+                    schedule.gb_month_usd,
+                )?,
+                put_per_k_ops_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "put_per_k_ops_usd",
+                    schedule.put_per_k_ops_usd,
+                )?,
+                get_per_k_ops_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "get_per_k_ops_usd",
+                    schedule.get_per_k_ops_usd,
+                )?,
+                list_per_k_ops_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "list_per_k_ops_usd",
+                    schedule.list_per_k_ops_usd,
+                )?,
+                head_per_k_ops_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "head_per_k_ops_usd",
+                    schedule.head_per_k_ops_usd,
+                )?,
+                retrieval_per_gb_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "retrieval_per_gb_usd",
+                    schedule.retrieval_per_gb_usd,
+                )?,
+                min_retention_days: schedule.min_retention_days,
+                min_object_size_bytes: schedule.min_object_size_bytes,
+                egress_per_gb_usd: parse_embedded_decimal(
+                    entry.provider,
+                    entry.region,
+                    entry.class,
+                    "egress_per_gb_usd",
+                    schedule.egress_per_gb_usd,
+                )?,
+            },
+        ));
+    }
+
+    let mut table = match path {
+        Some(path) => {
+            let override_file = load_override(path)?;
+            merge_tables(&entries, &override_file)
+        }
+        None => from_embedded_only(&entries, super::embedded::PRICE_TABLE_VERSION),
+    };
+    table.embedded_version = super::embedded::PRICE_TABLE_VERSION.to_string();
+    Ok(table)
+}
+
+fn parse_embedded_decimal(
+    provider: &str,
+    region: &str,
+    class: &str,
+    field: &str,
+    value: &str,
+) -> Result<Decimal> {
+    Decimal::from_str(value).map_err(|error| {
+        CrabError::Internal(format!(
+            "invalid embedded price {provider}/{region}/{class}.{field}: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]

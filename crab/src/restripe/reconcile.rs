@@ -1,13 +1,13 @@
 //! Online reconciliation for concurrent pushes during restripe.
 //!
 //! At the end of a restripe run, [`finalize`] reads the journal's
-//! `src_xorb → dest_xorbs` mapping and builds a reconciliation shard
-//! that records the new xorb info for the destination xorbs. The shard
-//! is uploaded to `.crab/shards/` and the shard list is updated.
+//! `src_xorb → dest_xorbs` mapping and reports the work that a metadata
+//! reconciliation would need to apply.
 //!
-//! # Invariant (design B5)
+//! # Target invariant (design B5)
 //!
-//! For any file-index entry `E` present at the end of the restripe:
+//! The eventual implementation must prove that, for any file-index entry
+//! `E` present at the end of the restripe:
 //!
 //! 1. If `E` existed at `run.started_at` AND its xorbs were in the
 //!    source set, `E` now points at dest xorbs.
@@ -17,35 +17,23 @@
 //!    newly-written dest xorb or a xorb out of restripe scope).
 //!
 //! Concurrent pushes during the run produce new xorbs outside the
-//! restripe snapshot. Those xorbs' file-index entries are untouched
-//! by reconciliation. Old source xorbs become orphans and are
-//! reclaimed by a later `crab gc`.
+//! restripe snapshot. Those xorbs' file-index entries are untouched by
+//! reconciliation. Old source xorbs become orphans and are reclaimed by a
+//! later `crab gc` after the metadata commit is complete.
 //!
-//! # Shard upload
-//!
-//! When a `Store` is provided, the reconciliation builds a shard via
-//! `PushShardSession`, uploads it to `.crab/shards/{hash}`, and
-//! updates the shard list via the manifest CAS pipeline. The shard
-//! upload is content-addressed and idempotent — a CAS repeat after a
-//! transient failure is a no-op if the first attempt committed.
-//!
-//! When no `Store` is available (tests, journal-only mode), the
-//! reconciliation reports the mapping counts without uploading.
+//! A `Store` cannot be used safely yet: the file-index rewrite needs the
+//! original `MDBFileInfo` records and a manifest/file-index CAS update, not
+//! an advisory object. Apply callers therefore fail closed until that
+//! contract is implemented. Tests can pass `None` to inspect journal counts.
 
 use std::collections::HashMap;
 
-use bytes::Bytes;
-use object_store::path::Path as ObjectPath;
 use serde::Serialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result};
 use crate::restripe::journal::{RestripeJournal, SourceStatus};
 use crate::storage::store::Store;
-
-/// Maximum CAS retry attempts for shard-list update.
-#[expect(dead_code, reason = "reserved for full shard-list CAS retry loop")]
-const MAX_CAS_RETRIES: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Reconciliation outcome
@@ -98,82 +86,12 @@ fn build_mapping(
     Ok((src_to_dest, entries_updated, entries_unchanged))
 }
 
-// ---------------------------------------------------------------------------
-// Shard upload
-// ---------------------------------------------------------------------------
-
-/// Upload reconciliation shards to object storage.
-///
-/// For each destination xorb in the mapping, we need to record its
-/// existence in the shard so that the chunk index can resolve chunks
-/// to the new xorb locations. The shard is built using the same
-/// `PushShardSession` used by the push pipeline.
-///
-/// Returns `(shards_uploaded, shard_bytes, cas_first_attempt, cas_attempts)`.
-async fn upload_reconciliation_shards(
-    store: &Store,
-    src_to_dest: &HashMap<String, Vec<String>>,
-) -> Result<(u64, u64, bool, u32)> {
-    if src_to_dest.is_empty() {
-        return Ok((0, 0, true, 1));
-    }
-
-    // Build a minimal reconciliation shard that records the dest xorb
-    // hashes. The full shard with chunk-level metadata would require
-    // parsing each dest xorb — for now we upload a marker shard that
-    // the chunk index can discover during the next shard sync.
-    //
-    // The shard is content-addressed: uploading the same shard twice
-    // is a no-op (CAS put semantics).
-    let mut shards_uploaded: u64 = 0;
-    let mut shard_bytes: u64 = 0;
-
-    // Collect all unique dest xorb hashes for the reconciliation record.
-    let mut all_dest_hashes: Vec<String> = src_to_dest.values().flatten().cloned().collect();
-    all_dest_hashes.sort();
-    all_dest_hashes.dedup();
-
-    // Build a reconciliation manifest as a JSON document that records
-    // the src→dest mapping. This is uploaded alongside the shards so
-    // that `crab fsck` can verify the restripe was complete.
-    let manifest = serde_json::json!({
-        "type": "restripe_reconciliation",
-        "version": "1.0",
-        "mappings": src_to_dest.len(),
-        "dest_xorbs": all_dest_hashes.len(),
-    });
-    let manifest_bytes = serde_json::to_vec(&manifest).unwrap_or_else(|_| b"{}".to_vec());
-
-    // Upload the reconciliation record to a well-known path.
-    // This is idempotent: the content is deterministic for a given mapping.
-    let record_hash = blake3::hash(&manifest_bytes);
-    let record_path = ObjectPath::from(format!(".crab/shards/restripe-{}", record_hash.to_hex()));
-
-    match store
-        .put(&record_path, Bytes::from(manifest_bytes.clone()))
-        .await
-    {
-        Ok(()) => {
-            shards_uploaded += 1;
-            shard_bytes += manifest_bytes.len() as u64;
-            debug!(
-                path = %record_path,
-                bytes = manifest_bytes.len(),
-                "uploaded reconciliation shard"
-            );
-        }
-        Err(e) => {
-            // Non-fatal: the reconciliation record is advisory.
-            // The dest xorbs are already uploaded and the journal
-            // has the mapping — fsck can reconstruct from there.
-            warn!(
-                error = %e,
-                "failed to upload reconciliation shard; continuing"
-            );
-        }
-    }
-
-    Ok((shards_uploaded, shard_bytes, true, 1))
+/// Reject xorb apply until the file-index reconciliation contract is real.
+pub fn ensure_apply_supported() -> Result<()> {
+    Err(CrabError::Configuration {
+        key: "optimize xorbs --apply".to_string(),
+        origin: "xorb apply is unavailable until it can rewrite MDBFileInfo records and commit the file-index/shard manifest atomically; use --dry-run".to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -183,15 +101,14 @@ async fn upload_reconciliation_shards(
 /// Finalize a restripe run by reconciling the file-index.
 ///
 /// Reads the journal's completed source entries to build the
-/// `src_xorb → dest_xorbs` mapping, uploads reconciliation shards
-/// when a Store is available, and returns the outcome.
+/// `src_xorb → dest_xorbs` mapping and returns the outcome.
 ///
 /// The reconciliation is scoped to the pre-run xorb snapshot:
 /// - Entries whose xorbs were in the source set are updated.
 /// - Entries added by concurrent pushes during the run are unchanged.
 /// - Every chunk reference in the final file-index resolves to a live
 ///   xorb (dest xorb or out-of-scope xorb).
-pub async fn finalize(
+pub fn finalize(
     journal: &RestripeJournal,
     run_id: &str,
     store: Option<&Store>,
@@ -206,14 +123,15 @@ pub async fn finalize(
         "reconciliation mapping built"
     );
 
-    // Step 2: Upload reconciliation shards (when store is available).
-    let (shards_uploaded, shard_bytes, cas_first_attempt, cas_attempts) = if let Some(store) = store
-    {
-        upload_reconciliation_shards(store, &src_to_dest).await?
-    } else {
-        debug!("no store available; skipping shard upload");
-        (0, 0, true, 1)
-    };
+    if store.is_some() && !src_to_dest.is_empty() {
+        return Err(CrabError::Configuration {
+            key: "restripe reconciliation".to_string(),
+            origin: "file-index reconciliation is not implemented; refusing to publish destination xorbs that readers cannot resolve".to_string(),
+        });
+    }
+
+    debug!("no file-index write performed; reporting reconciliation counts only");
+    let (shards_uploaded, shard_bytes, cas_first_attempt, cas_attempts) = (0, 0, true, 1);
 
     info!(
         entries_updated,
@@ -274,8 +192,8 @@ mod tests {
         assert!(!is_cas_repeat_noop(&outcome));
     }
 
-    #[tokio::test]
-    async fn finalize_with_completed_sources_reports_counts() {
+    #[test]
+    fn finalize_with_completed_sources_reports_counts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
         let journal = RestripeJournal::open(&path).unwrap();
@@ -305,7 +223,7 @@ mod tests {
             .update_source_status("test-reconcile", "xorb-003", SourceStatus::Skipped, None)
             .unwrap();
 
-        let outcome = finalize(&journal, "test-reconcile", None).await.unwrap();
+        let outcome = finalize(&journal, "test-reconcile", None).unwrap();
 
         assert_eq!(outcome.entries_updated, 2);
         assert_eq!(outcome.entries_unchanged, 1);
@@ -313,8 +231,8 @@ mod tests {
         assert!(outcome.cas_first_attempt);
     }
 
-    #[tokio::test]
-    async fn finalize_with_empty_dest_lists_counts_zero_updates() {
+    #[test]
+    fn finalize_with_empty_dest_lists_counts_zero_updates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
         let journal = RestripeJournal::open(&path).unwrap();
@@ -325,7 +243,7 @@ mod tests {
             .update_source_status("test-empty", "xorb-aaa", SourceStatus::Done, Some("[]"))
             .unwrap();
 
-        let outcome = finalize(&journal, "test-empty", None).await.unwrap();
+        let outcome = finalize(&journal, "test-empty", None).unwrap();
 
         assert_eq!(outcome.entries_updated, 0);
         assert_eq!(outcome.entries_unchanged, 0);

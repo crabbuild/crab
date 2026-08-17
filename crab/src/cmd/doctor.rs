@@ -25,10 +25,11 @@ use crab_cache::path_class::{CacheRouteContract, cache_route_contract_matches_cu
 
 use crate::core::config::{Config, ServiceAuth, ServiceMode};
 use crate::core::credential_discovery::{CredentialSource, discover_credentials};
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::core::project_config::ProjectConfig;
 use crate::core::style::CliStyle;
+use tokio_util::sync::CancellationToken;
 
 /// Outcome of a single diagnostic check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -247,48 +248,39 @@ pub async fn run_doctor_metadb(mode: OutputMode) -> Result<()> {
 ///
 /// Collects inventory, applies pricing, generates recommendations,
 /// and renders the report in human or JSON format.
-pub fn run_cost_report(
+pub async fn run_cost_report(
     mode: OutputMode,
-    _pricing_file: Option<String>,
-    _inventory_source: Option<String>,
-    _sample: Option<f64>,
-    _top_k: Option<usize>,
+    pricing_file: Option<String>,
+    inventory_source: Option<String>,
+    sample: Option<f64>,
+    top_k: Option<usize>,
+    config: &Config,
+    cancel: &CancellationToken,
 ) -> Result<()> {
-    use crate::cost::inventory::live::chrono_now_rfc3339;
-    use crate::cost::report::{CostReport, InventorySummary, format_bytes_iec};
-    use rust_decimal::Decimal;
-    use std::collections::BTreeMap;
-
-    // Build a placeholder report. In a full implementation, this would:
-    // 1. Resolve inventory source (auto/live/report)
-    // 2. Walk or parse the inventory
-    // 3. Load embedded + override pricing
-    // 4. Run the recommendation engine
-    // 5. Build and render the report
-    let now = chrono_now_rfc3339();
-
-    let report = CostReport {
-        price_table_version: crate::cost::pricing::embedded::PRICE_TABLE_VERSION.to_string(),
-        override_version: None,
-        generated_at: now.clone(),
-        inventory: InventorySummary {
-            source: "not yet connected".to_string(),
-            scanned_at: now,
-            total_objects: 0,
-            total_bytes: 0,
-            total_bytes_human: format_bytes_iec(0),
+    let remote_path = crate::git::discover::resolve_crab_dir()
+        .map_or_else(|| PathBuf::from(".crab/remote"), |dir| dir.join("remote"));
+    let remote =
+        std::fs::read_to_string(&remote_path).map_err(|error| CrabError::Configuration {
+            key: "remote".to_string(),
+            origin: format!(
+                "failed to read {}: {error}; run `crab init <url>` first",
+                remote_path.display()
+            ),
+        })?;
+    let remote = crate::git::url::CrabUrl::parse(remote.trim())?;
+    let store = crate::auth::build_store(config, &remote, "doctor.cost", cancel).await?;
+    let report = crate::cost::engine::build_report(
+        config,
+        &store,
+        &crate::cost::engine::ReportOptions {
+            pricing_file,
+            inventory_source,
+            sample_ratio: sample,
+            top_k,
         },
-        current_monthly_usd: Decimal::ZERO,
-        projected_monthly_usd: Decimal::ZERO,
-        projected_savings_usd: Decimal::ZERO,
-        per_class_costs: BTreeMap::new(),
-        recommendations: Vec::new(),
-        heaviest_cold: Vec::new(),
-        assumptions: vec![
-            "Cost report requires a connected bucket. Run from a crab-initialized repo."
-                .to_string(),
-        ],
-    };
+        cancel,
+    )
+    .await?;
 
     if mode == OutputMode::Json {
         emit_json("cost", "1.0", &report);

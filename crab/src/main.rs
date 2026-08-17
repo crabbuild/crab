@@ -3416,13 +3416,17 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             .entered();
             let mode = OutputMode::from_flags(json, false);
             if cost {
+                let config = Config::resolve_local()?;
                 crab::cmd::doctor::run_cost_report(
                     mode,
                     pricing_file,
                     inventory_source,
                     sample,
                     top_k,
-                )?;
+                    &config,
+                    &cancel,
+                )
+                .await?;
             } else if metadb {
                 crab::cmd::doctor::run_doctor_metadb(mode).await?;
             } else if support_bundle {
@@ -4967,16 +4971,13 @@ async fn run_optimize_command(
         OptimizeCmd::Plan(args) => {
             let _span = tracing::info_span!("optimize_plan").entered();
             let mode = OutputMode::from_flags(args.json, false);
-            let config = Config::resolve_local().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to load config for optimize plan, using defaults");
-                Config::default()
-            });
+            let config = Config::resolve_local()?;
             crab::cmd::optimize::run_plan(&args, &config, mode);
             Ok(ExitCode::SUCCESS)
         }
         OptimizeCmd::Apply(args) => {
             let _span = tracing::info_span!("optimize_apply").entered();
-            run_optimize_apply(args)
+            run_optimize_apply(args, cancel).await
         }
         OptimizeCmd::Xorbs(args) => {
             let _span = tracing::info_span!("optimize_xorbs").entered();
@@ -4988,7 +4989,7 @@ async fn run_optimize_command(
             );
 
             let config = Config::resolve_local()?;
-            crab::cmd::restripe::run_restripe(&args, &config).await?;
+            crab::cmd::restripe::run_restripe(&args, &config, cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
         OptimizeCmd::Packs {
@@ -5183,61 +5184,94 @@ async fn run_optimize_command(
         OptimizeCmd::Repo(args) => {
             let _span = tracing::info_span!("optimize_repo").entered();
             let mode = OutputMode::from_flags(args.json, false);
+            let config = Config::resolve_local()?;
             crab::cmd::doctor::run_cost_report(
                 mode,
                 args.pricing_file,
                 args.inventory_source,
                 args.sample,
                 args.top_k,
-            )?;
+                &config,
+                cancel,
+            )
+            .await?;
             Ok(ExitCode::SUCCESS)
         }
     }
 }
 
-fn run_optimize_apply(args: crab::cmd::optimize::OptimizeApplyArgs) -> Result<ExitCode> {
+async fn run_optimize_apply(
+    args: crab::cmd::optimize::OptimizeApplyArgs,
+    cancel: &CancellationToken,
+) -> Result<ExitCode> {
     let mode = OutputMode::from_flags(args.json, false);
     let config = Config::resolve_local()?;
     let mut payload = crab::cmd::optimize::build_apply_payload(&args, &config);
 
-    for step in &mut payload.steps {
-        if !mode.is_machine() && step.status != crab::cmd::optimize::OptimizeStepStatus::Skipped {
-            eprintln!("optimize: running {}", step.title);
+    for index in 0..payload.steps.len() {
+        if cancel.is_cancelled() {
+            let step = &mut payload.steps[index];
+            step.status = crab::cmd::optimize::OptimizeStepStatus::Failed;
+            "cancelled".clone_into(&mut step.detail);
+            crab::cmd::optimize::refresh_summary(&mut payload);
+            crab::cmd::optimize::render_apply(&payload, mode);
+            return Ok(ExitCode::FAILURE);
         }
-
-        match step.kind {
-            crab::cmd::optimize::OptimizeStepKind::CostReport => {
-                let cmd = crab::cmd::optimize::cost_command_args(&args);
-                crab::cmd::optimize::run_child_step(step, mode, &cmd)?;
+        let result = {
+            let step = &mut payload.steps[index];
+            if !mode.is_machine() && step.status != crab::cmd::optimize::OptimizeStepStatus::Skipped
+            {
+                eprintln!("optimize: running {}", step.title);
             }
-            crab::cmd::optimize::OptimizeStepKind::SafetyChecks => {
-                if step.status != crab::cmd::optimize::OptimizeStepStatus::Skipped {
-                    crab::replication::ensure_active_active_maintenance_admitted(
-                        &config,
-                        "cost optimization",
-                    )?;
-                    crab::cmd::optimize::mark_succeeded(
-                        step,
-                        "active-active maintenance admission passed",
-                    );
+
+            match step.kind {
+                crab::cmd::optimize::OptimizeStepKind::CostReport => {
+                    let cmd = crab::cmd::optimize::cost_command_args(&args);
+                    crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
+                }
+                crab::cmd::optimize::OptimizeStepKind::SafetyChecks => {
+                    if step.status == crab::cmd::optimize::OptimizeStepStatus::Skipped {
+                        Ok(())
+                    } else {
+                        crab::replication::ensure_active_active_maintenance_admitted(
+                            &config,
+                            "cost optimization",
+                        )
+                        .map(|()| {
+                            crab::cmd::optimize::mark_succeeded(
+                                step,
+                                "active-active maintenance admission passed",
+                            );
+                        })
+                    }
+                }
+                crab::cmd::optimize::OptimizeStepKind::LifecycleTiering => {
+                    let cmd = crab::cmd::optimize::tier_apply_command_args();
+                    crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
+                }
+                crab::cmd::optimize::OptimizeStepKind::XorbRestripe => {
+                    let cmd = crab::cmd::optimize::xorb_apply_command_args(&args);
+                    crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
+                }
+                crab::cmd::optimize::OptimizeStepKind::CachePrune => {
+                    let cmd = crab::cmd::optimize::cache_prune_command_args();
+                    crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
+                }
+                crab::cmd::optimize::OptimizeStepKind::ReplicaPolicy => {
+                    let cmd = crab::cmd::optimize::replica_policy_command_args();
+                    crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
                 }
             }
-            crab::cmd::optimize::OptimizeStepKind::LifecycleTiering => {
-                let cmd = crab::cmd::optimize::tier_apply_command_args();
-                crab::cmd::optimize::run_child_step(step, mode, &cmd)?;
+        };
+        if let Err(error) = result {
+            let step = &mut payload.steps[index];
+            if step.status != crab::cmd::optimize::OptimizeStepStatus::Failed {
+                step.status = crab::cmd::optimize::OptimizeStepStatus::Failed;
+                step.detail = error.to_string();
             }
-            crab::cmd::optimize::OptimizeStepKind::XorbRestripe => {
-                let cmd = crab::cmd::optimize::xorb_apply_command_args(&args);
-                crab::cmd::optimize::run_child_step(step, mode, &cmd)?;
-            }
-            crab::cmd::optimize::OptimizeStepKind::CachePrune => {
-                let cmd = crab::cmd::optimize::cache_prune_command_args();
-                crab::cmd::optimize::run_child_step(step, mode, &cmd)?;
-            }
-            crab::cmd::optimize::OptimizeStepKind::ReplicaPolicy => {
-                let cmd = crab::cmd::optimize::replica_policy_command_args();
-                crab::cmd::optimize::run_child_step(step, mode, &cmd)?;
-            }
+            crab::cmd::optimize::refresh_summary(&mut payload);
+            crab::cmd::optimize::render_apply(&payload, mode);
+            return Ok(ExitCode::FAILURE);
         }
     }
 
