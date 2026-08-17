@@ -281,8 +281,8 @@ pub fn build_report(
         heaviest_cold,
         assumptions: vec![
             "Pricing based on list prices; negotiated discounts not modeled.".to_string(),
-            "Retrieval costs estimated from current access patterns.".to_string(),
-            "Free-tier not applied unless cost.apply_free_tier = true.".to_string(),
+            "Retrieval costs require access telemetry and are not included in a live inventory report.".to_string(),
+            "Free-tier modeling is not included because account age and billing scope are not part of the Crab configuration contract.".to_string(),
         ],
     }
 }

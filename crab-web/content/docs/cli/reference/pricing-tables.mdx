@@ -13,8 +13,8 @@ Current version: **2026-03-01**
 
 ## How pricing data is used
 
-- `crab doctor --cost` uses the embedded table to estimate monthly
-  storage costs, projected savings, and recommendation deltas.
+- `crab doctor --cost` uses the embedded table and a live remote inventory to
+  estimate monthly storage costs and recommendation deltas.
 - `crab gc --dry-run` uses it to estimate early-deletion penalties.
 - `crab optimize xorbs --dry-run` uses PUT and storage costs for the
   xorb optimization cost estimate.

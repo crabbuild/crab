@@ -41,24 +41,17 @@ inventory_source = "live"
 list_concurrency = 32
 ```
 
-### Provider-side reports (recommended for large buckets)
+### Provider-side reports
 
-For buckets with millions of objects, provider-side inventory reports
-are faster and cheaper:
-
-- **S3 Inventory** — Parquet, ORC, or CSV format
-- **GCS Storage Insights** — Parquet format
-- **Azure Blob Inventory** — CSV format
-
-```toml
-[cost]
-inventory_source = "report"
-```
+Provider-side report parsers exist as library components, but Crab does not
+yet have a report-location/discovery contract. An explicit `report` source
+therefore fails with a configuration error; use `live` until report wiring is
+available.
 
 ### Auto (default)
 
-Prefers a report if one exists and is within
-`report_max_staleness_hours` (default 48). Falls back to live walk.
+Selects live inventory today. The report freshness setting is reserved for
+the provider-report discovery path.
 
 ```toml
 [cost]
@@ -76,11 +69,8 @@ crab doctor --cost --sample 0.25
 ```
 
 This uses a deterministic `blake3(key)` hash to include ~25% of
-objects. The report includes a Hoeffding-bound confidence interval
-at 95%.
-
-Sampling ratios ≥ 1/64 produce estimates within ±5% at 95% confidence
-for most distributions.
+objects. The report records that totals are scaled estimates when sampling
+is enabled; it does not currently emit a statistical confidence interval.
 
 ## Pricing Model
 
@@ -138,8 +128,10 @@ timestamp, and inventory source.
 ### 2. Cost Summary
 
 - **Current monthly cost** — estimated from current class distribution.
-- **Projected (with tier)** — estimated if tier-plan defaults were applied.
-- **Estimated savings** — the difference.
+- **Projected (with tier)** — equal to current cost until object age and
+  access telemetry are available to model tier transitions.
+- **Estimated savings** — conservative projected savings; use enabled
+  recommendations for potential tier savings.
 
 ### 3. Per-Class Breakdown
 
@@ -168,8 +160,9 @@ operator checklist:
 - active-active maintenance admission before any mutating apply step.
 - lifecycle tiering through `crab tier plan --apply --merge` when
   `[tier] enabled = true`.
-- xorb restriping through `crab optimize xorbs --apply` only when
-  `--include-xorbs` is passed.
+- xorb restriping is exposed as a planned step, but apply is currently
+  blocked until destination xorbs can be committed with their file-index and
+  shard metadata atomically. Use `crab optimize xorbs --dry-run` for estimates.
 - local cache pruning through `crab prune`.
 - replica policy checks through `crab replica doctor --fix-plan` when
   replication is configured.
@@ -177,7 +170,8 @@ operator checklist:
 `crab optimize apply` executes the same plan in order. It preserves each
 underlying command's safety checks and stops on the first failed step. Xorb
 rewrites are opt-in because they can be long-running and may restore archived
-objects before rewriting content-addressed xorbs.
+objects before rewriting content-addressed xorbs; requesting that step
+currently fails closed until metadata reconciliation is implemented.
 
 ### 5. Heaviest Cold Objects
 
@@ -213,7 +207,7 @@ pricing_file = ""
 # Access window in days for cost analysis
 access_window_days = 90
 
-# Whether to apply free-tier modeling
+# Reserved; true fails closed until billing-account scope is defined
 apply_free_tier = false
 
 # Maximum staleness in hours for inventory reports

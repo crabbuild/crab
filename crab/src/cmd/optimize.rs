@@ -1,14 +1,17 @@
 //! Operator workflow for repository cost optimization.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use clap::Parser;
 use schemars::JsonSchema;
 use serde::Serialize;
+use tokio::io::AsyncRead;
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
+use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 pub const OPTIMIZE_PLAN_SCHEMA: &str = "optimize.plan";
 pub const OPTIMIZE_APPLY_SCHEMA: &str = "optimize.apply";
@@ -188,7 +191,12 @@ pub fn render_apply(payload: &OptimizePayload, mode: OutputMode) {
 }
 
 /// Execute a child `crab` command as one optimizer step.
-pub fn run_child_step(step: &mut OptimizeStep, mode: OutputMode, args: &[String]) -> Result<()> {
+pub async fn run_child_step(
+    step: &mut OptimizeStep,
+    mode: OutputMode,
+    args: &[String],
+    cancel: &CancellationToken,
+) -> Result<()> {
     if step.status == OptimizeStepStatus::Skipped {
         return Ok(());
     }
@@ -198,26 +206,77 @@ pub fn run_child_step(step: &mut OptimizeStep, mode: OutputMode, args: &[String]
     let mut command = Command::new(&bin);
     command.args(args);
     if mode.is_machine() {
-        let output = command
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(CrabError::Io)?;
-        return finish_child_step(step, output.status);
+        let stdout_task = tokio::spawn(read_child_pipe(child.stdout.take()));
+        let stderr_task = tokio::spawn(read_child_pipe(child.stderr.take()));
+        let status = tokio::select! {
+            result = child.wait() => result.map_err(CrabError::Io)?,
+            () = cancel.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                step.status = OptimizeStepStatus::Failed;
+                "cancelled".clone_into(&mut step.detail);
+                return Err(CrabError::Cancelled);
+            }
+        };
+        let stdout = stdout_task.await.map_err(|error| {
+            CrabError::Internal(format!("stdout capture task failed: {error}"))
+        })??;
+        let stderr = stderr_task.await.map_err(|error| {
+            CrabError::Internal(format!("stderr capture task failed: {error}"))
+        })??;
+        let diagnostic = if status.success() {
+            None
+        } else {
+            bounded_child_output(&stderr).or_else(|| bounded_child_output(&stdout))
+        };
+        return finish_child_step(step, status, diagnostic.as_deref());
     }
 
-    let status = command
+    let mut child = command
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()
+        .spawn()
         .map_err(CrabError::Io)?;
-    finish_child_step(step, status)
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(CrabError::Io)?,
+        () = cancel.cancelled() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            step.status = OptimizeStepStatus::Failed;
+            "cancelled".clone_into(&mut step.detail);
+            return Err(CrabError::Cancelled);
+        }
+    };
+    finish_child_step(step, status, None)
 }
 
-fn finish_child_step(step: &mut OptimizeStep, status: std::process::ExitStatus) -> Result<()> {
+async fn read_child_pipe<R>(reader: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(mut reader) = reader else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut output).await?;
+    Ok(output)
+}
+
+fn finish_child_step(
+    step: &mut OptimizeStep,
+    status: std::process::ExitStatus,
+    diagnostic: Option<&str>,
+) -> Result<()> {
     if status.success() {
         step.status = OptimizeStepStatus::Succeeded;
-        step.detail = "completed".to_owned();
+        "completed".clone_into(&mut step.detail);
         return Ok(());
     }
 
@@ -225,11 +284,24 @@ fn finish_child_step(step: &mut OptimizeStep, status: std::process::ExitStatus) 
     let code = status
         .code()
         .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-    step.detail = format!("failed with exit status {code}");
+    step.detail = match diagnostic {
+        Some(diagnostic) => format!("failed with exit status {code}: {diagnostic}"),
+        None => format!("failed with exit status {code}"),
+    };
     Err(CrabError::Configuration {
         key: format!("{} failed", step.id),
-        origin: step.command.clone(),
+        origin: step.detail.clone(),
     })
+}
+
+fn bounded_child_output(bytes: &[u8]) -> Option<String> {
+    const MAX_DIAGNOSTIC_BYTES: usize = 2048;
+    let output = String::from_utf8_lossy(bytes);
+    let output = output.trim();
+    if output.is_empty() {
+        return None;
+    }
+    Some(output.chars().take(MAX_DIAGNOSTIC_BYTES).collect())
 }
 
 /// Mark a planned in-process safety step as succeeded.
@@ -434,7 +506,7 @@ fn xorb_step(args: &OptimizePlanArgs) -> OptimizeStep {
         command,
         mutates: true,
         status: OptimizeStepStatus::Planned,
-        detail: "rewrite content-addressed xorbs through the existing restripe journal".to_owned(),
+        detail: "requested xorb rewrite is currently blocked until file-index/shard reconciliation is implemented".to_owned(),
     }
 }
 

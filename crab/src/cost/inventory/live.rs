@@ -15,6 +15,7 @@ use std::time::Instant;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use super::{
@@ -100,6 +101,7 @@ async fn walk_prefix(
     prefix: &str,
     config: &LiveWalkConfig,
     progress: &WalkProgress,
+    cancel: &CancellationToken,
 ) -> Result<PrefixWalkResult> {
     use futures_util::StreamExt;
 
@@ -108,12 +110,19 @@ async fn walk_prefix(
 
     let mut stream = store.list(Some(&obj_prefix));
 
-    while let Some(meta_result) = stream.next().await {
+    loop {
+        let Some(meta_result) = (tokio::select! {
+            () = cancel.cancelled() => return Err(crate::core::error::CrabError::Cancelled),
+            next = stream.next() => next,
+        }) else {
+            break;
+        };
+
         let meta = match meta_result {
             Ok(m) => m,
             Err(e) => {
-                debug!(prefix, error = %e, "skipping object due to list error");
-                continue;
+                debug!(prefix, error = %e, "live inventory list failed");
+                return Err(crate::core::error::CrabError::Storage(e));
             }
         };
 
@@ -207,7 +216,11 @@ fn infer_default_class(provider: Provider) -> StorageClass {
 /// Uses `Semaphore`-gated concurrency to bound the number of
 /// simultaneous LIST requests. Returns a complete `Inventory` with
 /// per-class and per-prefix breakdowns.
-pub async fn walk_live(store: Arc<dyn ObjectStore>, config: LiveWalkConfig) -> Result<Inventory> {
+pub async fn walk_live(
+    store: Arc<dyn ObjectStore>,
+    config: LiveWalkConfig,
+    cancel: &CancellationToken,
+) -> Result<Inventory> {
     let semaphore = Arc::new(Semaphore::new(config.list_concurrency as usize));
     let progress = Arc::new(WalkProgress::new());
     let config = Arc::new(config);
@@ -225,10 +238,11 @@ pub async fn walk_live(store: Arc<dyn ObjectStore>, config: LiveWalkConfig) -> R
         let sem = Arc::clone(&semaphore);
         let prog = Arc::clone(&progress);
         let cfg = Arc::clone(&config);
+        let cancel = cancel.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await;
-            walk_prefix(store.as_ref(), prefix, &cfg, &prog).await
+            walk_prefix(store.as_ref(), prefix, &cfg, &prog, &cancel).await
         });
 
         handles.push((prefix.to_string(), handle));
@@ -269,13 +283,22 @@ pub async fn walk_live(store: Arc<dyn ObjectStore>, config: LiveWalkConfig) -> R
         }
     }
 
-    // Apply sample ratio scaling if sampling was used.
+    // Apply sample-ratio scaling to every aggregate, not only the totals.
+    // Per-class costs and prefix shares must describe the same estimated
+    // population as the headline totals.
     let (adjusted_objects, adjusted_bytes) = if let Some(ratio) = config.sample_ratio {
         if ratio > 0.0 && ratio < 1.0 {
-            let scale = 1.0 / ratio;
+            for stats in per_class.values_mut() {
+                stats.objects = scale_sample_value(stats.objects, ratio);
+                stats.bytes = scale_sample_value(stats.bytes, ratio);
+            }
+            for stats in per_prefix.values_mut() {
+                stats.objects = scale_sample_value(stats.objects, ratio);
+                stats.bytes = scale_sample_value(stats.bytes, ratio);
+            }
             (
-                (total_objects as f64 * scale) as u64,
-                (total_bytes as f64 * scale) as u64,
+                scale_sample_value(total_objects, ratio),
+                scale_sample_value(total_bytes, ratio),
             )
         } else {
             (total_objects, total_bytes)
@@ -307,6 +330,10 @@ pub async fn walk_live(store: Arc<dyn ObjectStore>, config: LiveWalkConfig) -> R
         per_prefix,
         heaviest_cold: all_heaviest_cold,
     })
+}
+
+fn scale_sample_value(value: u64, ratio: f64) -> u64 {
+    ((value as f64) / ratio).round() as u64
 }
 
 /// Returns the current UTC time as an RFC 3339 string.
@@ -412,6 +439,12 @@ mod tests {
             StorageClass::GcsStandard
         );
         assert_eq!(infer_default_class(Provider::Azure), StorageClass::AzureHot);
+    }
+
+    #[test]
+    fn sample_scaling_rounds_aggregate_values() {
+        assert_eq!(scale_sample_value(25, 0.25), 100);
+        assert_eq!(scale_sample_value(1, 0.3), 3);
     }
 
     #[test]
