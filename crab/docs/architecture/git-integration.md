@@ -23,7 +23,7 @@ argv[0] == "crab"             →  CLI mode
 
 ```
 git → helper:  capabilities
-helper → git:  fetch\npush\noption\n\n
+helper → git:  fetch\npush\noption\n[stateless-connect when the repository proof is current]\n\n
 
 git → helper:  list [for-push]
 helper → git:  {sha} refs/heads/main\n...\n\n
@@ -36,6 +36,19 @@ git → helper:  push {src}:{dst}\n...\n\n
 helper:        (executes 14-step push pipeline)
 helper → git:  ok {ref}\n...\n\n
 ```
+
+For a repository with a complete generation-bound visibility proof, Git then
+uses the terminal v2 path:
+
+~~~
+git → helper:  stateless-connect git-upload-pack
+helper → git:  (raw blank line)
+git ↔ helper:  protocol-v2 pkt-lines over the same stdio
+~~~
+
+The helper performs the temporary upload-pack role locally. It does not start
+a listener or require a Crab service. Repositories without a current locator
+and visibility proof remain on the legacy complete-pack path.
 
 Source: `crab/src/git/remote_helper.rs`
 
@@ -64,14 +77,21 @@ and ETag evidence before Crab claims provider parity.
 | Hydration | Supported and hash verified | `e2e_add_commit_push` | 64 MiB byte-identical reconstruction |
 | Connectivity check | Supported for complete fetches | fetch connectivity tests | clone plus `git fsck --connectivity-only` |
 | Immutable pack/index integrity | Fail closed before ref update or checkout when a required pack or published index is missing | pack validation and fetch fail-before-download tests | isolated missing-pack and missing-index clone failures |
-| Git partial-clone filters, including `blob:none` | Unsupported; the helper returns `unsupported` before transfer | filter option and fetch fail-before-I/O tests | not applicable; no filtered transfer is allowed |
-| `connect` / `stateless-connect` | Unsupported and not advertised | `v2_fetch_transport` explicit-unsupported contract | not applicable; no stateless session is allowed |
-| Git wire protocol v2 | Unsupported | `v2_fetch_transport` | not negotiated |
+| Git partial-clone filters | Supported on the proof-gated protocol-v2 path: `blob:none`, `blob:limit=<n>[kmg]`, `tree:<depth>`, `object:type={tag,commit,tree,blob}`, full-SHA-1 `sparse:oid`, and bounded repeated/combine intersections | `v2_fetch_transport`, `remote_helper_transcript`, live filter matrix/lazy-fetch proof | RustFS filter matrix, lazy blob retrieval, promisor sidecar, strict fsck |
+| `connect` | Unsupported; there is no stateful takeover | helper command contract tests | not applicable |
+| `stateless-connect git-upload-pack` | Supported only when the pinned snapshot has locator and visibility coverage; terminal and failure paths are fail-closed | raw wire transcripts and helper dispatch tests | `git ls-remote`, clone, fetch, shallow/deepen |
+| Git wire protocol v2 | Supported profile: `ls-refs`, `fetch`, depth/deepen, sideband, tags, and the documented filter matrix; optional extensions remain unsupported | upload-pack wire tests | RustFS protocol trace, filter matrix, and Git operations |
+| `packfile-uris`, `object-info`, `ref-in-want`, date/ref shallow selectors | Unsupported and rejected explicitly | parser/option contract tests | expected-failure cases |
 
-The manual evidence owner is
-`crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py`. It uses one unique
-remote prefix per run, verifies expected failures as non-zero commands, and
-never performs bucket-wide cleanup.
+The manual evidence owner for the protocol-v2 and partial-clone rows is
+`crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py`. It uses one
+unique remote prefix per run, verifies expected failures as non-zero commands,
+and never performs bucket-wide cleanup. The complete-pack rows remain owned by
+`crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py`.
+
+The protocol-v2 and partial-clone rows describe the implemented development-
+line profile. RustFS is qualified; provider and released-artifact evidence is
+still required before those rows become released support claims.
 
 ## Filter Driver (Long-Running Process)
 
@@ -81,8 +101,8 @@ Git's filter driver mechanism transforms file content at two points:
 
 Crab uses Git's long-running clean/smudge **filter-process protocol v2**, where
 a single persistent process handles all clean/smudge operations in a session.
-This protocol is unrelated to Git wire protocol v2. Crab does not currently
-advertise or implement Git wire protocol v2.
+This protocol is unrelated to Git wire protocol v2. Git wire protocol v2 is
+implemented separately by the proof-gated local upload-pack session above.
 
 ### Registration
 
@@ -288,9 +308,22 @@ Source: `crab/src/git/shallow.rs`
 
 ## Partial Clone Status
 
-Git partial clone is intentionally unsupported. Crab does not advertise the
-remote-helper `filter` capability, answers `option filter ...` with
-`unsupported`, and rejects direct library fetch requests carrying a filter
-before local-directory creation or object-store I/O. Lazy Crab checkout is a
-separate pointer-materialization feature: Git objects are fetched completely,
-while large payload bytes remain in the object store until hydration.
+The current development-line implementation supports direct filtered clones
+and filtered fetches over protocol v2 when the remote generation has complete
+locator and all-object visibility coverage. The accepted forms are
+`blob:none`, `blob:limit=<n>[kmg]`, `tree:<depth>`,
+`object:type={tag,commit,tree,blob}`, full-SHA-1 `sparse:oid`, and bounded
+repeated/combine intersections; see the support table above for semantics.
+RustFS lifecycle qualification is green; AWS/provider and released-artifact
+qualification remain before this is a released support claim.
+The planner authorizes raw OIDs from that immutable proof before reading bytes;
+the local helper produces a standard Git pack, and Git owns its promisor config,
+pack installation, and `.promisor` sidecars. A later `git cat-file`, checkout,
+diff, or merge can request missing blobs through a new helper session.
+
+The `crab clone` wrapper's default lazy mode is different: it configures Crab's
+pointer checkout and does not request a Git partial clone. Use ordinary Git
+with one of the supported `--filter=...` forms when Git-level filtering is
+desired. Date-based
+and ref-exclusion shallow selectors, stateful `connect`, `packfile-uris`,
+`object-info`, and `ref-in-want` remain unsupported and fail explicitly.

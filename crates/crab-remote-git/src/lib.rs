@@ -8,6 +8,7 @@ mod error;
 mod metrics;
 mod objects;
 mod operation;
+mod pack;
 mod path;
 mod reader;
 mod refs;
@@ -19,6 +20,7 @@ mod state;
 mod traversal;
 
 pub use budget::BudgetDimension;
+pub use crab_metadata::git_visibility::GitVisibilityIndex;
 pub use error::{
     BlameUnsupportedReason, CorruptionStage, CursorError, DeltaCorruption, Error,
     InflatedEntryError, PathError, RepositoryDiagnostic, RepositoryStateError, Result,
@@ -32,7 +34,9 @@ pub use objects::{
     Signature, SignatureHeader, TreeEntry,
 };
 pub use operation::{OperationContext, OperationKind};
+pub use pack::GeneratedPack;
 pub use path::GitPath;
+pub use reader::{RemoteGitObject, RemoteGitObjectMetadata};
 pub use refs::{HeadReference, RepositoryRef, RepositoryRefs};
 pub use repository::RemoteGitRepository;
 pub use repository::{ObjectLimits, OperationLimits, RepositoryIdentity, RepositoryOptions};

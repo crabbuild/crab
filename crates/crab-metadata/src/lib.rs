@@ -16,6 +16,7 @@ pub mod error;
 pub mod file_index_lookup;
 #[cfg(feature = "remote-index")]
 pub mod git_object_locator;
+pub mod git_visibility;
 pub mod key_codec;
 #[cfg(feature = "storage")]
 pub mod manifest_store;

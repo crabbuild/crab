@@ -75,7 +75,10 @@ The glue between them — the remote helper binary, the S3 metadata layer, the c
 ### 1.3 Non-Goals
 
 - **Not a GitHub replacement.** No pull requests, issues, code review, or web UI in v1. A separate product layer may sit on top later.
-- **Not a Git protocol server.** crab does not implement `git-upload-pack` / `git-receive-pack`. There is no HTTP smart protocol endpoint.
+- **No deployed Git protocol server.** The local `git-remote-crab` helper
+  temporarily performs the `git-upload-pack` role for protocol-v2 fetches over
+  its existing stdio; Crab does not deploy a listener or HTTP smart protocol
+  endpoint, and `git-receive-pack` takeover is not part of the profile.
 - **Not a general-purpose data platform.** Optimized for Git-shaped workloads; not a replacement for Delta Lake or Iceberg.
 - **Not an alternative to LFS for small files.** Small files stay in normal Git packfiles.
 - **Not magic cross-organization dedup.** Dedup scope is per-bucket (or per-bucket-prefix) by default. Global dedup requires an optional coordination service.
@@ -2275,7 +2278,16 @@ These are explicitly unresolved and need prototyping / discussion:
 1. **Handling partial quota / rate-limit errors mid-multipart.** If we’re halfway through a multipart upload and get throttled, we can pause and resume, but the multipart itself has a timeout. Need a watchdog.
 1. **SHA-256 migration.** Git supports SHA-256 object format but most tooling doesn’t. When crab flips to default SHA-256, older Git clients break. Probably wait until Git ecosystem stabilizes (post-2027?).
 1. **Submodule handling.** Gitmodules pointing to crab URLs should work transparently; verify this with the actual protocol.
-1. **Partial clones.** Git 2.30+ supports `--filter=blob:none`, but Crab does not advertise or honor partial-clone filters today. Supporting them requires a promisor-object lifecycle, on-demand Git object retrieval, and explicit interaction rules with Crab pointer smudging. Until that separate design is implemented and qualified, `option filter` fails closed rather than downloading complete packs silently.
+1. **Partial clones.** The proof-gated client-side protocol-v2 profile supports
+   `blob:none`, `blob:limit=<n>[kmg]`, `tree:<depth>`,
+   `object:type={tag,commit,tree,blob}`, full-SHA-1 `sparse:oid`, and bounded
+   repeated/combine intersections. It omits only the objects selected by the
+   requested filter, lets Git own promisor pack installation, and serves later
+   raw-OID requests from the immutable visibility proof. The `crab clone`
+   wrapper still uses its separate lazy pointer-checkout policy. Date/ref
+   shallow selectors, stateful `connect`, `packfile-uris`, `object-info`,
+   `ref-in-want`, `sparse:path`, and other unlisted filters remain unsupported;
+   an incomplete proof never falls back to a complete filtered clone.
 
 -----
 

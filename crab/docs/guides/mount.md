@@ -47,8 +47,12 @@ hydrated on demand from object storage.
 1. The CLI selects a backend. `auto` prefers NFS and falls back to FUSE only
    when NFS is not compiled in.
 2. Crab checks the cache at `~/.crab/mounts/repos/<hash>/` for an
-   existing blobless clone. If none exists, it runs
-   `git clone --bare --filter=blob:none` to bootstrap the tree structure.
+   existing blobless clone. If none exists, the current development-line
+   implementation runs `git clone --bare --filter=blob:none` against a
+   proof-gated v2 remote to bootstrap the tree structure. This path has green
+   RustFS qualification but is not a released support claim until provider and
+   released-artifact qualification complete; missing proof fails instead of
+   downloading a complete pack as a substitute.
 3. A snapshot is built from the target ref's tree.
 4. NFS starts a loopback NFSv3 server in `crab-nfs-mount` and mounts it through
    the OS NFS client. FUSE starts the FUSE session through `crab-fuse-mount`.

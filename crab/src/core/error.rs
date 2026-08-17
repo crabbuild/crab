@@ -1030,6 +1030,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::CacheStore(source) => Self::from(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
+            crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
             crab_read::ReadError::Xet(source) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Configuration { key, origin } => {
@@ -1055,6 +1056,9 @@ impl From<crab_read::ReadError> for CrabError {
                 example_chunk_index,
             },
             crab_read::ReadError::Cancelled => Self::Cancelled,
+            crab_read::ReadError::UnauthorizedObject => {
+                Self::Protocol("requested object is outside the visible generation".to_owned())
+            }
             crab_read::ReadError::Internal(message) => Self::Internal(message),
         }
     }
@@ -1673,6 +1677,9 @@ impl From<crab_git::walk::WalkError> for CrabError {
             crab_git::walk::WalkError::BeyondShallowBoundary { oid } => {
                 Self::BeyondShallowBoundary { oid }
             }
+            crab_git::walk::WalkError::LimitExceeded { actual, maximum } => Self::Protocol(
+                format!("Git visibility proof exceeds {maximum} objects (observed {actual})"),
+            ),
             error @ crab_git::walk::WalkError::Git { .. } => Self::Internal(error.to_string()),
         }
     }

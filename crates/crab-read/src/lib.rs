@@ -8,6 +8,7 @@ mod ref_advertisement;
 mod selection;
 mod store_client;
 mod term_resolver;
+mod upload_pack;
 
 pub use error::{ReadError, Result};
 pub use fetch_admission::{
@@ -26,3 +27,7 @@ pub use selection::{
 };
 pub use store_client::{SharedShardHints, StoreClient};
 pub use term_resolver::TermResolver;
+pub use upload_pack::{
+    PackPlan, UploadPackFilter, UploadPackFilterError, UploadPackObjectType, UploadPackRequest,
+    combine_upload_pack_filters, parse_upload_pack_filter, plan_upload_pack,
+};

@@ -20,6 +20,9 @@ pub enum ReadError {
     #[error("metadata error")]
     Metadata(#[from] crab_metadata::error::MetadataError),
 
+    #[error("remote Git error")]
+    RemoteGit(#[from] crab_remote_git::Error),
+
     #[error("xet data-plane error")]
     Xet(#[from] crab_xet::error::XetError),
 
@@ -48,6 +51,9 @@ pub enum ReadError {
 
     #[error("read operation cancelled")]
     Cancelled,
+
+    #[error("requested object is outside the visible generation")]
+    UnauthorizedObject,
 
     #[error("{0}")]
     Internal(String),

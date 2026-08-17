@@ -1,7 +1,10 @@
-//! Explicit contract tests for the released but unsupported protocol-v2
-//! transport scaffold.
+//! Contract tests for the retained client transport and local upload-pack path.
 
 #![cfg(feature = "gix-transport")]
+#![expect(
+    deprecated,
+    reason = "compatibility tests intentionally cover the retained transport API"
+)]
 
 use std::io::{BufReader, Cursor};
 
@@ -32,6 +35,15 @@ fn v2_transport_capabilities_are_not_advertised() {
                 .any(|line| { matches!(line, "connect" | "stateless-connect") })
         );
     }
+}
+
+#[test]
+fn v2_helper_capability_is_proof_gated() {
+    let legacy = crab::git::remote_helper::format_capabilities_with_v2(true, false);
+    assert!(!legacy.lines().any(|line| line == "stateless-connect"));
+
+    let ready = crab::git::remote_helper::format_capabilities_with_v2(true, true);
+    assert!(ready.lines().any(|line| line == "stateless-connect"));
 }
 
 #[test]

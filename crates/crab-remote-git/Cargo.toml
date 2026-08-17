@@ -17,6 +17,7 @@ crab-git = { workspace = true }
 crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
 crab-storage = { workspace = true }
 crab-xet = { workspace = true }
+flate2 = { workspace = true }
 gix-features = { workspace = true, features = ["crc32", "zlib"] }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
@@ -25,8 +26,9 @@ futures-util = { workspace = true }
 sha1 = "0.10"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

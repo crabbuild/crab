@@ -441,6 +441,12 @@ impl RemoteGitRuntime {
 
     pub(crate) async fn cached_object(&self, key: &ObjectCacheKey) -> Option<Arc<GitObject>> {
         let value = self.object_cache.lock().await.get(key);
+        let cache_event = if value.is_some() { "hit" } else { "miss" };
+        tracing::debug!(
+            cache_kind = "object",
+            cache_event,
+            "remote Git cache lookup"
+        );
         self.metrics.record(MetricObservation {
             kind: MetricKind::Cache,
             value: u64::from(value.is_some()),
@@ -690,11 +696,19 @@ impl RemoteGitRuntime {
         key: &PackIndexCacheKey,
         max_source_bytes: u64,
     ) -> Option<Arc<PackIndex>> {
-        self.pack_index_cache
+        let value = self
+            .pack_index_cache
             .lock()
             .await
             .get(key)
-            .filter(|index| index.source_bytes <= max_source_bytes)
+            .filter(|index| index.source_bytes <= max_source_bytes);
+        let cache_event = if value.is_some() { "hit" } else { "miss" };
+        tracing::debug!(
+            cache_kind = "pack_index",
+            cache_event,
+            "remote Git cache lookup"
+        );
+        value
     }
 
     pub(crate) async fn insert_pack_index(&self, key: PackIndexCacheKey, index: Arc<PackIndex>) {

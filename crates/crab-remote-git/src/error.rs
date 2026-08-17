@@ -49,6 +49,9 @@ pub enum RepositoryStateError {
     /// Manifest, inventory, and locator could not form one committed view.
     #[error("repository metadata does not form one committed generation")]
     InconsistentGeneration,
+    /// The immutable Git object visibility proof does not match the manifest refs.
+    #[error("Git object visibility proof does not match repository refs")]
+    VisibilityProofMismatch,
 }
 
 /// Revision validation and reachability failures.
@@ -367,6 +370,10 @@ pub enum Error {
     #[error("remote Git read was cancelled")]
     Cancelled,
 
+    /// The enclosing read-side policy denied an object before its bytes were exposed.
+    #[error("remote Git request was denied by authorization policy")]
+    AuthorizationDenied,
+
     /// The enclosing operation exceeded its wall-clock deadline.
     #[error("remote Git {operation} timed out")]
     Timeout { operation: &'static str },
@@ -503,6 +510,7 @@ impl Error {
             Self::LimitExceeded { .. } => "limit",
             Self::Allocation { .. } => "allocation",
             Self::Cancelled => "cancelled",
+            Self::AuthorizationDenied => "authorization",
             Self::Timeout { .. } => "timeout",
             Self::RepositoryState { .. }
             | Self::ObjectKind { .. }

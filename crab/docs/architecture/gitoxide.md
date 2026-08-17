@@ -21,7 +21,7 @@ correct.
 ## Two surfaces, one spine
 
 ```
-  git client  ──┬───► remote helper (fetch via gix-protocol, push hand-rolled)
+  git client  ──┬───► remote helper (local upload-pack fetch, push hand-rolled)
                 │
                 └───► filter process (gix-packetline framing, crab dispatch)
                                     │

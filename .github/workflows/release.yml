@@ -710,12 +710,557 @@ jobs:
           name: crab-${{ matrix.name }}
           path: dist/crab-${{ matrix.name }}.*
 
+  protocol-v2-release-gate:
+    name: Protocol v2 partial-clone release gate
+    needs: [prepare, build]
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-release-smoke
+      CRAB_E2E_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install smoke dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crab-linux-x86_64
+          path: release-dist
+
+      - name: Extract release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-bin
+          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
+          test -x release-bin/crab
+          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+
+      - name: Start RustFS
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run --rm -d \
+            --name crab-protocol-v2-release-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-protocol-v2-release-rustfs >&2 || true
+          exit 1
+
+      - name: Run lifecycle against the packaged artifact
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --backend rustfs \
+            --bucket "$CRAB_E2E_BUCKET" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --root "$CRAB_E2E_ROOT" \
+            --run-id "$CRAB_E2E_RUN_ID" \
+            --source-root "$GITHUB_WORKSPACE"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs crab-protocol-v2-release-rustfs > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-protocol-v2-release-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload protocol release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-v2-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: error
+          retention-days: 30
+
+  protocol-v2-git-compatibility-release-gate:
+    name: Protocol v2 packaged Git compatibility (${{ matrix.label }})
+    needs: [prepare, build, protocol-v2-release-gate]
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: git-2-30
+            git_version: 2.30.9
+          - label: git-2-40
+            git_version: 2.40.4
+          - label: git-2-45
+            git_version: 2.45.4
+          - label: git-current
+            git_version: current
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-release-${{ matrix.label }}
+      CRAB_E2E_RUN_ID: release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install compatibility dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
+            libexpat1-dev libfuse3-dev libpcre2-dev libssl-dev pipx xz-utils \
+            zlib1g-dev
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crab-linux-x86_64
+          path: release-dist
+
+      - name: Extract exact Linux release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-bin
+          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
+          test -x release-bin/crab
+          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+
+      - name: Install selected Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ matrix.git_version }}"
+          if [ "$version" = "current" ]; then
+            git_bin="$(command -v git)"
+          else
+            archive="$RUNNER_TEMP/git-${version}.tar.xz"
+            source_dir="$RUNNER_TEMP/git-${version}"
+            prefix="$RUNNER_TEMP/git-install-${version}"
+            curl --fail --location --silent --show-error \
+              "https://www.kernel.org/pub/software/scm/git/git-${version}.tar.xz" \
+              --output "$archive"
+            tar -xJf "$archive" -C "$RUNNER_TEMP"
+            (
+              cd "$source_dir"
+              make configure
+              ./configure --prefix="$prefix" --without-tcltk
+              make -j"$(nproc)" all
+              make install
+            )
+            git_bin="$prefix/bin/git"
+          fi
+          "$git_bin" --version
+          echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+
+      - name: Start RustFS
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run --rm -d \
+            --name "crab-protocol-v2-release-${{ matrix.label }}" \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs "crab-protocol-v2-release-${{ matrix.label }}" >&2 || true
+          exit 1
+
+      - name: Run lifecycle against exact artifact
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --git-bin "$GIT_BIN" \
+            --backend rustfs \
+            --bucket "$CRAB_E2E_BUCKET" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --root "$CRAB_E2E_ROOT" \
+            --run-id "$CRAB_E2E_RUN_ID" \
+            --source-root "$GITHUB_WORKSPACE"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs "crab-protocol-v2-release-${{ matrix.label }}" > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f "crab-protocol-v2-release-${{ matrix.label }}" >/dev/null 2>&1 || true
+
+      - name: Upload Git compatibility release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-v2-release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: error
+          retention-days: 30
+
+  protocol-v2-rollback-release-gate:
+    name: Protocol v2 rollback compatibility release gate
+    needs: [prepare, build, protocol-v2-release-gate]
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-rollback-release
+      CRAB_E2E_RUN_ID: release-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install rollback build and smoke dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
+            libexpat1-dev libfuse3-dev libpcre2-dev libssl-dev pipx xz-utils \
+            zlib1g-dev
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crab-linux-x86_64
+          path: release-dist
+
+      - name: Extract exact Linux release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-bin
+          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
+          test -x release-bin/crab
+          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+
+      - name: Build the immediately prior tagged Crab binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="${{ needs.prepare.outputs.tag }}"
+          previous="$(git tag --list 'v*' --sort=-v:refname | awk -v current="$current" '$0 != current { print; exit }')"
+          if [ -z "$previous" ]; then
+            echo "::error::No prior tagged Crab release is available for rollback qualification." >&2
+            exit 1
+          fi
+          prior_root="$RUNNER_TEMP/crab-previous"
+          prior_target="$RUNNER_TEMP/crab-previous-target"
+          git worktree add --detach "$prior_root" "$previous"
+          (
+            cd "$prior_root"
+            GIT_SHA="$(git rev-parse HEAD)" \
+              CARGO_TARGET_DIR="$prior_target" \
+              cargo build -p crab --release --locked --features gix-transport
+          )
+          test -x "$prior_target/release/crab"
+          "$prior_target/release/crab" --version
+          echo "PRIOR_CRAB_BIN=$prior_target/release/crab" >> "$GITHUB_ENV"
+          echo "PRIOR_CRAB_TAG=$previous" >> "$GITHUB_ENV"
+
+      - name: Start RustFS
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run --rm -d \
+            --name crab-protocol-v2-rollback-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-protocol-v2-rollback-rustfs >&2 || true
+          exit 1
+
+      - name: Run rollback compatibility against exact artifacts
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --rollback-crab-bin "$PRIOR_CRAB_BIN" \
+            --rollback-crab-tag "$PRIOR_CRAB_TAG" \
+            --git-bin "$(command -v git)" \
+            --backend rustfs \
+            --bucket "$CRAB_E2E_BUCKET" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --root "$CRAB_E2E_ROOT" \
+            --run-id "$CRAB_E2E_RUN_ID" \
+            --source-root "$GITHUB_WORKSPACE"
+
+      - name: Capture rollback RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs crab-protocol-v2-rollback-rustfs > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-protocol-v2-rollback-rustfs >/dev/null 2>&1 || true
+
+      - name: Remove prior release worktree
+        if: always()
+        run: git worktree remove --force "$RUNNER_TEMP/crab-previous" || true
+
+      - name: Upload rollback protocol release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-v2-rollback-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: error
+          retention-days: 30
+
+  protocol-v2-aws-release-gate:
+    name: Protocol v2 partial-clone AWS S3 release gate
+    needs: [prepare, build, protocol-v2-release-gate]
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CRAB_E2E_BUCKET: ${{ vars.CRAB_PROTOCOL_V2_AWS_BUCKET }}
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-aws-release-smoke
+      CRAB_E2E_RUN_ID: release-aws-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_REGION: ${{ vars.CRAB_PROTOCOL_V2_AWS_REGION }}
+      AWS_ENDPOINT_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Require AWS release qualification configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CRAB_E2E_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required for the AWS S3 protocol release gate." >&2
+              exit 1
+            fi
+          done
+
+      - name: Install smoke dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crab-linux-x86_64
+          path: release-dist
+
+      - name: Extract release artifact
+        run: |
+          set -euo pipefail
+          mkdir -p release-bin
+          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
+          test -x release-bin/crab
+          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+
+      - name: Run lifecycle against AWS S3
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --backend s3 \
+            --require-existing-bucket \
+            --bucket "$CRAB_E2E_BUCKET" \
+            --endpoint-url "" \
+            --root "$CRAB_E2E_ROOT" \
+            --run-id "$CRAB_E2E_RUN_ID" \
+            --source-root "$GITHUB_WORKSPACE"
+
+      - name: Upload AWS protocol release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-v2-aws-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+          if-no-files-found: error
+          retention-days: 30
+
+  protocol-v2-platform-release-gate:
+    name: Protocol v2 platform gate (${{ matrix.platform }})
+    needs: [prepare, build, protocol-v2-release-gate, protocol-v2-aws-release-gate]
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-aws-release-gate.result == 'success' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            os: macos-15
+            artifact: crab-darwin-aarch64
+            archive: crab-darwin-aarch64.tar.gz
+          - platform: windows-x86_64
+            os: windows-2022
+            artifact: crab-windows-x86_64
+            archive: crab-windows-x86_64.zip
+    env:
+      CRAB_E2E_BUCKET: ${{ vars.CRAB_PROTOCOL_V2_AWS_BUCKET }}
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-platform-${{ matrix.platform }}
+      CRAB_E2E_RUN_ID: release-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_REGION: ${{ vars.CRAB_PROTOCOL_V2_AWS_REGION }}
+      AWS_ENDPOINT_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Require AWS release qualification configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CRAB_E2E_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required for the platform protocol release gate." >&2
+              exit 1
+            fi
+          done
+
+      - name: Install macOS smoke dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install awscli
+          brew install --cask macfuse
+
+      - name: Install Windows smoke dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            py -3 -m pip install --user awscli
+            $userScripts = py -3 -c "import site; print(site.USER_BASE + r'\\Scripts')"
+            $userScripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          Get-Command aws -ErrorAction Stop
+          py -3 --version
+
+      - name: Download exact packaged platform artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-dist
+
+      - name: Extract packaged macOS artifact
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p release-bin
+          tar -xzf "release-dist/${{ matrix.archive }}" -C release-bin
+          test -x release-bin/crab
+          ln -s crab release-bin/git-remote-crab
+
+      - name: Extract packaged Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-bin | Out-Null
+          Expand-Archive -LiteralPath "release-dist/${{ matrix.archive }}" -DestinationPath release-bin -Force
+          if (-not (Test-Path release-bin/crab.exe)) {
+            throw 'Packaged Crab executable is missing.'
+          }
+          Copy-Item release-bin/crab.exe release-bin/git-remote-crab.exe -Force
+
+      - name: Run real-Git platform lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            py -3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+              --crab-bin "$GITHUB_WORKSPACE/release-bin/crab.exe" \
+              --backend s3 --require-existing-bucket \
+              --bucket "$CRAB_E2E_BUCKET" --endpoint-url "" \
+              --root "$CRAB_E2E_ROOT" --run-id "$CRAB_E2E_RUN_ID" \
+              --source-root "$GITHUB_WORKSPACE"
+          else
+            python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+              --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+              --backend s3 --require-existing-bucket \
+              --bucket "$CRAB_E2E_BUCKET" --endpoint-url "" \
+              --root "$CRAB_E2E_ROOT" --run-id "$CRAB_E2E_RUN_ID" \
+              --source-root "$GITHUB_WORKSPACE"
+          fi
+
+      - name: Upload platform protocol release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-v2-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+          if-no-files-found: warn
+          retention-days: 30
+
   # ---------------------------------------------------------------------------
   # Publish — collect artifacts, create GitHub release, update Homebrew tap
   # ---------------------------------------------------------------------------
   publish:
     name: Publish release
-    needs: [prepare, build]
+    needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-rollback-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

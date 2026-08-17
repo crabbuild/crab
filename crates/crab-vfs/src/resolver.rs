@@ -323,19 +323,7 @@ impl FuseResolver {
                 // Base files use the HEAD commit timestamp for stable mtime.
                 let ct = self.commit_time();
                 let mtime = if ct != 0 { ct } else { self.generation() };
-                // For blobless clones, files have size 0 in the snapshot
-                // because the blob wasn't available locally during tree walk.
-                // Report a placeholder size so the kernel issues read() calls;
-                // the actual content is fetched on demand by the ODB reader.
-                let size = if n.size == 0 && n.node_type == NodeType::File && n.object_oid.is_some()
-                {
-                    // Use a generous placeholder — the kernel will see EOF
-                    // when read() returns fewer bytes than requested.
-                    4096
-                } else {
-                    n.size
-                };
-                Ok((mode, size, n.node_type, mtime))
+                Ok((mode, n.size, n.node_type, mtime))
             }
         }
     }
@@ -699,6 +687,21 @@ mod tests {
         assert_eq!(mtime, 1_700_000_000);
         // File mode should be normalized.
         assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn getattr_preserves_unknown_blob_size_for_exact_lookup() {
+        let (_dir, resolver) = temp_resolver(&[BaseNode {
+            path: "a.txt".to_owned(),
+            node_type: NodeType::File,
+            mode: 0o100644,
+            object_oid: Some("abcd1234".to_owned()),
+            pointer: None,
+            size: 0,
+        }]);
+        let (_mode, size, node_type, _mtime) = resolver.getattr("a.txt").unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(node_type, NodeType::File);
     }
 
     #[test]

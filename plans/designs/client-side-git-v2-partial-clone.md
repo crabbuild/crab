@@ -2,12 +2,12 @@
 
 ## Status and authority
 
-- **Status**: Proposed implementation design for Plan 002
+- **Status**: Implemented client-side profile; provider/release qualification remains
 - **Decision**: The architecture is entirely client-side
 - **Planned against**: `origin/main` commit `8286b925`, 2026-08-14
-- **Implementation plan**: `plans/002-add-git-protocol-v2-and-partial-clone.md`
+- **Implementation plan**: `plans/013-add-git-protocol-v2-and-partial-clone.md`
 
-This document is normative for Plan 002. It resolves conflicting legacy
+This document is normative for Plan 013. It resolves conflicting legacy
 language that either says Crab never performs a Git protocol role or proposes
 using gitoxide client transport APIs after `stateless-connect`.
 
@@ -26,7 +26,7 @@ role.” The preferred terms are:
 - **local upload-pack session**: the temporary protocol-v2 role inside that
   helper after `stateless-connect git-upload-pack`.
 - **object store**: S3/GCS/Azure/R2/MinIO remote system of record.
-- **Crab service**: a deployed Crab-controlled network process. Plan 002 does
+- **Crab service**: a deployed Crab-controlled network process. Plan 013 does
   not require or introduce one.
 
 ## Deployment boundary
@@ -171,6 +171,24 @@ OID, immutable pack identity, and coverage where applicable. Cache corruption
 causes verification failure and refetch; it never changes repository truth.
 No cache service may become required for correctness.
 
+## Supported filter matrix
+
+The development-line profile accepts only these bounded forms:
+
+| Form | Semantics |
+|---|---|
+| `blob:none` | Omit ordinary blobs while retaining the reachable commit/tree/tag closure. |
+| `blob:limit=<n>[kmg]` | Omit blobs whose size is at least `n`; suffixes use binary powers of 1024. |
+| `tree:<depth>` | Retain tree/blob entries at tree-relative depth strictly below `depth`. |
+| `object:type={tag,commit,tree,blob}` | Retain only the requested Git object type while traversing required commits and trees. |
+| `sparse:oid=<full SHA-1>` | Read a visible specification blob and retain blobs selected by its sparse-checkout patterns. |
+| repeated `filter` / `combine:` | Intersect nested filters after bounded percent decoding. |
+
+Filter input is limited to 4 KiB, 16 members per combine, and eight nesting
+levels. `sparse:path`, `blob:depth`, and other unlisted forms fail before
+planning or object I/O. A gitlink in a tree is retained as tree metadata; its
+submodule commit is not dereferenced from the superproject repository.
+
 ## Data flows
 
 ### Ref discovery
@@ -189,11 +207,18 @@ No cache service may become required for correctness.
 4. Local producer streams the pack to Git.
 5. Git installs and verifies its local pack and updates refs.
 
-### Initial `blob:none` clone
+### Filtered clone and fetch
 
-1. Git sends `filter blob:none` in v2 fetch.
-2. Local planner includes commits, trees, and tags while omitting blobs.
-3. Local producer streams a filtered pack.
+1. Git sends one of the supported filters in a v2 fetch: `blob:none`,
+   `blob:limit=<n>[kmg]`, `tree:<depth>`,
+   `object:type={tag,commit,tree,blob}`, full-SHA-1 `sparse:oid`, or a bounded
+   repeated/combine intersection.
+2. Local planner parses and canonicalizes the filter before object I/O, then
+   applies its omission policy to the generation-pinned object closure.
+3. Local producer streams a filtered pack; `blob:limit` omits blobs at or above
+   the limit, and `sparse:oid` selects paths from the visible specification
+   blob. Tree gitlinks remain tree entries and are not dereferenced as
+   superproject objects.
 4. Git records promisor config and `.promisor` pack metadata locally.
 5. Checkout may trigger later object requests.
 
@@ -281,45 +306,52 @@ partial-clone savings because the Git blobs are already small pointers.
 
 ## Documentation reconciliation
 
-Plan 002's Phase 0 must update these canonical surfaces in the same bounded
+Plan 013's Phase 0 must update these canonical surfaces in the same bounded
 documentation commit before implementation proceeds:
 
 | Document | Required correction |
 |---|---|
-| `crab/docs/design/technical-design.md:78` | Replace “Not a Git protocol server” with “No deployed Git protocol server”; explain the local helper role and retain “no HTTP smart endpoint.” |
+| `crab/docs/design/technical-design.md:78` | Reconciled to “No deployed Git protocol server”; the local helper role and “no HTTP smart endpoint” remain explicit. |
 | `crab/docs/design/technical-design.md:2278` | Replace the unresolved partial-clone note with the phased client-side design and release gate. |
-| `crab/docs/architecture/gitoxide.md:24` | Replace “fetch via gix-protocol” with the local upload-pack state machine plus server-neutral gitoxide mechanics. |
+| `crab/docs/architecture/gitoxide.md:24` | Reconciled to the local upload-pack state machine plus server-neutral gitoxide mechanics. |
 | `crab/docs/architecture/git-integration.md:181` | Add separate legacy complete-pack and future client-side v2/range-pack flows. |
 | Historical Gitoxide adoption design | Remove `gix_transport::client` as stateless-connect glue; diagram Git and local helper on the same machine. |
 | Historical Gitoxide adoption requirements | Rewrite Req 2 around a Crab-owned local upload-pack session; `gix-protocol`/`gix-negotiate` client APIs are not owners. |
 | Historical Gitoxide adoption tasks | Replace task 5 with local pkt-line, session, planner, pack, and E2E tasks. |
 | Historical smart-HTTP parity design | Remove `connect`/receive-pack and the claim that v2 changes the outer helper command set; scope to `stateless-connect git-upload-pack`. |
 | Historical smart-HTTP parity requirements | Prohibit advertising an incomplete capability or graceful full-fetch fallback after takeover. Separate SHA-256 work. |
-| Historical smart-HTTP parity tasks | Keep v2 fetch in Plan 002 and move SHA-256 to its own follow-up. |
+| Historical smart-HTTP parity tasks | Keep v2 fetch in Plan 013 and move SHA-256 to its own follow-up. |
 | Historical transport-gap design | Delete the claim that filtering while indexing a downloaded complete pack is partial clone. Point to the range reader and promisor flow. |
 | Historical transport-gap requirements | Require actual omitted bytes, lazy retrieval, promisor metadata, and measured savings. Remove client-side `gix-protocol` ownership. |
 | Historical transport-gap tasks | Reopen falsely completed filter tasks until real Git and RustFS lifecycle gates pass. |
-| `crab/docs/guides/mount.md:51` | Until release, state that Crab remotes do not yet satisfy the promised blobless flow; after release, link to the exact support matrix. |
+| `crab/docs/guides/mount.md:51` | State that the development-line proof-gated profile is RustFS-qualified, link to the exact filter matrix, and retain the provider/release qualification caveat. |
 
 The reconciled docs must distinguish Git wire protocol v2 from Git's
 long-running clean/smudge filter-process protocol v2.
 
 ## Verification design
 
-The implementation is not complete until real Git proves the local-only path:
+Release qualification is not complete until real Git proves the local-only path:
 
 1. Run with no Crab service processes or service URLs configured.
 2. Use RustFS/S3 as the only repository remote and record all network
    destinations; repository data traffic must go only to approved provider
    endpoints.
-3. Prove v2 `ls-refs`, clone, fetch, shallow/deepen/unshallow, tags,
-   `blob:none`, lazy batched OIDs, checkout, fsck, GC/repack, and push.
+3. Prove v2 `ls-refs`, clone, fetch, shallow/deepen/unshallow, tags, every
+   supported filter, lazy batched OIDs, checkout, fsck, GC/repack, and push.
 4. Prove blobs are absent initially and byte-identical after lazy retrieval.
 5. Prove hidden/dangling/arbitrary OIDs are denied before object range reads.
 6. Kill/cancel at each session boundary and verify no metadata session, temp
    file, or child process leaks.
 7. Record source SHA, binary digest, Git/provider versions, metrics, and a
    redaction check in retained release evidence.
+8. Run the supported Git compatibility set (2.30.9, 2.40.4, 2.45.4, and the
+   current runner Git) against the packaged Linux artifact, plus current Git
+   on the packaged macOS and Windows artifacts.
+9. Run the packaged artifact against the immediately prior tagged Crab binary;
+   it must either service an authorized promised raw OID byte-identically or
+   refuse before writing a pack or promisor sidecar, with hydrate/unfilter as
+   the documented migration path.
 
 ## Rejected alternatives
 
@@ -341,6 +373,6 @@ The implementation is not complete until real Git proves the local-only path:
 
 The design is delivered only when a released local Crab binary, with no Crab
 server running, can use ordinary Git against an object-store repository for
-v2 ref discovery, complete fetch, `blob:none` clone, and lazy promised-object
-retrieval while passing the correctness, security, resource, performance, and
-rollback gates above.
+v2 ref discovery, complete fetch, the supported filter matrix, and lazy
+promised-object retrieval while passing the correctness, security, resource,
+performance, and rollback gates above.

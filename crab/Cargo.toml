@@ -104,18 +104,18 @@ watch = ["crab-workflow/watch"]
 
 # --- Gitoxide adoption per-requirement feature flags ---
 #
-# Each flag gates one requirement's adoption path in the
-# `crab-gitoxide-adoption` spec. Flags default OFF so the legacy
-# path keeps running; individual flags flip default-on after one
-# release cycle of green E2E (see design §Feature Flag Strategy).
-# At this stage the flags are declared but gate no code — cfg-gated
-# call sites land in Phase 1 and Phase 2.
+# Most flags gate one requirement's staged adoption path in the
+# `crab-gitoxide-adoption` spec. Flags default OFF so the legacy path keeps
+# running; individual flags flip default-on after one release cycle of green
+# E2E. `gix-transport` is the released compatibility API gate only; the local
+# protocol-v2 upload-pack owner is not the gix client transport.
 #
 # The `gix-all` meta-flag activates every per-requirement adoption
-# at once, which is how `scripts/build-matrix.sh` exercises the
-# full combined surface in CI before any flag is promoted.
+# at once. The checked combined surface is exercised by the
+# `nfs-feature-gate` target in `crab/Makefile` and by the release
+# archive checks in `.github/workflows/release.yml`.
 
-gix-transport    = []  # Fetch protocol via gix-protocol/gix-transport
+gix-transport    = []  # Deprecated released transport compatibility API; v2 uses local wire
 gix-filter-api   = []  # Filter process on gix-filter Server
 gix-ref-edits    = []  # Typed ref edits via gix-ref::transaction
 gix-pack-native  = []  # Pack gen + install via gix-pack
@@ -134,8 +134,8 @@ gix-credentials  = []  # Credential helper cascade
 gix-pathmatch    = []
 gix-revwalk      = []  # Connectivity + rev-walk completion
 
-# Meta-flag: activate every gix-* adoption flag above. Used by
-# `scripts/build-matrix.sh` for combined E2E verification.
+# Meta-flag: activate every gix-* adoption flag above. Used by the
+# `nfs-feature-gate` Make target for combined feature verification.
 gix-all = [
     "gix-transport",
     "gix-filter-api",
@@ -161,6 +161,7 @@ crab-git = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
 crab-read = { workspace = true }
+crab-remote-git = { workspace = true }
 crab-staging = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
@@ -304,8 +305,9 @@ gix-index = { workspace = true, features = ["sha1"] }
 gix = { workspace = true }
 gix-lock = { workspace = true }
 # gix-protocol exposes `fetch::Error` (the error type `CrabError::GixProtocol`
-# wraps) only when a client feature is enabled; `blocking-client` pulls in
-# `fetch` + `handshake` and is the stdio transport will drive.
+# wraps) only when a client feature is enabled. The retained transport
+# compatibility API uses these types, while production v2 framing is owned by
+# `git::upload_pack_wire`.
 gix-protocol = { workspace = true, features = ["sha1", "blocking-client"] }
 gix-transport = { workspace = true, features = ["blocking-client"] }
 gix-negotiate = { workspace = true, features = ["sha1"] }

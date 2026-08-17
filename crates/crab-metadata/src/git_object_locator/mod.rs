@@ -7,6 +7,8 @@ mod writer;
 pub use reader::{GitObjectLocatorSession, GitObjectLookup};
 pub use writer::{GitObjectLocatorWriter, LocatorSweepStats, LocatorWriteStats};
 
+const READER_CHECKPOINT_NAME: &str = "crab-git-locator";
+
 use crab_xet::hash::MerkleHash;
 
 /// Exact location of one Git object inside an immutable pack.

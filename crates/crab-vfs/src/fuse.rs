@@ -387,6 +387,15 @@ impl CrabFs {
         inodes.get_path(ino)
     }
 
+    fn exact_getattr(&self, path: &str) -> crate::core::error::Result<(u32, u64, NodeType, i64)> {
+        let (mode, size, node_type, mtime) = self.resolver.getattr(path)?;
+        if node_type != NodeType::File || size != 0 {
+            return Ok((mode, size, node_type, mtime));
+        }
+        let size = self.engine.exact_file_size(path)?;
+        Ok((mode, size, node_type, mtime))
+    }
+
     fn handle_path(&self, fh: u64) -> Option<Arc<str>> {
         let handles = self.handles.read().unwrap_or_else(|e| {
             warn!("handles RwLock was poisoned; recovering");
@@ -556,7 +565,7 @@ impl Filesystem for CrabFs {
             return;
         };
 
-        match self.resolver.getattr(&child_path) {
+        match self.exact_getattr(&child_path) {
             Ok((mode, size, node_type, mtime)) => {
                 let ino = {
                     let Ok(mut inodes) = self.inodes.write() else {
@@ -618,7 +627,7 @@ impl Filesystem for CrabFs {
             return;
         };
 
-        match self.resolver.getattr(&path) {
+        match self.exact_getattr(&path) {
             Ok((mode, size, node_type, mtime)) => {
                 let attr = self.make_attr(ino, mode, size, node_type, mtime);
                 reply.attr(&ENTRY_TTL, &attr);
@@ -719,7 +728,7 @@ impl Filesystem for CrabFs {
             }
         }
 
-        match self.resolver.getattr(&path) {
+        match self.exact_getattr(&path) {
             Ok((mode, size, node_type, mt)) => {
                 let attr = self.make_attr(ino, mode, size, node_type, mt);
                 reply.attr(&ENTRY_TTL, &attr);

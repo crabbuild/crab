@@ -23,8 +23,11 @@ pub struct RepositoryRef {
 /// Complete reference state from one validated manifest generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepositoryRefs {
-    /// Resolved symbolic `HEAD`, absent only for an empty repository.
+    /// Resolved symbolic `HEAD`, absent when the repository is empty or HEAD
+    /// points at an unborn branch.
     pub head: Option<HeadReference>,
+    /// Symbolic `HEAD` target for an empty repository.
+    pub unborn_head: Option<String>,
     /// References sorted by their complete bytewise names.
     pub entries: Vec<RepositoryRef>,
 }

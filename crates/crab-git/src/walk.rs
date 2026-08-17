@@ -6,11 +6,11 @@
 //! (for commit and tree walking), and `gix-object` (for blob parsing and
 //! pointer detection).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gix_hash::ObjectId;
-use gix_object::FindExt;
+use gix_object::{Find, FindExt};
 use tracing::{debug, warn};
 
 use crab_types::pointer::Pointer;
@@ -23,6 +23,8 @@ pub enum WalkError {
     ObjectsDirectoryNotFound { path: String },
     #[error("reachable walk crossed missing local history at {oid}")]
     BeyondShallowBoundary { oid: String },
+    #[error("reachable walk exceeded {maximum} objects (observed at least {actual})")]
+    LimitExceeded { actual: usize, maximum: usize },
     #[error("{operation}")]
     Git {
         operation: String,
@@ -73,6 +75,8 @@ pub struct ReachableSet {
     pub trees: HashSet<[u8; 20]>,
     /// Reachable blob OIDs (includes pointer blobs).
     pub blobs: HashSet<[u8; 20]>,
+    /// Reachable annotated-tag OIDs.
+    pub tags: HashSet<[u8; 20]>,
     /// Blobs that parse as crab pointers.
     pub pointers: Vec<PointerBlob>,
 }
@@ -83,8 +87,19 @@ impl ReachableSet {
             commits: HashSet::new(),
             trees: HashSet::new(),
             blobs: HashSet::new(),
+            tags: HashSet::new(),
             pointers: Vec::new(),
         }
+    }
+
+    /// Return the number of distinct Git objects in this closure.
+    #[must_use]
+    pub fn object_count(&self) -> usize {
+        self.commits
+            .len()
+            .saturating_add(self.trees.len())
+            .saturating_add(self.blobs.len())
+            .saturating_add(self.tags.len())
     }
 }
 
@@ -107,6 +122,23 @@ fn oid_to_bytes(oid: &gix_hash::oid) -> [u8; 20] {
 /// Returns [`WalkError::ObjectsDirectoryNotFound`] if the objects directory
 /// is missing, or [`WalkError::Git`] if a referenced object is corrupt.
 pub fn walk_reachable(git_dir: &Path, refs: &[(String, String)]) -> Result<ReachableSet> {
+    walk_reachable_with_limit(git_dir, refs, None)
+}
+
+/// Walk reachable objects with a fail-closed distinct-object bound.
+pub fn walk_reachable_bounded(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    maximum: usize,
+) -> Result<ReachableSet> {
+    walk_reachable_with_limit(git_dir, refs, Some(maximum))
+}
+
+fn walk_reachable_with_limit(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    maximum: Option<usize>,
+) -> Result<ReachableSet> {
     let objects_dir = git_dir.join("objects");
     if !objects_dir.is_dir() {
         return Err(WalkError::ObjectsDirectoryNotFound {
@@ -152,6 +184,7 @@ pub fn walk_reachable(git_dir: &Path, refs: &[(String, String)]) -> Result<Reach
 
         let commit_bytes = oid_to_bytes(&info.id);
         result.commits.insert(commit_bytes);
+        check_reachable_limit(&result, maximum)?;
 
         // Get the tree OID from this commit.
         let tree_id = {
@@ -169,7 +202,7 @@ pub fn walk_reachable(git_dir: &Path, refs: &[(String, String)]) -> Result<Reach
         };
 
         // Walk the tree breadth-first, collecting trees and blobs.
-        walk_tree(&odb, &tree_id, &mut result)?;
+        walk_tree(&odb, &tree_id, &mut result, maximum)?;
     }
 
     debug!(
@@ -183,17 +216,180 @@ pub fn walk_reachable(git_dir: &Path, refs: &[(String, String)]) -> Result<Reach
     Ok(result)
 }
 
+/// Walk each ref independently, preserving the object closure rooted at that
+/// ref. Annotated tags are peeled only for commit traversal, but every tag in
+/// the tag chain is retained in the corresponding closure.
+pub fn walk_reachable_by_ref(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    peeled_refs: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ReachableSet>> {
+    walk_reachable_by_ref_with_limit(git_dir, refs, peeled_refs, None)
+}
+
+/// Walk each ref independently with a fail-closed aggregate object bound.
+pub fn walk_reachable_by_ref_bounded(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    peeled_refs: &BTreeMap<String, String>,
+    maximum: usize,
+) -> Result<BTreeMap<String, ReachableSet>> {
+    walk_reachable_by_ref_with_limit(git_dir, refs, peeled_refs, Some(maximum))
+}
+
+fn walk_reachable_by_ref_with_limit(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    peeled_refs: &BTreeMap<String, String>,
+    maximum: Option<usize>,
+) -> Result<BTreeMap<String, ReachableSet>> {
+    let mut closures = BTreeMap::new();
+    let mut total_objects = 0usize;
+    for (name, oid) in refs {
+        let mut closure = ReachableSet::new();
+        let ref_maximum = maximum.map(|maximum| maximum.saturating_sub(total_objects));
+        let traversal_tip = if peeled_refs.contains_key(name) {
+            collect_annotated_tag_chain(git_dir, oid, &mut closure, ref_maximum)?
+                .to_hex()
+                .to_string()
+        } else {
+            oid.clone()
+        };
+        check_reachable_limit(&closure, ref_maximum)?;
+        let root =
+            ObjectId::from_hex(traversal_tip.as_bytes()).map_err(|source| WalkError::Git {
+                operation: format!("invalid ref object {traversal_tip}"),
+                source: Box::new(source),
+            })?;
+        let objects_dir = git_dir.join("objects");
+        let odb = gix_odb::at(&objects_dir).map_err(|source| WalkError::Git {
+            operation: format!("failed to open git ODB at {}", objects_dir.display()),
+            source: Box::new(source),
+        })?;
+        let mut buf = Vec::new();
+        let data = odb
+            .try_find(&root, &mut buf)
+            .map_err(|source| WalkError::Git {
+                operation: format!("failed to read ref object {root}"),
+                source,
+            })?
+            .ok_or_else(|| WalkError::BeyondShallowBoundary {
+                oid: traversal_tip.clone(),
+            })?;
+        match data.kind {
+            gix_object::Kind::Commit => {
+                merge_reachable(
+                    &mut closure,
+                    walk_reachable_with_limit(
+                        git_dir,
+                        &[(name.clone(), traversal_tip)],
+                        ref_maximum,
+                    )?,
+                );
+            }
+            gix_object::Kind::Tree => walk_tree(&odb, &root, &mut closure, ref_maximum)?,
+            gix_object::Kind::Blob => {
+                closure.blobs.insert(oid_to_bytes(&root));
+                check_blob_for_pointer(&odb, &root, &mut closure);
+                check_reachable_limit(&closure, ref_maximum)?;
+            }
+            gix_object::Kind::Tag => {
+                return Err(WalkError::Git {
+                    operation: format!("annotated tag {root} did not resolve"),
+                    source: Box::new(std::io::Error::other("tag chain did not resolve")),
+                });
+            }
+        }
+        total_objects = total_objects.saturating_add(closure.object_count());
+        if let Some(maximum) = maximum
+            && total_objects > maximum
+        {
+            return Err(WalkError::LimitExceeded {
+                actual: total_objects,
+                maximum,
+            });
+        }
+        closures.insert(name.clone(), closure);
+    }
+    Ok(closures)
+}
+
+fn merge_reachable(target: &mut ReachableSet, source: ReachableSet) {
+    target.commits.extend(source.commits);
+    target.trees.extend(source.trees);
+    target.blobs.extend(source.blobs);
+    target.tags.extend(source.tags);
+    target.pointers.extend(source.pointers);
+}
+
+fn collect_annotated_tag_chain(
+    git_dir: &Path,
+    start: &str,
+    result: &mut ReachableSet,
+    maximum: Option<usize>,
+) -> Result<ObjectId> {
+    let objects_dir = git_dir.join("objects");
+    let odb = gix_odb::at(&objects_dir).map_err(|source| WalkError::Git {
+        operation: format!("failed to open git ODB at {}", objects_dir.display()),
+        source: Box::new(source),
+    })?;
+    let mut current = ObjectId::from_hex(start.as_bytes()).map_err(|source| WalkError::Git {
+        operation: format!("invalid annotated tag object {start}"),
+        source: Box::new(source),
+    })?;
+
+    for _ in 0..32 {
+        let mut buf = Vec::new();
+        let Some(data) = odb
+            .try_find(&current, &mut buf)
+            .map_err(|source| WalkError::Git {
+                operation: format!("failed to read annotated tag {current}"),
+                source,
+            })?
+        else {
+            return Err(WalkError::Git {
+                operation: format!("annotated tag {current} is missing"),
+                source: Box::new(std::io::Error::other("missing object")),
+            });
+        };
+        if data.kind != gix_object::Kind::Tag {
+            return Ok(current);
+        }
+        result.tags.insert(oid_to_bytes(&current));
+        check_reachable_limit(result, maximum)?;
+        let tag = gix_object::TagRef::from_bytes(data.data, data.hash_kind).map_err(|source| {
+            WalkError::Git {
+                operation: format!("failed to parse annotated tag {current}"),
+                source: Box::new(source),
+            }
+        })?;
+        let target = tag.target();
+        if tag.target_kind == gix_object::Kind::Tag {
+            current = target;
+            continue;
+        }
+        return Ok(target);
+    }
+
+    Err(WalkError::Git {
+        operation: format!("annotated tag chain from {start} exceeds the limit"),
+        source: Box::new(std::io::Error::other("tag recursion limit")),
+    })
+}
+
 /// Walk a single tree and all its descendants, collecting tree and blob OIDs.
 fn walk_tree(
     odb: &impl gix_object::Find,
     tree_id: &gix_hash::oid,
     result: &mut ReachableSet,
+    maximum: Option<usize>,
 ) -> Result<()> {
     let tree_bytes = oid_to_bytes(tree_id);
     if !result.trees.insert(tree_bytes) {
         // Already visited this tree — skip to avoid redundant work.
         return Ok(());
     }
+    check_reachable_limit(result, maximum)?;
 
     let mut buf = Vec::new();
     let tree_iter = odb
@@ -204,7 +400,7 @@ fn walk_tree(
         })?;
 
     // Use gix-traverse breadth-first tree walk with a custom visitor.
-    let mut visitor = ObjectCollector::new(result);
+    let mut visitor = ObjectCollector::new(result, maximum);
     let mut state = gix_traverse::tree::breadthfirst::State::default();
 
     gix_traverse::tree::breadthfirst(tree_iter, &mut state, odb, &mut visitor).map_err(
@@ -213,6 +409,12 @@ fn walk_tree(
             source: Box::new(source),
         },
     )?;
+
+    if visitor.overflowed
+        && let Some(maximum) = maximum
+    {
+        return Err(limit_error(visitor.result, maximum));
+    }
 
     // Now read each newly discovered blob to check for pointers.
     for blob_oid in &visitor.pending_blobs {
@@ -262,14 +464,23 @@ struct ObjectCollector<'a> {
     /// after the walk completes (we can't read blobs during the walk because
     /// the visitor borrows the ODB buffer).
     pending_blobs: Vec<ObjectId>,
+    maximum: Option<usize>,
+    overflowed: bool,
 }
 
 impl<'a> ObjectCollector<'a> {
-    fn new(result: &'a mut ReachableSet) -> Self {
+    fn new(result: &'a mut ReachableSet, maximum: Option<usize>) -> Self {
         Self {
             result,
             pending_blobs: Vec::new(),
+            maximum,
+            overflowed: false,
         }
+    }
+
+    fn exceeds_limit(&self) -> bool {
+        self.maximum
+            .is_some_and(|maximum| self.result.object_count() > maximum)
     }
 }
 
@@ -286,6 +497,10 @@ impl gix_traverse::tree::Visit for ObjectCollector<'_> {
     ) -> std::ops::ControlFlow<(), bool> {
         let bytes = oid_to_bytes(entry.oid);
         if self.result.trees.insert(bytes) {
+            if self.exceeds_limit() {
+                self.overflowed = true;
+                return std::ops::ControlFlow::Break(());
+            }
             // New tree — descend into it.
             std::ops::ControlFlow::Continue(true)
         } else {
@@ -298,15 +513,37 @@ impl gix_traverse::tree::Visit for ObjectCollector<'_> {
         &mut self,
         entry: &gix_object::tree::EntryRef<'_>,
     ) -> std::ops::ControlFlow<(), bool> {
-        if !entry.mode.is_blob_or_symlink() {
-            return std::ops::ControlFlow::Continue(true);
+        if entry.mode.is_commit() {
+            // A gitlink records a submodule commit, but that object belongs to
+            // another repository and is not part of this superproject's closure.
+            return std::ops::ControlFlow::Continue(false);
         }
 
         let bytes = oid_to_bytes(entry.oid);
         if self.result.blobs.insert(bytes) && entry.mode.is_blob() {
             self.pending_blobs.push(entry.oid.to_owned());
         }
+        if self.exceeds_limit() {
+            self.overflowed = true;
+            return std::ops::ControlFlow::Break(());
+        }
         std::ops::ControlFlow::Continue(true)
+    }
+}
+
+fn check_reachable_limit(result: &ReachableSet, maximum: Option<usize>) -> Result<()> {
+    if let Some(maximum) = maximum
+        && result.object_count() > maximum
+    {
+        return Err(limit_error(result, maximum));
+    }
+    Ok(())
+}
+
+fn limit_error(result: &ReachableSet, maximum: usize) -> WalkError {
+    WalkError::LimitExceeded {
+        actual: result.object_count(),
+        maximum,
     }
 }
 
@@ -320,6 +557,7 @@ mod tests {
         assert!(set.commits.is_empty());
         assert!(set.trees.is_empty());
         assert!(set.blobs.is_empty());
+        assert!(set.tags.is_empty());
         assert!(set.pointers.is_empty());
     }
 
@@ -430,13 +668,74 @@ mod tests {
             return;
         }
 
-        let refs = vec![("refs/heads/main".into(), head_sha)];
+        let refs = vec![("refs/heads/main".into(), head_sha.clone())];
         let result = walk_reachable(&git_dir_path, &refs).unwrap();
 
         assert_eq!(result.commits.len(), 1, "expected 1 commit");
         assert!(!result.trees.is_empty(), "expected at least 1 tree");
         assert!(!result.blobs.is_empty(), "expected at least 1 blob");
         assert!(result.pointers.is_empty(), "expected no pointers");
+
+        let bounded = walk_reachable_bounded(
+            &git_dir_path,
+            &[("refs/heads/main".to_owned(), head_sha)],
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            bounded,
+            WalkError::LimitExceeded {
+                actual: 2,
+                maximum: 1
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_reachable_includes_symlink_target_blob() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        let git_dir_path = repo_dir.join(".git");
+
+        macro_rules! git {
+            ($($arg:expr),+ $(,)?) => {
+                std::process::Command::new("git")
+                    .args([$($arg),+])
+                    .current_dir(repo_dir)
+                    .env("GIT_DIR", &git_dir_path)
+            };
+        }
+        let status = git!("init", "--initial-branch=main")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+        git!("config", "user.email", "test@test.com")
+            .status()
+            .unwrap();
+        git!("config", "user.name", "Test").status().unwrap();
+        std::fs::write(repo_dir.join("target.txt"), b"target\n").unwrap();
+        symlink("target.txt", repo_dir.join("link.txt")).unwrap();
+        git!("add", ".").status().unwrap();
+        assert!(git!("commit", "-m", "symlink").status().unwrap().success());
+
+        let head = String::from_utf8(git!("rev-parse", "HEAD").output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let symlink_oid =
+            String::from_utf8(git!("rev-parse", "HEAD:link.txt").output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_owned();
+        let result =
+            walk_reachable(&git_dir_path, &[("refs/heads/main".to_owned(), head)]).unwrap();
+        let symlink_oid = ObjectId::from_hex(symlink_oid.as_bytes()).unwrap();
+        assert!(result.blobs.contains(&oid_to_bytes(&symlink_oid)));
     }
 
     #[test]
@@ -559,6 +858,10 @@ mod tests {
         assert!(
             !result.blobs.contains(&gitlink_bytes),
             "submodule gitlinks are not superproject blobs"
+        );
+        assert!(
+            !result.commits.contains(&gitlink_bytes),
+            "submodule gitlinks are not superproject commits"
         );
         assert!(result.pointers.is_empty());
     }

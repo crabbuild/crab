@@ -27,6 +27,7 @@ pub mod remote_helper;
 pub mod shallow;
 pub mod smudge;
 pub mod store_client;
+pub mod upload_pack_wire;
 pub mod url;
 pub mod worktree;
 pub mod worktree_hydration;
