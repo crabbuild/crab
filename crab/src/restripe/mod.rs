@@ -12,9 +12,9 @@
 //! - [`inference`] — auto-select profile from `RepoStats`.
 //! - [`planner`] — dry-run estimator (destination count, bytes,
 //!   wall-clock, API cost).
-//! - [`executor`] — streaming source-xorb → dest-xorb pipeline (stub).
+//! - [`executor`] — streaming source-xorb → dest-xorb pipeline.
 //! - [`journal`] — WAL-mode SQLite journal for crash-safe resume.
-//! - [`reconcile`] — online reconciliation with concurrent pushes (stub).
+//! - [`reconcile`] — atomic file-index and shard-manifest reconciliation.
 
 pub mod executor;
 pub mod inference;

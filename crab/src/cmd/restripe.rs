@@ -34,6 +34,7 @@ use crate::restripe::journal::RestripeJournal;
 use crate::restripe::planner::{self, CalibrationConfig, SourceXorbMeta};
 use crate::restripe::profile::Profile;
 use crate::restripe::reconcile;
+use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::audit_shim::{self, AuditOp};
@@ -445,11 +446,6 @@ async fn run_apply(
 ) -> Result<()> {
     let start = Instant::now();
 
-    // Destination xorbs are not useful until the file-index and shard
-    // manifest are updated atomically. Refuse the mutating path rather than
-    // leaving readers pointed at the pre-restripe metadata.
-    reconcile::ensure_apply_supported()?;
-
     // Check for concurrent GC.
     let crab_dir = journal_path
         .parent()
@@ -477,6 +473,7 @@ async fn run_apply(
     };
 
     let (store, parsed) = try_build_store(cfg, cancel).await?;
+    let router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
     let sources = if recorded_run.is_none() {
         enumerate_sources(&store, cancel).await?
     } else {
@@ -566,7 +563,8 @@ async fn run_apply(
     .await?;
 
     // Reconcile.
-    let reconcile_outcome = reconcile::finalize(&journal, &run_id, Some(&store))?;
+    let reconcile_outcome =
+        reconcile::finalize(&journal, &run_id, Some(&store), Some(&router), cancel).await?;
 
     let counts = journal.count_by_status(&run_id)?;
     if counts.pending > 0 || counts.staged > 0 {
