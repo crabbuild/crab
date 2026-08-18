@@ -175,7 +175,7 @@ pub fn run(args: &DagArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
     // enabled. The command is meaningless for a repo that hasn't
     // opted in — there's nothing to render, and surfacing a fake
     // empty graph would mask the misconfiguration.
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -656,6 +656,7 @@ mod tests {
             metrics: Vec::new(),
             plots: Vec::new(),
             plot_configs: Vec::new(),
+            artifacts: crab_workflow::ArtifactMetadata::default(),
             defaults: Defaults::default(),
             stages: map,
             workflow_membership: BTreeMap::new(),

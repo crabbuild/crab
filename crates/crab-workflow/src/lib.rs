@@ -1,7 +1,11 @@
 //! Workflow contracts, planning, execution, caching, and experiments for Crab.
 
+pub mod artifact;
+mod atomic;
 pub mod cache;
+pub mod checkpoint;
 pub mod discover;
+pub mod dvc_inventory;
 pub mod dvc_migration;
 pub mod env;
 pub mod error;
@@ -11,6 +15,7 @@ pub mod exp_range;
 pub mod exp_worktree;
 pub mod experiment;
 pub mod experiment_id;
+pub mod external_hash;
 pub mod gc;
 pub mod gitignore;
 pub mod graph;
@@ -32,6 +37,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod scheduler_lock;
 pub mod signals;
+pub mod source;
 pub mod stage;
 pub mod stage_cache_entry;
 pub mod stage_cmd;
@@ -50,6 +56,22 @@ pub mod watcher;
 pub mod workflow_doc;
 pub mod yaml;
 
+pub use artifact::{
+    ARTIFACT_REF_PREFIX, ARTIFACT_REMOTE_SCHEMA_VERSION, ARTIFACT_SCHEMA_VERSION, ArtifactCatalog,
+    ArtifactDecl, ArtifactManifest, ArtifactPromotion, ArtifactRegistry, RemoteArtifactEnvelope,
+    RemoteArtifactPayloadKind, RemoteArtifactTreeEntry, artifact_stage_ref, artifact_version_ref,
+    download_remote_artifact, manifest_from_path, promote_remote_artifact, publish_remote_artifact,
+    reachable_remote_artifact_objects, read_remote_artifact, read_remote_artifact_registry,
+    remote_artifact_manifest_path, snapshot_payload, validate_artifact_name, verify_payload,
+};
+pub use checkpoint::{
+    CHECKPOINT_PROTOCOL_VERSION, CHECKPOINT_SCHEMA_VERSION, CheckpointLineage, CheckpointRecord,
+};
+pub use dvc_inventory::{
+    DVC_INVENTORY_SCHEMA_VERSION, DVC_MIGRATION_JOURNAL_SCHEMA_VERSION, DvcFinding,
+    DvcImportProvenance, DvcInventory, DvcJournalEntry, DvcMigrationJournal, DvcOutputRecord,
+    DvcRemoteDescriptor, VerificationState, inventory_project, materialize_cached_directory,
+};
 pub use dvc_migration::{MigrationReport, MigrationWarning, convert_dvc_to_crab};
 pub use error::{Result, WorkflowError};
 pub use exp_queue::{ExpQueue, ExpQueueEntry, ExpStatus};
@@ -64,6 +86,9 @@ pub use experiment::{
     stage_entry_object_path, stage_ref,
 };
 pub use experiment_id::ExperimentId;
+pub use external_hash::{
+    EXTERNAL_HASH_INDEX_SCHEMA_VERSION, ExternalHashIndex, ExternalHashRecord, record_key,
+};
 pub use gc::{LocalWorkflowLiveSet, collect_local_workflow_live_set};
 pub use graph::Graph;
 pub use lockfile::{
@@ -76,10 +101,14 @@ pub use params::{PythonLiteral, PythonParseError, Scalar, ScalarMap};
 pub use plot_config::PlotConfig;
 pub use retry::{FailureKind, RetryDecision, should_retry};
 pub use run_state::RunState;
+pub use source::{
+    SOURCE_DESCRIPTOR_SCHEMA_VERSION, SourceDescriptor, load_source_descriptor,
+    save_source_descriptor,
+};
 pub use stage::Stage;
 pub use stage_cache_entry::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_MAX_SUPPORTED, ENTRY_SCHEMA_VERSION, StageCacheEntry,
-    TreeManifestEntry, cached_artifacts,
+    TreeManifestEntry, cached_artifacts, validate_stage_cache_entry,
 };
 pub use stage_cmd::Cmd;
 pub use stage_condition::{StageCondition, evaluate_expr};
@@ -95,5 +124,5 @@ pub use status::{
 };
 pub use store::WorkflowStore;
 pub use template::{TemplateContext, expand_foreach, expand_matrix, substitute, substitute_cmd};
-pub use workflow_doc::{Defaults, Workflow};
+pub use workflow_doc::{ArtifactMetadata, Defaults, Workflow};
 pub use yaml::{parse as parse_yaml, parse_at, parse_with_base_dir, parse_with_context};

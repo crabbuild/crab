@@ -111,6 +111,58 @@ fn init_scratch_repo() -> TempDir {
     tmp
 }
 
+#[cfg(unix)]
+fn init_checkpoint_repo() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+
+    git(repo, &["init", "--initial-branch=main"]);
+    git(repo, &["config", "user.email", "t@test.com"]);
+    git(repo, &["config", "user.name", "Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+
+    fs::create_dir_all(repo.join(".crab")).unwrap();
+    fs::write(
+        repo.join(".crab/config.toml"),
+        "[workflow]\nenabled = true\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("crab.yaml"),
+        concat!(
+            "stages:\n",
+            "  train:\n",
+            "    cmd: >-\n",
+            "      set -eu; printf one > model.bin;\n",
+            "      \"$CRAB_WORKFLOW_EXECUTABLE\" workflow checkpoint >> \"$CRAB_TEST_LOG\" 2>&1;\n",
+            "      printf two > model.bin;\n",
+            "      \"$CRAB_WORKFLOW_EXECUTABLE\" workflow checkpoint >> \"$CRAB_TEST_LOG\" 2>&1;\n",
+            "      if [ \"x$CRAB_TEST_CHECKPOINT_CRASH\" = x1 ]; then exit 91; fi;\n",
+            "      printf three > model.bin\n",
+            "    outs:\n",
+            "      - path: model.bin\n",
+            "        checkpoint: true\n",
+        ),
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-m", "checkpoint workflow"]);
+    tmp
+}
+
+#[cfg(unix)]
+fn local_experiment_ids(repo: &Path) -> Vec<String> {
+    let mut ids = fs::read_dir(repo.join(".crab/workflow/exp"))
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            Some(name.strip_suffix(".meta.json")?.to_owned())
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 /// Invoke `crab exp <subcmd>` with the extra argv and parse
 /// stdout as a JSON envelope. Returns the envelope's `.data` node
 /// (not the outer envelope — tests care about the payload).
@@ -267,6 +319,137 @@ fn run_exp_raw(
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_lineage_apply_reset_and_resume_preserve_source() {
+    let tmp = init_checkpoint_repo();
+    let repo = tmp.path();
+
+    let output = Command::new(bin())
+        .current_dir(repo)
+        .args(["exp", "run", "--json"])
+        .env("CRAB_TEST_CHECKPOINT_CRASH", "1")
+        .env("CRAB_TEST_LOG", repo.join("checkpoint.log"))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "checkpoint run unexpectedly succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ids = local_experiment_ids(repo);
+    assert_eq!(
+        ids.len(),
+        1,
+        "checkpoint run produced no metadata: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let source_id = ids[0].clone();
+    let source_state = repo
+        .join(".crab/workflow/checkpoints")
+        .join(&source_id)
+        .join("train.json");
+    assert!(
+        source_state.exists(),
+        "checkpoint state missing at {}: stdout={} stderr={} log={}",
+        source_state.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(repo.join("checkpoint.log")).unwrap_or_else(|error| error.to_string()),
+    );
+    let source_before_reset: Value =
+        serde_json::from_slice(&fs::read(&source_state).unwrap()).unwrap();
+    assert_eq!(source_before_reset["records"].as_array().unwrap().len(), 2);
+    assert_ne!(
+        source_before_reset["records"][0]["outputs"]["model.bin"],
+        source_before_reset["records"][1]["outputs"]["model.bin"]
+    );
+
+    let shown = run_exp_json(repo, "show", &[&source_id]);
+    assert_eq!(
+        shown["metadata"]["checkpoints"].as_array().unwrap().len(),
+        2
+    );
+
+    fs::write(repo.join("model.bin"), b"dirty").unwrap();
+    run_crab_json(
+        repo,
+        &["exp", "apply", &source_id, "--checkpoint", "0", "--json"],
+    );
+    assert_eq!(fs::read(repo.join("model.bin")).unwrap(), b"one");
+
+    let reset_path = source_state.parent().unwrap().join("reset.json");
+    fs::create_dir(&reset_path).unwrap();
+    let (failed_reset, _, _) =
+        run_exp_raw(repo, "reset", &[&source_id, "--checkpoint", "0", "--json"]);
+    assert!(!failed_reset.success());
+    let unchanged_after_failed_reset: Value =
+        serde_json::from_slice(&fs::read(&source_state).unwrap()).unwrap();
+    assert_eq!(
+        unchanged_after_failed_reset["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    fs::remove_dir(&reset_path).unwrap();
+
+    let reset = run_crab_json(
+        repo,
+        &["exp", "reset", &source_id, "--checkpoint", "0", "--json"],
+    );
+    assert_eq!(reset["reset_stages"].as_array().unwrap().len(), 1);
+    let source_after_reset: Value =
+        serde_json::from_slice(&fs::read(&source_state).unwrap()).unwrap();
+    assert_eq!(source_after_reset["records"].as_array().unwrap().len(), 1);
+
+    let resumed = Command::new(bin())
+        .current_dir(repo)
+        .args(["exp", "run", "--resume", &source_id, "--json"])
+        .env("CRAB_TEST_CHECKPOINT_CRASH", "0")
+        .env("CRAB_TEST_LOG", repo.join("checkpoint.log"))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "resume failed: stdout={} stderr={} log={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr),
+        fs::read_to_string(repo.join("checkpoint.log")).unwrap_or_else(|error| error.to_string()),
+    );
+    let resumed_ids = local_experiment_ids(repo);
+    assert_eq!(resumed_ids.len(), 2);
+    let resumed_id = resumed_ids.iter().find(|id| *id != &source_id).unwrap();
+    let resumed_state: Value = serde_json::from_slice(
+        &fs::read(
+            repo.join(".crab/workflow/checkpoints")
+                .join(resumed_id)
+                .join("train.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let resumed_records = resumed_state["records"].as_array().unwrap();
+    assert_eq!(resumed_records.len(), 4);
+    assert_eq!(
+        resumed_records[0]["experiment"], source_id,
+        "the fork retains lineage identity for parent links"
+    );
+    assert_eq!(resumed_records[3]["terminal"], true);
+    let source_after_resume: Value =
+        serde_json::from_slice(&fs::read(&source_state).unwrap()).unwrap();
+    assert_eq!(source_after_resume["records"].as_array().unwrap().len(), 1);
 }
 
 #[test]

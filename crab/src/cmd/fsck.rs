@@ -69,6 +69,14 @@ pub enum IssueKind {
     MissingFileIndex { file_hash: String },
     /// Git locator acceleration is unavailable, stale, or inconsistent.
     GitLocatorDamage { detail: String },
+    /// Git upload-pack visibility proof is unavailable, stale, or inconsistent.
+    GitVisibilityDamage { detail: String },
+    /// A historical Git visibility proof is missing or needs an idempotent backfill.
+    GitVisibilityBackfill {
+        generation: u64,
+        digest: String,
+        detail: String,
+    },
     /// A shard references a xorb that doesn't exist.
     MissingXorb { xorb_hash: String },
     /// A shard exists in storage but is not referenced by any xorb chain.
@@ -147,6 +155,32 @@ impl FsckIssue {
             },
             severity: IssueSeverity::Info,
             repairable: false,
+        }
+    }
+
+    pub(crate) fn git_visibility_damage(detail: impl Into<String>) -> Self {
+        Self {
+            kind: IssueKind::GitVisibilityDamage {
+                detail: detail.into(),
+            },
+            severity: IssueSeverity::Info,
+            repairable: false,
+        }
+    }
+
+    pub(crate) fn git_visibility_backfill(
+        generation: u64,
+        digest: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: IssueKind::GitVisibilityBackfill {
+                generation,
+                digest: digest.into(),
+                detail: detail.into(),
+            },
+            severity: IssueSeverity::Info,
+            repairable: true,
         }
     }
 
@@ -250,6 +284,19 @@ impl std::fmt::Display for FsckIssue {
             }
             IssueKind::GitLocatorDamage { detail } => {
                 write!(f, "{prefix}: Git locator acceleration damage: {detail}")
+            }
+            IssueKind::GitVisibilityDamage { detail } => {
+                write!(f, "{prefix}: Git visibility proof damage: {detail}")
+            }
+            IssueKind::GitVisibilityBackfill {
+                generation,
+                digest,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "{prefix}: historical Git visibility proof {generation}/{digest} requires backfill: {detail}"
+                )
             }
             IssueKind::MissingXorb { xorb_hash } => {
                 write!(f, "{prefix}: missing xorb {xorb_hash}")
@@ -439,6 +486,13 @@ pub trait FsckRepairer: Send + Sync {
         key: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>;
 
+    /// Rebuild one historical Git visibility proof from its verified packs.
+    fn repair_git_visibility_history(
+        &self,
+        generation: u64,
+        digest: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>;
+
     /// Repair an expired push lock.
     fn repair_push_lock(
         &self,
@@ -460,6 +514,14 @@ impl FsckRepairer for NullRepairer {
     fn repair_file_index_entry(
         &self,
         _key: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn repair_git_visibility_history(
+        &self,
+        _generation: u64,
+        _digest: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         Box::pin(async { Ok(false) })
     }
@@ -621,6 +683,8 @@ fn issue_code(kind: &IssueKind) -> String {
         IssueKind::MissingBlob { .. } => "fsck-missing-blob",
         IssueKind::MissingFileIndex { .. } => "fsck-missing-file-index",
         IssueKind::GitLocatorDamage { .. } => "fsck-git-locator-damage",
+        IssueKind::GitVisibilityDamage { .. } => "fsck-git-visibility-damage",
+        IssueKind::GitVisibilityBackfill { .. } => "fsck-git-visibility-backfill",
         IssueKind::MissingXorb { .. } => "fsck-missing-xorb",
         IssueKind::OrphanShard { .. } => "fsck-orphan-shard",
         IssueKind::PackListDivergence { .. } => "fsck-pack-list-divergence",
@@ -643,6 +707,9 @@ fn issue_path(kind: &IssueKind) -> Option<String> {
         | IssueKind::AbandonedMultipart { key, .. }
         | IssueKind::ShardListDivergence { key }
         | IssueKind::OrphanFileIndex { key } => Some(key.clone()),
+        IssueKind::GitVisibilityBackfill {
+            generation, digest, ..
+        } => Some(format!("{generation}/{digest}")),
         _ => None,
     }
 }
@@ -679,6 +746,18 @@ async fn repair_issues(
                     "repairing: aborting abandoned multipart upload"
                 );
                 repairer.abort_multipart(upload_id, key).await
+            }
+            IssueKind::GitVisibilityBackfill {
+                generation, digest, ..
+            } => {
+                info!(
+                    generation,
+                    digest = %digest,
+                    "repairing: backfilling historical Git visibility proof"
+                );
+                repairer
+                    .repair_git_visibility_history(*generation, digest)
+                    .await
             }
             _ => continue,
         };
@@ -808,6 +887,15 @@ mod tests {
             if let Ok(mut v) = self.repaired_file_indexes.lock() {
                 v.push(key.to_string());
             }
+            Box::pin(async { Ok(true) })
+        }
+
+        fn repair_git_visibility_history(
+            &self,
+            _generation: u64,
+            _digest: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>
+        {
             Box::pin(async { Ok(true) })
         }
 

@@ -7,7 +7,7 @@
 //! prefixed framing so that permutations of declared sets produce the
 //! same hash and distinct inputs never collide.
 //!
-//! The format is versioned via the literal prefix `b"crab.stage.v1\n"`.
+//! The format is versioned via the literal prefix `b"crab.stage.v3\n"`.
 //! Changing any framing rule requires bumping that prefix, which
 //! invalidates every existing stage cache entry — treat as
 //! semver-relevant.
@@ -16,8 +16,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::checkpoint::{CHECKPOINT_PROTOCOL_VERSION, CHECKPOINT_SCHEMA_VERSION};
 use crate::sandbox::HERMETIC_SANDBOX_POLICY_VERSION;
 use crate::stage::{Cmd, EnvSpec, Out, Stage};
+use crate::stage_cmd::platform_shell;
 use crab_types::workflow::StageHash;
 
 /// A stage with all deps resolved to concrete content hashes plus any
@@ -39,7 +41,7 @@ pub struct ResolvedStage {
 }
 
 /// Version prefix. Bumping this invalidates every existing cache entry.
-const V1_PREFIX: &[u8] = b"crab.stage.v1\n";
+const V3_PREFIX: &[u8] = b"crab.stage.v3\n";
 
 /// Discriminator bytes placed ahead of each structured section. Fixed
 /// values so adding new sections in a future version bump doesn't
@@ -57,6 +59,7 @@ mod tag {
     pub const SECT_OUTS: u8 = 0x15;
     pub const SECT_FLAGS: u8 = 0x16;
     pub const SECT_WDIR: u8 = 0x17;
+    pub const SECT_PLATFORM: u8 = 0x18;
 
     pub const ENV_INHERIT: u8 = 0x00;
     pub const ENV_ALLOWLIST: u8 = 0x01;
@@ -73,8 +76,9 @@ fn compute_with_policy_version(
     hermetic_policy_version: u16,
 ) -> StageHash {
     let mut h = blake3::Hasher::new();
-    h.update(V1_PREFIX);
+    h.update(V3_PREFIX);
 
+    push_platform(&mut h);
     push_name(&mut h, resolved.stage.name.as_str());
     push_cmd(&mut h, &resolved.cmd);
     push_deps(&mut h, &resolved.dep_hashes);
@@ -91,6 +95,13 @@ fn compute_with_policy_version(
 
     let digest: [u8; 32] = h.finalize().into();
     StageHash(digest)
+}
+
+fn push_platform(h: &mut blake3::Hasher) {
+    h.update(&[tag::SECT_PLATFORM]);
+    push_bytes(h, std::env::consts::OS.as_bytes());
+    push_bytes(h, std::env::consts::ARCH.as_bytes());
+    push_bytes(h, platform_shell().family.as_bytes());
 }
 
 fn push_len(h: &mut blake3::Hasher, n: usize) {
@@ -193,6 +204,11 @@ fn push_outs(h: &mut blake3::Hasher, outs: &[Out]) {
         }
         if !out.push {
             h.update(&[0x02]);
+        }
+        if out.checkpoint {
+            h.update(&[0x03]);
+            h.update(&CHECKPOINT_SCHEMA_VERSION.to_le_bytes());
+            h.update(&CHECKPOINT_PROTOCOL_VERSION.to_le_bytes());
         }
     }
 }

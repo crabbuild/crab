@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crab.build/schemas/migrate.from-dvc.json",
+  "title": "Crab DVC migration envelope",
+  "type": "object",
+  "required": ["schema", "version", "data"],
+  "properties": {
+    "schema": { "const": "migrate.from-dvc" },
+    "version": { "type": "string" },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": true
+}

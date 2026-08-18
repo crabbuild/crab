@@ -10,18 +10,19 @@
 //! reachable from a host's local view.
 //!
 //! This module is that decision: given a local repo root, walk the
-//! on-disk experiment metadata cache and return the union of stage
-//! hashes + experiment IDs a remote GC walker would consider
-//! reachable. The function is I/O-light (`fs::read_dir` + `fs::read`)
-//! and never spawns subprocesses — it's safe to call from any
-//! context, including the signal handlers that run during a GC sweep.
+//! on-disk experiment metadata and checkpoint caches and return the union
+//! of stage hashes, experiment IDs, and checkpoint payload identities a
+//! remote GC walker would consider reachable. The function is I/O-light
+//! (`fs::read_dir` + `fs::read`) and never spawns subprocesses — it's safe
+//! to call from any context, including the signal handlers that run during
+//! a GC sweep.
 //!
 //! The helper is conservative about what it parses: malformed or
 //! half-written `.meta.json` blobs are logged and skipped, not
-//! surfaced as errors. The live set is the set of artifacts the
-//! local cache *confidently* declares live; a partially written
-//! blob is neither confidently live nor confidently dead, so the
-//! GC walker's grace period handles it via its normal cutoff logic.
+//! surfaced as errors. Checkpoint state is different: a malformed
+//! lineage can hide a live payload, so checkpoint parse or reference
+//! failures abort the walk. A caller must fail closed rather than
+//! treating an unknown checkpoint as dead.
 
 use std::collections::HashSet;
 use std::fs;
@@ -29,6 +30,7 @@ use std::path::Path;
 
 use tracing::warn;
 
+use crate::checkpoint::{CheckpointLineage, CheckpointRecord};
 use crate::experiment::{ExperimentId, ExperimentMetadata};
 use crate::{Result, WorkflowError as CrabError};
 
@@ -42,6 +44,9 @@ const EXP_META_PARENT_REL: &str = ".crab/workflow/exp";
 /// [`EXP_META_PARENT_REL`]. Must match what `cmd::exp::write_local_metadata`
 /// emits.
 const EXP_META_SUFFIX: &str = ".meta.json";
+
+/// Relative path to per-experiment checkpoint state.
+const CHECKPOINT_PARENT_REL: &str = ".crab/workflow/checkpoints";
 
 /// Union of workflow artifacts reachable from the local experiment
 /// metadata cache.
@@ -62,14 +67,21 @@ pub struct LocalWorkflowLiveSet {
     /// rather than a [`Vec`] because duplicates are a no-op for
     /// downstream consumers; the walker emits each id at most once.
     pub experiment_ids: HashSet<ExperimentId>,
+    /// Blake3 payload identities referenced by acknowledged checkpoints.
+    /// Values retain the canonical `b3:<lowercase-hex>` spelling used by
+    /// [`CheckpointRecord`], allowing a remote walker to protect the exact
+    /// immutable payloads rather than only the lineage JSON.
+    pub checkpoint_object_hashes: HashSet<String>,
 }
 
 impl LocalWorkflowLiveSet {
-    /// True when neither the stage-hash set nor the experiment-id
-    /// set has any entries. Cheap and distinct from the derived
-    /// `Default::default()` equality check.
+    /// True when no stage, experiment, or checkpoint payload roots were found.
+    /// Cheap and distinct from the derived `Default::default()` equality
+    /// check.
     pub fn is_empty(&self) -> bool {
-        self.stage_hashes.is_empty() && self.experiment_ids.is_empty()
+        self.stage_hashes.is_empty()
+            && self.experiment_ids.is_empty()
+            && self.checkpoint_object_hashes.is_empty()
     }
 }
 
@@ -78,90 +90,302 @@ impl LocalWorkflowLiveSet {
 /// cache contains.
 ///
 /// Behavior:
-/// - A missing parent directory yields an empty [`LocalWorkflowLiveSet`]
-///   rather than an error. Absence is the normal state for a repo that
-///   has never run an experiment.
+/// - A missing metadata parent contributes no metadata entries rather than an
+///   error. Checkpoint state is still scanned, because a crash can leave a
+///   durable lineage after its summary blob was not written.
 /// - Entries that aren't regular files or whose name doesn't end in
 ///   `.meta.json` are ignored silently — the cache shares its parent
 ///   with experiment-scratch tmpdirs handled by
 ///   [`crate::exp_worktree::sweep_orphan_experiment_tmpdirs`].
-/// - Parse errors on individual blobs log a `warn!` and skip the blob.
+/// - Parse errors on individual metadata blobs log a `warn!` and skip the
+///   blob.
+/// - Checkpoint state is validated after metadata. A missing, malformed, or
+///   unreferenced checkpoint payload returns an error so a destructive caller
+///   cannot mistake unknown state for unreachable state.
 ///   The live set is the union of successfully-parsed blobs, never a
 ///   "partially determined" set that could misgate a delete.
 ///
-/// Returns [`CrabError::Io`] only for filesystem errors the caller
-/// cannot recover from (unreadable parent directory, `fs::read_dir`
-/// itself failing).
+/// Filesystem and checkpoint-contract errors are returned so a destructive
+/// caller can fail closed; malformed legacy metadata blobs remain logged and
+/// skipped for compatibility.
 pub fn collect_local_workflow_live_set(repo_root: &Path) -> Result<LocalWorkflowLiveSet> {
     let parent = repo_root.join(EXP_META_PARENT_REL);
+    let mut live = LocalWorkflowLiveSet::default();
+    match fs::read_dir(&parent) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(error = %e, "workflow gc: dir entry unreadable; skipping");
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        warn!(path = %path.display(), error = %error, "workflow gc: metadata entry stat failed; skipping");
+                        continue;
+                    }
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    // Tmpdir worktrees and other siblings live in this
+                    // directory; only plain `.meta.json` files describe
+                    // experiments. Silently skip everything else.
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(EXP_META_SUFFIX) {
+                    continue;
+                }
+
+                let bytes = match fs::read(&path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "workflow gc: metadata read failed; skipping",
+                        );
+                        continue;
+                    }
+                };
+
+                let meta: ExperimentMetadata = match serde_json::from_slice(&bytes) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        // Malformed blob — partial write, disk corruption,
+                        // or forward-compat drift. Don't fail the live-set
+                        // walk: the remote GC walker's grace period is the
+                        // backstop for genuinely stale objects whose
+                        // metadata became unreadable.
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "workflow gc: metadata parse failed; skipping",
+                        );
+                        continue;
+                    }
+                };
+
+                live.experiment_ids.insert(meta.exp_id);
+                for hex in meta.stages.values() {
+                    live.stage_hashes.insert(hex.clone());
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(CrabError::Io(e)),
+    }
+
+    collect_local_checkpoint_live_set(repo_root, &mut live)?;
+
+    Ok(live)
+}
+
+fn collect_local_checkpoint_live_set(
+    repo_root: &Path,
+    live: &mut LocalWorkflowLiveSet,
+) -> Result<()> {
+    let parent = repo_root.join(CHECKPOINT_PARENT_REL);
     let entries = match fs::read_dir(&parent) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LocalWorkflowLiveSet::default());
-        }
-        Err(e) => return Err(CrabError::Io(e)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CrabError::Io(error)),
     };
 
-    let mut live = LocalWorkflowLiveSet::default();
-
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "workflow gc: dir entry unreadable; skipping");
-                continue;
-            }
-        };
+        let entry = entry.map_err(CrabError::Io)?;
         let path = entry.path();
-        if !path.is_file() {
-            // Tmpdir worktrees and other siblings live in this
-            // directory; only plain `.meta.json` files describe
-            // experiments. Silently skip everything else.
-            continue;
+        let metadata = fs::symlink_metadata(&path).map_err(CrabError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(checkpoint_state_error(&path, "symlink is not allowed"));
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(EXP_META_SUFFIX) {
-            continue;
-        }
-
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "workflow gc: metadata read failed; skipping",
-                );
+        if !metadata.is_dir() {
+            // Temporary files are ignored only when they use the same naming
+            // convention as the atomic checkpoint writers. Any other regular
+            // file means state was written outside the contract.
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if name.contains(".tmp-") || name.contains(".backup-") || name.ends_with(".lock") {
                 continue;
             }
-        };
+            return Err(checkpoint_state_error(
+                &path,
+                "checkpoint state entry is not a directory",
+            ));
+        }
+        let transient = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| {
+                name.contains(".tmp-")
+                    || name.contains(".backup-")
+                    || name.contains(".resume-")
+                    || name.contains(".pull-")
+                    || name.ends_with(".lock")
+            });
+        if transient {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                checkpoint_state_error(&path, "checkpoint experiment directory is not UTF-8")
+            })?;
+        let exp_id = name.parse::<ExperimentId>().map_err(|error| {
+            checkpoint_state_error(&path, &format!("invalid experiment id: {error}"))
+        })?;
+        live.experiment_ids.insert(exp_id);
+        collect_checkpoint_state(&path, live)?;
+    }
+    Ok(())
+}
 
-        let meta: ExperimentMetadata = match serde_json::from_slice(&bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                // Malformed blob — partial write, disk corruption,
-                // or forward-compat drift. Don't fail the live-set
-                // walk: the remote GC walker's grace period is the
-                // backstop for genuinely stale objects whose
-                // metadata became unreadable.
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "workflow gc: metadata parse failed; skipping",
-                );
-                continue;
-            }
-        };
-
-        live.experiment_ids.insert(meta.exp_id);
-        for hex in meta.stages.values() {
-            live.stage_hashes.insert(hex.clone());
+fn collect_checkpoint_state(state_root: &Path, live: &mut LocalWorkflowLiveSet) -> Result<()> {
+    let mut lineage_paths = Vec::new();
+    collect_checkpoint_files(state_root, state_root, &mut lineage_paths)?;
+    let mut saw_lineage = false;
+    for path in lineage_paths {
+        if path.file_name().and_then(|value| value.to_str()) == Some("reset.json") {
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            return Err(checkpoint_state_error(
+                &path,
+                "checkpoint state file has an unsupported extension",
+            ));
+        }
+        saw_lineage = true;
+        let lineage = CheckpointLineage::load(&path).map_err(|error| {
+            checkpoint_state_error(&path, &format!("checkpoint lineage is invalid: {error}"))
+        })?;
+        for record in lineage.records {
+            collect_checkpoint_record(state_root, &record, live)?;
         }
     }
 
-    Ok(live)
+    if !saw_lineage {
+        // An empty state directory is normal for an experiment that has not
+        // emitted a checkpoint. Keep it live by experiment id, but do not
+        // silently accept an objects-only directory.
+        let objects = state_root.join("objects");
+        if objects.exists() {
+            return Err(checkpoint_state_error(
+                &objects,
+                "checkpoint objects exist without a lineage",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_checkpoint_record(
+    state_root: &Path,
+    record: &CheckpointRecord,
+    live: &mut LocalWorkflowLiveSet,
+) -> Result<()> {
+    if let Some(stage_hash) = record.stage_hash.strip_prefix("b3:") {
+        live.stage_hashes.insert(stage_hash.to_owned());
+    }
+    for hash in record.outputs.values().chain(record.metrics.values()) {
+        let digest = hash.strip_prefix("b3:").ok_or_else(|| {
+            checkpoint_state_error(state_root, "checkpoint payload hash is not a b3 digest")
+        })?;
+        let object = state_root.join("objects").join(digest).join("payload");
+        let metadata = fs::symlink_metadata(&object).map_err(|error| {
+            checkpoint_state_error(
+                &object,
+                &format!("checkpoint payload is unavailable: {error}"),
+            )
+        })?;
+        if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            return Err(checkpoint_state_error(
+                &object,
+                "checkpoint payload has an invalid type",
+            ));
+        }
+        live.checkpoint_object_hashes.insert(hash.clone());
+    }
+    Ok(())
+}
+
+fn collect_checkpoint_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(CrabError::Io)? {
+        let entry = entry.map_err(CrabError::Io)?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(CrabError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(checkpoint_state_error(
+                &path,
+                "checkpoint state symlink is not allowed",
+            ));
+        }
+        let relative = path.strip_prefix(root).map_err(|error| {
+            checkpoint_state_error(
+                &path,
+                &format!("checkpoint state path escaped root: {error}"),
+            )
+        })?;
+        if relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return Err(checkpoint_state_error(
+                &path,
+                "checkpoint state path is unsafe",
+            ));
+        }
+        if metadata.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if name == "objects"
+                || name.contains(".tmp-")
+                || name.contains(".backup-")
+                || name.ends_with(".lock")
+            {
+                continue;
+            }
+            collect_checkpoint_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if !name.contains(".tmp-") && !name.contains(".backup-") && !name.ends_with(".lock") {
+                files.push(path);
+            }
+        } else {
+            return Err(checkpoint_state_error(
+                &path,
+                "checkpoint state entry has an invalid type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint_state_error(path: &Path, detail: &str) -> CrabError {
+    CrabError::YamlInvalid {
+        key: "workflow_gc_checkpoint_state".to_owned(),
+        origin: format!("{}: {detail}", path.display()),
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +402,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::checkpoint::{CHECKPOINT_SCHEMA_VERSION, CheckpointLineage, CheckpointRecord};
     use crate::experiment::EXPERIMENT_METADATA_SCHEMA_VERSION;
 
     /// Build a valid [`ExperimentMetadata`] stamped with deterministic
@@ -299,5 +524,80 @@ mod tests {
         let live = collect_local_workflow_live_set(tmp.path()).expect("walk ok");
         assert!(live.experiment_ids.contains(&id));
         assert!(live.stage_hashes.is_empty());
+    }
+
+    #[test]
+    fn collect_local_workflow_live_set_keeps_checkpoint_payloads_live() {
+        let tmp = TempDir::new().unwrap();
+        let id = ExperimentId::new_v7();
+        let payload_hash = format!("b3:{}", "ab".repeat(32));
+        let state_root = tmp.path().join(CHECKPOINT_PARENT_REL).join(id.to_string());
+        let payload = state_root
+            .join("objects")
+            .join(payload_hash.strip_prefix("b3:").unwrap())
+            .join("payload");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, b"checkpoint").unwrap();
+        let mut lineage = CheckpointLineage::default();
+        lineage
+            .append(CheckpointRecord {
+                schema_version: CHECKPOINT_SCHEMA_VERSION,
+                id: "checkpoint-0".to_owned(),
+                experiment: id.to_string(),
+                stage: "train".to_owned(),
+                sequence: 0,
+                parent: None,
+                request_nonce: None,
+                stage_hash: format!("b3:{}", "cd".repeat(32)),
+                created_at_unix_ms: 0,
+                outputs: BTreeMap::from([("model.bin".to_owned(), payload_hash.clone())]),
+                metrics: BTreeMap::new(),
+                terminal: false,
+                resumable: true,
+            })
+            .unwrap();
+        lineage.save_atomic(&state_root.join("train.json")).unwrap();
+
+        let live = collect_local_workflow_live_set(tmp.path()).unwrap();
+        assert!(live.experiment_ids.contains(&id));
+        assert!(live.stage_hashes.contains(&"cd".repeat(32)));
+        assert!(live.checkpoint_object_hashes.contains(&payload_hash));
+    }
+
+    #[test]
+    fn collect_local_workflow_live_set_fails_closed_on_missing_checkpoint_payload() {
+        let tmp = TempDir::new().unwrap();
+        let id = ExperimentId::new_v7();
+        let state_root = tmp.path().join(CHECKPOINT_PARENT_REL).join(id.to_string());
+        fs::create_dir_all(&state_root).unwrap();
+        let mut lineage = CheckpointLineage::default();
+        lineage
+            .append(CheckpointRecord {
+                schema_version: CHECKPOINT_SCHEMA_VERSION,
+                id: "checkpoint-0".to_owned(),
+                experiment: id.to_string(),
+                stage: "train".to_owned(),
+                sequence: 0,
+                parent: None,
+                request_nonce: None,
+                stage_hash: format!("b3:{}", "cd".repeat(32)),
+                created_at_unix_ms: 0,
+                outputs: BTreeMap::from([(
+                    "model.bin".to_owned(),
+                    format!("b3:{}", "ab".repeat(32)),
+                )]),
+                metrics: BTreeMap::new(),
+                terminal: false,
+                resumable: true,
+            })
+            .unwrap();
+        lineage.save_atomic(&state_root.join("train.json")).unwrap();
+
+        let error = collect_local_workflow_live_set(tmp.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint payload is unavailable")
+        );
     }
 }

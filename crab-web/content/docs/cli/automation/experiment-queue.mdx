@@ -220,7 +220,8 @@ All subcommands support `--json` for structured output.
 ## Prerequisites
 
 - A Crab-managed repository (initialized with `crab init`).
-- Workflow feature enabled with `crab config set workflow.enabled true`.
+- Workflow enabled (the default for fresh configs; explicit opt-out is
+  `workflow.enabled = false`).
 - A `params.yaml` or `crab.yaml` file at the repository root for parameter
   overrides to apply.
 - A valid `crab.yaml` workflow definition for `crab run` to execute inside

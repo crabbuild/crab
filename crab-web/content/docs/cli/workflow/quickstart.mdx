@@ -1,6 +1,6 @@
 ---
 title: "Workflow Quickstart"
-description: "Enable Crab Workflow, define a small pipeline, run it, and share the stage cache."
+description: "Define a small Crab Workflow pipeline, run it, and share the stage cache."
 ---
 
 # Workflow Quickstart
@@ -17,11 +17,11 @@ mkdir ml-project
 cd ml-project
 git init
 crab init crab://my-bucket/ml-project
-crab config set workflow.enabled true
+# Optional: set workflow.enabled false to opt out; fresh configs are enabled.
 ```
 
-If this is an existing repository, run the same `crab config set` command from
-the repo root. Workflow commands are disabled until `workflow.enabled` is true.
+Fresh Crab configs enable workflow commands. Existing repositories can opt out
+explicitly with `crab config set workflow.enabled false`.
 
 ## Create a Small Project
 

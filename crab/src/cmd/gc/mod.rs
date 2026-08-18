@@ -36,7 +36,13 @@ use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crate::tier::classes::StorageClass;
 
-const REPO_GC_PREFIXES: &[&str] = &["packs/", "metadata/", "manifests/"];
+const REPO_GC_PREFIXES: &[&str] = &[
+    "packs/",
+    "metadata/",
+    "manifests/",
+    "workflow/artifacts/",
+    "refs/crab/artifacts/",
+];
 const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -867,6 +873,15 @@ async fn extend_reachable_bulk_objects(
         reachable.insert(path.as_ref().to_string());
     }
 
+    if !manifest.refs.is_empty() && !manifest.pack_index_hash.is_empty() {
+        reachable.insert(
+            router
+                .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+                .as_ref()
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -938,7 +953,14 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    let (manifest, reachable_keys) = reachable_repo_objects_from_manifest(store, router).await?;
+    let (manifest, mut reachable_keys) =
+        reachable_repo_objects_from_manifest(store, router).await?;
+    let workflow_store = crab_workflow::WorkflowStore::from_storage(store.clone().into());
+    reachable_keys.extend(
+        crab_workflow::reachable_remote_artifact_objects(&workflow_store, router.repo_prefix())
+            .await?
+            .into_iter(),
+    );
     let shard_snapshot = shard_snapshot_from_manifest(store, router, &manifest).await?;
     let (listed_objects, list_outcome) = list_repo_gc_candidates(store, router).await?;
     let deleter = StoreObjectDeleter::new(store.clone());
@@ -1522,6 +1544,9 @@ mod tests {
         manifest.shard_index_hash = shard_hash.clone();
         manifest.pack_index_hash = pack_hash.clone();
         manifest.generation = 1;
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
@@ -1532,13 +1557,17 @@ mod tests {
 
         // The reachable set should contain both segmented index objects and
         // the immutable segments they reference.
-        assert_eq!(reachable.len(), 4);
+        assert_eq!(reachable.len(), 5);
         assert!(reachable.contains(&format!(
             "org/repo/metadata/shard/indexes/{shard_hash}.json"
         )));
         assert!(reachable.contains(&format!("org/repo/{shard_segment_path}")));
         assert!(reachable.contains(&format!("org/repo/metadata/pack/indexes/{pack_hash}.json")));
         assert!(reachable.contains(&format!("org/repo/{pack_segment_path}")));
+        assert!(reachable.contains(&format!(
+            "org/repo/metadata/git-visibility/{:020}-{pack_hash}.json",
+            manifest.generation
+        )));
 
         // An object NOT in the reachable set is unreachable.
         assert!(!reachable.contains("org/repo/metadata/shard/indexes/deadbeef.json"));
@@ -1574,7 +1603,7 @@ mod tests {
         let (candidates, outcome) = list_repo_gc_candidates(&store, &router).await.unwrap();
         let keys: HashSet<_> = candidates.into_iter().map(|object| object.key).collect();
 
-        assert_eq!(outcome.requests, 3);
+        assert_eq!(outcome.requests, 5);
         assert!(keys.contains("org/repo/packs/pack-old.pack"));
         assert!(keys.contains("org/repo/metadata/pack/indexes/old.json"));
         assert!(keys.contains("org/repo/manifests/pack-list-old"));
@@ -1582,6 +1611,86 @@ mod tests {
         assert!(!keys.contains("org/repo/locks/refs/heads/main/lock"));
         assert!(!keys.contains("org/repo/locks/internal/repack/lock"));
         assert!(!keys.contains(".crab/xorbs/abc"));
+    }
+
+    #[tokio::test]
+    async fn repo_gc_retains_referenced_artifacts_and_reclaims_orphan_payloads() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use bytes::Bytes;
+        use crab_workflow::{
+            ArtifactDecl, manifest_from_path, promote_remote_artifact, publish_remote_artifact,
+        };
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("model.bin");
+        std::fs::write(&source, b"retained-model").unwrap();
+        let declaration = ArtifactDecl {
+            name: "model".to_owned(),
+            path: "model.bin".to_owned(),
+            kind: "model".to_owned(),
+            description: None,
+            labels: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        let (artifact, source_path) = manifest_from_path(temp.path(), &declaration, None).unwrap();
+        let workflow_store = crab_workflow::WorkflowStore::from_storage(store.clone().into());
+        publish_remote_artifact(&workflow_store, "org/repo", &artifact, &source_path)
+            .await
+            .unwrap();
+        promote_remote_artifact(
+            &workflow_store,
+            "org/repo",
+            "model",
+            &artifact.version_id,
+            "production",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let orphan = ObjectPath::from("org/repo/workflow/artifacts/payloads/dead/file");
+        store
+            .put(&orphan, Bytes::from_static(b"orphan"))
+            .await
+            .unwrap();
+        let args = GcArgs {
+            force: true,
+            yes: true,
+            ..GcArgs::default()
+        };
+        let outcome = run_repo_remote_gc(
+            &args,
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.bytes_reclaimed >= b"orphan".len() as u64);
+        assert!(store.head(&orphan).await.is_err());
+        let live_payload = ObjectPath::from(format!(
+            "org/repo/workflow/artifacts/payloads/{}/file",
+            artifact.content_hash.trim_start_matches("b3:")
+        ));
+        assert!(store.head(&live_payload).await.is_ok());
     }
 
     #[tokio::test]

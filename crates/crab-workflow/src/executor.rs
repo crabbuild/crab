@@ -58,6 +58,7 @@ use crate::signals::{
 use crate::stage::{
     Cmd, Dep, DepUrlHashExt, Out, OutKind, Stage, StageName, expand_external_url_out_alias,
 };
+use crate::stage_cmd::platform_shell;
 use crate::{Result, WorkflowError as CrabError};
 use crab_types::workflow::StageHash;
 
@@ -142,6 +143,15 @@ pub struct ExecutorConfig {
     /// Minimum free disk space (bytes) before skipping cache writes.
     /// Defaults to 100 MB.
     pub min_cache_headroom: u64,
+    /// Allow checkpoint outputs in an experiment-owned execution.
+    /// Ordinary `run` and `repro` keep the fail-closed policy.
+    pub allow_checkpoints: bool,
+    /// Private checkpoint control directory inherited by stage processes.
+    pub checkpoint_control_dir: Option<PathBuf>,
+    /// Stable experiment identity used by the checkpoint supervisor.
+    pub checkpoint_run_id: Option<String>,
+    /// Per-run checkpoint authentication token. Never included in hashes or logs.
+    pub checkpoint_token: Option<String>,
 }
 
 impl std::fmt::Debug for ExecutorConfig {
@@ -187,6 +197,13 @@ impl std::fmt::Debug for ExecutorConfig {
                 &self.remote_aliases.keys().collect::<Vec<_>>(),
             )
             .field("min_cache_headroom", &self.min_cache_headroom)
+            .field("allow_checkpoints", &self.allow_checkpoints)
+            .field("checkpoint_control_dir", &self.checkpoint_control_dir)
+            .field("checkpoint_run_id", &self.checkpoint_run_id)
+            .field(
+                "checkpoint_token",
+                &self.checkpoint_token.as_ref().map(|_| "redacted"),
+            )
             .finish()
     }
 }
@@ -218,6 +235,10 @@ impl ExecutorConfig {
             remote_artifact_stores: None,
             remote_aliases: BTreeMap::new(),
             min_cache_headroom: crate::cache::DEFAULT_MIN_CACHE_HEADROOM_BYTES,
+            allow_checkpoints: false,
+            checkpoint_control_dir: None,
+            checkpoint_run_id: None,
+            checkpoint_token: None,
         }
     }
 }
@@ -239,11 +260,11 @@ fn default_host_fingerprint() -> String {
 /// [`StageState::Resolved`]). `run_local` drives the rest of the
 /// state machine forward.
 ///
-/// On a cache hit this short-circuits: the executor fast-forwards
-/// the journal with virtual transitions carrying the cached entry's
-/// hash and returns the existing entry. The caller is responsible
-/// for materializing its outs (that's a separate concern wired in
-/// task 1.17).
+/// On a local cache hit this short-circuits: the executor fast-forwards
+/// the journal through `LockfileUpdated`, returns the existing entry, and
+/// leaves the final `Committed` transition to the caller after output
+/// materialization. Remote hits are materialized by the remote pull path and
+/// are committed before returning.
 ///
 /// Errors propagate after the journal has recorded the `Failed`
 /// transition. Callers receive the same error value they would see
@@ -295,6 +316,12 @@ async fn run_inner(
 ) -> Result<StageCacheEntry> {
     let stage = &resolved.stage;
     let stage_name = stage.name.as_str();
+    if !cfg.allow_checkpoints && stage.outs.iter().any(Out::is_checkpoint) {
+        return Err(CrabError::Configuration {
+            key: "workflow_checkpoint_requires_exp_run".to_owned(),
+            origin: format!("stage '{stage_name}' declares checkpoint outputs"),
+        });
+    }
     let stage_hash = crate::hasher::compute(resolved);
     let run_cache_write_enabled = stage.run_cache_enabled() && !cfg.no_commit;
     let run_cache_lookup_enabled = stage.run_cache_lookup_enabled() && !cfg.no_run_cache;
@@ -332,11 +359,11 @@ async fn run_inner(
     )?;
 
     if let Some(entry) = hit {
-        // Cache-hit fast-forward. The executor doesn't materialize
-        // outs on this code path — the caller coordinates
-        // cache-hit materialization through `materialize::` helpers
-        // (task 1.17). Walking the state machine here still keeps
-        // the journal honest for resume.
+        // Cache-hit fast-forward. Local cache bytes still need to be
+        // materialized by the caller before the stage can be considered
+        // committed. Leaving the journal at LockfileUpdated makes a crash
+        // before that rename visible to the next run instead of reporting a
+        // false durable success.
         for next in [
             StageState::Produced,
             StageState::Hashed,
@@ -344,7 +371,6 @@ async fn run_inner(
             StageState::EntryWritten,
             StageState::RefPublished,
             StageState::LockfileUpdated,
-            StageState::Committed,
         ] {
             journal.transition(run_id, stage_name, attempt, next, r#"{"source":"Cache"}"#)?;
         }
@@ -360,8 +386,11 @@ async fn run_inner(
     }
 
     // Remote cache pull: check the remote for a matching stage entry
-    // before falling through to local execution. Network errors are
-    // logged at debug! and fall through transparently.
+    // before falling through to local execution. `pull_remote` converts
+    // absent objects and transport failures into `Ok(None)`; an error that
+    // reaches this boundary is therefore an integrity, configuration, or
+    // local materialization failure and must not be hidden by rerunning the
+    // stage.
     let remote_candidates = [
         cfg.remote_store
             .as_ref()
@@ -423,16 +452,7 @@ async fn run_inner(
                         "remote cache miss"
                     );
                 }
-                Err(e) => {
-                    // Remote pull error — log and fall through.
-                    debug!(
-                        stage = %stage_name,
-                        stage_hash = %stage_hash,
-                        remote_source = source,
-                        error = %e,
-                        "remote cache pull error"
-                    );
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -536,7 +556,9 @@ async fn run_inner(
 
     let outcome = run_stage_commands(
         stage,
+        &stage_hash,
         cfg,
+        run_id,
         effective_cwd.as_deref(),
         sandbox_policy.as_ref(),
         &log_path,
@@ -674,18 +696,7 @@ async fn run_inner(
                     )?;
                 }
                 Err(e) => {
-                    debug!(
-                        stage = %stage_name,
-                        error = %e,
-                        "remote xorb staging failed; continuing without remote cache"
-                    );
-                    journal.transition(
-                        run_id,
-                        stage_name,
-                        attempt,
-                        StageState::Staged,
-                        r#"{"remote":"failed"}"#,
-                    )?;
+                    return Err(e);
                 }
             }
         } else {
@@ -751,19 +762,7 @@ async fn run_inner(
                     )?;
                 }
                 Err(e) => {
-                    // Remote push failure is non-fatal — log and continue.
-                    debug!(
-                        stage = %stage_name,
-                        error = %e,
-                        "remote cache push failed; continuing without remote ref"
-                    );
-                    journal.transition(
-                        run_id,
-                        stage_name,
-                        attempt,
-                        StageState::RefPublished,
-                        r#"{"remote":"failed"}"#,
-                    )?;
+                    return Err(e);
                 }
             }
         } else {
@@ -838,7 +837,9 @@ struct SupervisedCommandOptions<'a> {
 
 async fn run_stage_commands(
     stage: &Stage,
+    stage_hash: &StageHash,
     cfg: &ExecutorConfig,
+    run_id: Uuid,
     cwd: Option<&Path>,
     sandbox_policy: Option<&HermeticSandboxPolicy>,
     log_path: &Path,
@@ -864,8 +865,16 @@ async fn run_stage_commands(
                     }
                     None => None,
                 };
+                let mut command = build_shell_command(shell, &stage.env, cwd, sandbox_policy)?;
+                apply_checkpoint_environment(
+                    &mut command,
+                    cfg,
+                    run_id,
+                    stage.name.as_str(),
+                    stage_hash,
+                );
                 let outcome = run_supervised_command(
-                    build_shell_command(shell, &stage.env, cwd, sandbox_policy)?,
+                    command,
                     cfg,
                     SupervisedCommandOptions {
                         log_path,
@@ -886,8 +895,16 @@ async fn run_stage_commands(
             })
         }
         Cmd::Argv(_) | Cmd::Shell(_) => {
+            let mut command = build_command(&stage.cmd, &stage.env, cwd, sandbox_policy)?;
+            apply_checkpoint_environment(
+                &mut command,
+                cfg,
+                run_id,
+                stage.name.as_str(),
+                stage_hash,
+            );
             run_supervised_command(
-                build_command(&stage.cmd, &stage.env, cwd, sandbox_policy)?,
+                command,
                 cfg,
                 SupervisedCommandOptions {
                     log_path,
@@ -898,6 +915,34 @@ async fn run_stage_commands(
             )
             .await
         }
+    }
+}
+
+fn apply_checkpoint_environment(
+    command: &mut Command,
+    cfg: &ExecutorConfig,
+    run_id: Uuid,
+    stage: &str,
+    stage_hash: &StageHash,
+) {
+    let (Some(control_dir), Some(token)) = (
+        cfg.checkpoint_control_dir.as_ref(),
+        cfg.checkpoint_token.as_ref(),
+    ) else {
+        return;
+    };
+    command.env("CRAB_WORKFLOW_CONTROL_DIR", control_dir);
+    command.env(
+        "CRAB_WORKFLOW_RUN_ID",
+        cfg.checkpoint_run_id
+            .as_deref()
+            .map_or_else(|| run_id.to_string(), ToOwned::to_owned),
+    );
+    command.env("CRAB_WORKFLOW_STAGE", stage);
+    command.env("CRAB_WORKFLOW_STAGE_HASH", format!("b3:{stage_hash}"));
+    command.env("CRAB_WORKFLOW_TOKEN", token);
+    if let Ok(executable) = std::env::current_exe() {
+        command.env("CRAB_WORKFLOW_EXECUTABLE", executable);
     }
 }
 
@@ -934,7 +979,7 @@ async fn run_supervised_command(
 }
 
 /// Build the Tokio command for a `Cmd`. We deliberately avoid any
-/// implicit shell — `Cmd::Shell` routes through `sh -c` explicitly
+/// implicit shell — `Cmd::Shell` routes through the platform shell explicitly
 /// so the stage hash differs from `Cmd::Argv(["sh","-c","…"])` only
 /// by the canonicalized discriminator, matching the hasher.
 fn build_command(
@@ -988,16 +1033,20 @@ fn build_argv_command(
         }
         Ok(command)
     } else {
-        shell_command(":", sandbox_policy)
+        Err(CrabError::Configuration {
+            key: "workflow command argv".to_owned(),
+            origin: "argv must contain a program".to_owned(),
+        })
     }
 }
 
 fn shell_command(shell: &str, sandbox_policy: Option<&HermeticSandboxPolicy>) -> Result<Command> {
-    let args = vec!["-c".to_owned(), shell.to_owned()];
+    let descriptor = platform_shell();
+    let args = descriptor.args(shell);
     if let Some(policy) = sandbox_policy {
-        return policy.wrap_command("/bin/sh", &args);
+        return policy.wrap_command(descriptor.program, &args);
     }
-    let mut command = Command::new("/bin/sh");
+    let mut command = Command::new(descriptor.program);
     command.args(args);
     Ok(command)
 }
@@ -1013,7 +1062,8 @@ fn apply_command_context(command: &mut Command, env: &crate::stage::EnvSpec, cwd
     }
 }
 
-/// Execute an `on_cache_hit` hook command via `/bin/sh -c`. Returns
+/// Execute an `on_cache_hit` hook command via the native platform shell when
+/// the hook is shell-form. Returns
 /// the process exit status. The hook inherits the stage's sanitized
 /// environment and runs in the executor's working directory (repo
 /// root for `crab run`, experiment tmpdir for `crab exp run`).
@@ -1299,13 +1349,16 @@ async fn hash_external_url_out(
         path: declared.path.clone(),
         reason: "invalid external output URL",
     })?;
-    if matches!(parsed.scheme(), "ssh" | "sftp" | "hdfs" | "webhdfs") {
+    if matches!(
+        parsed.scheme(),
+        "ssh" | "sftp" | "hdfs" | "webhdfs" | "webdav" | "webdavs" | "gdrive" | "oss"
+    ) {
         return Err(CrabError::StageRemoteExecutionUnsupported);
     }
 
     let (file_hash, size, mode, tree_manifest) = match declared.kind {
         OutKind::File => {
-            let (bytes, mode) = if matches!(parsed.scheme(), "http" | "https") {
+            let ((file_hash, size), mode) = if matches!(parsed.scheme(), "http" | "https") {
                 (
                     fetch_http_external_url_out(&expanded).await?,
                     default_external_mode(),
@@ -1328,25 +1381,16 @@ async fn hash_external_url_out(
                         reason: "expected a regular file",
                     });
                 }
-                (
-                    bytes::Bytes::from(fs::read(&path).map_err(CrabError::Io)?),
-                    unix_mode(&meta),
-                )
+                (hash_local_external_file(&path)?, unix_mode(&meta))
             } else {
                 let (store, location) = external_object_store(&parsed)?;
                 (
-                    store.get(&location).await?.bytes().await?,
+                    hash_object_store_external_file(store.as_ref(), &location).await?,
                     default_external_mode(),
                 )
             };
-            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             enforce_out_size(stage_name, declared, size, cfg)?;
-            (
-                format!("b3:{}", blake3::hash(&bytes).to_hex()),
-                size,
-                mode,
-                None,
-            )
+            (format!("b3:{}", hex_of(&file_hash)), size, mode, None)
         }
         OutKind::Directory => {
             if matches!(parsed.scheme(), "http" | "https") {
@@ -1422,7 +1466,7 @@ fn external_object_store(
     .map_err(CrabError::Storage)
 }
 
-async fn fetch_http_external_url_out(url: &str) -> Result<bytes::Bytes> {
+async fn fetch_http_external_url_out(url: &str) -> Result<([u8; 32], u64)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .user_agent(format!("crab/{}", env!("CARGO_PKG_VERSION")))
@@ -1442,7 +1486,15 @@ async fn fetch_http_external_url_out(url: &str) -> Result<bytes::Bytes> {
             ))),
         }));
     }
-    response.bytes().await.map_err(external_url_network_error)
+    let mut stream = response.bytes_stream();
+    let mut hasher = blake3::Hasher::new();
+    let mut size = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(external_url_network_error)?;
+        size = size.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        hasher.update(&chunk);
+    }
+    Ok((*hasher.finalize().as_bytes(), size))
 }
 
 fn external_url_network_error(source: reqwest::Error) -> CrabError {
@@ -1460,6 +1512,30 @@ fn external_file_url_path(stage_name: &str, declared: &Out, parsed: &url::Url) -
             path: declared.path.clone(),
             reason: "file:// external output URL must resolve to a local filesystem path",
         })
+}
+
+fn hash_local_external_file(path: &Path) -> Result<([u8; 32], u64)> {
+    let mut file = fs::File::open(path).map_err(CrabError::Io)?;
+    let size = file.metadata().map_err(CrabError::Io)?.len();
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher).map_err(CrabError::Io)?;
+    Ok((*hasher.finalize().as_bytes(), size))
+}
+
+async fn hash_object_store_external_file(
+    store: &dyn object_store::ObjectStore,
+    location: &ObjectPath,
+) -> Result<([u8; 32], u64)> {
+    let result = store.get(location).await?;
+    let mut stream = result.into_stream();
+    let mut hasher = blake3::Hasher::new();
+    let mut size = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        size = size.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        hasher.update(&chunk);
+    }
+    Ok((*hasher.finalize().as_bytes(), size))
 }
 
 fn tree_manifest_entries(
@@ -1515,12 +1591,20 @@ async fn hash_external_directory_url_out(
             continue;
         }
 
-        let bytes = store.get(&meta.location).await?.bytes().await?;
-        let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let (file_hash, streamed_size) =
+            hash_object_store_external_file(store, &meta.location).await?;
+        let size = if streamed_size == meta.size {
+            meta.size
+        } else {
+            return Err(CrabError::Internal(format!(
+                "external object {} changed size while hashing: metadata {}, streamed {}",
+                meta.location, meta.size, streamed_size
+            )));
+        };
         tree_entries.push(crate::hasher::TreeEntry {
             path: PathBuf::from(rel),
             kind: crate::hasher::TreeEntryKind::File,
-            file_hash: *blake3::hash(&bytes).as_bytes(),
+            file_hash,
             size,
             mode: default_external_mode(),
         });
@@ -2291,7 +2375,11 @@ pub fn resolve_dep_hashes_with_wdir_remote_aliases(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
@@ -2466,7 +2554,11 @@ pub fn resolve_dep_hashes_with_wdir_allow_missing_remote_aliases(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
@@ -2616,6 +2708,10 @@ mod tests {
             remote_artifact_stores: None,
             remote_aliases: BTreeMap::new(),
             min_cache_headroom: crate::cache::DEFAULT_MIN_CACHE_HEADROOM_BYTES,
+            allow_checkpoints: false,
+            checkpoint_control_dir: None,
+            checkpoint_run_id: None,
+            checkpoint_token: None,
         }
     }
 
@@ -3274,6 +3370,56 @@ mod tests {
         assert_eq!(snap.workflow_stages_executed, 0);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_cache_integrity_errors_do_not_fall_through_to_execution() {
+        let tmp = TempDir::new().unwrap();
+        let stage = Stage {
+            outs: vec![Out::new(PathBuf::from("../escape.txt"), OutKind::File)],
+            ..Stage::new(
+                StageName::parse("remoteinvalid").unwrap(),
+                Cmd::Shell("printf executed > executed.txt".into()),
+            )
+        };
+        let resolved = make_resolved(stage);
+        let stage_hash = crate::hasher::compute(&resolved);
+        let mut remote_entry = make_cache_entry(
+            "remoteinvalid",
+            Path::new("../escape.txt"),
+            *blake3::hash(b"r").as_bytes(),
+        );
+        remote_entry.stage_hash = stage_hash;
+        let remote = Arc::new(crate::WorkflowStore::new(Arc::new(
+            object_store::memory::InMemory::new(),
+        )));
+        let hash = stage_hash.as_hex();
+        let manifest_path = object_store::path::Path::from(format!(
+            "org/repo/workflow/stages/{}/{hash}.json",
+            &hash[..2]
+        ));
+        remote
+            .put(
+                &manifest_path,
+                bytes::Bytes::from(serde_json::to_vec(&remote_entry).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let mut cfg = test_cfg(&tmp);
+        cfg.working_dir = Some(tmp.path().to_path_buf());
+        cfg.remote_store = Some(remote);
+        cfg.remote_prefix = Some("org/repo".into());
+        let run_id = Uuid::now_v7();
+        let journal = open_journal(&tmp, run_id);
+        prepare_stage(&journal, run_id, "remoteinvalid");
+
+        let error = run_local(&resolved, &cfg, &journal, run_id, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CrabError::CacheEntryInvalid { .. }));
+        assert!(!tmp.path().join("executed.txt").exists());
+        assert!(!tmp.path().join("escape.txt").exists());
+    }
+
     #[test]
     fn rfc3339_millis_produces_expected_shape() {
         let s = now_rfc3339_millis();
@@ -3841,7 +3987,7 @@ mod tests {
         let state = RunState::new();
         let resolver = StageOutResolver::new(&state, None, tmp.path());
         let consumer = StageName::parse("evaluate").unwrap();
-        let url = crate::stage::test_support::serve_http_body_once(b"executor-url-body");
+        let url = crate::stage::test_support::serve_http_body_n(b"executor-url-body", 2);
         let deps = vec![Dep::Url {
             url: url.clone(),
             digest: None,

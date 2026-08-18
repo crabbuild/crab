@@ -44,6 +44,7 @@ enum GitPullResult {
 pub async fn run_pull(args: &PullArgs, cancel: &CancellationToken) -> Result<()> {
     let style = CliStyle::resolve(args.mode);
     let start = Instant::now();
+    let repo_root = std::env::current_dir().map_err(CrabError::Io)?;
 
     // Phase 1: git pull
     if !args.mode.is_machine() {
@@ -100,7 +101,7 @@ pub async fn run_pull(args: &PullArgs, cancel: &CancellationToken) -> Result<()>
                 return Ok(());
             }
 
-            let config = Config::resolve_local().unwrap_or_default();
+            let config = Config::resolve_for_repo(&repo_root)?;
             let hydration_plan = pull_hydration_plan(&config)?;
             let filter = match hydration_plan {
                 PullHydrationPlan::Skip(reason) => {

@@ -243,7 +243,7 @@ pub async fn run_async(args: &StatusArgs, repo_root: &Path, mode: OutputMode) ->
         return run_local(args, repo_root, mode);
     }
 
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     let Some(mut entries) = status_entries(args, repo_root, &config, mode)? else {
         return Ok(());
     };
@@ -253,7 +253,7 @@ pub async fn run_async(args: &StatusArgs, repo_root: &Path, mode: OutputMode) ->
 }
 
 fn run_local(args: &StatusArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     let Some(entries) = status_entries(args, repo_root, &config, mode)? else {
         return Ok(());
     };
@@ -267,10 +267,9 @@ fn status_entries(
     config: &Config,
     mode: OutputMode,
 ) -> Result<Option<Vec<StageStatusEntry>>> {
-    // Config gate: workflow layer opt-in. The command is a no-op
-    // read, but emitting status for a repo that hasn't opted in
-    // would be misleading — the lockfile wouldn't have been written
-    // by this binary.
+    // Config gate: an explicit workflow opt-out must apply to read-only
+    // status too; otherwise status could claim a lockfile this binary did
+    // not produce.
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -918,7 +917,11 @@ fn resolve_path_dep_hashes(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
@@ -1584,7 +1587,7 @@ mod tests {
     fn http_url_dep_reports_up_to_date_when_body_matches_lockfile() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        let url = crate::workflow::stage::test_support::serve_http_body_once(b"status-url-body");
+        let url = crate::workflow::stage::test_support::serve_http_body_n(b"status-url-body", 2);
         write_yaml(
             root,
             &format!(
@@ -1624,7 +1627,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let base_url =
-            crate::workflow::stage::test_support::serve_http_body_once(b"status-alias-body");
+            crate::workflow::stage::test_support::serve_http_body_n(b"status-alias-body", 2);
         let base_url = base_url.trim_end_matches("data.bin").to_owned();
         write_yaml(
             root,

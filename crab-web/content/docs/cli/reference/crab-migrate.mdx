@@ -1,13 +1,14 @@
 ---
 title: "crab migrate"
-description: "Rewrite Git history to move files into or out of Crab tracking."
+description: "Inspect large-file history and convert DVC workflow state into Crab metadata."
 ---
 
 # crab migrate
 
-Rewrite Git history to convert large files into Crab pointers or restore Crab
-pointers to full files. History rewriting changes commit IDs. Back up the
-repository and coordinate with every contributor before applying it.
+Inspect large-file history and convert DVC workflow state into Crab metadata.
+The history-rewrite commands are currently dry-run only: non-dry-run requests
+fail explicitly without changing the repository. Use `crab adopt` for the
+supported working-tree cutover path.
 
 ## Synopsis
 
@@ -20,8 +21,8 @@ crab migrate <SUBCOMMAND> [OPTIONS]
 | Command | Purpose |
 | --- | --- |
 | `crab migrate info` | Report file types above a size threshold that would benefit from tracking |
-| `crab migrate import` | Convert large files in history to Crab pointers |
-| `crab migrate export` | Convert Crab pointers back to full files in history |
+| `crab migrate import` | Preview a large-file-to-pointer history migration; applying it is not yet supported |
+| `crab migrate export` | Preview a pointer-to-full-file history migration; applying it is not yet supported |
 | `crab migrate from-dvc` | Convert a `dvc.yaml` pipeline to `crab.yaml` |
 
 ## Examples
@@ -33,14 +34,14 @@ crab migrate info
 crab migrate info --above 10485760 --top 5
 ```
 
-Preview and then import selected files across all branches:
+Preview a prospective history rewrite:
 
 ```bash
 crab migrate import --include '*.bin' --include '*.safetensors' --dry-run
-crab migrate import --include '*.bin' --everything
+crab migrate import --include '*.bin' --everything --dry-run
 ```
 
-Export selected pointer-backed files from history:
+Preview exporting selected pointer-backed files from history:
 
 ```bash
 crab migrate export --include '*.bin' --dry-run

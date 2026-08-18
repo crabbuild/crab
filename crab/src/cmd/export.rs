@@ -179,10 +179,7 @@ pub async fn run_export(args: &ExportArgs, cancel: &CancellationToken) -> Result
     let (repo, paths) = resolve_source_and_paths(args)?;
     let target_url = parse_raw_target_url(&args.to)?;
 
-    let mut config = Config::resolve_local().unwrap_or_else(|e| {
-        tracing::debug!(error = %e, "export: failed to resolve local config, using defaults");
-        Config::default()
-    });
+    let mut config = Config::resolve_local()?;
     let jobs = effective_jobs(args, &config)?;
     config.hydrate.download_concurrency = jobs;
 

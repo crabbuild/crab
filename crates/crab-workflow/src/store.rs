@@ -33,9 +33,30 @@ impl WorkflowStore {
         Self { inner }
     }
 
+    /// Borrow the storage-domain facade for operations that need streaming
+    /// reads, multipart file uploads, or explicit CAS/delete semantics.
+    ///
+    /// Workflow policy remains in this crate; exposing the already-configured
+    /// facade avoids constructing a second provider client in CLI commands.
+    #[must_use]
+    pub fn as_storage(&self) -> &crab_storage::Store {
+        &self.inner
+    }
+
     /// Writes a content-addressed object if absent.
     pub async fn put(&self, path: &Path, bytes: Bytes) -> Result<()> {
         self.inner.put(path, bytes).await.map_err(Into::into)
+    }
+
+    /// Creates a coordination object only when the path is absent.
+    ///
+    /// Unlike [`Self::put`], this preserves an existing-object conflict even
+    /// when the backend does not implement conditional create correctly.
+    pub async fn create_strict(&self, path: &Path, bytes: Bytes) -> Result<()> {
+        self.inner
+            .create_strict(path, bytes)
+            .await
+            .map_err(Into::into)
     }
 
     /// Fetches object metadata without reading its body.
@@ -46,5 +67,15 @@ impl WorkflowStore {
     /// Reads an object together with its compare-and-swap token.
     pub async fn get_with_etag(&self, path: &Path) -> Result<(Bytes, crab_storage::ETag)> {
         self.inner.get_with_etag(path).await.map_err(Into::into)
+    }
+
+    /// Delete one remote workflow object.
+    pub async fn delete(&self, path: &Path) -> Result<()> {
+        self.inner.delete(path).await.map_err(Into::into)
+    }
+
+    /// List objects below a remote workflow prefix.
+    pub async fn list_prefix(&self, prefix: &Path) -> Result<Vec<ObjectMeta>> {
+        self.inner.list_prefix(prefix).await.map_err(Into::into)
     }
 }

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crab.build/schemas/data.json",
+  "title": "Crab data command envelope",
+  "type": "object",
+  "required": ["schema", "version", "data"],
+  "properties": {
+    "schema": { "const": "data" },
+    "version": { "type": "string" },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": true
+}

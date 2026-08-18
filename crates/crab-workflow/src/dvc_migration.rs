@@ -8,20 +8,21 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::Serialize;
 use serde_yaml::Value;
 
 use crate::error::{Result, WorkflowError};
 
 /// A warning emitted during DVC → crab conversion for features that
 /// cannot be automatically migrated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MigrationWarning {
     pub stage: String,
     pub message: String,
 }
 
 /// Summary of a DVC → crab migration.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct MigrationReport {
     pub stages_converted: usize,
     pub warnings: Vec<MigrationWarning>,
@@ -34,6 +35,8 @@ pub struct MigrationReport {
 pub fn convert_dvc_to_crab(dvc_content: &str) -> Result<(String, MigrationReport)> {
     let dvc: Value = serde_yaml::from_str(dvc_content)
         .map_err(|source| WorkflowError::DvcYamlParse { source })?;
+
+    validate_top_level_shape(&dvc)?;
 
     let mut warnings: Vec<MigrationWarning> = Vec::new();
     let mut crab_doc: BTreeMap<String, Value> = BTreeMap::new();
@@ -60,7 +63,13 @@ pub fn convert_dvc_to_crab(dvc_content: &str) -> Result<(String, MigrationReport
                 })?;
 
         for (name_val, stage_val) in stages {
-            let name = name_val.as_str().unwrap_or("<unknown>").to_owned();
+            let name = name_val
+                .as_str()
+                .ok_or_else(|| WorkflowError::DvcMigrationInvalid {
+                    key: "dvc_stage_name_invalid".to_owned(),
+                    origin: "stages contains a non-string name".to_owned(),
+                })?
+                .to_owned();
 
             let Some(stage_map) = stage_val.as_mapping() else {
                 warnings.push(MigrationWarning {
@@ -70,7 +79,7 @@ pub fn convert_dvc_to_crab(dvc_content: &str) -> Result<(String, MigrationReport
                 continue;
             };
 
-            let converted = convert_stage(&name, stage_map, &mut warnings);
+            let converted = convert_stage(&name, stage_map, &mut warnings)?;
             crab_stages.insert(name, converted);
             stages_converted += 1;
         }
@@ -108,12 +117,60 @@ pub fn convert_dvc_to_crab(dvc_content: &str) -> Result<(String, MigrationReport
     Ok((yaml_out, report))
 }
 
+fn validate_top_level_shape(dvc: &Value) -> Result<()> {
+    let Some(map) = dvc.as_mapping() else {
+        return Err(WorkflowError::DvcMigrationInvalid {
+            key: "dvc_schema_unsupported".to_owned(),
+            origin: "dvc.yaml must be a mapping".to_owned(),
+        });
+    };
+    for key in map.keys() {
+        let Some(key) = key.as_str() else {
+            return Err(WorkflowError::DvcMigrationInvalid {
+                key: "dvc_schema_unsupported".to_owned(),
+                origin: "dvc.yaml contains a non-string top-level key".to_owned(),
+            });
+        };
+        if !matches!(
+            key,
+            "vars" | "artifacts" | "params" | "metrics" | "plots" | "stages"
+        ) {
+            return Err(WorkflowError::DvcMigrationInvalid {
+                key: "dvc_schema_unsupported".to_owned(),
+                origin: format!("dvc.yaml top-level field `{key}` is not representable"),
+            });
+        }
+        let value = map.get(Value::String(key.to_owned())).ok_or_else(|| {
+            WorkflowError::DvcMigrationInvalid {
+                key: "dvc_schema_unsupported".to_owned(),
+                origin: format!("dvc.yaml top-level field `{key}` is missing"),
+            }
+        })?;
+        let valid = match key {
+            "vars" => value.is_sequence(),
+            "artifacts" | "stages" => value.is_mapping(),
+            "params" | "metrics" => value
+                .as_sequence()
+                .is_some_and(|values| values.iter().all(Value::is_string)),
+            "plots" => value.is_sequence(),
+            _ => false,
+        };
+        if !valid {
+            return Err(WorkflowError::DvcMigrationInvalid {
+                key: "dvc_schema_shape_unsupported".to_owned(),
+                origin: format!("dvc.yaml top-level field `{key}` has an unsupported shape"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Convert a single DVC stage mapping to crab format.
 fn convert_stage(
     name: &str,
     stage: &serde_yaml::Mapping,
     warnings: &mut Vec<MigrationWarning>,
-) -> Value {
+) -> Result<Value> {
     let mut out = serde_yaml::Mapping::new();
     let mut live_paths = Vec::new();
 
@@ -126,22 +183,30 @@ fn convert_stage(
             // Direct copy fields.
             "deps" | "params" | "metrics" | "wdir" | "frozen" | "desc" | "meta" | "vars"
             | "plots" | "foreach" | "matrix" => {
+                validate_stage_field_shape(name, key, val)?;
                 out.insert(key_val.clone(), val.clone());
             }
 
             // `cmd:` — strings and DVC shell lists pass through.
             "cmd" => {
+                validate_cmd_shape(name, val)?;
                 out.insert(key_val.clone(), val.clone());
             }
 
             // `outs:` — normalize DVC path-key settings.
             "outs" => {
-                let converted_outs = convert_outs(name, val, warnings);
+                let converted_outs = convert_outs(name, val, warnings)?;
                 out.insert(key_val.clone(), converted_outs);
             }
 
             // `always_changed:` → `nondeterministic:`.
             "always_changed" => {
+                if !val.is_bool() {
+                    return Err(WorkflowError::DvcMigrationInvalid {
+                        key: "dvc_stage_field_shape_unsupported".to_owned(),
+                        origin: format!("stage '{name}' always_changed must be a boolean"),
+                    });
+                }
                 out.insert(Value::String("nondeterministic".into()), val.clone());
             }
 
@@ -149,10 +214,13 @@ fn convert_stage(
             "do" => {
                 // Recursively convert the `do:` block.
                 if let Some(do_map) = val.as_mapping() {
-                    let converted_do = convert_stage(name, do_map, warnings);
+                    let converted_do = convert_stage(name, do_map, warnings)?;
                     out.insert(key_val.clone(), converted_do);
                 } else {
-                    out.insert(key_val.clone(), val.clone());
+                    return Err(WorkflowError::DvcMigrationInvalid {
+                        key: "dvc_stage_do_shape_unsupported".to_owned(),
+                        origin: format!("stage '{name}' do must be a mapping"),
+                    });
                 }
             }
 
@@ -161,26 +229,34 @@ fn convert_stage(
                 live_paths.extend(convert_live_paths(name, val, warnings));
             }
 
-            // Unknown fields — pass through with a warning.
+            // Unknown fields cannot be preserved safely: Crab's parser is
+            // strict, and passing an unrecognized DVC field through would
+            // either produce an invalid file or hide a semantic mismatch.
             other => {
-                warnings.push(MigrationWarning {
-                    stage: name.into(),
-                    message: format!("unknown field `{other}` passed through as-is"),
+                return Err(WorkflowError::DvcMigrationInvalid {
+                    key: "dvc_stage_field_unsupported".to_owned(),
+                    origin: format!("stage '{name}' field '{other}' is not representable"),
                 });
-                out.insert(key_val.clone(), val.clone());
             }
         }
     }
 
     append_live_outputs(name, &mut out, &live_paths, warnings);
 
-    Value::Mapping(out)
+    Ok(Value::Mapping(out))
 }
 
 /// Convert DVC `outs:` list, emitting warnings for unsupported fields.
-fn convert_outs(stage_name: &str, val: &Value, warnings: &mut Vec<MigrationWarning>) -> Value {
+fn convert_outs(
+    stage_name: &str,
+    val: &Value,
+    warnings: &mut Vec<MigrationWarning>,
+) -> Result<Value> {
     let Some(seq) = val.as_sequence() else {
-        return val.clone();
+        return Err(WorkflowError::DvcMigrationInvalid {
+            key: "dvc_output_shape_unsupported".to_owned(),
+            origin: format!("stage '{stage_name}' outs must be a sequence"),
+        });
     };
 
     let mut converted: Vec<Value> = Vec::with_capacity(seq.len());
@@ -192,18 +268,21 @@ fn convert_outs(stage_name: &str, val: &Value, warnings: &mut Vec<MigrationWarni
             // mapping. Normalize both to Crab's strict shape.
             Value::Mapping(m) => {
                 if let Some(path) = mapping_string(m, "path") {
-                    let filtered = filter_dvc_out_settings(stage_name, m, warnings);
+                    let filtered = filter_dvc_out_settings(stage_name, &path, m, warnings)?;
                     converted.push(structured_out(&path, filtered));
                     continue;
                 }
 
                 for (k, v) in m {
                     let Some(path) = k.as_str() else {
-                        converted.push(item.clone());
-                        continue;
+                        return Err(WorkflowError::DvcMigrationInvalid {
+                            key: "dvc_output_path_invalid".to_owned(),
+                            origin: format!("stage '{stage_name}' output path is not a string"),
+                        });
                     };
                     if let Some(settings) = v.as_mapping() {
-                        let filtered = filter_dvc_out_settings(stage_name, settings, warnings);
+                        let filtered =
+                            filter_dvc_out_settings(stage_name, path, settings, warnings)?;
                         if filtered.is_empty() {
                             converted.push(Value::String(path.to_owned()));
                         } else {
@@ -214,14 +293,71 @@ fn convert_outs(stage_name: &str, val: &Value, warnings: &mut Vec<MigrationWarni
                     }
                 }
             }
-            // Simple strings and unsupported item shapes pass through.
+            // Simple strings are the only unstructured output form Crab
+            // accepts. Other shapes would otherwise be silently reinterpreted.
+            Value::String(_) => converted.push(item.clone()),
             _ => {
-                converted.push(item.clone());
+                return Err(WorkflowError::DvcMigrationInvalid {
+                    key: "dvc_output_shape_unsupported".to_owned(),
+                    origin: format!("stage '{stage_name}' output is not a path or mapping"),
+                });
             }
         }
     }
 
-    Value::Sequence(converted)
+    Ok(Value::Sequence(converted))
+}
+
+fn validate_cmd_shape(stage_name: &str, value: &Value) -> Result<()> {
+    let valid = match value {
+        Value::String(_) => true,
+        Value::Sequence(values) => values.iter().all(Value::is_string),
+        Value::Mapping(map) => {
+            map.keys().all(|key| key.as_str() == Some("argv"))
+                && map
+                    .get(Value::String("argv".to_owned()))
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|argv| !argv.is_empty() && argv.iter().all(Value::is_string))
+        }
+        _ => false,
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(WorkflowError::DvcMigrationInvalid {
+        key: "dvc_command_shape_unsupported".to_owned(),
+        origin: format!("stage '{stage_name}' cmd is not a supported shell or argv form"),
+    })
+}
+
+fn validate_stage_field_shape(stage_name: &str, field: &str, value: &Value) -> Result<()> {
+    let valid = match field {
+        "deps" => value.as_sequence().is_some_and(|values| {
+            values.iter().all(|item| match item {
+                Value::String(_) => true,
+                Value::Mapping(map) => {
+                    let supported = ["path", "crab", "git", "url", "oci", "stage_out"];
+                    map.len() == 1
+                        && map
+                            .keys()
+                            .all(|key| key.as_str().is_some_and(|key| supported.contains(&key)))
+                }
+                _ => false,
+            })
+        }),
+        "params" | "metrics" | "plots" => value.is_sequence(),
+        "wdir" | "desc" => value.is_string(),
+        "frozen" => value.is_bool(),
+        "meta" | "vars" | "foreach" | "matrix" => true,
+        _ => true,
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(WorkflowError::DvcMigrationInvalid {
+        key: "dvc_stage_field_shape_unsupported".to_owned(),
+        origin: format!("stage '{stage_name}' field '{field}' has an unsupported shape"),
+    })
 }
 
 fn mapping_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
@@ -434,33 +570,48 @@ fn live_directory_out(path: &str) -> Value {
 
 fn filter_dvc_out_settings(
     stage_name: &str,
+    path: &str,
     settings: &serde_yaml::Mapping,
     warnings: &mut Vec<MigrationWarning>,
-) -> serde_yaml::Mapping {
+) -> Result<serde_yaml::Mapping> {
     let mut filtered = serde_yaml::Mapping::new();
-    let mut checkpoint_persist = false;
     for (sk, sv) in settings {
         let setting_key = sk.as_str().unwrap_or("");
         match setting_key {
             "path" | "desc" => {}
+            // DVC may materialize these identities in a generated dvc.yaml.
+            // They remain source verification inputs in the inventory, never
+            // Crab output metadata or content hashes.
+            "md5" | "size" | "isexec" => {
+                warnings.push(MigrationWarning {
+                    stage: stage_name.to_owned(),
+                    message: format!(
+                        "DVC output field `{setting_key}` for `{path}` is retained only for source verification"
+                    ),
+                });
+            }
             "cache" | "push" | "persist" | "kind" | "max_bytes" | "remote" => {
                 filtered.insert(sk.clone(), sv.clone());
             }
             "checkpoint" => {
-                checkpoint_persist = sv.as_bool().unwrap_or(false);
+                return Err(WorkflowError::DvcMigrationInvalid {
+                    key: "dvc_checkpoint_unsupported".to_owned(),
+                    origin: format!(
+                        "stage '{stage_name}' output '{path}' declares checkpoint semantics"
+                    ),
+                });
             }
             _ => {
-                warnings.push(MigrationWarning {
-                    stage: stage_name.into(),
-                    message: format!("unknown output field `{setting_key}` removed"),
+                return Err(WorkflowError::DvcMigrationInvalid {
+                    key: "dvc_output_field_unsupported".to_owned(),
+                    origin: format!(
+                        "stage '{stage_name}' output '{path}' field '{setting_key}' is not representable"
+                    ),
                 });
             }
         }
     }
-    if checkpoint_persist {
-        filtered.insert(Value::String("persist".to_owned()), Value::Bool(true));
-    }
-    filtered
+    Ok(filtered)
 }
 
 fn structured_out(path: &str, settings: serde_yaml::Mapping) -> Value {
@@ -1031,7 +1182,7 @@ stages:
     }
 
     #[test]
-    fn converts_checkpoint_output_to_persistent_out() {
+    fn rejects_checkpoint_output_without_losing_its_semantics() {
         let dvc = r#"
 stages:
   train:
@@ -1041,15 +1192,13 @@ stages:
           checkpoint: true
           push: false
 "#;
-        let (yaml, report) = convert_dvc_to_crab(dvc).unwrap();
-        assert!(report.warnings.is_empty());
-
-        let doc = parse_doc(&yaml);
-        let outs = stage_sequence(&doc, "train", "outs");
-        let out = outs[0].as_mapping().unwrap();
-        assert_eq!(key(out, "path").as_str(), Some("model.pt"));
-        assert_eq!(key(out, "persist").as_bool(), Some(true));
-        assert_eq!(key(out, "push").as_bool(), Some(false));
+        let error = convert_dvc_to_crab(dvc).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::DvcMigrationInvalid { key, origin }
+                if key == "dvc_checkpoint_unsupported"
+                    && origin.contains("model.pt")
+        ));
     }
 
     #[test]
@@ -1060,5 +1209,42 @@ foo:
 "#;
         let result = convert_dvc_to_crab(dvc);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_stage_fields_before_serializing_output() {
+        let dvc = r#"
+stages:
+  train:
+    cmd: python train.py
+    outs:
+      - model.pkl
+    unknown_dvc_feature: true
+"#;
+        let error = convert_dvc_to_crab(dvc).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::DvcMigrationInvalid { key, .. }
+                if key == "dvc_stage_field_unsupported"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_output_settings_before_serializing_output() {
+        let dvc = r#"
+stages:
+  train:
+    cmd: python train.py
+    outs:
+      - model.pkl:
+          cache: true
+          unknown_dvc_feature: true
+"#;
+        let error = convert_dvc_to_crab(dvc).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::DvcMigrationInvalid { key, .. }
+                if key == "dvc_output_field_unsupported"
+        ));
     }
 }

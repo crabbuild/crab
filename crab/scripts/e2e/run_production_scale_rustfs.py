@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify a production-shaped 200 GiB Crab repository against local RustFS.
 
-The workflow is deliberately opt-in. It creates one isolated run beneath
-``/Volumes/Workspace/CrabRepos/ml-model-200gb`` and keeps its source, clone,
+The qualification is deliberately explicit. It creates one isolated run
+beneath ``/Volumes/Workspace/CrabRepos/ml-model-200gb`` and keeps its source, clone,
 logs, manifests, and report for investigation. The files are sparse with
 deterministic repeated blocks: they exercise 200 GiB of logical content and
 deduplication without consuming several additional terabytes of host storage.

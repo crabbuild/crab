@@ -68,7 +68,8 @@ nodes and are annotated with `[expanded]` in ASCII output. Their names contain
 
 ## Prerequisites
 
-- Workflow feature enabled with `crab config set workflow.enabled true`.
+- Workflow enabled (the default for fresh configs; explicit opt-out is
+  `workflow.enabled = false`).
 - At least one `crab.yaml` or `*.workflow.yaml` file must exist at the
   repository root (or be discoverable via `--recursive`).
 

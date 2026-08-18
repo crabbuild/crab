@@ -9,13 +9,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use object_store::path::Path;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::cmd::fsck::{FsckChecker, FsckIssue, FsckRepairer, MultipartMeta, PushLockMeta};
 use crate::core::error::{CrabError, Result};
 #[cfg(test)]
 use crate::metadata::manifest::PackManifestEntry;
-use crate::metadata::manifest::{read_bulk_pack_list, read_bulk_shard_list, read_manifest};
+use crate::metadata::manifest::{
+    Manifest, read_bulk_pack_list, read_bulk_shard_list, read_manifest,
+};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 #[cfg(test)]
@@ -268,6 +271,99 @@ impl StoreChecker {
             Ok(issues) => close_result.map(|()| issues),
         }
     }
+
+    async fn check_git_visibility_index_for_manifest(
+        &self,
+        manifest: &Manifest,
+        historical: Option<(u64, &str)>,
+    ) -> Result<Vec<FsckIssue>> {
+        if manifest.refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let issue = |detail: String| match historical {
+            Some((generation, digest)) => {
+                FsckIssue::git_visibility_backfill(generation, digest, detail)
+            }
+            None => FsckIssue::git_visibility_damage(detail),
+        };
+        if manifest.pack_index_hash.is_empty() {
+            return Ok(vec![issue(
+                "manifest has refs but no pack-index hash".to_owned(),
+            )]);
+        }
+        let storage_router =
+            crab_storage::StoreLayout::new(self.store.as_storage().clone(), self.prefix.clone());
+        let index = match crab_metadata::git_visibility::read(
+            self.store.as_storage(),
+            &storage_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        {
+            Ok(index) => index,
+            Err(error) => {
+                return Ok(vec![issue(error.to_string())]);
+            }
+        };
+        let mut issues = Vec::new();
+        if index.refs.len() != manifest.refs.len() {
+            issues.push(issue(format!(
+                "proof covers {} refs but manifest has {}",
+                index.refs.len(),
+                manifest.refs.len()
+            )));
+        }
+        for (name, oid) in &manifest.refs {
+            let Some(objects) = index.refs.get(name) else {
+                issues.push(issue(format!("proof is missing ref {name}")));
+                continue;
+            };
+            if objects.binary_search(oid).is_err() {
+                issues.push(issue(format!("proof is missing tip {oid} for {name}")));
+            }
+            if let Some(peeled) = manifest.peeled_refs.get(name)
+                && objects.binary_search(peeled).is_err()
+            {
+                issues.push(issue(format!(
+                    "proof is missing peeled tip {peeled} for {name}"
+                )));
+            }
+        }
+        Ok(issues)
+    }
+
+    async fn check_git_visibility_index(&self) -> Result<Vec<FsckIssue>> {
+        let manifest = match read_manifest(&self.store, &self.router).await {
+            Ok((manifest, _)) => manifest,
+            Err(CrabError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        self.check_git_visibility_index_for_manifest(&manifest, None)
+            .await
+    }
+
+    async fn check_historical_git_visibility_indexes(&self) -> Result<Vec<FsckIssue>> {
+        let storage_router =
+            crab_storage::StoreLayout::new(self.store.as_storage().clone(), self.prefix.clone());
+        let entries = crab_metadata::manifest_store::list_manifest_history(
+            self.store.as_storage(),
+            &storage_router,
+        )
+        .await
+        .map_err(CrabError::from)?;
+        let mut issues = Vec::new();
+        for entry in entries {
+            issues.extend(
+                self.check_git_visibility_index_for_manifest(
+                    &entry.manifest,
+                    Some((entry.generation, &entry.digest)),
+                )
+                .await?,
+            );
+        }
+        Ok(issues)
+    }
 }
 
 impl FsckChecker for StoreChecker {
@@ -319,6 +415,8 @@ impl FsckChecker for StoreChecker {
             let expected_file_index = self.manifest_file_entries(&shard_list).await?;
             issues.extend(self.check_file_index_entries(&expected_file_index).await?);
             issues.extend(self.check_git_locator_entries().await?);
+            issues.extend(self.check_git_visibility_index().await?);
+            issues.extend(self.check_historical_git_visibility_indexes().await?);
 
             let mut checked_xorbs = HashSet::new();
             for shard_hash in &shard_list.entries {
@@ -558,6 +656,27 @@ impl FsckRepairer for StoreRepairer {
                     Err(e)
                 }
             }
+        })
+    }
+
+    fn repair_git_visibility_history(
+        &self,
+        generation: u64,
+        digest: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
+        let store = self.store.clone();
+        let router = self.router.clone();
+        let digest = digest.to_owned();
+        Box::pin(async move {
+            crate::cmd::history_recovery::rebuild_git_visibility_for_history(
+                &store,
+                &router,
+                generation,
+                &digest,
+                &CancellationToken::new(),
+            )
+            .await?;
+            Ok(true)
         })
     }
 

@@ -1,0 +1,30 @@
+---
+title: Workflow artifacts
+description: Declare, version, inspect, and retrieve immutable workflow artifacts.
+---
+
+The top-level artifacts catalog preserves model and dataset declarations in
+crab.yaml. A declaration names a clean repository-relative path and its kind;
+it does not make a stage executable or infer a release version.
+
+The CLI lifecycle is:
+
+- crab artifacts list and show inspect declarations, versions, and stage labels.
+- crab artifacts version create NAME creates an immutable BLAKE3-addressed
+  manifest from a clean output.
+- crab artifacts get NAME --version ID or --stage STAGE copies exactly one
+  immutable payload and never overwrites an existing destination.
+- crab artifacts history NAME reports promotion events.
+
+Creation rejects missing or dirty outputs. The manifest records the source Git
+commit, content identity, size, creation time, and bounded annotations. A
+version ID is content-addressed and is never a mutable label.
+
+When a `crab://` primary remote is configured, create, list, show, history,
+promote, and get use the remote registry as the canonical state. Payloads are
+uploaded content-addressably and downloads stream into a verified destination;
+the local registry remains a cache and recovery mirror. Without a Crab remote,
+the same commands operate on local Crab-owned state. Remote artifact refs and
+clean-clone retrieval are live-qualified on the RustFS file-artifact path;
+remote artifact GC retention is still a release gate, so no command removes
+old versions automatically.

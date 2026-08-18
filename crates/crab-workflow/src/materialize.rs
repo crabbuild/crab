@@ -11,9 +11,10 @@
 //! per-file atomic writes and is best-effort for directories — the
 //! fallback is documented, not silent.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -104,13 +105,23 @@ pub fn write_directory_atomic(
         fs::remove_dir_all(&staging).map_err(CrabError::Io)?;
     }
     fs::create_dir_all(&staging).map_err(CrabError::Io)?;
+    let mut cleanup = DirectorySidecarCleanup::new(staging.clone());
+    let mut paths = BTreeSet::new();
 
     for (rel, bytes, mode) in entries {
-        if rel.is_absolute() {
+        if rel.is_absolute()
+            || rel.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+            || !paths.insert(rel.clone())
+        {
             return Err(CrabError::StageOutMalformed {
                 stage: String::new(),
                 path: rel.clone(),
-                reason: "directory manifest entries must be relative",
+                reason: "directory manifest entries must be unique and relative",
             });
         }
         let target = staging.join(rel);
@@ -137,6 +148,7 @@ pub fn write_directory_atomic(
         fs::remove_dir_all(path).map_err(CrabError::Io)?;
     }
     fs::rename(&staging, path).map_err(CrabError::Io)?;
+    cleanup.disarm();
     Ok(())
 }
 
@@ -157,6 +169,7 @@ pub fn materialize_directory(
     cache_root: &Path,
     run_id: Uuid,
 ) -> Result<()> {
+    crate::stage_cache_entry::validate_tree_manifest(manifest)?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -170,6 +183,7 @@ pub fn materialize_directory(
         fs::remove_dir_all(&staging).map_err(CrabError::Io)?;
     }
     fs::create_dir_all(&staging).map_err(CrabError::Io)?;
+    let mut cleanup = DirectorySidecarCleanup::new(staging.clone());
 
     for entry in manifest {
         let rel = std::path::Path::new(&entry.path);
@@ -204,7 +218,31 @@ pub fn materialize_directory(
         fs::remove_dir_all(path).map_err(CrabError::Io)?;
     }
     fs::rename(&staging, path).map_err(CrabError::Io)?;
+    cleanup.disarm();
     Ok(())
+}
+
+struct DirectorySidecarCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl DirectorySidecarCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DirectorySidecarCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 fn directory_entry_bytes(
@@ -212,11 +250,10 @@ fn directory_entry_bytes(
     entry: &crate::cache::TreeManifestEntry,
     source: &Path,
 ) -> Result<Vec<u8>> {
-    if let Some(bytes) = crate::cache::read_local_xorb(cache_root, &entry.hash)? {
-        return Ok(bytes);
-    }
-
-    fs::read(source).map_err(|e| {
+    let bytes = if let Some(bytes) = crate::cache::read_local_xorb(cache_root, &entry.hash)? {
+        bytes
+    } else {
+        fs::read(source).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CrabError::StageCacheMiss {
                 stage: String::new(),
@@ -228,7 +265,18 @@ fn directory_entry_bytes(
         } else {
             CrabError::Io(e)
         }
-    })
+        })?
+    };
+    let actual_hash = format!("b3:{}", blake3::hash(&bytes).to_hex());
+    if actual_hash != entry.hash || bytes.len() as u64 != entry.size {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: entry.path.clone(),
+            expected: format!("{} bytes with {}", entry.size, entry.hash),
+            actual: format!("{} bytes with {actual_hash}", bytes.len()),
+        });
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -339,5 +387,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CrabError::StageOutMalformed { .. }));
+    }
+
+    #[test]
+    fn materialize_directory_rejects_traversal_before_writing() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("data");
+        let run_id = Uuid::now_v7();
+        let manifest = vec![crate::cache::TreeManifestEntry {
+            path: "../escape.txt".to_owned(),
+            kind: "file".to_owned(),
+            hash: format!("b3:{}", "ab".repeat(32)),
+            size: 1,
+            mode: 0o644,
+        }];
+
+        assert!(materialize_directory(&dir, &manifest, tmp.path(), run_id).is_err());
+        assert!(!tmp.path().join("escape.txt").exists());
+        assert!(!sidecar_path(&dir, run_id).exists());
     }
 }

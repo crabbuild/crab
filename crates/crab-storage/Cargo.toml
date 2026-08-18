@@ -11,6 +11,7 @@ name = "crab_storage"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-types = { workspace = true }

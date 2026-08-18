@@ -114,6 +114,94 @@ jobs:
             echo "source_short_sha=$source_short_sha"
           } >> "$GITHUB_OUTPUT"
 
+  workflow-release-gate:
+    name: Workflow release gate (RustFS)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WORKFLOW_RUSTFS_ACCESS_KEY: crab
+      WORKFLOW_RUSTFS_SECRET_KEY: crab
+      WORKFLOW_RUSTFS_BUCKET: crab
+      WORKFLOW_RUSTFS_ENDPOINT: http://127.0.0.1:9000
+      WORKFLOW_RUSTFS_REGION: us-east-1
+      WORKFLOW_RUSTFS_ROOT: /tmp/crab-workflow-release-gate
+      WORKFLOW_RUSTFS_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
+      WORKFLOW_RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install workflow smoke dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build release candidate
+        run: |
+          cargo build -p crab --release --locked
+          ln -sf crab target/release/git-remote-crab
+      - name: Start RustFS
+        run: |
+          mkdir -p "${WORKFLOW_RUSTFS_ROOT}" "${RUNNER_TEMP}/rustfs-data"
+          docker run --rm -d \
+            --name crab-workflow-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY \
+            -e RUSTFS_SECRET_KEY \
+            -v "${RUNNER_TEMP}/rustfs-data:/data" \
+            "${WORKFLOW_RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "${WORKFLOW_RUSTFS_ENDPOINT}" || true)"
+            if [ "${status:-000}" != "000" ] && [ "${status}" -lt 500 ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-workflow-rustfs >&2 || true
+          exit 1
+        env:
+          RUSTFS_ACCESS_KEY: ${{ env.WORKFLOW_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ env.WORKFLOW_RUSTFS_SECRET_KEY }}
+      - name: Run workflow smoke against release candidate
+        env:
+          CRAB_RUSTFS_IMAGE: ${{ env.WORKFLOW_RUSTFS_IMAGE }}
+          GITHUB_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          python3 crab/scripts/e2e/run_dvc_workflow_smoke.py \
+            --root "${WORKFLOW_RUSTFS_ROOT}" \
+            --run-id "${WORKFLOW_RUSTFS_RUN_ID}" \
+            --bucket "${WORKFLOW_RUSTFS_BUCKET}" \
+            --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" \
+            --region "${WORKFLOW_RUSTFS_REGION}" \
+            --access-key "${WORKFLOW_RUSTFS_ACCESS_KEY}" \
+            --secret-key "${WORKFLOW_RUSTFS_SECRET_KEY}" \
+            --min-free-bytes 1073741824
+      - name: Verify exact-commit workflow evidence
+        run: |
+          python3 crab/scripts/e2e/verify_workflow_evidence.py \
+            "${WORKFLOW_RUSTFS_ROOT}/${WORKFLOW_RUSTFS_RUN_ID}/artifacts/report.json" \
+            --source-sha "${{ needs.prepare.outputs.source_sha }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          docker logs crab-workflow-rustfs > "${WORKFLOW_RUSTFS_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-workflow-rustfs >/dev/null 2>&1 || true
+      - name: Upload workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-rustfs-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.WORKFLOW_RUSTFS_ROOT }}/${{ env.WORKFLOW_RUSTFS_RUN_ID }}/artifacts/*.json
+            ${{ env.WORKFLOW_RUSTFS_ROOT }}/${{ env.WORKFLOW_RUSTFS_RUN_ID }}/logs/*.log
+            ${{ env.WORKFLOW_RUSTFS_ROOT }}/rustfs.log
+          if-no-files-found: error
+          retention-days: 14
+
   replica-enterprise-gate:
     name: Replica enterprise gate
     needs: prepare
@@ -524,10 +612,110 @@ jobs:
         working-directory: crab
         run: make nfs-feature-gate
 
+  workflow-native-release-gate:
+    name: Native workflow release gate (${{ matrix.os }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run workflow contract tests
+        run: cargo test -p crab-workflow --locked
+
+      - name: Run CLI migration contract tests
+        run: cargo test -p crab --test workflow_migration --locked
+
+      - name: Build and execute the Windows release candidate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs
+          .\target\release\crab.exe --version
+
+      - name: Build and execute the Unix release candidate
+        if: runner.os != 'Windows'
+        run: |
+          cargo build -p crab --release --locked
+          ./target/release/crab --version
+
+      - name: Execute a native workflow stage on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          cat > "${smoke_root}/crab.yaml" <<'YAML'
+          stages:
+            smoke:
+              cmd:
+                argv: [python3, write.py]
+              outs: [output.txt]
+          YAML
+          cat > "${smoke_root}/write.py" <<'PY'
+          from pathlib import Path
+          Path("output.txt").write_text("native-workflow", encoding="utf-8")
+          PY
+          (cd "${smoke_root}" && "${GITHUB_WORKSPACE}/target/release/crab" run)
+          test "$(cat "${smoke_root}/output.txt")" = native-workflow
+
+      - name: Execute a native workflow stage on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "crab-native-workflow"
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          @'
+          stages:
+            smoke:
+              cmd:
+                argv: [python, write.py]
+              outs: [output.txt]
+          '@ | Set-Content -Path (Join-Path $smokeRoot "crab.yaml") -Encoding utf8
+          @'
+          from pathlib import Path
+          Path("output.txt").write_text("native-workflow", encoding="utf-8")
+          '@ | Set-Content -Path (Join-Path $smokeRoot "write.py") -Encoding utf8
+          Push-Location $smokeRoot
+          try {
+            & "$env:GITHUB_WORKSPACE\target\release\crab.exe" run
+            if ($LASTEXITCODE -ne 0) { throw "native workflow failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          if ((Get-Content (Join-Path $smokeRoot "output.txt") -Raw).Trim() -ne "native-workflow") {
+            throw "native workflow output mismatch"
+          }
+
+      - name: Write exact native evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p native-workflow-evidence
+          printf '{"schema_version":1,"source_sha":"%s","run_id":"%s","run_attempt":"%s","os":"%s","result":"%s"}\n' \
+            "$(git rev-parse HEAD)" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${RUNNER_OS}" "${{ job.status }}" \
+            > native-workflow-evidence/${RUNNER_OS}.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workflow-native-release-evidence-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: native-workflow-evidence/*.json
+          if-no-files-found: error
+
   build:
     name: Build (${{ matrix.name }})
-    needs: [prepare, replica-enterprise-gate, cache-service-enterprise-gate, nfs-native-evidence-gate, nfs-feature-gate]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.nfs-feature-gate.result == 'success' && (needs.nfs-native-evidence-gate.result == 'success' || needs.nfs-native-evidence-gate.result == 'skipped') && (needs.replica-enterprise-gate.result == 'success' || needs.replica-enterprise-gate.result == 'skipped') && (needs.cache-service-enterprise-gate.result == 'success' || needs.cache-service-enterprise-gate.result == 'skipped') }}
+    needs: [prepare, workflow-release-gate, workflow-native-release-gate, replica-enterprise-gate, cache-service-enterprise-gate, nfs-native-evidence-gate, nfs-feature-gate]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.workflow-release-gate.result == 'success' && needs.workflow-native-release-gate.result == 'success' && needs.nfs-feature-gate.result == 'success' && (needs.nfs-native-evidence-gate.result == 'success' || needs.nfs-native-evidence-gate.result == 'skipped') && (needs.replica-enterprise-gate.result == 'success' || needs.replica-enterprise-gate.result == 'skipped') && (needs.cache-service-enterprise-gate.result == 'success' || needs.cache-service-enterprise-gate.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     env:
       CRAB_BUILD_VERSION: ${{ needs.prepare.outputs.version }}

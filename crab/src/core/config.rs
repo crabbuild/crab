@@ -166,8 +166,8 @@ const DEFAULT_TIER_RESTRIPE_OUTPUT_CLASS: &str = "standard";
 
 /// Lifecycle tiering configuration from the `[tier]` TOML section.
 ///
-/// The entire subsystem is opt-in (`enabled = false` by default). When
-/// disabled, `crab tier` commands are inert and hydrate never issues
+/// The subsystem is disabled unless its explicit `enabled` setting is true.
+/// When disabled, `crab tier` commands are inert and hydrate never issues
 /// restore requests.
 #[derive(Debug, Clone)]
 pub struct TierConfig {
@@ -4625,7 +4625,7 @@ target_xorb_bytes = 16777216
     #[test]
     fn workflow_config_defaults() {
         let cfg = WorkflowConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.discover, WorkflowDiscover::Root);
         assert_eq!(cfg.parallelism, DEFAULT_WORKFLOW_PARALLELISM);
         assert_eq!(cfg.graceful_shutdown_timeout_secs, 10);
@@ -4790,7 +4790,7 @@ target_xorb_bytes = 16777216
         cfg.apply_env_overrides();
 
         // All three values were malformed; defaults preserved.
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.discover, WorkflowDiscover::Root);
         assert_eq!(cfg.parallelism, DEFAULT_WORKFLOW_PARALLELISM);
 
@@ -5552,9 +5552,9 @@ pub use crab_staging::StagingConfig;
 // Workflow configuration
 // ---------------------------------------------------------------------------
 
-/// Default workflow feature flag. When `false`, the workflow layer is inert
-/// and no `.crab/workflow/` artifacts are created.
-const DEFAULT_WORKFLOW_ENABLED: bool = false;
+/// Default workflow feature flag. Workflows are enabled for fresh configs;
+/// `workflow.enabled = false` remains an explicit opt-out.
+const DEFAULT_WORKFLOW_ENABLED: bool = true;
 
 /// Default stage-discovery mode. `Root` considers only `crab.yaml` at the
 /// repo root; nested yaml files are rejected unless `Recursive` is selected.
@@ -5641,9 +5641,8 @@ pub struct WorkflowRemoteConfig {
 
 /// Workflow-layer configuration from the `[workflow]` TOML section.
 ///
-/// The whole subsystem is feature-flagged behind `enabled = false` so
-/// partial rollouts don't destabilize commands that never touch a
-/// `crab.yaml`.
+/// The workflow subsystem is enabled by default and can be disabled explicitly
+/// with `enabled = false` when a repository needs a staged rollout.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WorkflowConfig {

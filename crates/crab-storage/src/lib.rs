@@ -3,6 +3,7 @@
 pub mod cas;
 pub mod error;
 pub mod error_map;
+pub mod external;
 pub mod head_batch;
 pub mod identity;
 pub mod layout;
@@ -15,6 +16,10 @@ pub use cas::{DEFAULT_MAX_ATTEMPTS, cas_update, cas_update_default};
 pub use crab_types::storage::StorageScope;
 pub use error::{Result, StorageError};
 pub use error_map::{classify_auth_error, map_object_store_error};
+pub use external::{
+    ExternalByteStream, ExternalCapabilities, ExternalDataStore, ExternalObjectMeta,
+    ObjectStoreExternalDataStore,
+};
 pub use head_batch::{HeadBatchConfig, HeadBatchOutcome, HeadBatchStore, head_batch};
 pub use identity::{BucketIdentity, StorageProviderKind};
 pub use layout::{

@@ -2,7 +2,7 @@
 //! forwarding, and stdout/stderr streaming.
 //!
 //! [`ChildSupervisor`] spawns a prepared [`tokio::process::Command`],
-//! forwards any SIGINT/SIGTERM the parent receives down to the child,
+//! forwards parent cancellation down to the child process tree,
 //! enforces a per-stage `timeout` by escalating through
 //! `SIGTERM → graceful_shutdown_timeout → SIGKILL`, and streams the
 //! child's stdout and stderr to durable sinks concurrently:
@@ -14,6 +14,8 @@
 //!    `.crab/workflow/runs/<run_id>/stage-<name>.log`, containing
 //!    interleaved stdout + stderr lines.
 //!
+//! Unix children run in a dedicated process group. Windows uses the native
+//! `taskkill /T` process-tree operation, with `/F` reserved for escalation.
 //! The supervisor deliberately does **not** touch the journal. It
 //! returns a [`SupervisorOutcome`] and emits structured
 //! [`SupervisorEvent`]s through an optional callback; the executor
@@ -412,7 +414,7 @@ impl ChildSupervisor {
                 () = timeout_fut, if !sent_term => {
                     timed_out = true;
                     debug!(pid, "workflow supervisor: timeout fired; sending SIGTERM");
-                    request_child_signal(child, pid, Signal::Term);
+                    request_child_signal(child, pid, Signal::Term).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Term,
                         reason: EscalationReason::Timeout,
@@ -423,7 +425,7 @@ impl ChildSupervisor {
                 // Parent SIGINT → forward SIGINT to child.
                 Some(()) = sigint.recv(), if !sent_term => {
                     debug!(pid, "workflow supervisor: parent SIGINT; forwarding");
-                    request_child_signal(child, pid, Signal::Int);
+                    request_child_signal(child, pid, Signal::Int).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Int,
                         reason: EscalationReason::ParentSigint,
@@ -434,7 +436,7 @@ impl ChildSupervisor {
                 // Parent SIGTERM → forward SIGTERM to child.
                 Some(()) = sigterm.recv(), if !sent_term => {
                     debug!(pid, "workflow supervisor: parent SIGTERM; forwarding");
-                    request_child_signal(child, pid, Signal::Term);
+                    request_child_signal(child, pid, Signal::Term).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Term,
                         reason: EscalationReason::ParentSigterm,
@@ -448,7 +450,7 @@ impl ChildSupervisor {
                         ExternalKillKind::Force => Signal::Kill,
                     };
                     debug!(pid, ?signal, "workflow supervisor: external kill request; forwarding");
-                    request_child_signal(child, pid, signal);
+                    request_child_signal(child, pid, signal).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal,
                         reason: EscalationReason::ExternalKillRequest,
@@ -460,7 +462,7 @@ impl ChildSupervisor {
                 // then SIGKILL if it's still alive.
                 () = sleep(self.graceful_shutdown), if sent_term => {
                     debug!(pid, "workflow supervisor: grace window expired; sending SIGKILL");
-                    request_child_signal(child, pid, Signal::Kill);
+                    request_child_signal(child, pid, Signal::Kill).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Kill,
                         reason: EscalationReason::GracefulShutdownExpired,
@@ -514,7 +516,7 @@ impl ChildSupervisor {
                 () = timeout_fut, if !sent_term => {
                     timed_out = true;
                     debug!(pid, "workflow supervisor: timeout fired; terminating child");
-                    request_child_signal(child, pid, Signal::Term);
+                    request_child_signal(child, pid, Signal::Term).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Term,
                         reason: EscalationReason::Timeout,
@@ -526,7 +528,7 @@ impl ChildSupervisor {
                     match res {
                         Ok(()) => {
                             debug!(pid, "workflow supervisor: parent Ctrl-C; terminating child");
-                            request_child_signal(child, pid, Signal::Int);
+                            request_child_signal(child, pid, Signal::Int).await;
                             self.emit(SupervisorEvent::SignalSent {
                                 signal: Signal::Int,
                                 reason: EscalationReason::ParentSigint,
@@ -543,7 +545,7 @@ impl ChildSupervisor {
                         ExternalKillKind::Force => Signal::Kill,
                     };
                     debug!(pid, ?signal, "workflow supervisor: external kill request; terminating child");
-                    request_child_signal(child, pid, signal);
+                    request_child_signal(child, pid, signal).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal,
                         reason: EscalationReason::ExternalKillRequest,
@@ -553,7 +555,7 @@ impl ChildSupervisor {
 
                 () = sleep(self.graceful_shutdown), if sent_term => {
                     debug!(pid, "workflow supervisor: grace window expired; killing child");
-                    request_child_signal(child, pid, Signal::Kill);
+                    request_child_signal(child, pid, Signal::Kill).await;
                     self.emit(SupervisorEvent::SignalSent {
                         signal: Signal::Kill,
                         reason: EscalationReason::GracefulShutdownExpired,
@@ -613,12 +615,44 @@ async fn wait_for_external_kill(path: &Path) -> ExternalKillKind {
 }
 
 #[cfg(unix)]
-fn request_child_signal(_child: &mut Child, pid: u32, signal: Signal) {
+async fn request_child_signal(_child: &mut Child, pid: u32, signal: Signal) {
     send_signal(pid, signal);
 }
 
-#[cfg(not(unix))]
-fn request_child_signal(child: &mut Child, pid: u32, signal: Signal) {
+#[cfg(windows)]
+async fn request_child_signal(child: &mut Child, pid: u32, signal: Signal) {
+    // Windows has no POSIX process-group signal equivalent. `taskkill /T`
+    // asks the native process tree manager to terminate the shell and every
+    // descendant; `/F` is reserved for the supervisor's final kill step.
+    let force = matches!(signal, Signal::Kill);
+    let pid_text = pid.to_string();
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/PID", pid_text.as_str(), "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if force {
+        command.arg("/F");
+    }
+    match command.status().await {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            warn!(pid, ?signal, code = ?status.code(), "workflow supervisor: taskkill failed");
+            if let Err(err) = child.start_kill() {
+                warn!(pid, ?signal, error = %err, "workflow supervisor: terminate child failed");
+            }
+        }
+        Err(err) => {
+            warn!(pid, ?signal, error = %err, "workflow supervisor: taskkill unavailable");
+            if let Err(err) = child.start_kill() {
+                warn!(pid, ?signal, error = %err, "workflow supervisor: terminate child failed");
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn request_child_signal(child: &mut Child, pid: u32, signal: Signal) {
     if let Err(err) = child.start_kill() {
         warn!(pid, ?signal, error = %err, "workflow supervisor: terminate child failed");
     }

@@ -1304,6 +1304,12 @@ impl From<crab_workflow::WorkflowError> for CrabError {
                 manifest_hash,
                 local_hash,
             },
+            crab_workflow::WorkflowError::CacheEntryInvalid { stage_hash, detail } => {
+                Self::CorruptObject {
+                    path: format!("workflow stage cache/{stage_hash}"),
+                    reason: detail,
+                }
+            }
             crab_workflow::WorkflowError::RemoteCacheReadonly => Self::RemoteCacheReadonly,
             crab_workflow::WorkflowError::JournalDiskFull { path } => {
                 Self::JournalDiskFull { path }

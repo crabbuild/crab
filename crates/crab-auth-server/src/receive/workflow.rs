@@ -6,10 +6,11 @@ use super::{
     PreparedViewScope, ReceiveContext, ReceiveManifestCommit, build_service_candidate_manifest,
     commit_receive_manifest, commit_service_git_locators, commit_service_metadata,
     compute_changed_paths, conflict, invalid, materialize_source_push,
-    parse_active_active_receive_config, promote_staged_objects, source_ref_updates_from_prepare,
-    validate_candidate_manifest_shape, validate_candidate_metadata,
-    validate_protected_dependency_receipt, validate_protected_shard_set_receipt,
-    validate_push_plan_shape, write_service_generation_index_receipt,
+    parse_active_active_receive_config, promote_staged_objects, publish_git_visibility_index,
+    source_ref_updates_from_prepare, validate_candidate_manifest_shape,
+    validate_candidate_metadata, validate_protected_dependency_receipt,
+    validate_protected_shard_set_receipt, validate_push_plan_shape,
+    write_service_generation_index_receipt,
 };
 use crate::error::Result;
 
@@ -221,6 +222,13 @@ pub async fn commit_receive(
             None
         }
     };
+    if let Err(error) = publish_git_visibility_index(ctx.store(), ctx.router(), &manifest).await {
+        tracing::warn!(
+            error = %error,
+            generation = manifest.generation,
+            "protected push committed; Git visibility proof requires repair"
+        );
+    }
     if let (Some(file_index_digest), Some(git_object_locator_digest)) =
         (file_index_digest, git_object_locator_digest)
         && let Err(error) = write_service_generation_index_receipt(

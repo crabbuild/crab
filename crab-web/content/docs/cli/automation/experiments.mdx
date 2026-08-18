@@ -179,7 +179,8 @@ Shows which experiments would be removed without actually deleting anything.
 
 ## Prerequisites
 
-- Workflow feature enabled with `crab config set workflow.enabled true`.
+- Workflow enabled (the default for fresh configs; set `workflow.enabled = false`
+  for an explicit opt-out).
 - A `crab.yaml` file at the repository root defining stages and metrics.
 - A clean git HEAD (the experiment worktree branches from the current commit).
 

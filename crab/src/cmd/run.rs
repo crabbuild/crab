@@ -74,6 +74,7 @@ use crate::core::output::{
     WorkflowStageProduced, WorkflowStageResult, WorkflowStageRetry, WorkflowStageStarted,
     emit_json,
 };
+use crate::read::{RepositoryOpenOptions, RepositoryReader};
 use crate::workflow::cache::{
     CurrentFile, OverwriteDecision, OverwriteFlags, RemoteArtifactStores, StageCacheEntry,
     cached_artifacts, overwrite_policy, read_local, read_local_xorb,
@@ -101,6 +102,7 @@ use crab_workflow::{
     FailureKind, Graph, LockedDep, Lockfile, RetryDecision, RunState, StageState, Workflow, retry,
     yaml,
 };
+use tokio_util::sync::CancellationToken;
 
 pub use crate::core::output::WorkflowStageOut as StageResultOut;
 /// Re-export of the canonical single-envelope schema for
@@ -125,6 +127,10 @@ pub(crate) struct RunInvocationOptions {
     pub mirror_child_output: bool,
     pub external_kill_path: Option<PathBuf>,
     pub child_started: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    pub allow_checkpoints: bool,
+    pub checkpoint_control_dir: Option<PathBuf>,
+    pub checkpoint_run_id: Option<String>,
+    pub checkpoint_token: Option<String>,
 }
 
 impl Default for RunInvocationOptions {
@@ -133,6 +139,10 @@ impl Default for RunInvocationOptions {
             mirror_child_output: true,
             external_kill_path: None,
             child_started: None,
+            allow_checkpoints: false,
+            checkpoint_control_dir: None,
+            checkpoint_run_id: None,
+            checkpoint_token: None,
         }
     }
 }
@@ -462,11 +472,9 @@ pub(crate) async fn run_in_with_options(
     mode: OutputMode,
     options: RunInvocationOptions,
 ) -> Result<()> {
-    // Config gate: workflow layer opt-in via `[workflow] enabled = true`.
-    // Falling back to defaults is the right move in a fresh repo — the
-    // feature flag default is already `false`, so the user's intent
-    // stays correct either way.
-    let config = Config::resolve_for_repo(repo_root).unwrap_or_default();
+    // Config gate: fresh configs run workflows by default, while an explicit
+    // `[workflow] enabled = false` remains a hard opt-out.
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -565,13 +573,14 @@ async fn run_inline_single_stage(
     for out in &stage.outs {
         out.validate(&stage.name)?;
     }
+    validate_stage_remote_capabilities(&stage, &workflow_remote_aliases(config))?;
 
     // Resolve deps to content hashes. Missing paths become
     // `StageDepMissing`; non-file entries (symlinks, FIFOs, etc.)
     // become `StageDepMalformed`.
     // When --pull is set, attempt to download missing deps first.
     if args.pull {
-        try_pull_missing_deps(&stage, &stage_name, repo_root);
+        try_pull_missing_deps(&stage, &stage_name, repo_root, config).await?;
     }
     let remote_aliases = workflow_remote_aliases(config);
     let dep_hashes =
@@ -615,8 +624,9 @@ async fn run_inline_single_stage(
     }
 
     // Build the remote store for cache pull (and push if --cache-push).
-    // Failures are non-fatal — we fall through to local-only mode.
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await;
+    // An explicitly requested push must not silently become a local-only run;
+    // callers can resume from the local journal/cache after the remote error.
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
     let remote_store = remote.as_ref().map(|remote| remote.store.clone());
     let remote_prefix = remote.as_ref().map(|remote| remote.prefix.clone());
     let remote_primary_fallback_store = remote
@@ -723,6 +733,10 @@ async fn run_inline_single_stage(
         remote_artifact_stores: remote_artifact_stores.clone(),
         remote_aliases,
         min_cache_headroom: config.workflow.min_cache_headroom_bytes(),
+        allow_checkpoints: false,
+        checkpoint_control_dir: None,
+        checkpoint_run_id: None,
+        checkpoint_token: None,
     };
 
     // JSONL stream for `--jsonl` mode. Held behind an Option so we can
@@ -853,6 +867,13 @@ async fn run_inline_single_stage(
                         );
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             } else if !from_remote {
                 // Miss-path events — emit after the executor has
                 // produced/hashed but before we mark `Committed` so
@@ -983,6 +1004,11 @@ async fn run_with_yaml(
     } else {
         crate::workflow::discover::parse_all_with_provenance(repo_root, yaml_paths)?
     };
+    let remote_aliases = workflow_remote_aliases(config);
+    for stage in workflow.stages.values() {
+        validate_checkpoint_execution(stage, options.allow_checkpoints)?;
+        validate_stage_remote_capabilities(stage, &remote_aliases)?;
+    }
     let graph = Graph::build(&workflow.stages)?;
 
     let lockfile_mode = match config.workflow.lockfile {
@@ -1065,6 +1091,25 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
     for err in semantic_errors {
         let error = CrabError::from(err);
         errors.push(yaml_error_to_json(&error));
+    }
+
+    // Provider capability is part of validation, not a late child-process
+    // failure. Keep the same alias expansion and scheme registry used by the
+    // execution path so `--validate` cannot report a workflow as runnable
+    // when an external dependency or output has no live provider.
+    match Config::resolve_for_repo(repo_root) {
+        Ok(config) => {
+            let remote_aliases = workflow_remote_aliases(&config);
+            for stage in workflow.stages.values() {
+                if let Err(error) = validate_checkpoint_execution(stage, false) {
+                    errors.push(yaml_error_to_json(&error));
+                }
+                if let Err(error) = validate_stage_remote_capabilities(stage, &remote_aliases) {
+                    errors.push(yaml_error_to_json(&error));
+                }
+            }
+        }
+        Err(error) => errors.push(yaml_error_to_json(&error)),
     }
 
     // Layer 3b: Graph-level checks (duplicate outs, cycles).
@@ -1252,7 +1297,8 @@ async fn run_yaml_single_stage(
     journal.insert_run_start(run_id, env!("CARGO_PKG_VERSION"), &host_fingerprint())?;
 
     let run_state = RunState::new();
-    let executor_cfg = build_executor_cfg(
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
         config,
@@ -1261,6 +1307,7 @@ async fn run_yaml_single_stage(
         args.no_commit,
         options,
     );
+    apply_workflow_remote(&mut executor_cfg, remote, args.cache_push);
 
     // JSONL stream for `--jsonl` mode in single-stage-from-yaml.
     let mut jsonl = if mode == OutputMode::Jsonl {
@@ -1296,6 +1343,7 @@ async fn run_yaml_single_stage(
         stage,
         &stage_name,
         repo_root,
+        config,
         &workflow.params,
         &run_state,
         Some(&lockfile),
@@ -1398,7 +1446,8 @@ async fn run_dag(
     // (skipped) so the scheduler never dispatches them.
     let stage_filter = filter_stages(args, workflow, graph)?;
 
-    let executor_cfg = build_executor_cfg(
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
         config,
@@ -1407,6 +1456,7 @@ async fn run_dag(
         args.no_commit,
         options,
     );
+    apply_workflow_remote(&mut executor_cfg, remote, args.cache_push);
 
     // Open the JSONL stream up-front so every stage event lands on
     // the same writer. The stream's umbrella schema is the stage-
@@ -1671,6 +1721,7 @@ async fn run_dag(
             let args_force = args.force;
             let args_allow_missing = args.allow_missing;
             let args_pull = args.pull;
+            let config_clone = config.clone();
             let cache_root_clone = cache_root.clone();
             let param_files_clone = workflow.params.clone();
             let jsonl_shared_clone = jsonl_shared.clone();
@@ -1723,6 +1774,7 @@ async fn run_dag(
                     &param_files_clone,
                     args_allow_missing,
                     args_pull,
+                    config_clone,
                     jsonl_shared_clone,
                     started_at,
                 )
@@ -2008,6 +2060,7 @@ async fn execute_stage_parallel(
     param_files: &[PathBuf],
     allow_missing: bool,
     pull: bool,
+    config: Config,
     jsonl: Option<Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
     run_started_at: Instant,
 ) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
@@ -2022,7 +2075,7 @@ async fn execute_stage_parallel(
     // When --pull is set, attempt to download missing dep files from
     // the remote before resolving hashes.
     if pull {
-        try_pull_missing_deps(stage, stage_name, repo_root);
+        try_pull_missing_deps(stage, stage_name, repo_root, &config).await?;
     }
 
     // Build a fresh RunState for dep resolution. In parallel mode,
@@ -2150,6 +2203,13 @@ async fn execute_stage_parallel(
                         });
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             Ok((entry, cache_hit, duration_ms, params))
@@ -2389,7 +2449,33 @@ fn build_executor_cfg(
         remote_artifact_stores: None,
         remote_aliases: workflow_remote_aliases(config),
         min_cache_headroom: config.workflow.min_cache_headroom_bytes(),
+        allow_checkpoints: options.allow_checkpoints,
+        checkpoint_control_dir: options.checkpoint_control_dir,
+        checkpoint_run_id: options.checkpoint_run_id,
+        checkpoint_token: options.checkpoint_token,
     }
+}
+
+fn apply_workflow_remote(
+    executor_cfg: &mut ExecutorConfig,
+    remote: Option<WorkflowRemote>,
+    cache_push: bool,
+) {
+    executor_cfg.cache_push = cache_push;
+    let Some(remote) = remote else {
+        return;
+    };
+    executor_cfg.remote_store = Some(remote.store);
+    executor_cfg.remote_prefix = Some(remote.prefix);
+    executor_cfg.remote_primary_fallback_store = remote
+        .primary_fallback
+        .as_ref()
+        .map(|fallback| fallback.store.clone());
+    executor_cfg.remote_primary_fallback_prefix = remote
+        .primary_fallback
+        .as_ref()
+        .map(|fallback| fallback.prefix.clone());
+    executor_cfg.remote_artifact_stores = remote.artifact_stores;
 }
 
 fn workflow_remote_aliases(config: &Config) -> std::collections::BTreeMap<String, String> {
@@ -2444,19 +2530,31 @@ struct CacheOnlyContext<'a> {
 
 /// Build a remote store for workflow cache operations.
 ///
-/// Returns `None` when no crab remote is configured or credentials
-/// are unavailable — the caller falls through to local-only mode.
+/// A repository without a configured Crab remote remains local-only unless
+/// `--cache-push` explicitly requires durable remote state. Once a remote is
+/// configured, malformed configuration or credential/transport failures are
+/// returned instead of being downgraded to a local-only run.
 async fn try_build_workflow_remote(
     repo_root: &Path,
     config: &Config,
     cache_push: bool,
-) -> Option<WorkflowRemote> {
-    let Ok(url_str) = crate::cmd::workflow::read_crab_remote_url(repo_root) else {
-        return None;
+) -> Result<Option<WorkflowRemote>> {
+    let url_str = match crate::cmd::workflow::read_crab_remote_url(repo_root) {
+        Ok(url) => url,
+        Err(CrabError::Configuration { .. }) if !cache_push => return Ok(None),
+        Err(CrabError::Configuration { .. }) => {
+            return Err(CrabError::Configuration {
+                key: "workflow_remote_required".into(),
+                origin: "--cache-push requires a configured crab:// remote".into(),
+            });
+        }
+        Err(error) => return Err(error),
     };
-    let Ok(crab_url) = crate::git::url::CrabUrl::parse(&url_str) else {
-        return None;
-    };
+    let crab_url =
+        crate::git::url::CrabUrl::parse(&url_str).map_err(|error| CrabError::Configuration {
+            key: "workflow_remote_url_invalid".into(),
+            origin: error.to_string(),
+        })?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let resolver = crate::replication::StoreResolver::new(config, &crab_url, &cancel);
     let artifact_stores =
@@ -2464,18 +2562,24 @@ async fn try_build_workflow_remote(
     let artifact_stores = (!artifact_stores.is_empty()).then_some(artifact_stores);
 
     if cache_push {
-        let selection = resolver.write_store("workflow-cache-push").await.ok()?;
-        return Some(WorkflowRemote {
+        let selection = resolver
+            .write_store("workflow-cache-push")
+            .await
+            .map_err(CrabError::from)?;
+        return Ok(Some(WorkflowRemote {
             store: Arc::new(crate::workflow::WorkflowStore::from_storage(
                 selection.store.into_storage(),
             )),
             prefix: selection.router.repo_prefix().to_owned(),
             primary_fallback: None,
             artifact_stores,
-        });
+        }));
     }
 
-    let selection = resolver.read_store("workflow-cache-pull").await.ok()?;
+    let selection = resolver
+        .read_store("workflow-cache-pull")
+        .await
+        .map_err(CrabError::from)?;
     let primary_fallback = if matches!(
         &selection.source,
         crate::replication::ReadSource::Replica { .. }
@@ -2483,7 +2587,7 @@ async fn try_build_workflow_remote(
         let primary = resolver
             .write_store("workflow-cache-pull-primary-fallback")
             .await
-            .ok()?;
+            .map_err(CrabError::from)?;
         Some(WorkflowPrimaryFallback {
             store: Arc::new(crate::workflow::WorkflowStore::from_storage(
                 primary.store.into_storage(),
@@ -2494,14 +2598,14 @@ async fn try_build_workflow_remote(
         None
     };
 
-    Some(WorkflowRemote {
+    Ok(Some(WorkflowRemote {
         store: Arc::new(crate::workflow::WorkflowStore::from_storage(
             selection.store.into_storage(),
         )),
         prefix: selection.router.repo_prefix().to_owned(),
         primary_fallback,
         artifact_stores,
-    })
+    }))
 }
 
 /// Execute one stage defined in `crab.yaml`, resolving its deps
@@ -2521,6 +2625,7 @@ async fn execute_one_stage_from_yaml(
     stage: &Stage,
     stage_name: &StageName,
     repo_root: &Path,
+    config: &Config,
     param_files: &[PathBuf],
     run_state: &RunState,
     lockfile: Option<&Lockfile>,
@@ -2533,6 +2638,7 @@ async fn execute_one_stage_from_yaml(
         stage,
         stage_name,
         repo_root,
+        config,
         param_files,
         run_state,
         lockfile,
@@ -2558,6 +2664,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     stage: &Stage,
     stage_name: &StageName,
     repo_root: &Path,
+    config: &Config,
     param_files: &[PathBuf],
     run_state: &RunState,
     lockfile: Option<&Lockfile>,
@@ -2577,7 +2684,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     // resolution so that successfully pulled files are picked up by
     // the normal hash computation.
     if args.pull {
-        try_pull_missing_deps(stage, stage_name, repo_root);
+        try_pull_missing_deps(stage, stage_name, repo_root, config).await?;
     }
 
     let resolver = StageOutResolver::new(run_state, lockfile, repo_root);
@@ -2707,6 +2814,13 @@ async fn execute_one_stage_from_yaml_with_jsonl(
                         );
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             Ok((entry, cache_hit, duration_ms, params))
@@ -2956,8 +3070,6 @@ async fn cache_only_path(
     } else {
         // Local miss — try remote before giving up.
         let mut tried_remote = false;
-        let mut last_error = None;
-
         for candidate in ctx.remote.candidates().into_iter().flatten() {
             tried_remote = true;
             match crate::workflow::cache::pull_remote_with_artifact_stores(
@@ -2995,25 +3107,14 @@ async fn cache_only_path(
                         "cache-only: remote miss"
                     );
                 }
-                Err(e) => {
-                    debug!(
-                        stage = %stage_name,
-                        remote_source = candidate.source,
-                        error = %e,
-                        "cache-only: remote pull failed"
-                    );
-                    last_error = Some(e.to_string());
-                }
+                Err(e) => return Err(e.into()),
             }
         }
 
         if tried_remote {
             return Err(CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
-                reason: last_error.map_or_else(
-                    || format!("no local or remote cache entry for {stage_hash}"),
-                    |error| format!("no local cache entry for {stage_hash}; remote error: {error}"),
-                ),
+                reason: format!("no local or remote cache entry for {stage_hash}"),
             });
         }
 
@@ -3130,11 +3231,10 @@ fn cached_file_bytes(
     cache_root: &Path,
     out: &crate::workflow::cache::CachedOut,
 ) -> Result<Vec<u8>> {
-    if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
-        return Ok(bytes);
-    }
-
-    std::fs::read(&out.path).map_err(|e| {
+    let bytes = if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
+        bytes
+    } else {
+        std::fs::read(&out.path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
@@ -3146,7 +3246,18 @@ fn cached_file_bytes(
         } else {
             CrabError::Io(e)
         }
-    })
+        })?
+    };
+    let actual_hash = format!("b3:{}", blake3::hash(&bytes).to_hex());
+    if actual_hash != out.file_hash || bytes.len() as u64 != out.size {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: out.path.display().to_string(),
+            expected: format!("{} bytes with {}", out.size, out.file_hash),
+            actual: format!("{} bytes with {actual_hash}", bytes.len()),
+        });
+    }
+    Ok(bytes)
 }
 
 /// Inspect a file that sits at a declared out path. Used by the
@@ -3276,7 +3387,11 @@ fn resolve_dep_hashes_local(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
@@ -3761,6 +3876,56 @@ fn build_env_spec(args: &RunArgs) -> EnvSpec {
     }
 }
 
+fn validate_stage_remote_capabilities(
+    stage: &Stage,
+    remote_aliases: &BTreeMap<String, String>,
+) -> Result<()> {
+    for dep in &stage.deps {
+        match dep {
+            Dep::Url { url, .. } => {
+                crate::workflow::stage::validate_url_provider(
+                    url,
+                    remote_aliases,
+                    &format!("stage '{}' dependency", stage.name),
+                )?;
+            }
+            Dep::CrabRef { .. } | Dep::GitRef { .. } | Dep::OciImage { .. } => {
+                return Err(CrabError::Configuration {
+                    key: "workflow.remote_provider_unsupported".to_owned(),
+                    origin: format!(
+                        "stage '{}' declares a cross-repository or OCI dependency without a live provider",
+                        stage.name
+                    ),
+                });
+            }
+            Dep::Path(_) | Dep::StageOut { .. } => {}
+        }
+    }
+    for output in &stage.outs {
+        if output.is_external_url() {
+            crate::workflow::stage::validate_url_provider(
+                &output.path.to_string_lossy(),
+                remote_aliases,
+                &format!("stage '{}' external output", stage.name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_execution(stage: &Stage, allow_checkpoints: bool) -> Result<()> {
+    if !allow_checkpoints && stage.outs.iter().any(Out::is_checkpoint) {
+        return Err(CrabError::Configuration {
+            key: "workflow_checkpoint_requires_exp_run".to_owned(),
+            origin: format!(
+                "stage '{}' declares checkpoint outputs; use `crab exp run`",
+                stage.name
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn cli_dep(path: &PathBuf) -> Dep {
     let value = path.to_string_lossy();
     if is_url_dep(value.as_ref()) {
@@ -4206,41 +4371,144 @@ fn clean_partial_outputs(stage: &Stage, repo_root: &Path) {
     }
 }
 
-/// Attempt to download missing dep files from the remote before
-/// executing a stage. When `--pull` is set and a `Dep::Path` file
-/// is absent from the workspace, this function tries to hydrate it
-/// from the configured remote.
+/// Attempt to materialize missing path deps from the current Crab snapshot.
 ///
-/// Returns the list of dep paths that were successfully pulled.
-/// Deps that fail to download are left missing — the normal dep
-/// resolution will surface `StageDepMissing` for them.
-fn try_pull_missing_deps(stage: &Stage, stage_name: &StageName, repo_root: &Path) -> Vec<PathBuf> {
-    let pulled = Vec::new();
-    for dep in &stage.deps {
-        if let Dep::Path(p) = dep {
-            let abs = if p.is_absolute() {
-                p.clone()
-            } else if let Some(wdir) = &stage.wdir {
-                repo_root.join(wdir).join(p)
-            } else {
-                repo_root.join(p)
+/// Pulling is deliberately best-effort: `--allow-missing` relies on the
+/// resolver's lockfile fallback when a remote is unavailable. Every successful
+/// download is published with a same-directory, no-clobber rename so a failed
+/// transfer cannot leave a partial dependency or overwrite a concurrent
+/// producer before a later hash.
+async fn try_pull_missing_deps(
+    stage: &Stage,
+    stage_name: &StageName,
+    repo_root: &Path,
+    config: &Config,
+) -> Result<Vec<PathBuf>> {
+    let missing = stage
+        .deps
+        .iter()
+        .filter_map(|dep| {
+            let Dep::Path(path) = dep else { return None };
+            if path.is_absolute() {
+                return None;
+            }
+            let destination = match &stage.wdir {
+                Some(wdir) => repo_root.join(wdir).join(path),
+                None => repo_root.join(path),
             };
-            if !abs.exists() {
-                // The dep file is missing — attempt to pull from remote.
+            if destination.exists() {
+                return None;
+            }
+            let repo_path =
+                local_repo_relative_dep_key(path, stage.wdir.as_deref()).replace('\\', "/");
+            if repo_path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+            {
                 warn!(
                     stage = %stage_name,
-                    dep = %p.display(),
-                    "pull: dep file missing; remote hydration not yet connected"
+                    dep = %path.display(),
+                    "pull: refusing a dependency path outside the repository snapshot"
                 );
-                // Stub: actual remote download will be wired once the
-                // storage layer integration for dep-level hydration is
-                // complete. For now, the missing dep falls through to
-                // normal resolution which will either use the lockfile
-                // hash (--allow-missing) or error with StageDepMissing.
+                return None;
             }
+            Some((path.clone(), destination, repo_path))
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = repo_root.to_string_lossy().into_owned();
+    let reader = match RepositoryReader::open(
+        &repo,
+        RepositoryOpenOptions {
+            cache_dir: None,
+            config: config.clone(),
+            cancel: CancellationToken::new(),
+        },
+    )
+    .await
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            warn!(
+                stage = %stage_name,
+                error = %error,
+                "pull: unable to open the Crab snapshot for missing dependencies"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    let snapshot = match reader.snapshot(Some("HEAD")).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(
+                stage = %stage_name,
+                error = %error,
+                "pull: unable to resolve HEAD for missing dependencies"
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut pulled = Vec::with_capacity(missing.len());
+    for (declared_path, destination, repo_path) in missing {
+        let entry = match snapshot.entry_for_path(&repo_path).await {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(
+                    stage = %stage_name,
+                    dep = %declared_path.display(),
+                    error = %error,
+                    "pull: dependency is not available in the Crab snapshot"
+                );
+                continue;
+            }
+        };
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        tokio::fs::create_dir_all(parent).await?;
+        let temp = tempfile::Builder::new()
+            .prefix(".crab-pull-")
+            .tempfile_in(parent)?
+            .into_temp_path();
+        let temp_path = temp.to_path_buf();
+        let bytes = match snapshot.download_to_path(&repo_path, &temp_path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warn!(
+                    stage = %stage_name,
+                    dep = %declared_path.display(),
+                    error = %error,
+                    "pull: dependency hydration failed"
+                );
+                continue;
+            }
+        };
+        if bytes != entry.size {
+            warn!(
+                stage = %stage_name,
+                dep = %declared_path.display(),
+                expected = entry.size,
+                actual = bytes,
+                "pull: dependency hydration returned an unexpected size"
+            );
+            continue;
+        }
+        match temp.persist_noclobber(&destination) {
+            Ok(()) => pulled.push(declared_path),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another parallel stage may have hydrated the same dep
+                // between our existence check and the rename.
+                drop(error.path);
+                pulled.push(declared_path);
+            }
+            Err(error) => return Err(CrabError::Io(error.error)),
         }
     }
-    pulled
+
+    Ok(pulled)
 }
 
 fn emit_miss_explanation(
@@ -4655,6 +4923,7 @@ mod tests {
     use super::*;
     use crab_workflow::Defaults;
     use std::fs;
+    use std::process::Command;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -4698,10 +4967,30 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_run_rejects_checkpoint_before_planning() {
+        let mut stage = Stage::new(
+            StageName::parse("train").unwrap(),
+            Cmd::Argv(vec!["train".to_owned()]),
+        );
+        let mut output = Out::new(PathBuf::from("model.bin"), OutKind::File);
+        output.checkpoint = true;
+        stage.outs.push(output);
+
+        let error = validate_checkpoint_execution(&stage, false).unwrap_err();
+        assert!(matches!(
+            error,
+            CrabError::Configuration { key, origin }
+                if key == "workflow_checkpoint_requires_exp_run"
+                    && origin.contains("crab exp run")
+        ));
+        validate_checkpoint_execution(&stage, true).unwrap();
+    }
+
+    #[test]
     fn run_resolver_accepts_unpinned_http_url_dep() {
         let tmp = TempDir::new().unwrap();
         let stage = StageName::parse("fetch").unwrap();
-        let url = crate::workflow::stage::test_support::serve_http_body_once(b"run-url-body");
+        let url = crate::workflow::stage::test_support::serve_http_body_n(b"run-url-body", 2);
         let deps = vec![Dep::Url {
             url: url.clone(),
             digest: None,
@@ -4719,7 +5008,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let stage = StageName::parse("fetch").unwrap();
         let base_url =
-            crate::workflow::stage::test_support::serve_http_body_once(b"run-alias-body");
+            crate::workflow::stage::test_support::serve_http_body_n(b"run-alias-body", 2);
         let base_url = base_url.trim_end_matches("data.bin").to_owned();
         let deps = vec![Dep::Url {
             url: "remote://datasets/raw.csv".to_owned(),
@@ -4816,6 +5105,26 @@ mod tests {
         assert!(
             matches!(err, CrabError::WorkflowStageNameInvalid { .. }),
             "wrong variant: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_push_requires_a_configured_remote() {
+        let (_lock, _guard) = EnabledGuard::new();
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
+
+        let mut args = base_args(tmp.path());
+        args.cache_push = true;
+        let error = run_in(&args, tmp.path(), OutputMode::Text)
+            .await
+            .expect_err("cache push must not silently fall back to local-only execution");
+        assert!(
+            matches!(
+                &error,
+                CrabError::Configuration { key, .. } if key == "workflow_remote_required"
+            ),
+            "wrong variant: {error:?}"
         );
     }
 
@@ -4946,16 +5255,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pull_hydrates_missing_tracked_dependency_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).success());
+        fs::write(tmp.path().join("dep.txt"), b"snapshot payload").unwrap();
+        assert!(git(&["add", "dep.txt"]).success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Crab Test",
+                "-c",
+                "user.email=crab-test@example.invalid",
+                "commit",
+                "-qm",
+                "snapshot",
+            ])
+            .success()
+        );
+        fs::remove_file(tmp.path().join("dep.txt")).unwrap();
+
+        let mut stage = Stage::new(
+            StageName::parse("train").unwrap(),
+            Cmd::Argv(vec!["true".to_owned()]),
+        );
+        stage.deps.push(Dep::Path(PathBuf::from("dep.txt")));
+        let pulled = try_pull_missing_deps(&stage, &stage.name, tmp.path(), &Config::default())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled, vec![PathBuf::from("dep.txt")]);
+        assert_eq!(
+            fs::read(tmp.path().join("dep.txt")).unwrap(),
+            b"snapshot payload"
+        );
+        assert!(
+            fs::read_dir(tmp.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".crab-pull-"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn workflow_disabled_returns_config_error() {
         let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized via ENV_GUARD.
-        unsafe { std::env::remove_var("CRAB_WORKFLOW_ENABLED") };
+        unsafe { std::env::set_var("CRAB_WORKFLOW_ENABLED", "false") };
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
         let args = base_args(tmp.path());
-        let err = run_in(&args, tmp.path(), OutputMode::Text)
-            .await
-            .expect_err("disabled workflow must fail");
+        let result = run_in(&args, tmp.path(), OutputMode::Text).await;
+        // SAFETY: serialized via ENV_GUARD.
+        unsafe { std::env::remove_var("CRAB_WORKFLOW_ENABLED") };
+        let err = result.expect_err("disabled workflow must fail");
         assert!(
             matches!(err, CrabError::WorkflowDisabled),
             "wrong variant: {err}"
@@ -5384,6 +5746,7 @@ mod tests {
             metrics: Vec::new(),
             plots: Vec::new(),
             plot_configs: Vec::new(),
+            artifacts: crab_workflow::ArtifactMetadata::default(),
             defaults: Defaults::default(),
             stages,
             workflow_membership: BTreeMap::new(),
@@ -5664,6 +6027,30 @@ mod tests {
         assert!(
             matches!(err, CrabError::Configuration { .. }),
             "wrong variant: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_push_requires_a_configured_remote() {
+        let (_lock, _guard) = EnabledGuard::new();
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("crab.yaml"),
+            "stages:\n  train:\n    cmd: \"true\"\n",
+        )
+        .unwrap();
+
+        let mut args = yaml_base_args();
+        args.cache_push = true;
+        let error = run_in(&args, tmp.path(), OutputMode::Text)
+            .await
+            .expect_err("yaml cache push must not silently skip remote publication");
+        assert!(
+            matches!(
+                &error,
+                CrabError::Configuration { key, .. } if key == "workflow_remote_required"
+            ),
+            "wrong variant: {error:?}"
         );
     }
 

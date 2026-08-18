@@ -438,6 +438,11 @@ async fn publish_filtered_view(
     let uploaded_crab = upload_view_crab_objects(store, &router, crab_objects).await?;
     let refs = list_view_refs(filtered_git)?;
     let head = resolve_view_head(filtered_git, &refs)?;
+    let ref_pairs = refs
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    let peeled_refs = crate::receive::derive_peeled_refs(filtered_git, &ref_pairs)?;
     let scan = scan_reachable_pointers(filtered_git)?;
     copy_lfs_objects(store.clone(), source_repo, repo_prefix, &scan.lfs_pointers).await?;
     verify_crab_pointers_backed_by_uploaded_view(
@@ -461,6 +466,7 @@ async fn publish_filtered_view(
         view_generation,
         refs,
         head,
+        peeled_refs,
         uploaded_crab.shard_hashes.clone(),
         pack,
     )
@@ -502,6 +508,15 @@ async fn publish_filtered_view(
             None
         }
     };
+    if let Err(error) =
+        crate::receive::publish_git_visibility_index(store, &router, &manifest).await
+    {
+        tracing::warn!(
+            error = %error,
+            generation = manifest.generation,
+            "ACL view committed; Git visibility proof requires repair"
+        );
+    }
     if let (Some(file_index_digest), Some(git_object_locator_digest)) =
         (file_index_digest, git_object_locator_digest)
         && let Err(error) = crate::receive::write_service_generation_index_receipt(
@@ -581,6 +596,7 @@ async fn write_view_manifest(
     generation: u64,
     refs: BTreeMap<String, String>,
     head: String,
+    peeled_refs: BTreeMap<String, String>,
     shard_hashes: Vec<String>,
     pack: Option<PackManifestEntry>,
 ) -> Result<Manifest> {
@@ -600,7 +616,7 @@ async fn write_view_manifest(
         pusher: Some("crab-auth-view".to_owned()),
         session_id: uuid::Uuid::now_v7().to_string(),
         refs,
-        peeled_refs: BTreeMap::new(),
+        peeled_refs,
         head,
         shard_index_hash,
         pack_index_hash,
@@ -829,6 +845,7 @@ mod tests {
             1,
             BTreeMap::new(),
             "refs/heads/main".to_owned(),
+            BTreeMap::new(),
             source_objects.shard_hashes.clone(),
             None,
         )

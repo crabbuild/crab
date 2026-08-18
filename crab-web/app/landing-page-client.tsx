@@ -285,7 +285,7 @@ export function LandingPageClient() {
                 <Tag>ML Workflows</Tag>
                 <H2>DVC-Compatible Pipeline Engine</H2>
                 <Desc>
-                  Crab&apos;s workflow engine is a superset of DVC&apos;s pipeline capabilities. Migrate with a single command — then unlock parallel DAG execution, crash recovery, and resource scheduling.
+                  Crab&apos;s workflow engine brings DVC-style stages together with parallel DAG execution, crash recovery, and resource scheduling. Migration is inventory-first and fails closed on unsupported checkpoints, artifacts, and providers until each cutover gate is verified.
                 </Desc>
               </Reveal>
               <Reveal>

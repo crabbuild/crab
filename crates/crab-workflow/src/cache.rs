@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 
 use crate::stage::OutKind;
+use crate::stage_cache_entry::{
+    decode_b3_hash, validate_stage_cache_entry, validate_stage_cache_entry_at,
+};
 pub use crate::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_MAX_SUPPORTED, ENTRY_SCHEMA_VERSION, StageCacheEntry,
     TreeManifestEntry, cached_artifacts,
@@ -177,6 +180,13 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
             run_id: hash.as_hex(),
             detail: format!("stage cache entry shape mismatch: {e}"),
         })?;
+    if entry.stage_hash != *hash {
+        return Err(CrabError::CacheEntryHashMismatch {
+            manifest_hash: entry.stage_hash.as_hex(),
+            local_hash: hash.as_hex(),
+        });
+    }
+    validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root))?;
     Ok(Some(entry))
 }
 
@@ -190,6 +200,7 @@ pub fn write_local(cache_root: &Path, entry: &StageCacheEntry) -> Result<()> {
     if is_cache_disabled() {
         return Ok(());
     }
+    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     let path = entry_path(cache_root, &entry.stage_hash);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -333,12 +344,15 @@ fn write_local_xorb(cache_root: &Path, xorb_hash: &str, bytes: &[u8]) -> Result<
 }
 
 fn local_xorb_path(cache_root: &Path, xorb_hash: &str) -> Result<PathBuf> {
-    let hex = xorb_hash.strip_prefix("b3:").unwrap_or(xorb_hash);
-    if hex.len() < 2 {
+    let Some(digest) = decode_b3_hash(xorb_hash) else {
         return Err(CrabError::Internal(format!(
             "invalid local xorb hash '{xorb_hash}'"
         )));
-    }
+    };
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     Ok(cache_root
         .join("xorbs")
         .join(&hex[..2])
@@ -722,6 +736,7 @@ pub async fn push_remote_with_artifact_stores(
     entry: &StageCacheEntry,
     cache_root: &Path,
 ) -> Result<bool> {
+    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     if !entry.remote_push_enabled() {
         debug!(
             stage = %entry.stage_name,
@@ -950,6 +965,14 @@ fn cache_worktree_root(cache_root: &Path) -> &Path {
         .unwrap_or(cache_root)
 }
 
+fn cache_validation_root(cache_root: &Path) -> Option<&Path> {
+    let crab_root = cache_root.parent()?;
+    if crab_root.file_name().is_some_and(|name| name == ".crab") {
+        return crab_root.parent();
+    }
+    None
+}
+
 fn xorb_bytes_for_remote_push(
     cache_root: &Path,
     stage_hash: &StageHash,
@@ -1062,6 +1085,7 @@ pub async fn pull_remote_with_artifact_stores(
         );
         return Ok(None);
     }
+    validate_stage_cache_entry(&entry)?;
 
     // Step 3: Download xorbs and materialize artifacts with blake3 verification.
     let base_dir = working_dir.unwrap_or_else(|| std::path::Path::new("."));
@@ -1098,6 +1122,15 @@ pub async fn pull_remote_with_artifact_stores(
                         path: out.path.display().to_string(),
                         expected: out.file_hash.clone(),
                         actual: actual_hash,
+                    });
+                }
+                if xorb_bytes.len() as u64 != out.size {
+                    cleanup_partial(&materialized_paths);
+                    return Err(CrabError::CacheEntryCorrupt {
+                        stage_hash: stage_hash.as_hex(),
+                        path: out.path.display().to_string(),
+                        expected: format!("{} bytes", out.size),
+                        actual: format!("{} bytes", xorb_bytes.len()),
                     });
                 }
                 write_local_xorb(cache_root, &out.file_hash, &xorb_bytes)?;
@@ -1147,6 +1180,15 @@ pub async fn pull_remote_with_artifact_stores(
                                 path: format!("{}/{}", out.path.display(), tree_entry.path),
                                 expected: tree_entry.hash.clone(),
                                 actual: actual_hash,
+                            });
+                        }
+                        if file_bytes.len() as u64 != tree_entry.size {
+                            cleanup_partial(&materialized_paths);
+                            return Err(CrabError::CacheEntryCorrupt {
+                                stage_hash: stage_hash.as_hex(),
+                                path: format!("{}/{}", out.path.display(), tree_entry.path),
+                                expected: format!("{} bytes", tree_entry.size),
+                                actual: format!("{} bytes", file_bytes.len()),
                             });
                         }
                         write_local_xorb(cache_root, &tree_entry.hash, &file_bytes)?;
@@ -1275,6 +1317,11 @@ pub async fn push_all_local_with_artifact_stores(
                 }
             };
 
+            if validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root)).is_err() {
+                errors += 1;
+                continue;
+            }
+
             if !entry.remote_push_enabled() {
                 skipped += 1;
                 continue;
@@ -1343,7 +1390,7 @@ mod tests {
                 kind: OutKind::File,
                 push: true,
                 remote: None,
-                file_hash: "b3:abcdef".to_owned(),
+                file_hash: format!("b3:{}", "ab".repeat(32)),
                 size: 42,
                 mode: 0o644,
                 tree_manifest: None,
@@ -1398,6 +1445,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let got = read_local(tmp.path(), &StageHash([0; 32])).unwrap();
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn local_xorb_path_rejects_malformed_hashes() {
+        let tmp = TempDir::new().unwrap();
+        let error = read_local_xorb(tmp.path(), "../escape").unwrap_err();
+        assert!(matches!(error, CrabError::Internal(_)));
     }
 
     #[test]
@@ -1566,6 +1620,32 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_cache_rejects_traversal_before_materialization() {
+        let primary = crate::WorkflowStore::new(Arc::new(object_store::memory::InMemory::new()));
+        let tmp = TempDir::new().unwrap();
+        let stage_hash = StageHash([12; 32]);
+        let mut entry = sample_entry(stage_hash);
+        entry.outs[0].path = PathBuf::from("../escape.txt");
+        let manifest_path = remote_manifest_path("org/repo", &stage_hash);
+        primary
+            .put(&manifest_path, Bytes::from(canonical_json(&entry).unwrap()))
+            .await
+            .unwrap();
+
+        let error = pull_remote(
+            &primary,
+            "org/repo",
+            &stage_hash,
+            tmp.path(),
+            Some(tmp.path()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CrabError::CacheEntryInvalid { .. }));
+        assert!(!tmp.path().join("escape.txt").exists());
     }
 
     #[test]

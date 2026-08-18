@@ -21,9 +21,9 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    Cmd, Defaults, Dep, EnvSpec, Out, OutKind, ParamRef, PlotConfig, Resources, Result,
-    RetryPolicy, Stage, StageCondition, StageName, TemplateContext, Workflow, WorkflowError,
-    expand_foreach, expand_matrix, is_external_url_out_path, is_url_dep, substitute,
+    ArtifactMetadata, Cmd, Defaults, Dep, EnvSpec, Out, OutKind, ParamRef, PlotConfig, Resources,
+    Result, RetryPolicy, Stage, StageCondition, StageName, TemplateContext, Workflow,
+    WorkflowError, expand_foreach, expand_matrix, is_external_url_out_path, is_url_dep, substitute,
     substitute_cmd, validate_wdir,
 };
 
@@ -56,7 +56,10 @@ pub fn parse_with_context(text: &str, ctx: &TemplateContext) -> Result<Workflow>
             path: PathBuf::new(),
             source,
         })?;
-    let _ = &raw.artifacts;
+    let artifacts = ArtifactMetadata::from_declarations(raw.artifacts);
+    // Validate preserved catalog metadata at workflow parse time so malformed
+    // artifact declarations cannot reach execution and be silently ignored.
+    crate::ArtifactCatalog::from_metadata(&artifacts)?;
 
     let defaults = raw
         .defaults
@@ -123,6 +126,7 @@ pub fn parse_with_context(text: &str, ctx: &TemplateContext) -> Result<Workflow>
         metrics: raw.metrics,
         plots: simple_plots,
         plot_configs,
+        artifacts,
         defaults,
         stages,
         workflow_membership,
@@ -141,8 +145,6 @@ pub fn parse_with_base_dir(text: &str, base_dir: &Path) -> Result<Workflow> {
             path: PathBuf::new(),
             source,
         })?;
-    let _ = &raw.artifacts;
-
     let vars = TemplateContext::load_vars(&raw.vars, base_dir)?;
     let param_paths = template_param_paths(&raw.params);
     let params = TemplateContext::load_params(&param_paths, base_dir)?;
@@ -367,7 +369,7 @@ struct RawStageOutDep {
 #[serde(untagged)]
 enum RawOut {
     Path(String),
-    Structured(RawOutStructured),
+    Structured(Box<RawOutStructured>),
     DvcPathMap(BTreeMap<String, Option<RawDvcOutSettings>>),
 }
 
@@ -378,7 +380,7 @@ enum RawOut {
 #[serde(untagged)]
 enum RawMetric {
     Path(String),
-    Structured(RawOutStructured),
+    Structured(Box<RawOutStructured>),
     DvcPathMap(BTreeMap<String, Option<RawDvcOutSettings>>),
 }
 
@@ -394,6 +396,8 @@ struct RawOutStructured {
     push: Option<bool>,
     #[serde(default)]
     persist: Option<bool>,
+    #[serde(default)]
+    checkpoint: Option<serde_yaml::Value>,
     #[serde(default)]
     max_bytes: Option<u64>,
     #[serde(default)]
@@ -414,6 +418,8 @@ struct RawDvcOutSettings {
     push: Option<bool>,
     #[serde(default)]
     persist: Option<bool>,
+    #[serde(default)]
+    checkpoint: Option<serde_yaml::Value>,
     #[serde(default)]
     max_bytes: Option<u64>,
     #[serde(default)]
@@ -1399,7 +1405,15 @@ impl RawCmd {
                 }
                 Ok(Cmd::ShellList(commands))
             }
-            RawCmd::Argv(RawCmdArgv { argv }) => Ok(Cmd::Argv(argv)),
+            RawCmd::Argv(RawCmdArgv { argv }) => {
+                if argv.is_empty() {
+                    return Err(WorkflowError::YamlInvalid {
+                        key: format!("stage '{stage}' cmd"),
+                        origin: "argv must contain a program".to_owned(),
+                    });
+                }
+                Ok(Cmd::Argv(argv))
+            }
         }
     }
 }
@@ -1596,11 +1610,27 @@ impl RawOutStructured {
             cache,
             push,
             persist,
+            checkpoint,
             max_bytes,
             remote,
             _desc: _,
         } = self;
         let path = output_path_from_string(&path.to_string_lossy(), stage)?;
+
+        let checkpoint = match checkpoint {
+            None => false,
+            Some(serde_yaml::Value::Bool(value)) => value,
+            Some(_) => {
+                return Err(WorkflowError::YamlInvalid {
+                    key: format!(
+                        "stage '{}' output '{}.checkpoint'",
+                        stage.as_str(),
+                        path.display()
+                    ),
+                    origin: "checkpoint must be a boolean".to_owned(),
+                });
+            }
+        };
 
         let kind = match kind.as_deref() {
             None | Some("file") => OutKind::File,
@@ -1623,6 +1653,7 @@ impl RawOutStructured {
             push: push.unwrap_or(!external),
             remote,
             persist: persist.unwrap_or(false),
+            checkpoint,
             max_bytes,
         })
     }
@@ -1635,6 +1666,7 @@ impl RawDvcOutSettings {
             cache,
             push,
             persist,
+            checkpoint,
             max_bytes,
             remote,
             _desc: _,
@@ -1645,6 +1677,7 @@ impl RawDvcOutSettings {
             cache,
             push,
             persist,
+            checkpoint,
             max_bytes,
             remote,
             _desc: None,
@@ -1967,6 +2000,22 @@ stages:
     }
 
     #[test]
+    fn rejects_empty_argv_command() {
+        let yaml = r#"
+stages:
+  empty:
+    cmd:
+      argv: []
+"#;
+        let error = parse(yaml).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::YamlInvalid { key, origin }
+                if key == "stage 'empty' cmd" && origin == "argv must contain a program"
+        ));
+    }
+
+    #[test]
     fn accepts_dvc_top_level_artifacts_metadata() {
         let yaml = r#"
 artifacts:
@@ -1988,6 +2037,26 @@ stages:
         let wf = parse(yaml).expect("parse DVC artifacts metadata");
         assert_eq!(wf.stages.len(), 1);
         assert!(wf.stages.contains_key(&StageName::parse("train").unwrap()));
+        assert_eq!(
+            wf.artifacts.schema_version,
+            ArtifactMetadata::SCHEMA_VERSION
+        );
+        assert_eq!(wf.artifacts.declarations.len(), 1);
+        assert!(wf.artifacts.declarations.contains_key("cv-classification"));
+    }
+
+    #[test]
+    fn preserves_checkpoint_output_semantics() {
+        let yaml = r#"
+stages:
+  train:
+    cmd: "python train.py"
+    outs:
+      - path: model.pt
+        checkpoint: true
+"#;
+        let workflow = parse(yaml).expect("checkpoint field should remain explicit");
+        assert!(workflow.stages[&StageName::parse("train").unwrap()].outs[0].checkpoint);
     }
 
     #[test]
@@ -2690,18 +2759,12 @@ plots:
                 .iter()
                 .all(|config| config.id.as_deref() == Some("train_val_test"))
         );
-        assert!(
-            wf.plot_configs
-                .iter()
-                .any(|config| config.path == PathBuf::from("metrics/train.csv")
-                    && config.y == vec!["train_loss", "val_loss"])
-        );
-        assert!(
-            wf.plot_configs
-                .iter()
-                .any(|config| config.path == PathBuf::from("metrics/test.csv")
-                    && config.y == vec!["test_loss"])
-        );
+        assert!(wf.plot_configs.iter().any(|config| config.path.as_path()
+            == Path::new("metrics/train.csv")
+            && config.y == vec!["train_loss", "val_loss"]));
+        assert!(wf.plot_configs.iter().any(|config| config.path.as_path()
+            == Path::new("metrics/test.csv")
+            && config.y == vec!["test_loss"]));
     }
 
     #[test]

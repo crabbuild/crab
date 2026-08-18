@@ -7978,7 +7978,59 @@ async fn apply_active_active_repair_action(
         &target_prefix,
     )
     .await?;
+    replicate_git_visibility_index(
+        &source_store,
+        &source_router,
+        &target_store,
+        &target_router,
+        &manifest,
+    )
+    .await?;
     materialize_active_active_manifest_projection(&target_store, &target_router, &manifest).await
+}
+
+async fn replicate_git_visibility_index(
+    source_store: &Store,
+    source_router: &StoreLayout,
+    target_store: &Store,
+    target_router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<()> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(());
+    }
+
+    let source_storage_router = crab_storage::StoreLayout::new(
+        source_store.as_storage().clone(),
+        source_router.repo_prefix().to_owned(),
+    );
+    let source_path =
+        source_storage_router.git_visibility_path(manifest.generation, &manifest.pack_index_hash);
+    match source_store.as_storage().head(&source_path).await {
+        Ok(_) => {}
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(()),
+        Err(error) => return Err(CrabError::from(error)),
+    }
+
+    let index = crab_metadata::git_visibility::read(
+        source_store.as_storage(),
+        &source_storage_router,
+        manifest.generation,
+        &manifest.pack_index_hash,
+    )
+    .await
+    .map_err(CrabError::from)?;
+    let target_storage_router = crab_storage::StoreLayout::new(
+        target_store.as_storage().clone(),
+        target_router.repo_prefix().to_owned(),
+    );
+    crab_metadata::git_visibility::upload_if_absent(
+        target_store.as_storage(),
+        &target_storage_router,
+        &index,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 async fn verify_repair_uploaded_objects_present(

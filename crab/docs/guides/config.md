@@ -92,10 +92,11 @@ crab config set hydrate.include '*.bin'
 crab config set hydrate.exclude 'archive/*'
 ```
 
-### Enable the workflow layer
+### Configure the workflow layer
 
 ```bash
-crab config set workflow.enabled true
+# Fresh configs are enabled; set false only to opt out.
+crab config set workflow.enabled false
 crab config set workflow.discover recursive
 crab config set workflow.lockfile split
 ```
@@ -138,7 +139,7 @@ settings the whole team must share, such as `auth.storage_provider`.
 | `hydrate.include` | array | `[]` | Default include patterns for `crab hydrate` |
 | `hydrate.exclude` | array | `[]` | Default exclude patterns for `crab hydrate` |
 | `hydrate.auto` | bool | `false` | Automatically hydrate matching files |
-| `workflow.enabled` | bool | `false` | Enable workflow, stage, experiment, metric, plot, and queue commands |
+| `workflow.enabled` | bool | `true` | Enable workflow, stage, experiment, metric, plot, and queue commands; set `false` for an explicit opt-out |
 | `workflow.discover` | enum | `root` | Discover only root `crab.yaml`, or `recursive` for nested `crab.yaml` and `*.workflow.yaml` files |
 | `workflow.lockfile` | enum | `single` | Use a single `crab.lock`, or `split` for per-workflow lockfiles |
 | `workflow.parallelism` | int | `4` | Maximum concurrent stage executions unless overridden by `--parallelism` |

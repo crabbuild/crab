@@ -358,7 +358,7 @@ async fn apply_verified_history(
         (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
     };
 
-    let acceleration_rebuilt = rebuild_locator_inventory(store, router, &restored, verified)
+    let locator_rebuilt = rebuild_locator_inventory(store, router, &restored, verified)
         .await
         .map_or_else(
             |error| {
@@ -367,6 +367,22 @@ async fn apply_verified_history(
             },
             |()| true,
         );
+    let repository = verified._workspace.path().join("repository.git");
+    let visibility_rebuilt = crate::git::push::publish_git_visibility_index_from_git_dir(
+        &repository,
+        &restored,
+        store,
+        router,
+    )
+    .await
+    .map_or_else(
+        |error| {
+            warn!(%error, generation = restored.generation, "history restored; Git visibility proof requires repair");
+            false
+        },
+        |()| true,
+    );
+    let acceleration_rebuilt = locator_rebuilt && visibility_rebuilt;
     Ok((restored, acceleration_rebuilt))
 }
 
@@ -702,6 +718,25 @@ async fn verify_history(
         _workspace: workspace,
         packs: verified_packs,
     })
+}
+
+/// Rebuild one immutable historical Git visibility proof after full pack verification.
+pub(crate) async fn rebuild_git_visibility_for_history(
+    store: &Store,
+    router: &StoreLayout,
+    generation: u64,
+    digest: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let verified = verify_history(store, router, generation, Some(digest), cancel).await?;
+    let repository = verified._workspace.path().join("repository.git");
+    crate::git::push::publish_git_visibility_index_from_git_dir(
+        &repository,
+        &verified.entry.manifest,
+        store,
+        router,
+    )
+    .await
 }
 
 async fn record_segmented_metadata(

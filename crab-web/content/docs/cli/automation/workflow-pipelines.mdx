@@ -48,7 +48,8 @@ reports zero entries and exits successfully.
 
 ## Prerequisites
 
-- Workflow feature enabled with `crab config set workflow.enabled true`.
+- Workflow enabled (the default for fresh configs; explicit opt-out is
+  `workflow.enabled = false`).
 - A valid `crab://` remote URL configured (via `crab init` or git remote).
 - Valid cloud credentials for the configured object store (same as `crab push`).
 

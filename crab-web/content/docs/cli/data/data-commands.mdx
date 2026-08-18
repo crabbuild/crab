@@ -1,0 +1,52 @@
+---
+title: "Data source commands"
+description: "Import, inspect, and update versioned external data sources with Crab CLI."
+---
+
+# Data source commands
+
+Use the `crab data` namespace for DVC-style source provenance. It is separate
+from the existing raw object-store `crab import` and self-update `crab update`
+commands.
+
+```bash
+crab data list --recursive --json
+crab data list --rev HEAD~1 data --recursive --json
+crab data import ../source-repo --path data/train.csv --rev HEAD \
+  --output data/train.csv
+crab data import-url https://example.test/data.csv --output data/data.csv
+crab data import-url s3://bucket/data.csv --output data/data.csv
+crab data import-db sqlite --database data/source.db \
+  --query 'select * from samples order by id' --output data/samples.jsonl
+crab data status --json
+crab data update data/data.csv --dry-run --json
+```
+
+Successful imports write a versioned descriptor under
+`.crab/workflow/sources/`. Descriptors contain a credential-free locator,
+locked revision or validator, recomputed `b3:` content identity, byte count,
+and target path. A URL response or object-store object is streamed into a
+temporary file and verified before replacement; failed updates leave the prior
+target intact.
+
+`data status` reports a per-source dimension matrix in JSON: `workspace`,
+`descriptor`, `git`, `lock`, `cache`, `source`, and `remote`. It never performs
+network I/O implicitly; `source` and `remote` are `not-checked` until a
+network-aware status operation is added. `cache=not-managed` is explicit for
+source descriptors that have not been promoted into the workflow cache.
+
+`data import-db` currently supports the bundled read-only SQLite connector.
+The query is materialized as deterministic JSONL (one object per row); binary
+columns use a $binary_base64 value. The database path and query identity are
+recorded in the credential-free descriptor, and updates rerun the same query
+transactionally. Other connector names fail before writing data.
+
+`--rev` currently targets a local Git repository: `data list` reads committed
+tree entries, while `data import` accepts a committed file, directory, or the
+repository root, records the resolved commit id, and preserves executable
+bits. Symlinks and submodules are rejected before writing a target. Remote Git
+transport, non-SQLite database connectors, and SSH/WebDAV/HDFS/Drive/OSS URL
+providers remain explicitly unsupported and fail before writing a target.
+Object-store URLs use the configured cloud credential chain for S3, GCS, and
+Azure-compatible schemes; credentials are never read from or written to the
+source URL.

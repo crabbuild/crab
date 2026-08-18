@@ -302,13 +302,15 @@ parallelizes across runs.
 
 ## 13. Conclusion
 
-Crab's workflow engine is **more capable than DVC's pipeline engine** for
-production workloads: parallel execution, crash recovery, retry, resource
-scheduling, and structured observability are all features DVC lacks. The
-primary gaps are in **developer ergonomics** (templating, foreach/matrix,
-experiment queue) rather than execution capability.
+Crab's workflow engine has strong Unix-first capabilities for production
+workloads: parallel execution, crash recovery, retry, resource scheduling, and
+structured observability. Those strengths do not make it a general DVC
+replacement yet; migration, checkpoint lineage, artifact lifecycle, provider
+compatibility, and release qualification remain explicit gates.
 
-For users migrating from DVC, the `crab.yaml` schema is intentionally
-similar enough that most `dvc.yaml` files can be converted with minimal
-changes (rename `dvc.yaml` → `crab.yaml`, remove unsupported fields like
-`wdir`/`frozen`/`vars`). The execution semantics are a strict superset.
+For users migrating from DVC, the `crab.yaml` schema is intentionally similar
+in its supported subset, but migration is an inventory-and-verification
+protocol rather than a file rename. Unsupported fields and remote/provider
+semantics fail closed; `checkpoint: true` is not rewritten as `persist: true`,
+and `.dvc/` remains the recovery source until the cutover report proves a
+fresh-clone byte/tree/mode restore.

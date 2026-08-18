@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::stage::{Dep, Out, StageName};
-use crate::{Defaults, Workflow, yaml};
+use crate::{ArtifactMetadata, Defaults, Workflow, yaml};
 use crate::{Result, WorkflowError as CrabError};
 
 /// Directories that never contain user-authored stage yaml and would
@@ -148,6 +148,7 @@ pub fn merge_with_provenance(
                 metrics: Vec::new(),
                 plots: Vec::new(),
                 plot_configs: Vec::new(),
+                artifacts: crate::ArtifactMetadata::default(),
                 defaults: Defaults::default(),
                 stages: BTreeMap::new(),
                 workflow_membership: BTreeMap::new(),
@@ -179,6 +180,7 @@ pub fn merge_with_provenance(
             metrics: root_wf.metrics.clone(),
             plots: root_wf.plots.clone(),
             plot_configs: root_wf.plot_configs.clone(),
+            artifacts: root_wf.artifacts.clone(),
             defaults: root_wf.defaults.clone(),
             stages: BTreeMap::new(),
             workflow_membership: BTreeMap::new(),
@@ -189,6 +191,7 @@ pub fn merge_with_provenance(
             metrics: Vec::new(),
             plots: Vec::new(),
             plot_configs: Vec::new(),
+            artifacts: crate::ArtifactMetadata::default(),
             defaults: Defaults::default(),
             stages: BTreeMap::new(),
             workflow_membership: BTreeMap::new(),
@@ -213,6 +216,7 @@ pub fn merge_with_provenance(
     // from distinct files can never silently mix.
     let mut prefix_sources: BTreeMap<String, PathBuf> = BTreeMap::new();
     for (yaml_path, wf) in &nested_slots {
+        merge_artifacts(&mut merged.artifacts, &wf.artifacts, yaml_path)?;
         let rel_dir = yaml_relative_dir(repo_root, yaml_path);
         let prefix_components = prefix_components_for(&rel_dir, yaml_path);
         if prefix_components.is_empty() {
@@ -313,6 +317,31 @@ pub fn merge_with_provenance(
     }
 
     Ok((merged, origins))
+}
+
+fn merge_artifacts(
+    target: &mut ArtifactMetadata,
+    source: &ArtifactMetadata,
+    source_path: &Path,
+) -> Result<()> {
+    for (name, declaration) in &source.declarations {
+        if let Some(existing) = target.declarations.get(name) {
+            if existing != declaration {
+                return Err(CrabError::YamlInvalid {
+                    key: format!("artifact '{name}'"),
+                    origin: format!(
+                        "conflicting declarations while merging {}",
+                        source_path.display()
+                    ),
+                });
+            }
+            continue;
+        }
+        target
+            .declarations
+            .insert(name.clone(), declaration.clone());
+    }
+    Ok(())
 }
 
 /// Parse every discovered yaml, then merge. Convenience wrapper so
@@ -527,6 +556,7 @@ fn rewrite_out(out: &Out, rel_dir: &str) -> Out {
         push: out.push,
         remote: out.remote.clone(),
         persist: out.persist,
+        checkpoint: out.checkpoint,
         max_bytes: out.max_bytes,
     }
 }
@@ -694,6 +724,55 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_root_and_nested_artifact_metadata() {
+        let tmp = TempDir::new().unwrap();
+        write_yaml(
+            tmp.path(),
+            "crab.yaml",
+            "artifacts:\n  root-model:\n    path: models/root.pt\nstages: {}\n",
+        );
+        write_yaml(
+            tmp.path(),
+            "eval/crab.yaml",
+            "artifacts:\n  eval-report:\n    path: reports/eval.json\nstages: {}\n",
+        );
+
+        let paths = discover(tmp.path(), DiscoverMode::Recursive).unwrap();
+        let merged = parse_all(tmp.path(), &paths).unwrap();
+
+        assert_eq!(
+            merged.artifacts.schema_version,
+            ArtifactMetadata::SCHEMA_VERSION
+        );
+        assert_eq!(merged.artifacts.declarations.len(), 2);
+        assert!(merged.artifacts.declarations.contains_key("root-model"));
+        assert!(merged.artifacts.declarations.contains_key("eval-report"));
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_artifact_metadata() {
+        let tmp = TempDir::new().unwrap();
+        write_yaml(
+            tmp.path(),
+            "crab.yaml",
+            "artifacts:\n  model:\n    path: models/root.pt\nstages: {}\n",
+        );
+        write_yaml(
+            tmp.path(),
+            "eval/crab.yaml",
+            "artifacts:\n  model:\n    path: reports/eval.pt\nstages: {}\n",
+        );
+
+        let paths = discover(tmp.path(), DiscoverMode::Recursive).unwrap();
+        let error = parse_all(tmp.path(), &paths).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CrabError::YamlInvalid { key, .. } if key == "artifact 'model'"
+        ));
+    }
+
+    #[test]
     fn merge_rewrites_stage_out_deps_within_same_nested_file() {
         let tmp = TempDir::new().unwrap();
         write_yaml(tmp.path(), "crab.yaml", "stages: {}\n");
@@ -780,6 +859,7 @@ mod tests {
                     metrics: Vec::new(),
                     plots: Vec::new(),
                     plot_configs: Vec::new(),
+                    artifacts: crate::ArtifactMetadata::default(),
                     defaults: Defaults::default(),
                     stages: BTreeMap::new(),
                     workflow_membership: BTreeMap::new(),

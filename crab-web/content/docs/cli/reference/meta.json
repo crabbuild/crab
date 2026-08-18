@@ -76,6 +76,7 @@
     "crab-recover",
     "crab-update",
     "crab-completions",
-    "crab-version"
+    "crab-version",
+    "external-providers"
   ]
 }

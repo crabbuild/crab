@@ -2,13 +2,13 @@
 
 ## Executive Summary
 
-Crab's workflow engine is **feature-superior to DVC's pipeline engine** in
-several critical dimensions (parallelism, crash recovery, resource-aware
-scheduling, structured output, content-defined storage). DVC's remaining
-advantages are mostly ecosystem and UX maturity: Hydra-rich experiment
-ergonomics, experiment comparison polish, more remote backends, and broader
-documentation. This document maps DVC capabilities to Crab equivalents and
-identifies the remaining gaps.
+Crab's workflow engine has demonstrated advantages over DVC for parallel DAG
+execution, crash recovery, resource-aware scheduling, structured output, and
+content-defined storage. It is not yet a general DVC replacement: migration
+cutover, checkpoint transport, artifact remote/GC integration, provider live
+qualification, and the complete data-command profile remain gated by Plan 014.
+This document maps current Crab behavior to DVC concepts and names the gaps;
+the verdict column is not a release-parity claim.
 
 Sources: [DVC docs](https://dvc.org/doc/user-guide/pipelines),
 [DVC dvc.yaml spec](https://dvc.org/doc/user-guide/project-structure/dvcyaml-files),
@@ -36,16 +36,16 @@ Sources: [DVC docs](https://dvc.org/doc/user-guide/pipelines),
 | Aspect | DVC (`dvc.yaml`) | Crab (`crab.yaml`) | Verdict |
 |--------|-------------------|------------------------|---------|
 | Format | YAML 1.2, `deny_unknown_fields` | YAML 1.2, `deny_unknown_fields` | Parity |
-| Stage command | `cmd:` (string or list of strings); list entries execute sequentially in separate shell invocations and stop on first failure | `cmd:` shell string, DVC-style shell list with the same separate-shell fail-fast semantics, or `cmd: {argv: [...]}` | Parity |
+| Stage command | `cmd:` (string or list of strings); list entries execute sequentially in separate shell invocations and stop on first failure | `cmd:` shell string, DVC-style shell list with the same separate-shell fail-fast semantics, or `cmd: {argv: [...]}`; shell strings use `/bin/sh -c` on Unix and `cmd.exe /D /S /C` on Windows, while argv stays shell-free | Core parity; platform shell syntax is not translated |
 | Dependencies | `deps:` (file paths and supported external URLs/paths) | `deps:` local paths, DVC-style URL strings, DVC-style `remote://name/path` aliases through `[workflow.remotes.<name>]`, explicit `stage_out:`, pinned `url:` deps with `b3:<64-hex>` digests, and digest-less live HTTP(S), `file://`, S3, GCS, and Azure deps; schema also reserves `crab:`, `git:`, `oci:`, and SSH/HDFS-style URL forms for configured resolvers | Core parity for local, HTTP(S), file, S3, GCS, Azure, and `remote://` aliases backed by those URLs; SSH/HDFS dependency backends remain a gap |
-| Outputs | `outs:` path strings or path-key maps with `cache`, `persist`, `push`, `remote` subfields; external outputs are tracked but not cached | `outs:` path strings, DVC path-key maps, or explicit `path:` maps with `cache`, `push`, `persist`, `remote`, `kind`, `max_bytes` subfields; `cache: false` disables stage-cache reads/writes as in DVC, `push: false` keeps local cache but suppresses remote stage-cache publication, `remote:` routes artifact bytes through matching `[workflow.remotes.<name>]` entries, and absolute/`file://`, HTTP(S), S3, GCS, Azure, and `remote://` alias external outs are tracked when non-cached | Core parity for schema, cache policy, named output remotes, local external outs, object-store/HTTP external outs, and supported `remote://` output aliases; SSH/HDFS output backends remain a gap |
+| Outputs | `outs:` path strings or path-key maps with `cache`, `persist`, `push`, `remote` subfields; external outputs are tracked but not cached | `outs:` path strings, DVC path-key maps, or explicit `path:` maps with `cache`, `push`, `persist`, `remote`, `kind`, `max_bytes`, and distinct `checkpoint` fields; `cache: false` disables stage-cache reads/writes as in DVC, `push: false` keeps local cache but suppresses remote stage-cache publication, and supported local/HTTP/object-store external outs are tracked when non-cached | Core parity for the documented local and object-store profile; remote output routing and SSH/HDFS/WebDAV/Drive/OSS providers remain capability-gated |
 | Parameters | Top-level params files plus stage-level dot-path keys, file-scoped keys, and whole-file refs; defaults to `params.yaml`; supports YAML, JSON, TOML, Python params files; `dvc params diff [--targets <path> ...] [--all] [--deps] [--json] [--md] [--no-path] [a_rev] [b_rev]` defaults to `HEAD` vs workspace | Same stage-level refs and params formats; Python files are parsed as safe literal top-level assignments, class constants, and `self.*` assignments inside `__init__` for hashing/status; `crab params diff` defaults to `HEAD` vs workspace, uses declared workflow/stage params before falling back to `params.yaml`, keeps same-named params path-scoped, and accepts DVC-style `--targets <path>... -- [a_rev] [b_rev]`, `--all`, `--deps`, `--json`, `--md`, and `--no-path` | Core parity for params tracking, explicit files, path-scoped output, workspace/default diff, two-ref diff, dependency-only diff, `--all`, JSON, Markdown, and no-path |
 | Metrics | Top-level and stage-level `metrics:` file lists; stage metrics may use DVC output settings; `dvc metrics show [-a] [-T] [--all-commits] [--json] [--md] [-R] [targets...]` prints declared or explicit metric files, and `dvc metrics diff [--targets <path> ...] [-R] [--all] [--json] [--md] [--no-path] [--precision <n>] [a_rev] [b_rev]` compares declared or explicit metric files, defaulting to `HEAD` vs workspace | Top-level and stage-level `metrics:` file lists; stage metric hashes are written to `crab.lock`, and structured stage metrics accept DVC `cache`, `persist`, and `push` settings; `crab metrics show` defaults to workspace metrics, uses declared workflow/stage metric paths before falling back to `metrics.json`, keeps same-named metrics path-scoped, and accepts DVC-style targets, `-R/--recursive`, `-a/--all-branches`, `-T/--all-tags`, `-A/--all-commits`, `--json`, and `--md`; `crab metrics diff` defaults to `HEAD` vs workspace and accepts DVC-style `--targets <path>... -- [a_rev] [b_rev]`, `-R/--recursive`, `--all`, `--json`, `--md`, `--no-path`, and `--precision <n>` | Core parity for declared metrics, explicit files, recursive directory targets, path-scoped show/diff output, workspace/default diff, two-ref diff, history show, JSON, Markdown, no-path, and precision |
 | Plots | Top-level or stage-level `plots:` with rich x/y/template config and render commands, plus `dvc plots show`, `dvc plots diff`, and `dvc plots templates [template]` | Top-level and stage-level `plots:` accept paths, arbitrary plot IDs, DVC multi-source `x`/`y` mappings, and DVC confusion-style plots where `x` and `y` come from different files; stage plot files/directories are hashed into `crab.lock`; top-level configs also carry `x`, `y`, `no_header`, `x_label`, `y_label`, `title`, and `template` metadata for `crab plots show [targets...] --show-vega --no-header --x-label --y-label --html-template --open`; `crab plots diff` defaults to `HEAD` vs workspace, accepts DVC-style `--targets <path-or-id>... -- <rev> [rev ...]`, `--baseline <ref>` compares that ref vs workspace, `--target <ref>` enables explicit ref overlays, and recursive image/data-series rendering is supported; `crab plots templates [template]` lists/dumps built-in and local Vega-Lite JSON templates with DVC anchors | Parity for core data-series, image, directory, plot ID, cross-file x/y, custom HTML wrapper, workspace/default diff, multi-ref diff, and template workflows; DVC still ahead on VS Code/Studio dashboard ecosystem polish |
 | DVCLive files | Modern DVCLive writes `params:`, `metrics:`, and `plots:` entries; older projects may contain stage-level `live:` sections | Modern DVCLive-generated declarations pass through; migration maps legacy `live:` paths to a directory output plus `<live-dir>/metrics.json` and the recursive `<live-dir>/plots` target, and preserves explicit DVCLive plot declarations when present | Migration parity for local DVCLive outputs; DVC still ahead on Studio/live-dashboard ecosystem polish |
-| Artifacts | Top-level `artifacts:` model/artifact metadata | Top-level `artifacts:` is accepted and preserved by DVC migration as execution-ignored metadata | Parser/migration parity |
+| Artifacts | Top-level `artifacts:` model/artifact metadata | Top-level `artifacts:` is validated as catalog metadata; local `crab artifacts list/show/get/version create/promote/history` is available for lockfile-backed local outputs; remote publication, clean-clone enumeration, and GC reachability remain gated | Local lifecycle preview; not replacement parity |
 | Working dir | `wdir:` per stage; relative deps, outs, and stage params resolve from it | `wdir:` per stage, validated relative to repo root; relative deps, outs, default `params.yaml`, and file-scoped stage params resolve from it | Parity |
-| Stage authoring | `dvc stage add -n <stage> [-f] [-d path] [-p [file:]keys] [-o path] [-O path] [--outs-persist path] [--outs-persist-no-cache path] [-m path] [-M path] [--plots path] [--plots-no-cache path] [-w path] [--always-changed] [--desc text] [--run] command` writes or updates `dvc.yaml` and checks graph integrity | `crab stage add` accepts the same core authoring flags, writes `crab.yaml`, rejects overwrites unless `--force`, validates the resulting workflow through Crab's parser and DAG graph builder before writing, maps DVC checkpoint paths to persistent outs, and adds `--json` output | Core parity; Crab adds JSON |
+| Stage authoring | `dvc stage add -n <stage> [-f] [-d path] [-p [file:]keys] [-o path] [-O path] [--outs-persist path] [--outs-persist-no-cache path] [-m path] [-M path] [--plots path] [--plots-no-cache path] [-w path] [--always-changed] [--desc text] [--run] command` writes or updates `dvc.yaml` and checks graph integrity | `crab stage add` accepts the supported core authoring flags, writes `crab.yaml`, rejects overwrites unless `--force`, validates the resulting workflow through Crab's parser and DAG graph builder, writes `checkpoint: true` explicitly for `--checkpoints`, and adds `--json` output; ordinary `run/repro` still fail closed until experiment lineage is wired | Core parity except experiment checkpoint lifecycle; Crab adds JSON |
 | Stage listing | `dvc stage list [-R] [--all] [--fail] [--name-only] [targets...]` lists stage names and descriptions from workflow files | `crab stage list [-R] [--all] [--fail] [--name-only] [--json] [targets...]` lists Crab stages, accepts DVC-style `path/to/dvc.yaml:stage` aliases, generates descriptions from `desc`, outs, metrics, plots, or deps, and adds structured JSON output | Parity; Crab adds JSON |
 | Frozen stages | `frozen: true`; `dvc freeze <stage>` and `dvc unfreeze <stage>` toggle it; `--force` does not override frozen stages | `frozen: true`; `crab freeze <stage>` and `crab unfreeze <stage>` toggle it, including DVC-style `path/to/dvc.yaml:stage` aliases; `--force` does not override frozen stages | Parity |
 | Always changed | `always_changed: true` | `always_changed: true` compatibility alias and `nondeterministic: true` native spelling; both mark status stale, skip local/remote run-cache lookup, and force execution | Parity |
@@ -111,7 +111,7 @@ pipeline run.
 | Read-only cache | Not supported | Auto-detected, operates without cache | **Crab ahead** |
 | `cache: false` per output | Disables run cache for that stage | `cache: false` per output | Parity |
 | `push: false` per output | Keeps local cache, skips remote push | `push: false` per output suppresses remote stage-cache publication | Parity |
-| `remote:` per output | Pushes selected output to a named data remote | `remote:` is accepted on outputs and cache entries; artifact xorbs are pushed/pulled through matching `[workflow.remotes.<name>]` Crab URLs while stage manifests/refs stay on the repo remote | Parity |
+| `remote:` per output | Pushes selected output to a named data remote | `remote:` is parsed and reported, but a destination must be explicitly mapped and live-verified; the current migration/provider gate does not claim DVC-style per-output remote parity | Gap; fail closed until the provider matrix and remote refs are qualified |
 | `persist: true` | Output not deleted before re-run | `persist: true` | Parity |
 
 ### What DVC hashes for the run cache
@@ -202,7 +202,7 @@ ecosystem around queued runs. Crab keeps stage-cache reuse on
 | Aspect | DVC | Crab | Verdict |
 |--------|-----|--------|---------|
 | Large file tracking | `.dvc` files + `dvc add` | Pointer blobs + `crab add` (CDC chunking) | **Crab ahead** (dedup) |
-| Remote storage | S3, GCS, Azure, SSH, HTTP, HDFS | S3, GCS, Azure | DVC has more backends |
+| Remote storage | S3, GCS, Azure, SSH, HTTP, HDFS | S3, GCS, Azure are the currently qualified object-store paths; SSH/SFTP, WebDAV, HDFS/WebHDFS, Drive, and OSS remain parser/runtime gaps until live provider gates pass | Provider qualification pending |
 | Content-defined chunking | Not supported (whole-file hash) | Gearhash CDC with 3-tier dedup | **Crab far ahead** |
 | Lazy checkout / VFS | Not supported | FUSE mount, on-demand hydration | **Crab far ahead** |
 | Git LFS compat | Separate tool | Built-in LFS transfer agent | **Crab ahead** |
@@ -349,18 +349,10 @@ ecosystem around queued runs. Crab keeps stage-cache reuse on
 
 ## 13. Conclusion
 
-Crab's workflow engine is **more capable than DVC's pipeline engine** for
-production workloads: parallel execution, crash recovery, retry, resource
-scheduling, and structured observability are all features DVC lacks. The
-core DVC pipeline ergonomics (`vars`, param substitution, file-scoped params,
-command dictionary unpacking, `foreach`, `matrix`, `wdir`, `frozen`, `desc`,
-`meta`, queued experiments) are now present in Crab. The remaining gaps are
-primarily around ecosystem polish: custom Hydra plugins/resolvers, richer
-dashboard integrations, and broader remote backend coverage.
-
-For users migrating from DVC, the `crab.yaml` schema is intentionally
-similar enough that most `dvc.yaml` files can be converted with minimal
-changes (rename `dvc.yaml` → `crab.yaml`, review plot/Hydra-specific fields,
-and migrate DVC remotes as needed). For the supported workflow surface,
-Crab extends DVC's execution semantics with parallelism, structured output,
-and object-store-native data handling.
+Crab's strongest demonstrated differences are parallel execution, crash
+recovery, retry, resource scheduling, structured observability, and
+content-defined storage. The schema converter can preserve many DVC pipeline
+fields, but conversion is not a data migration and does not authorize deleting
+`.dvc/`. Keep DVC state until the repository-aware migration report and a
+byte-identical clean-clone verification pass. Consult the Plan 014 gate table
+before describing Crab as a replacement for any broader DVC profile.

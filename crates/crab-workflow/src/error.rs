@@ -566,6 +566,15 @@ pub enum WorkflowError {
         local_hash: String,
     },
 
+    /// A cache manifest is structurally invalid or contains an unsafe path.
+    #[error("cache entry invalid for stage hash {stage_hash}: {detail}")]
+    CacheEntryInvalid {
+        /// Cache key, when known.
+        stage_hash: String,
+        /// Stable validation detail.
+        detail: String,
+    },
+
     /// A cache push was requested while the remote is read-only.
     #[error("remote cache is read-only")]
     RemoteCacheReadonly,

@@ -1,0 +1,30 @@
+---
+title: "External providers"
+description: "Capability-accurate external dependency support in Crab workflows."
+---
+
+# External providers
+
+Crab resolves external workflow dependencies through a streaming provider
+boundary. A recognized URL scheme is not a support claim: the operation must
+also have a compiled adapter and a live qualification result.
+
+| Scheme family | Read/stat | List | Conditional reuse | Write/atomic publish | Status |
+|---|---:|---:|---:|---:|---|
+| `file://` | yes | yes | local metadata | local atomic replacement | qualified |
+| `http://`, `https://` | yes | no | streamed GET; validators are advisory until index qualification | no | qualified read |
+| `s3://`, `gs://`, `az://`, `abfs://` | yes | yes | provider metadata plus streamed verification | Crab remote only | qualified read |
+| `ssh://`, `sftp://` | no | no | no | no | rejected at preflight |
+| `webdav://`, `webdavs://` | no | no | no | no | rejected at preflight |
+| `hdfs://`, `webhdfs://` | no | no | no | no | rejected at preflight |
+| `gdrive://` | no | no | no | no | rejected at preflight |
+| `oss://` | no | no | no | no | rejected at preflight |
+
+Unsupported providers fail before a stage is spawned. Crab does not silently
+fall back to a different protocol or claim that an S3-compatible endpoint is
+equivalent to every provider. Large bodies are hashed incrementally; an ETag
+is treated as a provider validator and never as a Crab content hash.
+
+The SSH/SFTP, WebDAV, HDFS/WebHDFS, Google Drive, and Aliyun OSS rows become
+supported only after dependency review, authentication tests, and retained
+live evidence for each advertised capability.

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crab.build/schemas/artifacts.json",
+  "title": "Crab artifact command envelope",
+  "type": "object",
+  "required": ["schema", "version", "data"],
+  "properties": {
+    "schema": { "const": "artifacts" },
+    "version": { "type": "string" },
+    "data": {}
+  },
+  "additionalProperties": true
+}

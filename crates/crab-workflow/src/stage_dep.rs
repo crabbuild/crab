@@ -61,6 +61,10 @@ pub fn is_url_dep(value: &str) -> bool {
             | "sftp"
             | "hdfs"
             | "webhdfs"
+            | "webdav"
+            | "webdavs"
+            | "gdrive"
+            | "oss"
             | "remote"
     )
 }
@@ -78,6 +82,9 @@ mod tests {
             "az://container/data.csv",
             "abfss://container/path",
             "file:///tmp/data.csv",
+            "webdav://example.test/data.csv",
+            "gdrive://drive/file-id",
+            "oss://bucket/data.csv",
             "remote://datasets/raw.csv",
         ] {
             assert!(is_url_dep(value), "{value} should be a URL dep");
