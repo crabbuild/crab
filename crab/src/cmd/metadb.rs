@@ -187,6 +187,10 @@ pub struct AccelerationHealth {
     pub git_locator_index_available: bool,
     pub git_locator_covered_generation: Option<u64>,
     pub git_locator_covered_pack_index_hash: Option<String>,
+    pub git_visibility_index_available: bool,
+    pub git_visibility_covered_generation: Option<u64>,
+    pub git_visibility_covered_pack_index_hash: Option<String>,
+    pub git_visibility_coverage_current: bool,
     pub git_locator_writer_lease_active: bool,
     pub repair_required: bool,
     pub notes: Vec<String>,
@@ -202,6 +206,10 @@ impl AccelerationHealth {
             git_locator_index_available: false,
             git_locator_covered_generation: None,
             git_locator_covered_pack_index_hash: None,
+            git_visibility_index_available: false,
+            git_visibility_covered_generation: None,
+            git_visibility_covered_pack_index_hash: None,
+            git_visibility_coverage_current: false,
             git_locator_writer_lease_active: false,
             repair_required: true,
             notes: vec![note.into()],
@@ -1266,6 +1274,9 @@ async fn rebuild_git_object_locators(
         crab_metadata::manifest_store::read_bulk_pack_list(store, router, &manifest.pack_index_hash)
             .await?
     };
+    let visibility_temp = tempfile::tempdir()?;
+    let visibility_pack_dir = visibility_temp.path().join("objects/pack");
+    std::fs::create_dir_all(&visibility_pack_dir)?;
     let mut failed = 0u64;
     let mut derived = Vec::with_capacity(packs.len());
     for pack in packs {
@@ -1297,6 +1308,7 @@ async fn rebuild_git_object_locators(
         }
         let canonical_name = pack.pack_id.clone();
         let expected_object_count = pack.object_count;
+        let visibility_pack_dir_for_pack = visibility_pack_dir.clone();
         let verified = tokio::task::spawn_blocking(move || -> Result<_> {
             let pack_dir = temp.path().join("objects/pack");
             std::fs::create_dir_all(&pack_dir)?;
@@ -1328,6 +1340,13 @@ async fn rebuild_git_object_locators(
                     reason: "pack index checksum disagrees with pack trailer".to_owned(),
                 });
             }
+            crab_git::pack::install_pack_file_from_path(
+                &visibility_pack_dir_for_pack,
+                &source,
+                &canonical_name,
+                0,
+                false,
+            )?;
             let sample_indexes = sampled_location_indexes(locations.len());
             let mut samples = Vec::with_capacity(sample_indexes.len());
             for (index, location) in (&mut locations).enumerate() {
@@ -1526,6 +1545,13 @@ async fn rebuild_git_object_locators(
     let release_result = lock.release().await.map_err(CrabError::from);
     let _stats = write_result?;
     release_result?;
+    crate::git::push::publish_git_visibility_index_from_storage_git_dir(
+        visibility_temp.path(),
+        manifest,
+        store,
+        router,
+    )
+    .await?;
     let processed = u64::try_from(derived.len()).map_err(|_| {
         CrabError::Internal("rebuilt Git pack count cannot be represented".to_owned())
     })?;
@@ -2105,6 +2131,61 @@ async fn diagnose_acceleration_health(
         }
     };
     let mut notes = Vec::new();
+    let (
+        git_visibility_index_available,
+        git_visibility_covered_generation,
+        git_visibility_covered_pack_index_hash,
+        git_visibility_coverage_current,
+    ) = if manifest.refs.is_empty() {
+        // Empty repositories have no pack-index identity to bind. The
+        // protocol uses an empty in-memory proof for this immutable state.
+        (true, Some(manifest.generation), None, true)
+    } else if manifest.pack_index_hash.is_empty() {
+        notes.push(
+            "Git visibility proof has no pack-index identity; run `crab metadb rebuild`".to_owned(),
+        );
+        (false, None, None, false)
+    } else {
+        match crab_metadata::git_visibility::read(
+            &storage,
+            &router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        {
+            Ok(index) => {
+                let covers_manifest = index.refs.len() == manifest.refs.len()
+                    && manifest.refs.iter().all(|(name, oid)| {
+                        index.refs.get(name).is_some_and(|objects| {
+                            objects.binary_search(oid).is_ok()
+                                && manifest
+                                    .peeled_refs
+                                    .get(name)
+                                    .is_none_or(|peeled| objects.binary_search(peeled).is_ok())
+                        })
+                    });
+                if !covers_manifest {
+                    notes.push(
+                        "Git visibility proof does not cover the current manifest refs; run `crab metadb rebuild`"
+                            .to_owned(),
+                    );
+                }
+                (
+                    true,
+                    Some(index.generation),
+                    Some(index.pack_index_hash),
+                    covers_manifest,
+                )
+            }
+            Err(error) => {
+                notes.push(format!(
+                    "Git visibility proof unavailable: {error}; run `crab metadb rebuild`"
+                ));
+                (false, None, None, false)
+            }
+        }
+    };
     let receipt_path = router.repo_path(&format!(
         "metadata/generation-receipts/{:020}.json",
         manifest.generation
@@ -2240,7 +2321,9 @@ async fn diagnose_acceleration_health(
         || !ref_registry_repo_complete
         || !ref_registry_bucket_complete
         || !git_locator_index_available
-        || !git_locator_coverage_current;
+        || !git_locator_coverage_current
+        || !git_visibility_index_available
+        || !git_visibility_coverage_current;
     AccelerationHealth {
         manifest_generation: Some(manifest.generation),
         generation_receipt_valid,
@@ -2249,6 +2332,10 @@ async fn diagnose_acceleration_health(
         git_locator_index_available,
         git_locator_covered_generation,
         git_locator_covered_pack_index_hash,
+        git_visibility_index_available,
+        git_visibility_covered_generation,
+        git_visibility_covered_pack_index_hash,
+        git_visibility_coverage_current,
         git_locator_writer_lease_active,
         repair_required,
         notes,
@@ -2344,6 +2431,29 @@ fn render_doctor_metadb(payload: &DoctorMetadbPayload, mode: OutputMode) {
             .git_locator_covered_pack_index_hash
             .as_deref()
             .unwrap_or("<none>")
+    );
+    println!(
+        "  git_visibility_index_available: {}",
+        payload.acceleration.git_visibility_index_available
+    );
+    println!(
+        "  git_visibility_covered_generation: {}",
+        payload
+            .acceleration
+            .git_visibility_covered_generation
+            .map_or_else(|| "<none>".to_owned(), |generation| generation.to_string())
+    );
+    println!(
+        "  git_visibility_covered_pack_index_hash: {}",
+        payload
+            .acceleration
+            .git_visibility_covered_pack_index_hash
+            .as_deref()
+            .unwrap_or("<none>")
+    );
+    println!(
+        "  git_visibility_coverage_current: {}",
+        payload.acceleration.git_visibility_coverage_current
     );
     println!(
         "  git_locator_writer_lease_active: {}",

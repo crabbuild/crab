@@ -1,0 +1,97 @@
+name: Workflow native execution
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Workflow tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run workflow crate tests
+        run: cargo test -p crab-workflow --locked
+
+      - name: Run CLI migration contract tests
+        run: cargo test -p crab --test workflow_migration --locked
+
+      - name: Build release CLI on Windows feature contract
+        if: runner.os == 'Windows'
+        run: cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs
+
+      - name: Build release CLI on Unix
+        if: runner.os != 'Windows'
+        run: cargo build -p crab --release --locked
+
+      - name: Smoke the native Windows release binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\target\release\crab.exe --version
+
+      - name: Smoke the native Unix release binary
+        if: runner.os != 'Windows'
+        run: ./target/release/crab --version
+
+      - name: Execute a native workflow stage on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          cat > "${smoke_root}/crab.yaml" <<'YAML'
+          stages:
+            smoke:
+              cmd:
+                argv: [python3, write.py]
+              outs: [output.txt]
+          YAML
+          cat > "${smoke_root}/write.py" <<'PY'
+          from pathlib import Path
+          Path("output.txt").write_text("native-workflow", encoding="utf-8")
+          PY
+          (cd "${smoke_root}" && "${GITHUB_WORKSPACE}/target/release/crab" run)
+          test "$(cat "${smoke_root}/output.txt")" = native-workflow
+
+      - name: Execute a native workflow stage on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "crab-native-workflow"
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          @'
+          stages:
+            smoke:
+              cmd:
+                argv: [python, write.py]
+              outs: [output.txt]
+          '@ | Set-Content -Path (Join-Path $smokeRoot "crab.yaml") -Encoding utf8
+          @'
+          from pathlib import Path
+          Path("output.txt").write_text("native-workflow", encoding="utf-8")
+          '@ | Set-Content -Path (Join-Path $smokeRoot "write.py") -Encoding utf8
+          Push-Location $smokeRoot
+          try {
+            & "$env:GITHUB_WORKSPACE\target\release\crab.exe" run
+            if ($LASTEXITCODE -ne 0) { throw "native workflow failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          if ((Get-Content (Join-Path $smokeRoot "output.txt") -Raw).Trim() -ne "native-workflow") {
+            throw "native workflow output mismatch"
+          }

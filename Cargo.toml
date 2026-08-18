@@ -104,6 +104,7 @@ google-cloud-token = "0.1.2"
 
 async-trait = "0.1"
 blake3 = "1.8"
+md-5 = "0.11"
 bytes = "1.11"
 futures-util = "0.3"
 flate2 = "1"

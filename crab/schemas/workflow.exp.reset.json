@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Crab workflow experiment reset",
+  "type": "object",
+  "required": ["schema", "version", "payload"],
+  "properties": {
+    "schema": {"const": "workflow.exp.reset"},
+    "version": {"const": "1.0"},
+    "payload": {
+      "type": "object",
+      "required": ["exp_id", "reset_stages"],
+      "properties": {
+        "exp_id": {"type": "string"},
+        "checkpoint": {"type": ["string", "null"]},
+        "reset_stages": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -167,12 +167,18 @@ fn json_envelope_pins_down_stage_and_edge_order() {
 
 #[test]
 fn fails_when_workflow_disabled() {
-    // A repo without `[workflow] enabled = true` should surface the
-    // same gating error as every other workflow subcommand.
+    // Fresh configs enable workflows. Exercise the explicit opt-out rather
+    // than relying on the default so this test protects the shipped contract.
     let tmp = TempDir::new().unwrap();
     fs::write(
         tmp.path().join("crab.yaml"),
         "stages:\n  clean:\n    cmd: \"true\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join(".crab")).unwrap();
+    fs::write(
+        tmp.path().join(".crab/config.toml"),
+        "[workflow]\nenabled = false\n",
     )
     .unwrap();
 

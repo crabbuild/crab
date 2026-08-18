@@ -780,6 +780,9 @@ enum Cmd {
     /// Rewrite history to move files into or out of crab tracking.
     #[command(subcommand)]
     Migrate(MigrateCmd),
+    /// Manage immutable workflow artifacts and promotion labels.
+    #[command(subcommand)]
+    Artifacts(crab::cmd::artifacts::ArtifactsCommand),
     /// Native concurrent push that bypasses git's serial remote helper protocol.
     Push(crab::cmd::push::PushArgs),
     /// Git pull + automatic hydration of newly-fetched pointer blobs.
@@ -893,14 +896,17 @@ enum Cmd {
     },
     /// Import a raw object-storage prefix into a fresh Crab-backed git repo.
     Import(crab::cmd::import::ImportArgs),
+    /// Manage versioned external data sources and source provenance.
+    #[command(subcommand)]
+    Data(crab::cmd::data::DataCommand),
     /// Export one Crab snapshot as materialized files into raw object storage.
     Export(crab::cmd::export::ExportArgs),
     /// Execute a single workflow stage with content-addressed caching.
     ///
     /// Computes a deterministic hash over the command, deps, params and
     /// env, looks it up in the local stage cache, and either replays the
-    /// cached outputs or runs the command. Requires `[workflow] enabled =
-    /// true` in `.crab/config.toml`.
+    /// cached outputs or runs the command. Workflows are enabled by default;
+    /// `[workflow] enabled = false` is an explicit opt-out.
     Run(crab::cmd::run::RunArgs),
     /// DVC-compatible spelling for `crab run`.
     ///
@@ -1519,6 +1525,8 @@ enum ExpCmd {
     Promote(crab::cmd::exp::PromoteArgs),
     /// Apply a completed experiment snapshot to the workspace.
     Apply(crab::cmd::exp::ApplyArgs),
+    /// Reset an experiment checkpoint lineage to a selected point or base.
+    Reset(crab::cmd::exp::ResetArgs),
     /// Save the current workspace as an experiment without running.
     Save(crab::cmd::exp::SaveArgs),
     /// Rename a local experiment label.
@@ -1606,6 +1614,9 @@ enum WorkflowCmd {
     Journal(WorkflowJournalCmd),
     /// Push local stage cache entries to the configured remote.
     PushCache(crab::cmd::workflow::PushCacheArgs),
+    /// Internal stage-to-supervisor checkpoint control protocol.
+    #[command(hide = true)]
+    Checkpoint(crab::cmd::workflow_checkpoint::WorkflowCheckpointArgs),
 }
 
 #[derive(Subcommand)]
@@ -1980,7 +1991,31 @@ enum MigrateCmd {
         /// Output file path (default: `crab.yaml` in the same directory).
         #[arg(long, short, value_name = "PATH")]
         output: Option<std::path::PathBuf>,
+        /// Inspect and report without writing YAML, a journal, or Crab data.
+        #[arg(long)]
+        plan: bool,
+        /// Resume from the migration journal after verifying source identity.
+        #[arg(long)]
+        resume: bool,
+        /// Map a named DVC remote explicitly as NAME=CRAB_DESTINATION.
+        #[arg(long = "remote-map", value_name = "NAME=DESTINATION")]
+        remote_map: Vec<String>,
+        /// Emit one JSON envelope instead of text.
+        #[arg(long, conflicts_with = "jsonl")]
+        json: bool,
+        /// Emit one terminal JSONL result event.
+        #[arg(long, conflicts_with = "json")]
+        jsonl: bool,
     },
+}
+
+impl MigrateCmd {
+    fn output_mode(&self) -> OutputMode {
+        match self {
+            Self::FromDvc { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
+            _ => OutputMode::Text,
+        }
+    }
 }
 
 impl Cmd {
@@ -2035,7 +2070,10 @@ impl Cmd {
             Self::Undo { json, .. } => OutputMode::from_flags(*json, false),
             Self::Why { json, .. } => OutputMode::from_flags(*json, false),
             Self::Import(args) => args.output_mode(),
+            Self::Data(command) => command.output_mode(),
             Self::Export(args) => args.output_mode(),
+            Self::Migrate(command) => command.output_mode(),
+            Self::Artifacts(command) => command.output_mode(),
             Self::Run(args) | Self::Repro(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Stage(StageCmd::Add(args)) => OutputMode::from_flags(args.json, false),
             Self::Stage(StageCmd::List(args)) => OutputMode::from_flags(args.json, false),
@@ -2047,6 +2085,7 @@ impl Cmd {
             Self::Exp(ExpCmd::Ls(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Promote(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Apply(args)) => OutputMode::from_flags(args.json, false),
+            Self::Exp(ExpCmd::Reset(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Save(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Rename(args)) => OutputMode::from_flags(args.json, false),
             Self::Exp(ExpCmd::Push(args)) => OutputMode::from_flags(args.json, false),
@@ -2090,6 +2129,7 @@ impl Cmd {
                 args.output_mode()
             }
             Self::Workflow(WorkflowCmd::PushCache(args)) => args.output_mode(),
+            Self::Workflow(WorkflowCmd::Checkpoint(args)) => args.output_mode(),
             Self::Auth(AuthCmd::Status { json }) => OutputMode::from_flags(*json, false),
             Self::Organization(args) => args.output_mode(),
             Self::Repo(args) => args.output_mode(),
@@ -2284,13 +2324,16 @@ impl Cmd {
             Self::Lock { .. } => "lock",
             Self::Unlock { .. } => "unlock",
             Self::Locks { .. } => "locks",
+            Self::Migrate(MigrateCmd::FromDvc { .. }) => crab::cmd::migrate::DVC_MIGRATION_SCHEMA,
             Self::Migrate(_) => "migrate",
+            Self::Artifacts(command) => command.schema_name(),
             Self::Push(_) => "push",
             Self::Ship { .. } => "ship",
             Self::Adopt { .. } => "adopt",
             Self::Unadopt { .. } => crab::cmd::unadopt::UNADOPT_SCHEMA,
             Self::Undo { .. } => crab::cmd::undo::UNDO_SCHEMA,
             Self::Import(_) => "import",
+            Self::Data(_) => crab::cmd::data::DATA_SCHEMA,
             Self::Export(_) => "export.summary",
             Self::Run(_) | Self::Repro(_) => "workflow.stage_result",
             Self::Stage(StageCmd::Add(_)) => crab::cmd::stage::STAGE_ADD_SCHEMA,
@@ -2303,6 +2346,7 @@ impl Cmd {
             Self::Exp(ExpCmd::Ls(_)) => crab::cmd::exp::EXP_LS_SCHEMA,
             Self::Exp(ExpCmd::Promote(_)) => crab::cmd::exp::EXP_PROMOTE_SCHEMA,
             Self::Exp(ExpCmd::Apply(_)) => crab::cmd::exp::EXP_APPLY_SCHEMA,
+            Self::Exp(ExpCmd::Reset(_)) => crab::cmd::exp::EXP_RESET_SCHEMA,
             Self::Exp(ExpCmd::Save(_)) => crab::cmd::exp::EXP_SAVE_SCHEMA,
             Self::Exp(ExpCmd::Rename(_)) => crab::cmd::exp::EXP_RENAME_SCHEMA,
             Self::Exp(ExpCmd::Push(_)) => crab::cmd::exp::EXP_PUSH_SCHEMA,
@@ -2349,6 +2393,9 @@ impl Cmd {
             }
             Self::Workflow(WorkflowCmd::PushCache(_)) => {
                 crab::cmd::workflow::WORKFLOW_PUSH_CACHE_SCHEMA
+            }
+            Self::Workflow(WorkflowCmd::Checkpoint(_)) => {
+                crab::cmd::workflow_checkpoint::WORKFLOW_CHECKPOINT_SCHEMA
             }
             Self::Lfs(_) => "lfs",
             Self::LfsTransferAgent => "lfs-transfer-agent",
@@ -4281,14 +4328,30 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                     dir,
                     stdout,
                     output,
+                    plan,
+                    resume,
+                    remote_map,
+                    json,
+                    jsonl,
                 } => {
-                    crab::cmd::migrate::run_migrate_from_dvc(
+                    crab::cmd::migrate::run_migrate_from_dvc_with_options(
                         dir.as_deref(),
                         stdout,
                         output.as_deref(),
+                        crab::cmd::migrate::DvcMigrationOptions {
+                            plan,
+                            resume,
+                            mode: OutputMode::from_flags(json, jsonl),
+                            remote_map,
+                        },
                     )?;
                 }
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Cmd::Artifacts(command)) => {
+            let _span = tracing::info_span!("artifacts").entered();
+            command.run()?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Push(ref args)) => {
@@ -4392,6 +4455,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::import::run_import(args, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Some(Cmd::Data(command)) => {
+            let _span = tracing::info_span!("data").entered();
+            command.run()?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Export(ref args)) => {
             let _span = tracing::info_span!("export").entered();
             crab::cmd::export::run_export(args, &cancel).await?;
@@ -4434,6 +4502,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 ExpCmd::Ls(args) => crab::cmd::exp::exec_ls(args)?,
                 ExpCmd::Promote(args) => crab::cmd::exp::exec_promote(args)?,
                 ExpCmd::Apply(args) => crab::cmd::exp::exec_apply(args)?,
+                ExpCmd::Reset(args) => crab::cmd::exp::exec_reset(args)?,
                 ExpCmd::Save(args) => crab::cmd::exp::exec_save(args)?,
                 ExpCmd::Rename(args) => crab::cmd::exp::exec_rename(args)?,
                 ExpCmd::Push(args) => crab::cmd::exp::exec_push(args).await?,
@@ -4486,6 +4555,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 }
                 WorkflowCmd::PushCache(args) => {
                     crab::cmd::workflow::exec_push_cache(args).await?;
+                }
+                WorkflowCmd::Checkpoint(args) => {
+                    crab::cmd::workflow_checkpoint::run(&args)?;
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -5796,6 +5868,7 @@ mod tests {
 
     use crab::core::config::Config;
     use crab::core::error::CrabError;
+    use crab::core::output::OutputMode;
 
     use super::{
         Cli, Cmd, OptimizeCacheCmd, OptimizeCmd, OptimizeIndexesCmd, OptimizeLfsCmd,
@@ -6187,6 +6260,36 @@ mod tests {
                 }
                 _ => unreachable!("get should parse as download"),
             }
+        });
+    }
+
+    #[test]
+    fn workflow_data_and_artifact_commands_keep_dispatch_contracts() {
+        parse_cli_on_large_stack(|| {
+            let artifacts = Cli::try_parse_from([
+                "crab",
+                "artifacts",
+                "get",
+                "model",
+                "--version",
+                &format!("b3:{}", "aa".repeat(32)),
+                "--json",
+            ])
+            .unwrap();
+            let artifact_command = artifacts.cmd.as_ref().unwrap();
+            assert_eq!(artifact_command.schema_name(), "artifacts");
+            assert_eq!(artifact_command.output_mode(), OutputMode::Json);
+
+            let data = Cli::try_parse_from(["crab", "data", "list", "--jsonl"]).unwrap();
+            let data_command = data.cmd.as_ref().unwrap();
+            assert_eq!(data_command.schema_name(), "data");
+            assert_eq!(data_command.output_mode(), OutputMode::Jsonl);
+
+            let checkpoint =
+                Cli::try_parse_from(["crab", "workflow", "checkpoint", "--json"]).unwrap();
+            let checkpoint_command = checkpoint.cmd.as_ref().unwrap();
+            assert_eq!(checkpoint_command.schema_name(), "workflow.checkpoint");
+            assert_eq!(checkpoint_command.output_mode(), OutputMode::Json);
         });
     }
 

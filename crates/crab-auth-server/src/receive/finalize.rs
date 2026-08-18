@@ -15,7 +15,7 @@ use crab_storage::{Store, StoreLayout};
 
 use super::{
     ActiveActiveReceiveConfig, MaterializedSourcePush, ProtectedPushPlan,
-    active_active_coordinator_registration, non_empty,
+    active_active_coordinator_registration, non_empty, publish_git_visibility_index,
 };
 use crate::error::{AuthServerError, Result};
 
@@ -69,12 +69,25 @@ async fn commit_active_active_manifest(
             force: false,
         })
         .collect::<Vec<_>>();
+    let visibility_proof_published =
+        match publish_git_visibility_index(store, router, commit.manifest).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    generation = commit.manifest.generation,
+                    "active-active protected push committed; Git visibility proof requires repair"
+                );
+                false
+            }
+        };
     let uploaded_objects = active_active_uploaded_objects(
         store,
         router,
         commit.plan,
         commit.materialized,
         commit.manifest,
+        visibility_proof_published,
     )
     .await?;
     let push_plan = coordination_active_active::plan_active_active_push(
@@ -111,6 +124,7 @@ async fn active_active_uploaded_objects(
     plan: &ProtectedPushPlan,
     materialized: &MaterializedSourcePush,
     manifest: &Manifest,
+    visibility_proof_published: bool,
 ) -> Result<Vec<String>> {
     let mut keys = BTreeSet::new();
     for object in &plan.staged_objects {
@@ -136,6 +150,17 @@ async fn active_active_uploaded_objects(
         &manifest.pack_index_hash,
     )
     .await?;
+    if visibility_proof_published
+        && !manifest.refs.is_empty()
+        && !manifest.pack_index_hash.is_empty()
+    {
+        keys.insert(
+            router
+                .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+                .as_ref()
+                .to_owned(),
+        );
+    }
     Ok(keys.into_iter().collect())
 }
 
@@ -241,6 +266,7 @@ mod tests {
         let materialized = MaterializedSourcePush {
             ref_updates: Vec::new(),
             packs: Vec::new(),
+            peeled_refs: std::collections::BTreeMap::new(),
         };
 
         let err = commit_receive_manifest(

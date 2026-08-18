@@ -86,6 +86,7 @@ fn linear_three_stage() -> Workflow {
         metrics: Vec::new(),
         plots: Vec::new(),
         plot_configs: Vec::new(),
+        artifacts: crab_workflow::ArtifactMetadata::default(),
         defaults: Defaults::default(),
         stages,
         workflow_membership: BTreeMap::new(),

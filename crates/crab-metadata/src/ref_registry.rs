@@ -159,6 +159,49 @@ impl RefRegistry {
             .insert(repo_prefix.to_owned(), exp_ids);
     }
 
+    /// Union workflow roots published by one writer into a repo entry.
+    ///
+    /// Workflow objects are uploaded before their experiment ref becomes
+    /// visible. Union semantics ensure a concurrent push can only leave an
+    /// extra GC root; it can never erase another experiment's checkpoint or
+    /// stage protection. Exact removal is deliberately a separate,
+    /// administrator-driven reconciliation operation.
+    pub fn register_workflow_union(
+        &mut self,
+        repo_prefix: &str,
+        stage_hashes: impl IntoIterator<Item = String>,
+        exp_ids: impl IntoIterator<Item = String>,
+    ) -> bool {
+        self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
+        let mut changed = false;
+        let stages = self
+            .workflow_stage_hashes
+            .entry(repo_prefix.to_owned())
+            .or_default();
+        for hash in stage_hashes {
+            if !stages.contains(&hash) {
+                stages.push(hash);
+                changed = true;
+            }
+        }
+        stages.sort();
+        stages.dedup();
+
+        let experiments = self
+            .workflow_experiment_ids
+            .entry(repo_prefix.to_owned())
+            .or_default();
+        for id in exp_ids {
+            if !experiments.contains(&id) {
+                experiments.push(id);
+                changed = true;
+            }
+        }
+        experiments.sort();
+        experiments.dedup();
+        changed
+    }
+
     /// Record the coordinator that protects an active-active repo's writes.
     pub fn register_active_active_coordinator(
         &mut self,
@@ -269,6 +312,42 @@ pub async fn union_register_repo_shards(
             let was_complete = registry.complete_repos.contains(&repo_prefix);
             registry.register_union(&repo_prefix, shard_hashes.clone());
             if registry.repos.get(&repo_prefix) != Some(&before) || !was_complete {
+                registry.generation += 1;
+            }
+        },
+    )
+    .await
+    .map(|registry| registry.generation)
+    .map_err(MetadataError::from)
+}
+
+/// Publish conservative workflow GC roots after immutable experiment
+/// objects have been uploaded and before the experiment ref is made visible.
+///
+/// This helper intentionally uses union semantics. A failed or interrupted
+/// push may leave an extra root, but it cannot remove another writer's root;
+/// later reconciliation may remove stale roots once remote experiment refs
+/// have been enumerated.
+#[cfg(feature = "storage")]
+pub async fn union_register_workflow_roots(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    stage_hashes: Vec<String>,
+    exp_ids: Vec<String>,
+) -> Result<u64> {
+    let registry_path = router.ref_registry_path();
+    let repo_prefix = router.repo_prefix().to_owned();
+    crab_storage::cas::cas_update_default::<RefRegistry, _>(
+        store,
+        registry_path.as_ref(),
+        |registry| {
+            let schema_was_current = registry.schema_version == REF_REGISTRY_SCHEMA_VERSION;
+            let changed = registry.register_workflow_union(
+                &repo_prefix,
+                stage_hashes.clone(),
+                exp_ids.clone(),
+            );
+            if changed || !schema_was_current {
                 registry.generation += 1;
             }
         },
@@ -504,6 +583,34 @@ mod tests {
     }
 
     #[test]
+    fn workflow_union_preserves_concurrent_roots_and_is_idempotent() {
+        let mut reg = RefRegistry::default();
+        assert!(reg.register_workflow_union(
+            "org/models",
+            vec!["stage-b".to_owned(), "stage-a".to_owned()],
+            vec!["exp-2".to_owned()],
+        ));
+        assert!(reg.register_workflow_union(
+            "org/models",
+            vec!["stage-c".to_owned(), "stage-a".to_owned()],
+            vec!["exp-1".to_owned(), "exp-2".to_owned()],
+        ));
+        assert!(!reg.register_workflow_union(
+            "org/models",
+            vec!["stage-a".to_owned()],
+            vec!["exp-1".to_owned()],
+        ));
+        assert_eq!(
+            reg.workflow_stage_hashes["org/models"],
+            vec!["stage-a", "stage-b", "stage-c"]
+        );
+        assert_eq!(
+            reg.workflow_experiment_ids["org/models"],
+            vec!["exp-1", "exp-2"]
+        );
+    }
+
+    #[test]
     fn all_referenced_workflow_stages_returns_union() {
         let mut reg = RefRegistry::default();
         reg.register_workflow_stages("org/a", vec!["sh1".into(), "sh2".into()]);
@@ -644,6 +751,50 @@ mod tests {
         assert_eq!(
             registry.active_active_coordinators["org/models"],
             registration
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn workflow_union_persists_conservative_roots() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        let first = union_register_workflow_roots(
+            &store,
+            &router,
+            vec!["stage-b".to_owned(), "stage-a".to_owned()],
+            vec!["exp-1".to_owned()],
+        )
+        .await
+        .unwrap();
+        let second = union_register_workflow_roots(
+            &store,
+            &router,
+            vec!["stage-c".to_owned()],
+            vec!["exp-2".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert!(second > first);
+
+        let (body, _) = store
+            .get_with_etag(&router.ref_registry_path())
+            .await
+            .unwrap();
+        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            registry.workflow_stage_hashes["org/models"],
+            vec!["stage-a", "stage-b", "stage-c"]
+        );
+        assert_eq!(
+            registry.workflow_experiment_ids["org/models"],
+            vec!["exp-1", "exp-2"]
         );
     }
 

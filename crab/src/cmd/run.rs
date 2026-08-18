@@ -125,6 +125,10 @@ pub(crate) struct RunInvocationOptions {
     pub mirror_child_output: bool,
     pub external_kill_path: Option<PathBuf>,
     pub child_started: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    pub allow_checkpoints: bool,
+    pub checkpoint_control_dir: Option<PathBuf>,
+    pub checkpoint_run_id: Option<String>,
+    pub checkpoint_token: Option<String>,
 }
 
 impl Default for RunInvocationOptions {
@@ -133,6 +137,10 @@ impl Default for RunInvocationOptions {
             mirror_child_output: true,
             external_kill_path: None,
             child_started: None,
+            allow_checkpoints: false,
+            checkpoint_control_dir: None,
+            checkpoint_run_id: None,
+            checkpoint_token: None,
         }
     }
 }
@@ -462,10 +470,8 @@ pub(crate) async fn run_in_with_options(
     mode: OutputMode,
     options: RunInvocationOptions,
 ) -> Result<()> {
-    // Config gate: workflow layer opt-in via `[workflow] enabled = true`.
-    // Falling back to defaults is the right move in a fresh repo — the
-    // feature flag default is already `false`, so the user's intent
-    // stays correct either way.
+    // Config gate: fresh configs run workflows by default, while an explicit
+    // `[workflow] enabled = false` remains a hard opt-out.
     let config = Config::resolve_for_repo(repo_root).unwrap_or_default();
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
@@ -565,6 +571,7 @@ async fn run_inline_single_stage(
     for out in &stage.outs {
         out.validate(&stage.name)?;
     }
+    validate_stage_remote_capabilities(&stage, &workflow_remote_aliases(config))?;
 
     // Resolve deps to content hashes. Missing paths become
     // `StageDepMissing`; non-file entries (symlinks, FIFOs, etc.)
@@ -723,6 +730,10 @@ async fn run_inline_single_stage(
         remote_artifact_stores: remote_artifact_stores.clone(),
         remote_aliases,
         min_cache_headroom: config.workflow.min_cache_headroom_bytes(),
+        allow_checkpoints: false,
+        checkpoint_control_dir: None,
+        checkpoint_run_id: None,
+        checkpoint_token: None,
     };
 
     // JSONL stream for `--jsonl` mode. Held behind an Option so we can
@@ -983,6 +994,11 @@ async fn run_with_yaml(
     } else {
         crate::workflow::discover::parse_all_with_provenance(repo_root, yaml_paths)?
     };
+    let remote_aliases = workflow_remote_aliases(config);
+    for stage in workflow.stages.values() {
+        validate_checkpoint_execution(stage, options.allow_checkpoints)?;
+        validate_stage_remote_capabilities(stage, &remote_aliases)?;
+    }
     let graph = Graph::build(&workflow.stages)?;
 
     let lockfile_mode = match config.workflow.lockfile {
@@ -1065,6 +1081,21 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
     for err in semantic_errors {
         let error = CrabError::from(err);
         errors.push(yaml_error_to_json(&error));
+    }
+
+    // Provider capability is part of validation, not a late child-process
+    // failure. Keep the same alias expansion and scheme registry used by the
+    // execution path so `--validate` cannot report a workflow as runnable
+    // when an external dependency or output has no live provider.
+    let config = Config::resolve_for_repo(repo_root).unwrap_or_default();
+    let remote_aliases = workflow_remote_aliases(&config);
+    for stage in workflow.stages.values() {
+        if let Err(error) = validate_checkpoint_execution(stage, false) {
+            errors.push(yaml_error_to_json(&error));
+        }
+        if let Err(error) = validate_stage_remote_capabilities(stage, &remote_aliases) {
+            errors.push(yaml_error_to_json(&error));
+        }
     }
 
     // Layer 3b: Graph-level checks (duplicate outs, cycles).
@@ -2389,6 +2420,10 @@ fn build_executor_cfg(
         remote_artifact_stores: None,
         remote_aliases: workflow_remote_aliases(config),
         min_cache_headroom: config.workflow.min_cache_headroom_bytes(),
+        allow_checkpoints: options.allow_checkpoints,
+        checkpoint_control_dir: options.checkpoint_control_dir,
+        checkpoint_run_id: options.checkpoint_run_id,
+        checkpoint_token: options.checkpoint_token,
     }
 }
 
@@ -3276,7 +3311,11 @@ fn resolve_dep_hashes_local(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
@@ -3759,6 +3798,56 @@ fn build_env_spec(args: &RunArgs) -> EnvSpec {
     } else {
         EnvSpec::Inherit
     }
+}
+
+fn validate_stage_remote_capabilities(
+    stage: &Stage,
+    remote_aliases: &BTreeMap<String, String>,
+) -> Result<()> {
+    for dep in &stage.deps {
+        match dep {
+            Dep::Url { url, .. } => {
+                crate::workflow::stage::validate_url_provider(
+                    url,
+                    remote_aliases,
+                    &format!("stage '{}' dependency", stage.name),
+                )?;
+            }
+            Dep::CrabRef { .. } | Dep::GitRef { .. } | Dep::OciImage { .. } => {
+                return Err(CrabError::Configuration {
+                    key: "workflow.remote_provider_unsupported".to_owned(),
+                    origin: format!(
+                        "stage '{}' declares a cross-repository or OCI dependency without a live provider",
+                        stage.name
+                    ),
+                });
+            }
+            Dep::Path(_) | Dep::StageOut { .. } => {}
+        }
+    }
+    for output in &stage.outs {
+        if output.is_external_url() {
+            crate::workflow::stage::validate_url_provider(
+                &output.path.to_string_lossy(),
+                remote_aliases,
+                &format!("stage '{}' external output", stage.name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_execution(stage: &Stage, allow_checkpoints: bool) -> Result<()> {
+    if !allow_checkpoints && stage.outs.iter().any(Out::is_checkpoint) {
+        return Err(CrabError::Configuration {
+            key: "workflow_checkpoint_requires_exp_run".to_owned(),
+            origin: format!(
+                "stage '{}' declares checkpoint outputs; use `crab exp run`",
+                stage.name
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn cli_dep(path: &PathBuf) -> Dep {
@@ -4698,6 +4787,26 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_run_rejects_checkpoint_before_planning() {
+        let mut stage = Stage::new(
+            StageName::parse("train").unwrap(),
+            Cmd::Argv(vec!["train".to_owned()]),
+        );
+        let mut output = Out::new(PathBuf::from("model.bin"), OutKind::File);
+        output.checkpoint = true;
+        stage.outs.push(output);
+
+        let error = validate_checkpoint_execution(&stage, false).unwrap_err();
+        assert!(matches!(
+            error,
+            CrabError::Configuration { key, origin }
+                if key == "workflow_checkpoint_requires_exp_run"
+                    && origin.contains("crab exp run")
+        ));
+        validate_checkpoint_execution(&stage, true).unwrap();
+    }
+
+    #[test]
     fn run_resolver_accepts_unpinned_http_url_dep() {
         let tmp = TempDir::new().unwrap();
         let stage = StageName::parse("fetch").unwrap();
@@ -4949,13 +5058,14 @@ mod tests {
     async fn workflow_disabled_returns_config_error() {
         let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized via ENV_GUARD.
-        unsafe { std::env::remove_var("CRAB_WORKFLOW_ENABLED") };
+        unsafe { std::env::set_var("CRAB_WORKFLOW_ENABLED", "false") };
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
         let args = base_args(tmp.path());
-        let err = run_in(&args, tmp.path(), OutputMode::Text)
-            .await
-            .expect_err("disabled workflow must fail");
+        let result = run_in(&args, tmp.path(), OutputMode::Text).await;
+        // SAFETY: serialized via ENV_GUARD.
+        unsafe { std::env::remove_var("CRAB_WORKFLOW_ENABLED") };
+        let err = result.expect_err("disabled workflow must fail");
         assert!(
             matches!(err, CrabError::WorkflowDisabled),
             "wrong variant: {err}"
@@ -5384,6 +5494,7 @@ mod tests {
             metrics: Vec::new(),
             plots: Vec::new(),
             plot_configs: Vec::new(),
+            artifacts: crab_workflow::ArtifactMetadata::default(),
             defaults: Defaults::default(),
             stages,
             workflow_membership: BTreeMap::new(),

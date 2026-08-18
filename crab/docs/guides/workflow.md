@@ -316,7 +316,7 @@ lists or dictionaries, matching DVC sweep definitions.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `artifacts` | map | DVC-compatible model/artifact metadata accepted for migration compatibility; ignored by workflow execution |
+| `artifacts` | map | Preserved and validated as non-executable catalog metadata; local `crab artifacts` lifecycle commands operate on immutable versions and CAS labels |
 | `params` | list of paths | Param files to expose to `crab params` and additional template resolution |
 | `metrics` | list of paths | Metric files to expose to `crab metrics` |
 | `plots` | list of paths or structured plot configs | Plot files, directories, or DVC-style plot IDs for `crab plots show` and `crab plots diff`; accepts multi-source `x`/`y` mappings and renders CSV, TSV, JSON/YAML object arrays, including nested arrays, plus JPEG/GIF/PNG/SVG images |
@@ -562,9 +562,10 @@ DVC-style URL strings in `deps:` are accepted for `http://`, `https://`,
 fetched/read and hashed as live external deps. `remote://name/path` aliases
 expand through `[workflow.remotes.<name>].url`; aliases are live-hashed when
 the expanded URL uses one of those supported backends. Pinned URL deps with a
-`b3:<64-hex>` digest participate in the stage hash without network access.
-SSH, HDFS, and WebHDFS URL deps still require a digest or a future provider
-resolver.
+`b3:<64-hex>` digest participate in the stage hash without network access only
+after provider preflight. SSH, SFTP, HDFS, WebHDFS, WebDAV, Drive, and OSS
+schemes are rejected before execution until a live provider is compiled and
+qualified; a digest does not bypass that capability check.
 Directory deps are allowed. Crab hashes them as a canonical tree
 manifest (sorted paths, NFC normalization, `.gitignore`-filtered).
 Symlinks, FIFOs, device files, and sockets are rejected.
@@ -849,7 +850,7 @@ Example stage block:
 
 ```yaml
 schema_version: 1
-crab_hash_algo: "crab.stage.v1"
+crab_hash_algo: "crab.stage.v3"
 stages:
   report:
     stage_hash: "b3:abc123..."
@@ -1980,21 +1981,19 @@ It was a cache hit. Either:
 - **Remote execution**: not implemented. Use `--remote-url` and you
   get `StageRemoteExecutionUnsupported`, NOT silent local fallthrough.
 - **URL deps**: pinned URL deps with `digest: "b3:<64-hex>"` are hashed from
-  the declared digest. DVC-style URL string deps are parsed as URL deps.
-  Digest-less `http://`, `https://`, `file://`, S3, GCS, Azure, and
-  `remote://` aliases backed by those URLs are fetched/read and hashed. SSH,
-  HDFS, and WebHDFS deps without a digest return
-  `StageRemoteExecutionUnsupported` until those resolvers land.
+  the declared digest after provider preflight. DVC-style URL string deps are
+  parsed as URL deps. Digest-less `http://`, `https://`, `file://`, S3, GCS,
+  Azure, and `remote://` aliases backed by those URLs are fetched/read and
+  hashed. SSH, SFTP, HDFS, WebHDFS, WebDAV, Drive, and OSS deps fail with a
+  typed provider-capability error before a stage starts.
 - **External outs**: absolute paths, `file://`, HTTP(S), S3, GCS, and Azure
   output URLs, plus `remote://` aliases backed by those URLs, are tracked when
   non-cached. Cached absolute and external URL outputs are rejected to prevent
   cache restore outside the workspace. SSH and HDFS output URLs still return
   `StageRemoteExecutionUnsupported`.
-- **Feature flag**: the layer is opt-in via
-  `crab config set workflow.enabled true`, which writes
-  `[workflow] enabled = true` in `.crab/config.toml`. Disabled: new commands
-  hidden from help and respond with `WorkflowDisabled`. Stock commands
-  unaffected either way.
+- **Feature flag**: fresh configs enable the layer by default. Set
+  `crab config set workflow.enabled false` for an explicit opt-out; disabled
+  commands respond with `WorkflowDisabled`. Stock commands are unaffected.
 - **Env `inherit` footgun**: the default. Silent spurious cache hits
   are possible if env varies. Consider `env: allowlist` in any
   pipeline you care about.

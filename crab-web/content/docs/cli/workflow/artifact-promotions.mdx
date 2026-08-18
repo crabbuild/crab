@@ -1,0 +1,16 @@
+---
+title: Artifact promotions
+description: Compare-and-swap promotion labels for immutable workflow versions.
+---
+
+Promote an existing immutable version with crab artifacts promote NAME VERSION
+STAGE. Stage names are normalized and validated; a stage is a mutable label,
+never part of the immutable manifest identity.
+
+Automation should pass --expected CURRENT_VERSION. A concurrent change then
+fails instead of silently overwriting the label. Promotion records the prior
+value and timestamp in the local audit history and copies no artifact bytes.
+
+Use crab artifacts show NAME to inspect versions and labels without hydrating
+payloads. Remote publication, clone visibility, and GC reachability remain
+blocked until the artifact remote gate passes.

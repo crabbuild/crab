@@ -17,6 +17,9 @@ pub struct Out {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
     pub persist: bool,
+    /// Preserve an acknowledged lineage point during experiment execution.
+    #[serde(default)]
+    pub checkpoint: bool,
     pub max_bytes: Option<u64>,
 }
 
@@ -35,6 +38,7 @@ impl Out {
             push: true,
             remote: None,
             persist: false,
+            checkpoint: false,
             max_bytes: None,
         }
     }
@@ -43,6 +47,12 @@ impl Out {
     #[must_use]
     pub fn is_external_url(&self) -> bool {
         is_external_url_out_path(&self.path)
+    }
+
+    /// Return true when this output participates in experiment checkpoint lineage.
+    #[must_use]
+    pub fn is_checkpoint(&self) -> bool {
+        self.checkpoint
     }
 
     /// Validate traversal, cache, push, remote, and external-output rules.
@@ -55,6 +65,15 @@ impl Out {
                 stage: stage_name.as_str().to_owned(),
                 path: self.path.clone(),
                 reason: "absolute out paths must set cache: false",
+            });
+        }
+        if self.checkpoint
+            && (!self.cache || self.kind == OutKind::Stdout || self.is_external_url())
+        {
+            return Err(WorkflowError::StageOutMalformed {
+                stage: stage_name.as_str().to_owned(),
+                path: self.path.clone(),
+                reason: "checkpoint outputs must be cached local file or directory outs",
             });
         }
         if self.is_external_url() {
@@ -140,6 +159,10 @@ pub fn is_external_url_out(value: &str) -> bool {
             | "sftp"
             | "hdfs"
             | "webhdfs"
+            | "webdav"
+            | "webdavs"
+            | "gdrive"
+            | "oss"
             | "remote"
     )
 }

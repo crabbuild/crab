@@ -37,34 +37,56 @@ For the automated migration command, see the full
 
 ## Migration Checklist
 
-1. Commit or stash current DVC work.
-2. Initialize Crab and enable Workflow:
+1. Commit or stash current DVC work. Keep `dvc.yaml`, `dvc.lock`, `.dvc/`,
+   `.dvc/cache/`, `.dvc/config`, and any tracked `.dvc` pointer files in place
+   until the data and lock migration is independently verified.
+2. Initialize Crab. Fresh configs enable Workflow; set `workflow.enabled = false`
+   only when you explicitly want to opt out:
 
    ```bash
    crab init crab://my-bucket/ml-project
+   # Optional explicit setting:
    crab config set workflow.enabled true
    ```
 
-3. Convert `dvc.yaml`:
+3. Start with a read-only inventory and converted definition:
+
+   ```bash
+   crab migrate from-dvc --plan --json
+   ```
+
+   Review every pointer, cache object, lock record, remote, provenance
+   record, and blocking finding. For a mapped DVC remote, pass an explicit
+   credential-free destination only after deciding which Crab remote owns it:
+
+   ```bash
+   crab migrate from-dvc --remote-map origin=crab://bucket/project
+   ```
+
+4. Run the repository-aware migration and validate:
 
    ```bash
    crab migrate from-dvc
-   ```
-
-4. Validate:
-
-   ```bash
    crab run --validate
    crab workflow dag
    ```
 
-5. Run once to create `crab.lock`:
+   The command writes `.crab/workflow/migration/dvc.json`, transfers verified
+   sources through Crab staging, and writes canonical pointers and `crab.lock`
+   only after the source and publication gates pass. A failed run retains the
+   journal and source state; resume only after the inventory is unchanged:
 
    ```bash
-   crab run
+   crab migrate from-dvc --resume
    ```
 
-6. Push git state and stage cache:
+5. Inspect `safe_to_remove_dvc` in the text or JSON report. It is false for
+   missing/corrupt/unknown records, unverified remote mappings, unsupported
+   checkpoints/providers, and artifacts awaiting lifecycle proof. It may be
+   true only after a fresh Crab clone restores the migrated tree byte-for-byte
+   (including modes) and the journal contains clean-clone evidence.
+
+6. Push Git state and stage cache only after the report is understood:
 
    ```bash
    git add crab.yaml crab.lock params.yaml
@@ -73,7 +95,11 @@ For the automated migration command, see the full
    crab workflow push-cache --all
    ```
 
-7. Remove DVC files after the Crab workflow is verified.
+7. Do not remove DVC files unless the report explicitly says
+   `safe_to_remove_dvc: true`. The command never deletes or rewrites
+   `dvc.yaml`, `dvc.lock`, `.dvc/`, cache objects, remotes, workspace data, or
+   pointer files. A manual cleanup after a verified cutover is outside the
+   migration command.
 
 ## YAML Compatibility
 
@@ -93,13 +119,26 @@ Most DVC fields map directly:
 | `matrix` | Supported. |
 | `vars` and `${...}` | Supported for templating. |
 | `always_changed` | Supported as DVC-compatible spelling for nondeterministic stages. |
+| `artifacts` | Preserved and validated as catalog metadata. Local `crab artifacts` list/show/get/version/promote/history is available; migration remains cutover-blocked until remote publication, clean-clone, and GC evidence pass. |
 
 ## Behavior Differences
 
-- Crab Workflow must be enabled with `crab config set workflow.enabled true`.
+- Crab Workflow is enabled by default for fresh configs; set
+  `workflow.enabled = false` for an explicit opt-out.
 - Stage cache is shared through the Crab remote with `crab run --cache-push` or
   `crab workflow push-cache --all`.
 - Large files should be tracked with Crab's file layer, not a DVC remote.
+- `checkpoint` outputs are rejected with `dvc_checkpoint_unsupported`; they
+  are never silently rewritten to `persist`. Hand-authored Crab checkpoints
+  belong to `crab exp run`, not ordinary `run`/`repro`.
+- The migration command inventories and transfers supported local sources, but
+  it does not infer or live-verify a DVC remote destination. Use
+  `--remote-map`, then satisfy the provider and clean-clone gates before
+  treating the result as safe.
+- Top-level `artifacts:` declarations are preserved and validated as catalog
+  metadata. See the artifact lifecycle pages for local versioning and
+  promotion; remote publication and GC reachability are not claimed by
+  migration until their release evidence exists.
 - Local experiment metadata lives under `.crab/workflow/exp/`.
 - Run journals live under `.crab/workflow/runs/`.
 - Split workflow files can use `workflow.discover recursive` and
@@ -139,10 +178,14 @@ For strict read-only verification:
 crab run --cache-only --json
 ```
 
-## Final Cutover
+## Cutover status
 
-Only remove DVC files after a clean Crab run, metrics check, and remote cache
-push:
+The converter is not a cutover gate. A clean Crab run, metrics check, and
+remote cache push are necessary but insufficient because DVC cache, remotes,
+pointer files, workspace data, and lock state are not imported yet. Keep the
+DVC inputs until a dedicated importer has verified a fresh-clone restore.
+
+For now, use the following as validation only:
 
 ```bash
 crab run
@@ -151,5 +194,6 @@ crab plots show
 crab workflow push-cache --all
 ```
 
-Then remove DVC-specific files and update CI scripts. Keep the DVC branch around
-until the first Crab-backed release is reproducible from a fresh clone.
+Do not remove DVC-specific files or uninstall DVC based on this workflow
+converter. Removal becomes safe only after the data migration and restore
+qualification work is complete.

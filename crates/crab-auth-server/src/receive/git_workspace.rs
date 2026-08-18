@@ -19,8 +19,8 @@ use object_store::path::Path as ObjectPath;
 use crate::error::{AuthServerError, Result};
 
 use super::{
-    MaterializedSourcePush, ProtectedPushPlan, PushPrepareRecord, conflict, invalid,
-    validate_ref_update, validate_sha1,
+    MaterializedSourcePush, ProtectedPushPlan, PushPrepareRecord, conflict, derive_peeled_refs,
+    invalid, validate_ref_update, validate_sha1,
 };
 
 pub(super) async fn compute_changed_paths(
@@ -60,6 +60,17 @@ pub(super) async fn install_base_packs(
 ) -> Result<()> {
     GitReceiveWorkspace::new(store, router, router.repo_prefix())
         .install_base_packs(git_dir)
+        .await
+}
+
+pub(super) async fn install_manifest_packs(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    manifest: &Manifest,
+    git_dir: &Path,
+) -> Result<()> {
+    GitReceiveWorkspace::new(store, router, router.repo_prefix())
+        .install_manifest_packs(router, manifest, git_dir)
         .await
 }
 
@@ -150,9 +161,20 @@ impl<'a> GitReceiveWorkspace<'a> {
                 }
             }
         }
+        let mut final_refs = base.map_or_else(BTreeMap::new, |manifest| manifest.refs.clone());
+        for update in &final_updates {
+            if update.new_oid.is_empty() {
+                final_refs.remove(&update.ref_name);
+            } else {
+                final_refs.insert(update.ref_name.clone(), update.new_oid.clone());
+            }
+        }
+        let final_refs = final_refs.into_iter().collect::<Vec<_>>();
+        let peeled_refs = derive_peeled_refs(&git_dir, &final_refs)?;
         Ok(MaterializedSourcePush {
             ref_updates: final_updates,
             packs,
+            peeled_refs,
         })
     }
 

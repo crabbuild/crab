@@ -79,6 +79,12 @@ class SmokeReport:
     remote: str
     root: str
     endpoint_url: str
+    source_sha: str
+    workflow_run_id: str
+    workflow_run_attempt: str
+    crab_version: str
+    platform: str
+    rustfs_image: str
     env: dict[str, str]
     commands: list[dict[str, Any]] = field(default_factory=list)
     checks: list[dict[str, Any]] = field(default_factory=list)
@@ -107,6 +113,12 @@ class Smoke:
             remote=self.remote,
             root=str(self.run_root),
             endpoint_url=args.endpoint_url,
+            source_sha=os.environ.get("GITHUB_SHA", "unknown"),
+            workflow_run_id=os.environ.get("GITHUB_RUN_ID", "local"),
+            workflow_run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+            crab_version="unknown",
+            platform=os.name,
+            rustfs_image=os.environ.get("CRAB_RUSTFS_IMAGE", "unknown"),
             env=redact_env(self.env),
         )
 
@@ -563,8 +575,11 @@ stages:
         usage = shutil.disk_usage(self.root)
         self.check(
             "workspace-free-space",
-            usage.free > 20 * 1024**3,
-            {"free_gib": round(usage.free / 1024**3, 2)},
+            usage.free >= self.args.min_free_bytes,
+            {
+                "free_gib": round(usage.free / 1024**3, 2),
+                "required_bytes": self.args.min_free_bytes,
+            },
         )
         try:
             with urllib.request.urlopen(self.args.endpoint_url, timeout=5) as response:
@@ -841,6 +856,9 @@ Path('hydra_metrics.json').write_text(json.dumps({
         self.write_report()
         try:
             self.preflight()
+            version = self.run_cmd("crab version", ["crab", "--version"], self.run_root)
+            self.report.crab_version = self.text(version).strip()
+            self.write_report()
             self.git("git init source", ["init", "-b", "main"], self.source)
             self.git("git config email", ["config", "user.email", "dvc-e2e@crab.local"], self.source)
             self.git("git config name", ["config", "user.name", "Crab DVC E2E"], self.source)
@@ -1193,6 +1211,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--access-key", default="crab")
     parser.add_argument("--secret-key", default="crab")
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--min-free-bytes",
+        type=int,
+        default=20 * 1024**3,
+        help="Minimum free space required before running the smoke (default: 20 GiB).",
+    )
     return parser.parse_args()
 
 

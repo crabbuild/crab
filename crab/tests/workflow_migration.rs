@@ -69,7 +69,7 @@ fn v1_cache_entry_json(stage_hash_bytes: &[u8; 32]) -> String {
 /// Build a v1 lockfile YAML string (missing `source` and potentially
 /// missing `attempts`).
 fn v1_lockfile_yaml_no_source_no_attempts() -> String {
-    r#"crab_hash_algo: "crab.stage.v1"
+    r#"crab_hash_algo: "crab.stage.v3"
 schema_version: 1
 stages:
   train:
@@ -98,7 +98,7 @@ stages:
 
 /// Build a v1 lockfile YAML string that has `attempts` but no `source`.
 fn v1_lockfile_yaml_with_attempts_no_source() -> String {
-    r#"crab_hash_algo: "crab.stage.v1"
+    r#"crab_hash_algo: "crab.stage.v3"
 schema_version: 1
 stages:
   train:

@@ -339,10 +339,7 @@ fn walk_path<'v>(root: &'v Value, path: &str) -> Option<&'v Value> {
         match current {
             Value::Mapping(map) => {
                 let key = Value::String((*segment).to_owned());
-                match map.get(&key) {
-                    Some(v) => current = v,
-                    None => return None,
-                }
+                current = map.get(&key)?;
             }
             Value::Sequence(seq) => {
                 // Try numeric index access.

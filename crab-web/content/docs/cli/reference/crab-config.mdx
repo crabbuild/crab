@@ -32,7 +32,7 @@ For conceptual background, see [Configuration](/docs/cli/authentication/configur
 | `hydrate.include` | array | `[]` | Default include patterns for `crab hydrate`. |
 | `hydrate.exclude` | array | `[]` | Default exclude patterns for `crab hydrate`. |
 | `hydrate.auto` | boolean | `false` | Automatically hydrate matching files. |
-| `workflow.enabled` | boolean | `false` | Enable workflow, stage, experiment, metric, plot, and queue commands. |
+| `workflow.enabled` | boolean | `true` | Enable workflow, stage, experiment, metric, plot, and queue commands. Set `false` for an explicit opt-out. |
 | `workflow.discover` | enum | `root` | Use `root` discovery, or `recursive` for nested `crab.yaml` and `*.workflow.yaml` files. |
 | `workflow.lockfile` | enum | `single` | Use one `crab.lock`, or `split` for per-workflow lockfiles. |
 | `workflow.parallelism` | integer | `4` | Maximum concurrent stage executions unless overridden by `--parallelism`. |

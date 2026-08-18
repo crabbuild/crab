@@ -41,14 +41,16 @@
 //!   files left behind by crashed workers.
 //! - `gc` — prune local experiment metadata beyond a keep count.
 //!
-//! Not in scope yet:
-//! - Extending the GC live-set walker to cover experiment refs.
-//! - Remote stage-cache hydration during `exp pull`; `workflow
-//!   push-cache` / `run --pull-cache` remain the cache transport.
+//! Release qualification still requires a GC live-set audit for checkpoint
+//! objects and remote clean-clone evidence. Remote stage-cache hydration
+//! during `exp pull` remains separate; `workflow push-cache` / `run
+//! --pull-cache` are the cache transport.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -64,7 +66,10 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crab_workflow::{ExpQueue, ExpQueueEntry, ExpStatus, ExperimentId, Lockfile};
+use crab_workflow::{
+    CHECKPOINT_SCHEMA_VERSION, CheckpointLineage, CheckpointRecord, ExpQueue, ExpQueueEntry,
+    ExpStatus, ExperimentId, Lockfile, snapshot_payload,
+};
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result};
@@ -95,6 +100,8 @@ pub const EXP_LS_SCHEMA: &str = "workflow.exp.ls";
 pub const EXP_PROMOTE_SCHEMA: &str = "workflow.exp.promote";
 /// Schema label for `crab exp apply` structured output.
 pub const EXP_APPLY_SCHEMA: &str = "workflow.exp.apply";
+/// Schema label for `crab exp reset` structured output.
+pub const EXP_RESET_SCHEMA: &str = "workflow.exp.reset";
 /// Schema label for `crab exp save` structured output.
 pub const EXP_SAVE_SCHEMA: &str = "workflow.exp.save";
 /// Schema label for `crab exp rename` structured output.
@@ -166,6 +173,7 @@ pub(crate) struct ExpRunExecutionOptions {
     all_pipelines: bool,
     glob: bool,
     copy_paths: Vec<PathBuf>,
+    resume: Option<String>,
 }
 
 impl Default for ExpRunExecutionOptions {
@@ -189,6 +197,7 @@ impl Default for ExpRunExecutionOptions {
             all_pipelines: false,
             glob: false,
             copy_paths: Vec::new(),
+            resume: None,
         }
     }
 }
@@ -214,6 +223,7 @@ impl ExpRunExecutionOptions {
             all_pipelines: args.all_pipelines,
             glob: args.glob,
             copy_paths: args.copy_paths.clone(),
+            resume: args.resume.clone(),
         }
     }
 
@@ -361,6 +371,11 @@ pub struct RunArgs {
     /// experiment worktree before running.
     #[arg(long = "copy-paths", short = 'C', value_name = "PATH")]
     pub copy_paths: Vec<PathBuf>,
+
+    /// Resume a new experiment from the latest acknowledged checkpoint of
+    /// this experiment id or unambiguous prefix.
+    #[arg(long, value_name = "EXPERIMENT")]
+    pub resume: Option<String>,
 
     /// Max parallel stages. Reserved for future parallel DAG
     /// execution; ignored for now.
@@ -641,12 +656,39 @@ pub struct ApplyArgs {
     /// Experiment id or unambiguous prefix to apply to the workspace.
     pub id: String,
 
+    /// Optional checkpoint id or sequence to apply instead of the terminal
+    /// workspace snapshot.
+    #[arg(long, value_name = "CHECKPOINT")]
+    pub checkpoint: Option<String>,
+
     /// Structured JSON output (single envelope).
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
 
 impl ApplyArgs {
+    fn output_mode(&self) -> OutputMode {
+        OutputMode::from_flags(self.json, false)
+    }
+}
+
+/// Args for `crab exp reset <id>`.
+#[derive(Debug, Clone, Parser)]
+pub struct ResetArgs {
+    /// Experiment id or unambiguous prefix whose checkpoint lineage is reset.
+    pub id: String,
+
+    /// Keep the selected checkpoint as the resume base. Without a selector,
+    /// all acknowledged checkpoints are discarded from the active lineage.
+    #[arg(long, value_name = "CHECKPOINT")]
+    pub checkpoint: Option<String>,
+
+    /// Structured JSON output (single envelope).
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+impl ResetArgs {
     fn output_mode(&self) -> OutputMode {
         OutputMode::from_flags(self.json, false)
     }
@@ -1004,6 +1046,16 @@ pub struct ExpApplyPayload {
     pub exp_id: String,
     pub applied: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+}
+
+/// Payload emitted by `exp reset`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ExpResetPayload {
+    pub exp_id: String,
+    pub checkpoint: Option<String>,
+    pub reset_stages: Vec<String>,
 }
 
 /// Payload emitted by `exp save`.
@@ -1168,6 +1220,12 @@ pub fn exec_apply(args: ApplyArgs) -> Result<()> {
     run_exp_apply(&args, &cwd).map(|_| ())
 }
 
+/// `crab exp reset`.
+pub fn exec_reset(args: ResetArgs) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    run_exp_reset(&args, &cwd).map(|_| ())
+}
+
 /// `crab exp save`.
 pub fn exec_save(args: SaveArgs) -> Result<()> {
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
@@ -1292,7 +1350,28 @@ pub(crate) async fn run_exp_run_with_id(
     };
     let base_commit = worktree.base_commit.clone();
     let tmpdir_path = worktree.path.clone();
+    let checkpoint_control_dir = crate::cmd::workflow_checkpoint::create_control_directory(
+        &tmpdir_path,
+        &exp_id.to_string(),
+    )?;
+    let checkpoint_token = crate::cmd::workflow_checkpoint::control_token(&exp_id.to_string());
     copy_paths_into_experiment(repo_root, &tmpdir_path, &options.copy_paths)?;
+    if let Some(source) = options.resume.as_deref() {
+        let source_id = resolve_experiment_id(repo_root, source)?;
+        let records = checkpoint_records(repo_root, &source_id)?;
+        let record = records
+            .iter()
+            .rev()
+            .find(|record| record.resumable)
+            .ok_or_else(|| CrabError::Configuration {
+                key: "exp run --resume".to_owned(),
+                origin: format!("experiment {source_id} has no acknowledged checkpoint"),
+            })?;
+        let source_state = checkpoint_state_dir(repo_root, &source_id);
+        let target_state = checkpoint_state_dir(repo_root, &exp_id);
+        copy_checkpoint_state(&source_state, &target_state)?;
+        apply_checkpoint_record_to(&target_state, &tmpdir_path, record)?;
+    }
     let _active_queue_run = if is_queued_run {
         Some(crate::cmd::exp_queue::mark_queue_run_active(
             repo_root,
@@ -1375,7 +1454,17 @@ pub(crate) async fn run_exp_run_with_id(
         cmd: options.targets.clone(),
     };
 
-    let dag_result = crate::cmd::run::run_in_with_options(
+    let (checkpoint_stop_tx, checkpoint_stop_rx) = tokio::sync::oneshot::channel();
+    let checkpoint_supervisor = tokio::spawn(crate::cmd::workflow_checkpoint::supervise(
+        checkpoint_control_dir.clone(),
+        tmpdir_path.clone(),
+        repo_root.to_path_buf(),
+        exp_id.to_string(),
+        checkpoint_token.clone(),
+        checkpoint_stop_rx,
+    ));
+
+    let mut dag_result = crate::cmd::run::run_in_with_options(
         &run_args,
         &tmpdir_path,
         OutputMode::Text,
@@ -1384,9 +1473,32 @@ pub(crate) async fn run_exp_run_with_id(
             external_kill_path: is_queued_run
                 .then(|| crate::cmd::exp_queue::queue_kill_path(repo_root, &exp_id.to_string())),
             child_started: queue_child_started,
+            allow_checkpoints: true,
+            checkpoint_control_dir: Some(checkpoint_control_dir.clone()),
+            checkpoint_run_id: Some(exp_id.to_string()),
+            checkpoint_token: Some(checkpoint_token),
         },
     )
     .await;
+    if dag_result.is_ok()
+        && let Err(error) = crate::cmd::workflow_checkpoint::finalize_checkpoints(
+            &tmpdir_path,
+            repo_root,
+            &exp_id.to_string(),
+        )
+    {
+        dag_result = Err(error);
+    }
+    let _ = checkpoint_stop_tx.send(());
+    let supervisor_result = checkpoint_supervisor
+        .await
+        .map_err(|error| CrabError::Internal(format!("checkpoint supervisor failed: {error}")))?;
+    if let Err(error) = supervisor_result
+        && dag_result.is_ok()
+    {
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(&checkpoint_control_dir);
     let status = if dag_result.is_ok() {
         "success"
     } else {
@@ -1535,6 +1647,16 @@ pub fn run_exp_show(args: &ShowArgs, repo_root: &Path) -> Result<()> {
     let metadata_value = serde_json::to_value(&metadata).map_err(|e| {
         CrabError::Internal(format!("serialize experiment metadata for {exp_id}: {e}"))
     })?;
+    let checkpoints = checkpoint_records(repo_root, &exp_id)?;
+    let mut metadata_value = metadata_value;
+    if let serde_json::Value::Object(object) = &mut metadata_value {
+        object.insert(
+            "checkpoints".to_owned(),
+            serde_json::to_value(&checkpoints).map_err(|error| {
+                CrabError::Internal(format!("serialize checkpoints for {exp_id}: {error}"))
+            })?,
+        );
+    }
     let payload = ExpShowPayload {
         metadata: metadata_value,
     };
@@ -1597,16 +1719,678 @@ pub fn run_exp_promote(args: &PromoteArgs, repo_root: &Path) -> Result<()> {
 pub fn run_exp_apply(args: &ApplyArgs, repo_root: &Path) -> Result<ExpApplyPayload> {
     let exp_id = resolve_experiment_id(repo_root, &args.id)?;
     read_local_metadata(repo_root, &exp_id)?;
-    let (applied, deleted) =
-        apply_experiment_snapshot_to(repo_root, &exp_id, repo_root, "exp apply")?;
+    let (applied, deleted) = if let Some(selector) = args.checkpoint.as_deref() {
+        let record = select_checkpoint_record(repo_root, &exp_id, selector)?;
+        (
+            apply_checkpoint_record_to(
+                &checkpoint_state_dir(repo_root, &exp_id),
+                repo_root,
+                &record,
+            )?,
+            Vec::new(),
+        )
+    } else {
+        apply_experiment_snapshot_to(repo_root, &exp_id, repo_root, "exp apply")?
+    };
 
     let payload = ExpApplyPayload {
         exp_id: exp_id.to_string(),
         applied,
         deleted,
+        checkpoint: args.checkpoint.clone(),
     };
     emit_apply(&payload, args.output_mode());
     Ok(payload)
+}
+
+/// Testable `exp reset` entry point.
+pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPayload> {
+    let exp_id = resolve_experiment_id(repo_root, &args.id)?;
+    read_local_metadata(repo_root, &exp_id)?;
+    let state_root = checkpoint_state_dir(repo_root, &exp_id);
+    let state_parent = state_root
+        .parent()
+        .ok_or_else(|| CrabError::Configuration {
+            key: "exp reset".to_owned(),
+            origin: format!(
+                "checkpoint state path has no parent: {}",
+                state_root.display()
+            ),
+        })?;
+    ensure_checkpoint_parent_not_symlink(state_parent)?;
+    fs::create_dir_all(state_parent).map_err(CrabError::Io)?;
+    let paths = checkpoint_lineage_paths(&state_root)?;
+    let selected = args
+        .checkpoint
+        .as_deref()
+        .map(|selector| select_checkpoint_from_paths(&paths, selector))
+        .transpose()?;
+    let mut reset_stages = Vec::new();
+    let mut staged_lineages = Vec::new();
+    for path in &paths {
+        let lineage = load_checkpoint_lineage(&path)?;
+        let stage = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let next = match &selected {
+            Some((selected_stage, selected_record)) if selected_stage == &stage => {
+                lineage.reset_to(&selected_record.id)?
+            }
+            Some(_) => lineage.clone(),
+            None => CheckpointLineage::default(),
+        };
+        if next != lineage {
+            staged_lineages.push((
+                path.file_name()
+                    .map(std::ffi::OsString::from)
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: "exp reset".to_owned(),
+                        origin: path.display().to_string(),
+                    })?,
+                next,
+            ));
+            reset_stages.push(stage);
+        }
+    }
+
+    let temporary = state_parent.join(format!(".{exp_id}.reset-{}", uuid::Uuid::now_v7()));
+    let result = (|| {
+        match fs::symlink_metadata(&state_root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CrabError::Configuration {
+                    key: "exp reset checkpoint state".to_owned(),
+                    origin: format!("state root is not a directory: {}", state_root.display()),
+                });
+            }
+            Ok(_) => copy_checkpoint_tree(&state_root, &temporary)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&temporary).map_err(CrabError::Io)?;
+            }
+            Err(error) => return Err(CrabError::Io(error)),
+        }
+
+        for (file_name, lineage) in staged_lineages {
+            lineage
+                .save_atomic(&temporary.join(file_name))
+                .map_err(|error| CrabError::Configuration {
+                    key: "exp reset".to_owned(),
+                    origin: error.to_string(),
+                })?;
+        }
+
+        let decision = serde_json::json!({
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "experiment": exp_id.to_string(),
+            "checkpoint": args.checkpoint,
+            "reset_stages": reset_stages,
+            "created_at": crab_types::time::now_rfc3339_millis(),
+        });
+        write_checkpoint_reset_decision(&temporary, &decision)?;
+        validate_checkpoint_state(&temporary)?;
+        commit_checkpoint_state_reset(&temporary, &state_root)
+    })();
+    if let Err(error) = result {
+        let _ = remove_existing_path(&temporary);
+        return Err(error);
+    }
+    let payload = ExpResetPayload {
+        exp_id: exp_id.to_string(),
+        checkpoint: args.checkpoint.clone(),
+        reset_stages,
+    };
+    emit_reset(&payload, args.output_mode());
+    Ok(payload)
+}
+
+fn commit_checkpoint_state_reset(temporary: &Path, state_root: &Path) -> Result<()> {
+    let parent = state_root
+        .parent()
+        .ok_or_else(|| CrabError::Configuration {
+            key: "exp reset".to_owned(),
+            origin: format!(
+                "checkpoint state path has no parent: {}",
+                state_root.display()
+            ),
+        })?;
+    ensure_checkpoint_parent_not_symlink(parent)?;
+    let backup = parent.join(format!(
+        ".{}.reset-backup-{}",
+        state_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("checkpoint"),
+        uuid::Uuid::now_v7()
+    ));
+    let had_state = match fs::symlink_metadata(state_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(CrabError::Configuration {
+                key: "exp reset checkpoint state".to_owned(),
+                origin: format!("state root is not a directory: {}", state_root.display()),
+            });
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(CrabError::Io(error)),
+    };
+    if had_state {
+        fs::rename(state_root, &backup).map_err(CrabError::Io)?;
+    }
+    if let Err(error) = fs::rename(temporary, state_root) {
+        if had_state {
+            let _ = fs::rename(&backup, state_root);
+        }
+        return Err(CrabError::Io(error));
+    }
+    if had_state && let Err(error) = fs::remove_dir_all(&backup) {
+        tracing::warn!(path = %backup.display(), error = %error, "checkpoint reset backup cleanup deferred");
+    }
+    Ok(())
+}
+
+fn checkpoint_state_dir(repo_root: &Path, exp_id: &ExperimentId) -> PathBuf {
+    repo_root
+        .join(".crab/workflow/checkpoints")
+        .join(exp_id.to_string())
+}
+
+fn copy_checkpoint_state(source: &Path, destination: &Path) -> Result<()> {
+    let source_metadata = fs::symlink_metadata(source).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CrabError::Configuration {
+                key: "workflow checkpoint state missing".to_owned(),
+                origin: source.display().to_string(),
+            }
+        } else {
+            CrabError::Io(error)
+        }
+    })?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint state invalid".to_owned(),
+            origin: source.display().to_string(),
+        });
+    }
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint state collision".to_owned(),
+            origin: destination.display().to_string(),
+        });
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| CrabError::Configuration {
+            key: "workflow checkpoint state path invalid".to_owned(),
+            origin: destination.display().to_string(),
+        })?;
+    ensure_checkpoint_parent_not_symlink(parent)?;
+    fs::create_dir_all(parent).map_err(CrabError::Io)?;
+    let temporary = parent.join(format!(
+        ".{}.resume-{}",
+        destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("checkpoint"),
+        uuid::Uuid::now_v7()
+    ));
+    let result = copy_checkpoint_tree(source, &temporary)
+        .and_then(|()| validate_checkpoint_state(&temporary))
+        .and_then(|()| fs::rename(&temporary, destination).map_err(CrabError::Io));
+    if let Err(error) = result {
+        let _ = remove_existing_path(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn ensure_checkpoint_parent_not_symlink(parent: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        if matches!(component, Component::CurDir) {
+            continue;
+        }
+        current.push(component.as_os_str());
+        if let Ok(metadata) = fs::symlink_metadata(&current)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint state parent symlink".to_owned(),
+                origin: current.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn copy_checkpoint_tree(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source).map_err(CrabError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint state symlink".to_owned(),
+            origin: source.display().to_string(),
+        });
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).map_err(CrabError::Io)?;
+        let mut entries = fs::read_dir(source)
+            .map_err(CrabError::Io)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(CrabError::Io)?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains(".tmp-")
+                || name.contains(".backup-")
+                || name.contains(".resume-")
+                || name.contains(".pull-")
+                || name.ends_with(".lock")
+            {
+                continue;
+            }
+            copy_checkpoint_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        preserve_mode(source, destination)?;
+        return Ok(());
+    }
+    if metadata.is_file() {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(CrabError::Io)?;
+        }
+        fs::copy(source, destination).map_err(CrabError::Io)?;
+        preserve_mode(source, destination)?;
+        return Ok(());
+    }
+    Err(CrabError::Configuration {
+        key: "workflow checkpoint state entry invalid".to_owned(),
+        origin: source.display().to_string(),
+    })
+}
+
+fn checkpoint_lineage_paths(state_root: &Path) -> Result<Vec<PathBuf>> {
+    if !state_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(state_root)
+        .map_err(CrabError::Io)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_lineage = entry.file_type().ok().is_some_and(|kind| kind.is_file())
+                && path.extension().and_then(|value| value.to_str()) == Some("json")
+                && path.file_name().and_then(|value| value.to_str()) != Some("reset.json");
+            is_lineage.then_some(path)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn load_checkpoint_lineage(path: &Path) -> Result<CheckpointLineage> {
+    CheckpointLineage::load(path).map_err(|error| CrabError::Configuration {
+        key: "workflow checkpoint lineage".to_owned(),
+        origin: format!("{}: {error}", path.display()),
+    })
+}
+
+fn checkpoint_records(repo_root: &Path, exp_id: &ExperimentId) -> Result<Vec<CheckpointRecord>> {
+    let paths = checkpoint_lineage_paths(&checkpoint_state_dir(repo_root, exp_id))?;
+    let mut records = Vec::new();
+    for path in paths {
+        records.extend(load_checkpoint_lineage(&path)?.records);
+    }
+    records.sort_by(|left, right| {
+        left.created_at_unix_ms
+            .cmp(&right.created_at_unix_ms)
+            .then_with(|| left.stage.cmp(&right.stage))
+            .then_with(|| left.sequence.cmp(&right.sequence))
+    });
+    Ok(records)
+}
+
+fn select_checkpoint_record(
+    repo_root: &Path,
+    exp_id: &ExperimentId,
+    selector: &str,
+) -> Result<CheckpointRecord> {
+    let paths = checkpoint_lineage_paths(&checkpoint_state_dir(repo_root, exp_id))?;
+    select_checkpoint_from_paths(&paths, selector).map(|(_, record)| record)
+}
+
+fn select_checkpoint_from_paths(
+    paths: &[PathBuf],
+    selector: &str,
+) -> Result<(String, CheckpointRecord)> {
+    let mut matches = Vec::new();
+    for path in paths {
+        let lineage = load_checkpoint_lineage(path)?;
+        let stage = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        for record in lineage.records {
+            if record.id == selector
+                || selector
+                    .parse::<u64>()
+                    .is_ok_and(|sequence| record.sequence == sequence)
+            {
+                matches.push((stage.clone(), record));
+            }
+        }
+    }
+    match matches.as_slice() {
+        [(stage, record)] => Ok((stage.clone(), record.clone())),
+        [] => Err(CrabError::Configuration {
+            key: "workflow checkpoint".to_owned(),
+            origin: format!("checkpoint selector '{selector}' was not found"),
+        }),
+        _ => Err(CrabError::Configuration {
+            key: "workflow checkpoint".to_owned(),
+            origin: format!("checkpoint selector '{selector}' is ambiguous"),
+        }),
+    }
+}
+
+fn apply_checkpoint_record_to(
+    state_root: &Path,
+    target_root: &Path,
+    record: &CheckpointRecord,
+) -> Result<Vec<PathBuf>> {
+    let mut entries = record
+        .outputs
+        .iter()
+        .map(|(relative, hash)| (relative.as_str(), hash.as_str(), "output"))
+        .collect::<Vec<_>>();
+    entries.extend(
+        record
+            .metrics
+            .iter()
+            .map(|(relative, hash)| (relative.as_str(), hash.as_str(), "metric")),
+    );
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint".to_owned(),
+            origin: format!("checkpoint {} has duplicate output/metric paths", record.id),
+        });
+    }
+    if entries.windows(2).any(|pair| {
+        let left = Path::new(pair[0].0);
+        let right = Path::new(pair[1].0);
+        left.starts_with(right) || right.starts_with(left)
+    }) {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint".to_owned(),
+            origin: format!(
+                "checkpoint {} has overlapping output/metric paths",
+                record.id
+            ),
+        });
+    }
+
+    let mut prepared = Vec::with_capacity(entries.len());
+    for (index, (relative, hash, kind)) in entries.iter().enumerate() {
+        let relative = PathBuf::from(relative);
+        if let Err(error) = ensure_safe_workspace_relpath(&relative) {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(error);
+        }
+        let Some(digest) = (*hash).strip_prefix("b3:") else {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint".to_owned(),
+                origin: format!("checkpoint {} has an invalid {kind} hash", record.id),
+            });
+        };
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint".to_owned(),
+                origin: format!("checkpoint {} has an invalid {kind} hash", record.id),
+            });
+        }
+        let source = state_root.join("objects").join(digest).join("payload");
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                remove_prepared_checkpoint_temporaries(&prepared);
+                return Err(CrabError::Configuration {
+                    key: "workflow checkpoint object missing".to_owned(),
+                    origin: format!("{}: {error}", source.display()),
+                });
+            }
+        };
+        if !metadata.file_type().is_file() && !metadata.file_type().is_dir() {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint object invalid".to_owned(),
+                origin: source.display().to_string(),
+            });
+        }
+        let actual = match checkpoint_payload_hash(&source) {
+            Ok(actual) => actual,
+            Err(error) => {
+                remove_prepared_checkpoint_temporaries(&prepared);
+                return Err(error);
+            }
+        };
+        if actual != digest {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint object corrupt".to_owned(),
+                origin: format!("{}: expected {digest}, got {actual}", source.display()),
+            });
+        }
+        let target = target_root.join(&relative);
+        if let Some(parent) = target.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(CrabError::Io(error));
+        }
+        let temporary = target.with_file_name(format!(
+            ".{}.checkpoint-tmp-{}-{index}-{}",
+            target
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("output"),
+            std::process::id(),
+            crab_types::time::now_rfc3339_millis().replace(':', "")
+        ));
+        if let Err(error) = remove_existing_path(&temporary) {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            return Err(error);
+        }
+        if let Err(error) = snapshot_payload(&source, &temporary) {
+            remove_prepared_checkpoint_temporaries(&prepared);
+            let _ = remove_existing_path(&temporary);
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint apply".to_owned(),
+                origin: error.to_string(),
+            });
+        }
+        prepared.push((relative, temporary, target));
+    }
+
+    let mut swaps = Vec::with_capacity(prepared.len());
+    for (index, (_, temporary, target)) in prepared.iter().enumerate() {
+        match CheckpointTargetSwap::apply(temporary, target) {
+            Ok(swap) => swaps.push(swap),
+            Err(error) => {
+                for swap in swaps.into_iter().rev() {
+                    drop(swap);
+                }
+                for (_, temporary, _) in prepared.iter().skip(index) {
+                    let _ = remove_existing_path(temporary);
+                }
+                return Err(error);
+            }
+        }
+    }
+    for swap in swaps {
+        swap.finish();
+    }
+    let mut applied = prepared
+        .into_iter()
+        .map(|(relative, _, _)| relative)
+        .collect::<Vec<_>>();
+    applied.sort();
+    Ok(applied)
+}
+
+fn remove_prepared_checkpoint_temporaries(prepared: &[(PathBuf, PathBuf, PathBuf)]) {
+    for (_, temporary, _) in prepared {
+        let _ = remove_existing_path(temporary);
+    }
+}
+
+struct CheckpointTargetSwap {
+    target: PathBuf,
+    backup: Option<PathBuf>,
+    committed: bool,
+}
+
+impl CheckpointTargetSwap {
+    fn apply(temporary: &Path, target: &Path) -> Result<Self> {
+        let backup = target.with_file_name(format!(
+            ".{}.checkpoint-backup-{}-{}",
+            target
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("output"),
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let had_target = match fs::symlink_metadata(target) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(CrabError::Io(error)),
+        };
+        if had_target {
+            fs::rename(target, &backup).map_err(CrabError::Io)?;
+        }
+        if let Err(error) = fs::rename(temporary, target) {
+            if had_target {
+                let _ = fs::rename(&backup, target);
+            }
+            return Err(CrabError::Io(error));
+        }
+        Ok(Self {
+            target: target.to_owned(),
+            backup: had_target.then_some(backup),
+            committed: false,
+        })
+    }
+
+    fn finish(mut self) {
+        self.committed = true;
+        if let Some(backup) = self.backup.take()
+            && let Err(error) = remove_existing_path(&backup)
+        {
+            // The target is already the committed snapshot. A cleanup failure
+            // must not turn a multi-path apply into a partial rollback.
+            tracing::warn!(path = %backup.display(), error = %error, "checkpoint backup cleanup deferred");
+        }
+    }
+}
+
+impl Drop for CheckpointTargetSwap {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = remove_existing_path(&self.target);
+        if let Some(backup) = self.backup.take() {
+            let _ = fs::rename(backup, &self.target);
+        }
+    }
+}
+
+fn checkpoint_payload_hash(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path).map_err(CrabError::Io)?;
+    let hash = if metadata.is_file() {
+        let mut file = fs::File::open(path).map_err(CrabError::Io)?;
+        let mut hasher = blake3::Hasher::new();
+        std::io::copy(&mut file, &mut hasher).map_err(CrabError::Io)?;
+        *hasher.finalize().as_bytes()
+    } else if metadata.is_dir() {
+        crab_workflow::hasher::hash_directory(path, false)?.hash
+    } else {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint object invalid".to_owned(),
+            origin: path.display().to_string(),
+        });
+    };
+    Ok(blake3::Hash::from(hash).to_hex().to_string())
+}
+
+fn write_checkpoint_reset_decision(state_root: &Path, decision: &serde_json::Value) -> Result<()> {
+    ensure_checkpoint_parent_not_symlink(state_root)?;
+    fs::create_dir_all(state_root).map_err(CrabError::Io)?;
+    let path = state_root.join("reset.json");
+    let temporary = state_root.join(format!(
+        ".reset.json.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let bytes = serde_json::to_vec_pretty(decision)
+        .map_err(|error| CrabError::Internal(format!("serialize checkpoint reset: {error}")))?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(CrabError::Io)?;
+    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(CrabError::Io(error));
+    }
+    if let Err(error) = replace_checkpoint_reset_file(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn replace_checkpoint_reset_file(temporary: &Path, destination: &Path) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination).map_err(CrabError::Io)
+    }
+
+    #[cfg(windows)]
+    {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "exp reset".to_owned(),
+                origin: format!("reset path has no parent: {}", destination.display()),
+            })?;
+        let backup = parent.join(format!(
+            ".reset.json.backup-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let had_destination = match fs::symlink_metadata(destination) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(CrabError::Io(error)),
+        };
+        if had_destination {
+            fs::rename(destination, &backup).map_err(CrabError::Io)?;
+        }
+        if let Err(error) = fs::rename(temporary, destination) {
+            if had_destination {
+                let _ = fs::rename(&backup, destination);
+            }
+            return Err(CrabError::Io(error));
+        }
+        if had_destination && let Err(error) = fs::remove_file(&backup) {
+            tracing::warn!(path = %backup.display(), error = %error, "checkpoint reset backup cleanup deferred");
+        }
+        Ok(())
+    }
 }
 
 fn apply_experiment_snapshot_to(
@@ -2247,7 +3031,7 @@ async fn build_experiment_remote_from_url(
     operation: &str,
     access: ExperimentRemoteAccess,
 ) -> Result<ExperimentRemote> {
-    let crab_url = CrabUrl::parse(&url_str)?;
+    let crab_url = CrabUrl::parse(url_str)?;
     let cancel = CancellationToken::new();
     let resolver = crate::replication::StoreResolver::new(config, &crab_url, &cancel);
 
@@ -2360,6 +3144,8 @@ async fn push_experiments_to_remote(
     for id in ids {
         let ref_path = remote_exp_meta_ref_path(prefix, id);
         if !force && remote_object_exists(store, &ref_path).await? {
+            let metadata = read_remote_metadata(store, prefix, id).await?;
+            register_workflow_gc_roots(store, prefix, &metadata).await?;
             skipped.push(id.to_string());
             continue;
         }
@@ -2379,6 +3165,7 @@ async fn push_experiments_to_remote(
         }
 
         push_workspace_snapshot(store, prefix, repo_root, id).await?;
+        push_checkpoint_state(store, prefix, repo_root, id).await?;
 
         let meta_bytes = metadata.canonical_json()?;
         let meta_hash = metadata.content_hash()?;
@@ -2397,11 +3184,39 @@ async fn push_experiments_to_remote(
             )
             .await?;
 
+        // Establish the conservative workflow GC root after every immutable
+        // experiment object is durable, but before publishing the visible
+        // metadata ref. Union semantics protect concurrent pushes; a failed
+        // ref publication can leave only an extra root, never an unsafe
+        // deletion candidate.
+        register_workflow_gc_roots(store, prefix, &metadata).await?;
+
         store.put(&ref_path, Bytes::from(meta_hash)).await?;
         pushed.push(id.to_string());
     }
 
     Ok(ExpPushPayload { pushed, skipped })
+}
+
+async fn register_workflow_gc_roots(
+    store: &Store,
+    prefix: &str,
+    metadata: &ExperimentMetadata,
+) -> Result<()> {
+    let storage = store.as_storage();
+    let registry_router = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
+    crab_metadata::ref_registry::union_register_workflow_roots(
+        storage,
+        &registry_router,
+        metadata.stages.values().cloned().collect(),
+        vec![metadata.exp_id.to_string()],
+    )
+    .await
+    .map_err(|error| CrabError::Configuration {
+        key: "exp push workflow GC roots".to_owned(),
+        origin: error.to_string(),
+    })?;
+    Ok(())
 }
 
 async fn pull_experiments_from_remote(
@@ -2443,6 +3258,7 @@ async fn pull_experiment_from_store(
     id: &ExperimentId,
 ) -> Result<()> {
     let metadata = read_remote_metadata(store, prefix, id).await?;
+    pull_checkpoint_state(store, prefix, repo_root, id).await?;
     restore_workspace_snapshot(store, prefix, repo_root, id).await?;
     write_local_metadata(repo_root, &metadata)?;
     Ok(())
@@ -3503,6 +4319,191 @@ async fn push_workspace_snapshot(
     Ok(())
 }
 
+async fn push_checkpoint_state(
+    store: &Store,
+    prefix: &str,
+    repo_root: &Path,
+    exp_id: &ExperimentId,
+) -> Result<()> {
+    let state_root = checkpoint_state_dir(repo_root, exp_id);
+    if !state_root.is_dir() {
+        return Ok(());
+    }
+    validate_checkpoint_state(&state_root)?;
+    let mut files = Vec::new();
+    collect_checkpoint_files(&state_root, &state_root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (relative, path) in files {
+        let bytes = fs::read(&path).map_err(CrabError::Io)?;
+        let remote_path = remote_exp_checkpoint_path(prefix, exp_id, &relative);
+        if remote_object_exists(store, &remote_path).await? {
+            let (existing, _) = store.get_with_etag(&remote_path).await?;
+            if existing != bytes {
+                return Err(CrabError::CorruptObject {
+                    path: remote_path.as_ref().to_owned(),
+                    reason: "immutable checkpoint object differs from local bytes".to_owned(),
+                });
+            }
+            continue;
+        }
+        store.put(&remote_path, Bytes::from(bytes)).await?;
+    }
+    Ok(())
+}
+
+async fn pull_checkpoint_state(
+    store: &Store,
+    prefix: &str,
+    repo_root: &Path,
+    exp_id: &ExperimentId,
+) -> Result<()> {
+    let remote_prefix = remote_exp_checkpoint_prefix(prefix, exp_id);
+    let remote_entries = store.list_prefix(&remote_prefix).await?;
+    let state_parent = repo_root.join(".crab/workflow/checkpoints");
+    fs::create_dir_all(&state_parent).map_err(CrabError::Io)?;
+    let state_root = checkpoint_state_dir(repo_root, exp_id);
+    if remote_entries.is_empty() {
+        match fs::remove_dir_all(&state_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CrabError::Io(error)),
+        }
+        return Ok(());
+    }
+
+    let temporary = state_parent.join(format!("{exp_id}.pull-{}", uuid::Uuid::now_v7()));
+    fs::create_dir_all(&temporary).map_err(CrabError::Io)?;
+    let result = async {
+        for meta in remote_entries {
+            let key = meta.location.as_ref();
+            let relative = key.strip_prefix(remote_prefix.as_ref()).ok_or_else(|| {
+                CrabError::CorruptObject {
+                    path: key.to_owned(),
+                    reason: "checkpoint object is outside its namespace".to_owned(),
+                }
+            })?;
+            let relative = relative.trim_start_matches('/');
+            let relative = remote_rel_to_path(relative)?;
+            let target = temporary.join(&relative);
+            let (bytes, _) = store.get_with_etag(&meta.location).await?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(CrabError::Io)?;
+            }
+            fs::write(&target, bytes).map_err(CrabError::Io)?;
+        }
+        validate_checkpoint_state(&temporary)?;
+        Ok::<(), CrabError>(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+
+    let backup = state_parent.join(format!("{exp_id}.backup-{}", uuid::Uuid::now_v7()));
+    if state_root.exists() {
+        fs::rename(&state_root, &backup).map_err(CrabError::Io)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &state_root) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &state_root);
+        }
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(CrabError::Io(error));
+    }
+    let _ = fs::remove_dir_all(backup);
+    Ok(())
+}
+
+fn collect_checkpoint_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(CrabError::Io)? {
+        let entry = entry.map_err(CrabError::Io)?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|error| {
+            CrabError::Internal(format!("checkpoint path is outside state: {error}"))
+        })?;
+        ensure_safe_workspace_relpath(relative)?;
+        let is_transient = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(".tmp-") || name.contains(".backup-"))
+            || path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"));
+        if is_transient {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(CrabError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint state".to_owned(),
+                origin: format!("symlink is not allowed: {}", path.display()),
+            });
+        }
+        if metadata.is_dir() {
+            collect_checkpoint_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            files.push((relative.to_string_lossy().replace('\\', "/"), path));
+        }
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_state(state_root: &Path) -> Result<()> {
+    let paths = checkpoint_lineage_paths(state_root)?;
+    for path in paths {
+        let lineage = load_checkpoint_lineage(&path)?;
+        for record in lineage.records {
+            for hash in record.outputs.values() {
+                validate_checkpoint_object(state_root, &path, hash, "output")?;
+            }
+            for hash in record.metrics.values() {
+                validate_checkpoint_object(state_root, &path, hash, "metric")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_object(
+    state_root: &Path,
+    lineage_path: &Path,
+    hash: &str,
+    kind: &str,
+) -> Result<()> {
+    let digest = hash
+        .strip_prefix("b3:")
+        .ok_or_else(|| CrabError::CorruptObject {
+            path: lineage_path.display().to_string(),
+            reason: format!("checkpoint {kind} hash is not a b3 digest"),
+        })?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CrabError::CorruptObject {
+            path: lineage_path.display().to_string(),
+            reason: format!("checkpoint {kind} hash is malformed"),
+        });
+    }
+    let object = state_root.join("objects").join(digest).join("payload");
+    if !object.exists() {
+        return Err(CrabError::CorruptObject {
+            path: object.display().to_string(),
+            reason: format!("checkpoint {kind} object is missing"),
+        });
+    }
+    let actual = checkpoint_payload_hash(&object)?;
+    if actual != digest {
+        return Err(CrabError::CorruptObject {
+            path: object.display().to_string(),
+            reason: format!("expected {digest}, got {actual}"),
+        });
+    }
+    Ok(())
+}
+
 async fn restore_workspace_snapshot(
     store: &Store,
     prefix: &str,
@@ -3923,6 +4924,12 @@ fn remove_experiment_files(repo_root: &Path, exp_id: &ExperimentId) -> Result<()
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(CrabError::Io(e)),
     }
+    let checkpoint_dir = checkpoint_state_dir(repo_root, exp_id);
+    match fs::remove_dir_all(&checkpoint_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(CrabError::Io(e)),
+    }
     Ok(())
 }
 
@@ -4052,6 +5059,14 @@ fn remote_exp_workspace_manifest_path(prefix: &str, id: &ExperimentId) -> Object
 
 fn remote_exp_workspace_blob_path(prefix: &str, id: &ExperimentId, hash: &str) -> ObjectPath {
     remote_path(prefix, &format!("workflow/exp/{id}/workspace/blobs/{hash}"))
+}
+
+fn remote_exp_checkpoint_prefix(prefix: &str, id: &ExperimentId) -> ObjectPath {
+    remote_path(prefix, &format!("workflow/exp/{id}/checkpoints/"))
+}
+
+fn remote_exp_checkpoint_path(prefix: &str, id: &ExperimentId, relative: &str) -> ObjectPath {
+    remote_path(prefix, &format!("workflow/exp/{id}/checkpoints/{relative}"))
 }
 
 /// Read an experiment's metadata from the local cache.
@@ -4822,6 +5837,27 @@ fn emit_show(payload: &ExpShowPayload, m: &ExperimentMetadata, mode: OutputMode)
                     println!("  {k}");
                 }
             }
+            match payload.metadata.get("checkpoints") {
+                Some(serde_json::Value::Array(checkpoints)) if !checkpoints.is_empty() => {
+                    println!("checkpoints:");
+                    for checkpoint in checkpoints {
+                        let id = checkpoint
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown");
+                        let stage = checkpoint
+                            .get("stage")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown");
+                        let sequence = checkpoint
+                            .get("sequence")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_default();
+                        println!("  {id} ({stage} #{sequence})");
+                    }
+                }
+                _ => println!("checkpoints: (none)"),
+            }
         }
     }
 }
@@ -5348,6 +6384,9 @@ fn emit_apply(payload: &ExpApplyPayload, mode: OutputMode) {
             emit_json(EXP_APPLY_SCHEMA, EXP_SCHEMA_VERSION, payload);
         }
         OutputMode::Text => {
+            if let Some(checkpoint) = &payload.checkpoint {
+                println!("applied checkpoint {checkpoint}");
+            }
             println!(
                 "applied exp {}: {} file(s), {} deletion(s)",
                 payload.exp_id,
@@ -5359,6 +6398,25 @@ fn emit_apply(payload: &ExpApplyPayload, mode: OutputMode) {
             }
             for path in &payload.deleted {
                 println!("  deleted {}", path.display());
+            }
+        }
+    }
+}
+
+fn emit_reset(payload: &ExpResetPayload, mode: OutputMode) {
+    match mode {
+        OutputMode::Json | OutputMode::Jsonl => {
+            emit_json(EXP_RESET_SCHEMA, EXP_SCHEMA_VERSION, payload);
+        }
+        OutputMode::Text => {
+            match &payload.checkpoint {
+                Some(checkpoint) => {
+                    println!("reset exp {} to checkpoint {checkpoint}", payload.exp_id);
+                }
+                None => println!("reset exp {} to base", payload.exp_id),
+            }
+            for stage in &payload.reset_stages {
+                println!("  {stage}");
             }
         }
     }
@@ -5674,6 +6732,117 @@ mod tests {
         let err =
             RunArgs::try_parse_from(["run", "--single-item", "--downstream", "train"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn checkpoint_selector_rejects_sequence_ambiguity_across_stages() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("train.json");
+        let second = temp.path().join("evaluate.json");
+        let record = |stage: &str| CheckpointRecord {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            id: format!("{stage}-checkpoint"),
+            experiment: "exp".to_owned(),
+            stage: stage.to_owned(),
+            sequence: 0,
+            parent: None,
+            request_nonce: None,
+            stage_hash: format!("b3:{}", "cd".repeat(32)),
+            created_at_unix_ms: 0,
+            outputs: BTreeMap::new(),
+            metrics: BTreeMap::new(),
+            terminal: false,
+            resumable: true,
+        };
+        CheckpointLineage {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            records: vec![record("train")],
+        }
+        .save_atomic(&first)
+        .unwrap();
+        CheckpointLineage {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            records: vec![record("evaluate")],
+        }
+        .save_atomic(&second)
+        .unwrap();
+        assert!(select_checkpoint_from_paths(&[first, second], "0").is_err());
+    }
+
+    #[test]
+    fn checkpoint_apply_rejects_corrupt_immutable_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_root = temp.path().join("state");
+        let target_root = temp.path().join("target");
+        let bytes = b"checkpoint-bytes";
+        let digest = blake3::hash(bytes).to_hex().to_string();
+        let object = state_root.join("objects").join(&digest).join("payload");
+        fs::create_dir_all(object.parent().unwrap()).unwrap();
+        fs::write(&object, bytes).unwrap();
+        let record = CheckpointRecord {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            id: "checkpoint".to_owned(),
+            experiment: "exp".to_owned(),
+            stage: "train".to_owned(),
+            sequence: 0,
+            parent: None,
+            request_nonce: None,
+            stage_hash: format!("b3:{}", "cd".repeat(32)),
+            created_at_unix_ms: 0,
+            outputs: BTreeMap::from([("model.bin".to_owned(), format!("b3:{digest}"))]),
+            metrics: BTreeMap::new(),
+            terminal: false,
+            resumable: true,
+        };
+        let applied = apply_checkpoint_record_to(&state_root, &target_root, &record).unwrap();
+        assert_eq!(applied, vec![PathBuf::from("model.bin")]);
+        assert_eq!(fs::read(target_root.join("model.bin")).unwrap(), bytes);
+        fs::write(&object, b"corrupt").unwrap();
+        assert!(apply_checkpoint_record_to(&state_root, &target_root, &record).is_err());
+    }
+
+    #[test]
+    fn resume_checkpoint_state_copy_is_validated_and_drops_transient_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let bytes = b"checkpoint-bytes";
+        let digest = blake3::hash(bytes).to_hex().to_string();
+        let object = source.join("objects").join(&digest).join("payload");
+        fs::create_dir_all(object.parent().unwrap()).unwrap();
+        fs::write(&object, bytes).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("train.lock"), b"stale lock").unwrap();
+        let record = CheckpointRecord {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            id: "checkpoint".to_owned(),
+            experiment: "source-exp".to_owned(),
+            stage: "train".to_owned(),
+            sequence: 0,
+            parent: None,
+            request_nonce: None,
+            stage_hash: format!("b3:{}", "cd".repeat(32)),
+            created_at_unix_ms: 0,
+            outputs: BTreeMap::from([("model.bin".to_owned(), format!("b3:{digest}"))]),
+            metrics: BTreeMap::new(),
+            terminal: false,
+            resumable: true,
+        };
+        CheckpointLineage {
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+            records: vec![record.clone()],
+        }
+        .save_atomic(&source.join("train.json"))
+        .unwrap();
+
+        copy_checkpoint_state(&source, &destination).unwrap();
+        assert!(!destination.join("train.lock").exists());
+        let copied = CheckpointLineage::load(&destination.join("train.json")).unwrap();
+        assert_eq!(copied.records, vec![record]);
+        assert_eq!(
+            fs::read(destination.join("objects").join(digest).join("payload")).unwrap(),
+            bytes
+        );
     }
 
     #[test]
@@ -6446,8 +7615,8 @@ mod tests {
         metrics_changed.insert(
             "metrics.json:accuracy".to_owned(),
             (
-                Some(serde_json::json!(0.123456)),
-                Some(serde_json::json!(0.987654)),
+                Some(serde_json::json!(0.123_456)),
+                Some(serde_json::json!(0.987_654)),
             ),
         );
 
@@ -6885,6 +8054,13 @@ mod tests {
         kept.name = Some("conic-ease".to_owned());
         write_remote_metadata_for_test(&store, prefix, &removed).await;
         write_remote_metadata_for_test(&store, prefix, &kept).await;
+        store
+            .put(
+                &remote_exp_checkpoint_path(prefix, &id_removed, "train.json"),
+                Bytes::from_static(b"checkpoint"),
+            )
+            .await
+            .unwrap();
 
         let payload = remove_remote_experiments(
             &store,
@@ -6912,6 +8088,14 @@ mod tests {
             !remote_object_exists(
                 &store,
                 &remote_exp_workspace_blob_path(prefix, &id_removed, "abc")
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !remote_object_exists(
+                &store,
+                &remote_exp_checkpoint_path(prefix, &id_removed, "train.json")
             )
             .await
             .unwrap()
@@ -7041,6 +8225,13 @@ mod tests {
         .unwrap();
         assert_eq!(resolved, vec![id]);
 
+        // An older remote may have the experiment ref but no workflow root
+        // registration yet. A no-op push must repair that protection before
+        // reporting the experiment as skipped.
+        store
+            .delete(&ObjectPath::from(".crab/ref-registry"))
+            .await
+            .unwrap();
         let skipped = push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
             .await
             .unwrap();
@@ -7065,6 +8256,7 @@ mod tests {
         let apply = run_exp_apply(
             &ApplyArgs {
                 id: id.to_string(),
+                checkpoint: None,
                 json: false,
             },
             repo_root,
@@ -7098,6 +8290,119 @@ mod tests {
             .unwrap();
         let refs: Vec<String> = serde_json::from_slice(&stage_refs).unwrap();
         assert_eq!(refs, vec!["ab".repeat(32)]);
+        let (registry_bytes, _) = store
+            .get_with_etag(&ObjectPath::from(".crab/ref-registry"))
+            .await
+            .unwrap();
+        let registry: crab_metadata::ref_registry::RefRegistry =
+            serde_json::from_slice(&registry_bytes).unwrap();
+        assert_eq!(
+            registry.workflow_experiment_ids[prefix],
+            vec![id.to_string()]
+        );
+        assert_eq!(
+            registry.workflow_stage_hashes[prefix],
+            vec!["ab".repeat(32)]
+        );
+    }
+
+    #[tokio::test]
+    async fn push_pull_round_trips_checkpoint_lineage_and_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let inner: std::sync::Arc<dyn object_store::ObjectStore> =
+            std::sync::Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let prefix = "team/checkpoints";
+        let id = ExperimentId::new_v7();
+        let metadata = ExperimentMetadata {
+            schema_version: EXPERIMENT_METADATA_SCHEMA_VERSION,
+            exp_id: id,
+            base_commit: "c".repeat(40),
+            queue_commit: None,
+            name: Some("checkpoint-transport".to_owned()),
+            message: None,
+            status: "failed".to_owned(),
+            param_overrides: BTreeMap::new(),
+            stages: BTreeMap::new(),
+            metrics: BTreeMap::new(),
+            cli_args: vec!["exp".to_owned(), "run".to_owned()],
+            host_fingerprint: "test".to_owned(),
+            started_at: "2024-01-01T00:00:00.000Z".to_owned(),
+            ended_at: None,
+        };
+        write_local_metadata(repo_root, &metadata).unwrap();
+        fs::create_dir_all(workspace_dir_path(repo_root, &id)).unwrap();
+        fs::write(
+            workspace_dir_path(repo_root, &id).join("model.bin"),
+            b"checkpoint",
+        )
+        .unwrap();
+        fs::write(
+            workspace_manifest_path(repo_root, &id),
+            serde_json::to_vec(&ExpWorkspaceManifest {
+                deleted: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let payload_hash = format!("b3:{}", blake3::hash(b"checkpoint").to_hex());
+        let state_root = checkpoint_state_dir(repo_root, &id);
+        let payload = state_root
+            .join("objects")
+            .join(payload_hash.strip_prefix("b3:").unwrap())
+            .join("payload");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, b"checkpoint").unwrap();
+        let mut lineage = CheckpointLineage::default();
+        lineage
+            .append(CheckpointRecord {
+                schema_version: CHECKPOINT_SCHEMA_VERSION,
+                id: "checkpoint-0".to_owned(),
+                experiment: id.to_string(),
+                stage: "train".to_owned(),
+                sequence: 0,
+                parent: None,
+                request_nonce: Some("01".repeat(32)),
+                stage_hash: format!("b3:{}", "aa".repeat(32)),
+                created_at_unix_ms: 0,
+                outputs: BTreeMap::from([("model.bin".to_owned(), payload_hash.clone())]),
+                metrics: BTreeMap::new(),
+                terminal: false,
+                resumable: true,
+            })
+            .unwrap();
+        lineage.save_atomic(&state_root.join("train.json")).unwrap();
+
+        push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
+            .await
+            .unwrap();
+        remove_experiment_files(repo_root, &id).unwrap();
+
+        let remote = ExperimentRemote {
+            store,
+            prefix: prefix.to_owned(),
+            primary_fallback: None,
+        };
+        pull_experiments_from_remote(&remote, repo_root, &[id], false)
+            .await
+            .unwrap();
+        let restored =
+            CheckpointLineage::load(&checkpoint_state_dir(repo_root, &id).join("train.json"))
+                .unwrap();
+        assert_eq!(restored.records.len(), 1);
+        assert_eq!(restored.records[0].outputs["model.bin"], payload_hash);
+        assert_eq!(
+            fs::read(
+                checkpoint_state_dir(repo_root, &id)
+                    .join("objects")
+                    .join(payload_hash.strip_prefix("b3:").unwrap())
+                    .join("payload"),
+            )
+            .unwrap(),
+            b"checkpoint"
+        );
     }
 
     #[tokio::test]

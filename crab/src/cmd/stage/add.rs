@@ -50,7 +50,7 @@ pub struct StageAddArgs {
     #[arg(long = "outs-persist-no-cache", value_name = "PATH")]
     pub outs_persist_no_cache: Vec<PathBuf>,
 
-    /// DVC checkpoint output paths; stored as persistent cached outs.
+    /// Experiment checkpoint output paths.
     #[arg(long = "checkpoints", short = 'c', value_name = "PATH")]
     pub checkpoints: Vec<PathBuf>,
 
@@ -115,6 +115,7 @@ struct OutputSpec {
     path: PathBuf,
     cache: bool,
     persist: bool,
+    checkpoint: bool,
 }
 
 pub async fn exec_add(args: StageAddArgs) -> Result<()> {
@@ -174,7 +175,24 @@ fn build_stage_yaml(args: &StageAddArgs) -> Result<Value> {
     push_outputs(&mut outs, &args.outs_no_cache, false, false)?;
     push_outputs(&mut outs, &args.outs_persist, true, true)?;
     push_outputs(&mut outs, &args.outs_persist_no_cache, false, true)?;
-    push_outputs(&mut outs, &args.checkpoints, true, true)?;
+    for path in &args.checkpoints {
+        let spec = OutputSpec {
+            path: path.clone(),
+            cache: true,
+            persist: false,
+            checkpoint: true,
+        };
+        if let Some(existing) = outs.iter().find(|existing| existing.path == spec.path) {
+            if existing == &spec {
+                continue;
+            }
+            return Err(CrabError::Configuration {
+                key: format!("stage add output '{}'", path.display()),
+                origin: "checkpoint path conflicts with another output".to_owned(),
+            });
+        }
+        outs.push(spec);
+    }
     push_outputs(&mut outs, &args.plots, true, false)?;
     push_outputs(&mut outs, &args.plots_no_cache, false, false)?;
     insert_sequence(
@@ -295,6 +313,7 @@ fn push_outputs(
             path: path.clone(),
             cache,
             persist,
+            checkpoint: false,
         };
         if let Some(existing) = outs.iter().find(|existing| existing.path == spec.path) {
             if existing == &spec {
@@ -312,7 +331,7 @@ fn push_outputs(
 }
 
 fn output_yaml_value(out: &OutputSpec) -> Value {
-    if out.cache && !out.persist {
+    if out.cache && !out.persist && !out.checkpoint {
         return path_yaml_value(&out.path);
     }
     let mut map = Mapping::new();
@@ -322,6 +341,9 @@ fn output_yaml_value(out: &OutputSpec) -> Value {
     }
     if out.persist {
         map.insert(Value::String("persist".to_owned()), Value::Bool(true));
+    }
+    if out.checkpoint {
+        map.insert(Value::String("checkpoint".to_owned()), Value::Bool(true));
     }
     Value::Mapping(map)
 }
@@ -607,6 +629,18 @@ mod tests {
                 "10".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn stage_add_writes_checkpoint_outputs_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = minimal_add_args("train", &["python", "train.py"]);
+        args.checkpoints = vec![PathBuf::from("checkpoint.pkl")];
+
+        run_stage_add(&args, tmp.path()).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join("crab.yaml")).unwrap();
+        assert!(text.contains("checkpoint: true"));
+        assert!(!text.contains("persist: true"));
     }
 
     #[test]

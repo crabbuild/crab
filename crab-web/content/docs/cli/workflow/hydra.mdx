@@ -14,7 +14,7 @@ config files instead of one flat params file.
 ## Enable Hydra Composition
 
 ```bash
-crab config set workflow.enabled true
+# Optional explicit opt-in is no longer needed; set false only to opt out.
 crab config set hydra.enabled true
 crab config set hydra.config_dir conf
 crab config set hydra.config_name config.yaml

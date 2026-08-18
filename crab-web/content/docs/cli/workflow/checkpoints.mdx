@@ -1,0 +1,40 @@
+---
+title: Workflow checkpoints
+description: Explicit experiment checkpoint semantics and the fail-closed execution boundary.
+---
+
+Crab checkpoints are immutable experiment lineage points. They are different
+from persistent outputs: persist keeps an output during cleanup, while a
+checkpoint records an acknowledged snapshot with a parent, sequence, output
+identities, metrics, and resume state.
+
+Declare a checkpoint explicitly in crab.yaml. The minimal shape is a stage with
+an output mapping containing path, checkpoint: true, and cache: true.
+
+Checkpoint outputs must be cached local files or directories. The field is
+included in the stage hash. crab run and crab repro reject checkpoint stages
+with an actionable error; use crab exp run once the experiment supervisor is
+configured for checkpoint acknowledgement. Crab never silently converts
+checkpoint: true to persist: true.
+
+For stage authors, the hidden crab workflow checkpoint control command is
+authenticated by inherited per-run state. It writes an atomic request under a
+private directory and returns success only after a supervisor acknowledgement.
+The control token is never a CLI argument, workflow hash input, journal field,
+or log value.
+
+Checkpoint records are versioned and parent-linked. Selectors are either an
+immutable checkpoint ID or a numeric sequence; ambiguous selectors fail. A
+partially written next record is ignored, while the latest acknowledged
+checkpoint remains the recovery point.
+
+`crab exp run --resume <experiment>` forks a new experiment worktree from the
+latest resumable point after validating and copying the source lineage and
+immutable checkpoint objects. Subsequent acknowledgements append to that
+lineage; the source experiment remains unchanged.
+
+The validated contract, local supervisor, lineage selectors, and local
+push/pull validation are implemented. Release qualification still requires a
+clean-clone checkpoint E2E covering remote publication, `exp show/apply/reset`,
+resume, metrics, and GC reachability; until that evidence is retained, these
+operations are not advertised as release-qualified.

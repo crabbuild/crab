@@ -1,0 +1,37 @@
+---
+title: "Data source commands"
+description: "Import, inspect, and update versioned external data sources with Crab CLI."
+---
+
+# Data source commands
+
+Use the `crab data` namespace for DVC-style source provenance. It is separate
+from the existing raw object-store `crab import` and self-update `crab update`
+commands.
+
+```bash
+crab data list --recursive --json
+crab data list --rev HEAD~1 data --recursive --json
+crab data import ../source-repo --path data/train.csv --rev HEAD \
+  --output data/train.csv
+crab data import-url https://example.test/data.csv --output data/data.csv
+crab data status --json
+crab data update data/data.csv --dry-run --json
+```
+
+Successful imports write a versioned descriptor under
+`.crab/workflow/sources/`. Descriptors contain a credential-free locator,
+locked revision or validator, recomputed `b3:` content identity, byte count,
+and target path. A URL response is streamed into a temporary file and
+verified before replacement; failed updates leave the prior target intact.
+
+`data import-db` is an explicit connector boundary. It fails with a typed
+unsupported diagnostic until a connector with documented snapshot/isolation
+and credential handling is compiled. Likewise, a URL scheme without a live
+provider adapter fails before writing data.
+
+`--rev` currently targets a local Git repository: `data list` reads committed
+tree entries, while `data import` accepts one committed file, records the
+resolved commit id, and preserves its executable bit. Directory-at-revision,
+remote Git transport, database connectors, and non-file URL providers remain
+explicitly unsupported and fail before writing a target.

@@ -2363,6 +2363,7 @@ dependencies = [
 name = "crab-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "bytes",
  "crab-types",
@@ -2449,6 +2450,7 @@ dependencies = [
  "globset",
  "insta",
  "libc",
+ "md-5",
  "nix 0.29.0",
  "notify",
  "object_store",

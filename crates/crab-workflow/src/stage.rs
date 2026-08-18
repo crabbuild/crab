@@ -13,7 +13,9 @@ pub use crate::{
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use crate::stage_runtime::test_support;
-pub use crate::stage_runtime::{DepUrlHashExt, expand_external_url_out_alias};
+pub use crate::stage_runtime::{
+    DepUrlHashExt, expand_external_url_out_alias, validate_url_provider,
+};
 
 /// A single workflow stage: command, deps, outs, env, and execution policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

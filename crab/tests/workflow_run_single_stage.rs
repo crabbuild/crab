@@ -70,7 +70,7 @@ fn run_single_stage_copies_dep_to_out() {
     assert!(first_run.path().join("journal.db").exists());
 }
 
-/// The workflow feature flag keeps the command inert by default.
+/// An explicit environment opt-out keeps the workflow command inert.
 #[test]
 fn run_fails_with_workflow_disabled() {
     let tmp = TempDir::new().unwrap();
@@ -78,8 +78,8 @@ fn run_fails_with_workflow_disabled() {
 
     let output = Command::new(bin())
         .current_dir(tmp.path())
-        // Explicitly unset so we don't inherit a test env.
-        .env_remove("CRAB_WORKFLOW_ENABLED")
+        // The shipped default is enabled; exercise the explicit opt-out.
+        .env("CRAB_WORKFLOW_ENABLED", "0")
         .args([
             "run",
             "--name",

@@ -867,6 +867,15 @@ async fn extend_reachable_bulk_objects(
         reachable.insert(path.as_ref().to_string());
     }
 
+    if !manifest.refs.is_empty() && !manifest.pack_index_hash.is_empty() {
+        reachable.insert(
+            router
+                .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+                .as_ref()
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -1522,6 +1531,9 @@ mod tests {
         manifest.shard_index_hash = shard_hash.clone();
         manifest.pack_index_hash = pack_hash.clone();
         manifest.generation = 1;
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
@@ -1532,13 +1544,17 @@ mod tests {
 
         // The reachable set should contain both segmented index objects and
         // the immutable segments they reference.
-        assert_eq!(reachable.len(), 4);
+        assert_eq!(reachable.len(), 5);
         assert!(reachable.contains(&format!(
             "org/repo/metadata/shard/indexes/{shard_hash}.json"
         )));
         assert!(reachable.contains(&format!("org/repo/{shard_segment_path}")));
         assert!(reachable.contains(&format!("org/repo/metadata/pack/indexes/{pack_hash}.json")));
         assert!(reachable.contains(&format!("org/repo/{pack_segment_path}")));
+        assert!(reachable.contains(&format!(
+            "org/repo/metadata/git-visibility/{:020}-{pack_hash}.json",
+            manifest.generation
+        )));
 
         // An object NOT in the reachable set is unreachable.
         assert!(!reachable.contains("org/repo/metadata/shard/indexes/deadbeef.json"));

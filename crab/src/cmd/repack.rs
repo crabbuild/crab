@@ -17,6 +17,7 @@ use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::push::{
     CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
+    publish_git_visibility_index_from_git_dir,
 };
 use crate::metadata::manifest::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, read_bulk_pack_list, read_manifest,
@@ -222,6 +223,15 @@ async fn run_repack_locked(
 
     let committed = repack_manifest(manifest, new_generation, pack_index_hash);
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
+    if let Err(error) =
+        publish_git_visibility_index_from_git_dir(&git_dir, &committed, store, router).await
+    {
+        warn!(
+            error = %error,
+            generation = committed.generation,
+            "repack committed; Git visibility proof requires repair"
+        );
+    }
     let anchor = CommittedManifestAnchor {
         generation: committed.generation,
         shard_index_hash: manifest_hash_or_default(&committed.shard_index_hash)?,

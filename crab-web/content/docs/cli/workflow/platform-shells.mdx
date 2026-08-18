@@ -1,0 +1,45 @@
+---
+title: "Workflow platform shells"
+description: "Choose native workflow commands that behave predictably on Unix and Windows."
+---
+
+# Workflow platform shells
+
+Crab keeps command form explicit:
+
+- `cmd: { argv: [...] }` starts the program directly without a shell.
+- A string `cmd:` and each item in a command list use the host platform's
+  default shell: `/bin/sh -c` on Unix and `cmd.exe /D /S /C` on Windows.
+- `on_cache_hit` hooks use the same adapter as stages.
+
+Crab does not translate POSIX shell syntax to Windows or Windows batch syntax
+to Unix. A shell command that is valid on one platform can therefore still be
+invalid on another. Use argv form for cross-platform workflows, or select the
+platform-specific command in your workflow authoring layer.
+
+## Examples
+
+Portable argv form:
+
+```yaml
+stages:
+  train:
+    cmd:
+      argv: [python, train.py, --output, model.bin]
+```
+
+Platform-native shell form:
+
+```yaml
+stages:
+  package:
+    cmd: "python package.py && python verify.py"
+```
+
+The stage hash includes the target operating system, architecture, and shell
+family. A cache entry produced on Unix cannot be replayed as a Windows shell
+execution (or vice versa).
+
+Hermetic workflow execution remains macOS-only. Requesting `hermetic: true` on
+Windows fails before Crab starts the stage, rather than silently running without
+the requested policy.

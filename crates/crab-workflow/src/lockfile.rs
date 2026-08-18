@@ -30,7 +30,7 @@ use crab_types::workflow::StageHash;
 pub const LOCKFILE_SCHEMA_VERSION: u16 = 2;
 
 /// Hash-algorithm tag recorded in the lockfile.
-pub const LOCKFILE_HASH_ALGO: &str = "crab.stage.v1";
+pub const LOCKFILE_HASH_ALGO: &str = "crab.stage.v3";
 
 /// A dependency as recorded in the lockfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1744,7 +1744,7 @@ mod tests {
         assert_eq!(
             text,
             concat!(
-                "crab_hash_algo: \"crab.stage.v1\"\n",
+                "crab_hash_algo: \"crab.stage.v3\"\n",
                 "schema_version: 2\n",
                 "stages: {}\n",
             )

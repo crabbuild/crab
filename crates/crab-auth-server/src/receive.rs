@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crab_auth::{
@@ -97,6 +98,7 @@ pub struct ProtectedPushPlan {
 pub struct MaterializedSourcePush {
     pub ref_updates: Vec<PushRefUpdate>,
     pub packs: Vec<PackManifestEntry>,
+    pub peeled_refs: BTreeMap<String, String>,
 }
 
 /// Prepared protected-push session state written after view authorization.
@@ -853,6 +855,132 @@ pub async fn install_base_packs(
     git_workspace::install_base_packs(store, router, git_dir).await
 }
 
+/// Installs the packs named by a candidate manifest into a temporary Git ODB.
+pub async fn install_manifest_packs(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    manifest: &Manifest,
+    git_dir: &Path,
+) -> Result<()> {
+    git_workspace::install_manifest_packs(store, router, manifest, git_dir).await
+}
+
+/// Publishes the complete Git object visibility proof for a committed view.
+///
+/// The proof is intentionally built from the same immutable packs named by
+/// the committed manifest. A failure leaves the manifest usable for legacy
+/// reads while keeping protocol-v2 advertisement gated.
+pub async fn publish_git_visibility_index(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    manifest: &Manifest,
+) -> Result<()> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let git_dir = temp.path().join("visibility.git");
+    let init = Command::new("git")
+        .args(["init", "--bare", path_str(&git_dir)?])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !init.status.success() {
+        return Err(invalid(format!(
+            "visibility Git repository initialization failed: {}",
+            String::from_utf8_lossy(&init.stderr).trim()
+        )));
+    }
+    install_manifest_packs(store, router, manifest, &git_dir).await?;
+
+    let refs = manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    let git_dir_for_walk = git_dir.clone();
+    let closures = tokio::task::spawn_blocking(move || {
+        let peeled = derive_peeled_refs(&git_dir_for_walk, &refs)?;
+        crab_git::walk::walk_reachable_by_ref_bounded(
+            &git_dir_for_walk,
+            &refs,
+            &peeled,
+            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize,
+        )
+        .map(|closures| (closures, peeled))
+        .map_err(|error| invalid(format!("Git visibility walk failed: {error}")))
+    })
+    .await
+    .map_err(|error| invalid(format!("Git visibility walk join failed: {error}")))??;
+
+    let refs = closures
+        .0
+        .into_iter()
+        .map(|(name, closure)| {
+            let mut objects = BTreeSet::new();
+            objects.extend(closure.commits.iter().map(sha1_hex));
+            objects.extend(closure.trees.iter().map(sha1_hex));
+            objects.extend(closure.blobs.iter().map(sha1_hex));
+            objects.extend(closure.tags.iter().map(sha1_hex));
+            (name, objects.into_iter().collect::<Vec<_>>())
+        })
+        .collect();
+    let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        refs,
+    );
+    crab_metadata::git_visibility::upload_if_absent(store, router, &index)
+        .await
+        .map_err(AuthServerError::from)
+}
+
+fn path_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| invalid("visibility Git path is not valid UTF-8"))
+}
+
+pub(crate) fn derive_peeled_refs(
+    git_dir: &Path,
+    refs: &[(String, String)],
+) -> Result<BTreeMap<String, String>> {
+    let mut peeled = BTreeMap::new();
+    for (name, oid) in refs {
+        let expression = format!("{oid}^{{}}");
+        let output = Command::new("git")
+            .args([
+                "--git-dir",
+                path_str(git_dir)?,
+                "rev-parse",
+                "--verify",
+                &expression,
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(invalid(format!(
+                "failed to peel Git reference {name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let target = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if target != *oid {
+            peeled.insert(name.clone(), target);
+        }
+    }
+    Ok(peeled)
+}
+
+fn sha1_hex(oid: &[u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(40);
+    for byte in oid {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 /// Publishes service metadata indexes for staged shard terms.
 pub async fn commit_service_metadata(
     store: &Store,
@@ -1274,7 +1402,7 @@ pub async fn build_service_candidate_manifest(
                 .unwrap_or_else(|| "refs/heads/main".to_owned())
         };
     }
-    manifest.peeled_refs.clear();
+    manifest.peeled_refs = materialized.peeled_refs.clone();
     manifest.shard_index_hash = build_service_segment_index(
         store,
         router,

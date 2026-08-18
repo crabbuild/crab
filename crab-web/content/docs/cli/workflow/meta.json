@@ -13,6 +13,10 @@
     "remote-cache-ci",
     "split-workflows-lockfiles",
     "operations-troubleshooting",
-    "dvc-migration"
+    "dvc-migration",
+    "platform-shells",
+    "checkpoints",
+    "artifacts",
+    "artifact-promotions"
   ]
 }

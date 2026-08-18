@@ -301,9 +301,8 @@ crab cache clean
 ~~~
 
 Lazy checkout is a Crab pointer-materialization feature, not Git partial
-clone. Crab currently rejects Git partial-clone filters such as
-`--filter=blob:none` on its remote-helper path rather than silently changing
-the requested transfer.
+clone. The wrapper does not request `--filter=blob:none`; ordinary Git may use
+the proof-gated protocol-v2 profile described in Current limitations.
 
 ## Daily workflow
 
@@ -420,8 +419,8 @@ also includes:
 - **Workflow execution:** `crab run`, `crab repro`, `crab stage`,
   `crab exp`, `crab queue`, `crab params`, `crab metrics`, and
   `crab plots` provide content-addressed stages, experiments, metrics,
-  parameters, plots, and queues. Enable the workflow layer with
-  `[workflow] enabled = true` in local configuration.
+  parameters, plots, and queues. Fresh configurations enable the workflow
+  layer; set `[workflow] enabled = false` for an explicit opt-out.
 - **Git LFS interoperability:** `crab lfs` provides compatibility and
   conversion commands for repositories that already use Git LFS.
 - **Virtual filesystems:** `crab mount` and `crab unmount` expose a
@@ -489,14 +488,20 @@ when a bucket contains more than one logical repository.
 The following behaviors are intentional and should be considered when
 designing integrations:
 
-- Git partial-clone filters, including `blob:none`, are not supported by the
-  direct Crab remote helper.
-- Remote-helper `connect` and `stateless-connect` sessions are not
-  advertised or implemented.
+- The current development-line helper implements proof-gated Git wire
+  protocol v2 fetch, including `blob:none` partial clone, when the remote has
+  current locator and visibility coverage. RustFS qualification is green;
+  provider and released-artifact qualification remain before this becomes a
+  released support claim. Git owns promisor configuration and pack sidecars;
+  missing proof fails closed rather than silently fetching a full filtered
+  clone.
+- Stateful `connect` and receive-pack takeover are unsupported. The helper's
+  terminal `stateless-connect git-upload-pack` profile is the local fetch path.
 - Depth-based shallow operations are supported, but date-based and
   ref-exclusion shallow selectors are rejected explicitly.
-- Lazy Crab checkout fetches Git history and packs; it only defers Crab-managed
-  file payloads. It is not a substitute for Git's partial-clone protocol.
+- The `crab clone` wrapper's lazy checkout fetches Git history and packs; it
+  only defers Crab-managed file payloads. Direct Git `--filter=blob:none` is
+  the separate Git partial-clone path.
 - FUSE and NFS mounting depend on the target operating system and build
   features. The regular CLI and direct object-storage workflow do not require a
   mount.

@@ -36,7 +36,8 @@ Three invocation modes are supported:
    Crab parses `crab.yaml`, builds the dependency graph, topologically sorts
    stages, skips cached stages, and executes every stale stage in order.
 
-Enable the workflow feature with `crab config set workflow.enabled true`.
+Workflow is enabled by default for fresh configs; set
+`crab config set workflow.enabled false` only for an explicit opt-out.
 On first use, `crab run` ensures the workflow scratch directory is added to
 `.gitignore`.
 
@@ -143,7 +144,8 @@ outs), and reports errors as structured JSON. Exits 0 if valid, 2 on error.
 
 ## Prerequisites
 
-- Workflow feature enabled with `crab config set workflow.enabled true`.
+- Workflow enabled (the default for fresh configs; explicit opt-out is
+  `workflow.enabled = false`).
 - For inline mode: `--name` and a command after `--` are required.
 - For yaml mode: a `crab.yaml` file must exist at the repository root (or
   discoverable via `--recursive`).

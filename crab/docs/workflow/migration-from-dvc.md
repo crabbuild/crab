@@ -1,9 +1,10 @@
 # Migrating from DVC to Crab
 
-This guide covers converting an existing DVC pipeline (`dvc.yaml`) to
-Crab's workflow format (`crab.yaml`). The automated migration tool
-handles most of the work; this document explains what it does, what it
-can't do, and what you need to finish by hand.
+This guide covers the repository-aware migration of a DVC project into
+Crab's workflow format (`crab.yaml`). Migration inventories DVC metadata,
+pointers, cache objects, remotes, materialized data, lock records, and
+run-cache state before publishing Crab state. It never deletes DVC state and
+does not claim general DVC replacement parity.
 
 ## Table of Contents
 
@@ -25,9 +26,14 @@ extends them in several areas. Most DVC concepts map directly:
 - `wdir:` and `frozen:` — direct equivalents; `dvc freeze` and
   `dvc unfreeze` map to `crab freeze` and `crab unfreeze`.
 
-The migration tool reads your `dvc.yaml`, applies conversion rules, emits
-a valid `crab.yaml`, and prints a report of anything that needs manual
-attention.
+The migration tool reads `dvc.yaml`, inventories `.dvc` pointers, cache
+objects, remotes, workspace outputs, lock records, and run-cache state, then
+transfers verified sources into Crab-owned migration state before it writes
+canonical pointers, `crab.lock`, and `crab.yaml`. Source precedence is
+materialized output, verified local cache, then a qualified live remote.
+Remote mappings are explicit and remain blocking until their destination is
+populated and live-verified. Keep the DVC inputs until the report and clean
+clone restore evidence say otherwise.
 
 ## Running the migration
 
@@ -38,16 +44,33 @@ crab migrate from-dvc
 # From a different directory:
 crab migrate from-dvc --dir path/to/project
 
-# Print to stdout instead of writing crab.yaml:
+# Print only the converted definition to stdout:
 crab migrate from-dvc --stdout
+
+# Inspect inventory without changing Crab or DVC state:
+crab migrate from-dvc --plan --json
+
+# Resume a verified local transfer after an interruption:
+crab migrate from-dvc --resume
+
+# Map a DVC remote without embedding credentials (still needs live proof):
+crab migrate from-dvc --remote-map origin=crab://bucket/project
 ```
 
-The command:
+The repository-aware command:
 1. Locates `dvc.yaml` in the target directory.
-2. Parses the DVC pipeline definition.
-3. Converts each stage to crab format.
-4. Writes `crab.yaml` (or prints to stdout).
-5. Prints a migration report with stage count and warnings.
+2. Inventories DVC metadata, cache roots and `.dir` manifests, remotes,
+   lock records, ignore files, run-cache state, and outputs.
+3. Converts each stage to Crab format and validates the generated YAML before
+   any mutation.
+4. Writes a durable journal and verified Crab-owned source objects; failures
+   leave the previous tracked state intact.
+5. Publishes canonical pointers and `crab.lock` only after verification, then
+   prints stable findings, transfer state, and cutover status.
+
+`--plan` performs no YAML, Git, Crab-data, or journal mutation. `--stdout` is
+conversion-only. `--remote-map` records an intended destination; it is not
+proof that the destination was populated.
 
 After migration, validate the result:
 
@@ -68,7 +91,7 @@ crab run --validate
 | `metrics:` | `metrics:` | Direct copy, including stage-level DVC path-key output settings such as `cache`, `persist`, and `push`; produced metric hashes are recorded in `crab.lock`; `crab metrics show` uses declared metrics by default and accepts DVC-style targets, `-R`, `-a`, `-T`, `--all-commits`, `--json`, and `--md`; `crab metrics diff` accepts DVC-style `--targets <path>... -- [a_rev] [b_rev]`, `--all`, `--json`, and `--md` |
 | `plots:` | `plots:` | Plot source paths, arbitrary plot IDs, DVC multi-source `x`/`y` mappings, cross-file `x`/`y` sources, headerless data, axis labels, custom HTML wrappers, and basic metadata are preserved; produced stage plot hashes are recorded in `crab.lock`, and plots can be rendered with `crab plots show --show-vega`, `--no-header`, `--x-label`, `--y-label`, `--html-template`, `--format html`, `--open`, or `crab plots diff` |
 | `live:` | `outs:` + `metrics:` | Legacy DVCLive sections become a cached directory output plus `<live-dir>/metrics.json`; modern DVCLive-generated `params:`, `metrics:`, and `plots:` pass through normally |
-| `artifacts:` | `artifacts:` | Direct copy as model/artifact metadata; ignored by workflow execution |
+| `artifacts:` | `artifacts:` | Preserved and validated as catalog metadata; local `crab artifacts` list/show/get/version/promote/history lifecycle is available, while remote publication and clean-clone GC remain gated |
 | `wdir:` | `wdir:` | Direct copy; stage-local `params.yaml` and file-scoped stage params remain relative to `wdir` |
 | `frozen:` | `frozen:` | Direct copy; `crab freeze <stage>` and `crab unfreeze <stage>` toggle it after migration |
 | `always_changed:` | `always_changed:` or `nondeterministic:` | Directly accepted; migration emits the native Crab spelling |
@@ -97,8 +120,8 @@ outs:
 | `cache: true/false` | `cache: true/false`; `false` disables run-cache reads/writes for the stage |
 | `persist: true` | `persist: true` |
 | `push: false` | `push: false`; local cache is retained, remote stage-cache publication is skipped |
-| `checkpoint: true` | `persist: true`; old DVC checkpoint outputs are kept across stage runs |
-| `remote: <name>` | Routes artifact bytes through `[workflow.remotes.<name>]`; stage manifests and refs stay on the configured Crab repo remote |
+| `checkpoint: true` | Rejected by DVC migration with `dvc_checkpoint_unsupported`; hand-authored Crab checkpoints are explicit, and ordinary `run/repro` reject them because `crab exp run` owns lineage |
+| `remote: <name>` | Inventoried as redacted metadata; an explicit `--remote-map NAME=DESTINATION` is required, and destination population/live verification remains a cutover gate |
 
 ### Command list conversion
 
@@ -106,6 +129,10 @@ DVC allows `cmd:` as a list of strings. Crab accepts that form directly and
 runs each command in order in a fresh shell with the same working directory and
 environment, stopping after the first failure. The migration tool preserves the
 list form so shell state such as `cd` or `export` does not leak between entries:
+
+Shell strings use `/bin/sh -c` on Unix and `cmd.exe /D /S /C` on Windows; Crab
+does not translate POSIX syntax to batch syntax. Use `cmd: { argv: [...] }` for
+cross-platform stages.
 
 ```yaml
 # DVC
@@ -144,12 +171,23 @@ normally.
 
 ## Unsupported features
 
-These DVC features have no crab equivalent. The migration tool emits
-warnings but continues converting the rest of the pipeline.
+The following gaps are safety boundaries, not conversion warnings that can be
+ignored:
+
+- DVC checkpoint outputs are rejected rather than downgraded to `persist`.
+- Inventory and local transfer are implemented for `.dvc` pointers, cache
+  objects, remotes, workspace data, and `dvc.lock`, but live remote fetch and
+  clean-clone cutover remain gated until their evidence is available.
+- Top-level artifact declarations are retained as validated catalog metadata;
+  local `crab artifacts` list/show/get/version/promote/history is available,
+  while remote publication and clean-clone GC remain gated.
+
+Unsupported DVC features are reported as typed findings. Fatal semantic or
+source failures leave the target unchanged; migration never deletes `.dvc/`.
 
 | DVC feature | Workaround |
 |-------------|------------|
-| SSH/HDFS external deps | Keep DVC-style HTTP(S), `file://`, S3, GCS, Azure, or `remote://` aliases backed by those URLs in `deps:` for live change detection, use a pinned URL dep such as `{ url: { url: "ssh://...", digest: "b3:<64-hex>" } }` when you want network-free hashing for an unsupported backend, or use Crab's cross-repo deps when a configured resolver is available. SSH, HDFS, and WebHDFS deps still need a digest until those resolvers land. |
+| SSH/HDFS external deps | Use DVC-style HTTP(S), `file://`, S3, GCS, Azure, or `remote://` aliases backed by those URLs in `deps:`. SSH, SFTP, HDFS, WebHDFS, WebDAV, Drive, and OSS schemes fail migration/run preflight until a live provider is compiled and qualified; a pinned digest does not bypass that capability check. |
 | SSH/HDFS external outs | Absolute local paths, `file://`, HTTP(S), S3, GCS, Azure, and `remote://` aliases backed by those URLs are supported when non-cached. SSH, HDFS, and WebHDFS output URLs remain a migration warning until those resolvers land. |
 | Hydra custom Python resolvers/plugins | Crab composes YAML defaults-list config groups directly, honors package directives such as `# @package _global_`, and resolves nested `${...}`, relative `${.sibling}` / `${..parent}` references, `${join:...}`, `${oc.env:VAR,default}`, `${oc.select:key,default}`, `${oc.decode:...}`, `${oc.create:...}`, `${oc.deprecated:key[,message]}`, `${oc.dict.keys:path}`, and `${oc.dict.values:path}` expressions. Move arbitrary Python resolver/plugin logic into the stage command when it cannot be expressed with that safe subset or static YAML defaults. |
 
@@ -378,8 +416,9 @@ configured object-store remote used by `crab exp push` and `crab exp pull`.
 
 After running `crab migrate from-dvc`:
 
-1. **Review warnings.** The migration report lists anything that couldn't
-   be converted automatically. Address each warning.
+1. **Review findings.** Run `crab migrate from-dvc --plan --json`, then inspect
+   the journal and report. Address every blocking finding; mapped remotes still
+   need live destination verification.
 
 2. **Validate the pipeline.**
    ```bash
@@ -387,15 +426,10 @@ After running `crab migrate from-dvc`:
    ```
    Fix any schema errors or undefined template references.
 
-3. **Convert the lockfile.** The migration tool does NOT convert
-   `dvc.lock` to `crab.lock`. Run the pipeline once to generate a
-   fresh lockfile:
-   ```bash
-   crab run
-   ```
-   This re-executes all stages (no prior cache exists). If you want to
-   avoid re-execution, populate the cache first by running with existing
-   outputs present.
+3. **Verify the lockfile.** The repository-aware migration recomputes Crab
+   hashes from verified bytes and writes `crab.lock`; it never copies DVC MD5
+   or ETag values. If it is blocked, resume the journal after correcting the
+   source rather than hand-writing a lockfile.
 
 4. **Update CI scripts.** Use `crab repro` when you want to keep the DVC
    command shape, or `crab run` as the native Crab spelling. Preserve target
@@ -417,13 +451,10 @@ After running `crab migrate from-dvc`:
    tracked outputs. Crab uses the same pattern — your existing
    `.gitignore` likely works as-is.
 
-6. **Remove DVC artifacts.** Once satisfied:
-   ```bash
-   rm dvc.yaml dvc.lock
-   rm -rf .dvc/
-   git rm .dvc/.gitignore  # if tracked
-   pip uninstall dvc        # optional
-   ```
+6. **Keep DVC artifacts.** Do not remove `dvc.yaml`, `dvc.lock`, `.dvc/`,
+   `.dvc/cache/`, remotes, or `.dvc` pointer files unless the report explicitly
+   says `safe_to_remove_dvc: true` after a fresh-clone byte/tree/mode restore
+   check. The migration command has no delete flag.
 
 7. **Commit the migration.**
    ```bash
@@ -546,7 +577,8 @@ stages:
     outs:
       - models/model.pkl:
           persist: true
-      - models/checkpoints/
+      - models/checkpoints/:
+          push: false
     metrics:
       - metrics/train.json
 
@@ -570,13 +602,15 @@ Migration Report
 Stages converted: 5
 Output written to: crab.yaml
 Warnings: none
+safe_to_remove_dvc: false
+Blocking findings:
+  dvc_remote_clean_clone_unverified
 ==================================================
 ```
 
-The `checkpoints/` output keeps `push: false`: Crab still writes and reads the
-local stage cache, but skips remote publication for the whole stage because a
-remote stage-cache entry must be complete. `cache: false` is different: it keeps
-output hashes in `crab.lock` but disables run-cache reuse for the whole stage.
-Per-output `remote:` is preserved and active for workflow cache transfers.
-Add matching `[workflow.remotes.<name>]` entries in `.crab.toml` when your DVC
-project depended on different storage backends per output.
+DVC checkpoint outputs are rejected by migration; they are not represented as
+ordinary persistent outputs. Hand-authored Crab checkpoints are explicit
+experiment lineage and must run through `crab exp run`. `push: false` remains
+an ordinary stage-cache publication setting, while `remote:` declarations are
+recorded as redacted inventory findings and require an explicit, verified
+mapping. No DVC file is removed by this example.

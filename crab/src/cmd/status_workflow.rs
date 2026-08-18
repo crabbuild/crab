@@ -267,10 +267,9 @@ fn status_entries(
     config: &Config,
     mode: OutputMode,
 ) -> Result<Option<Vec<StageStatusEntry>>> {
-    // Config gate: workflow layer opt-in. The command is a no-op
-    // read, but emitting status for a repo that hasn't opted in
-    // would be misleading — the lockfile wouldn't have been written
-    // by this binary.
+    // Config gate: an explicit workflow opt-out must apply to read-only
+    // status too; otherwise status could claim a lockfile this binary did
+    // not produce.
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -918,7 +917,11 @@ fn resolve_path_dep_hashes(
                 out.insert(key, digest);
             }
             Dep::Url { .. } => {
-                let Some((key, digest)) = dep.url_hash_with_remote_aliases(remote_aliases)? else {
+                let Some((key, digest)) = dep.url_hash_with_remote_aliases_and_index(
+                    remote_aliases,
+                    Some(&repo_root.join(".crab/workflow/external-hashes.json")),
+                )?
+                else {
                     continue;
                 };
                 out.insert(key, digest);
