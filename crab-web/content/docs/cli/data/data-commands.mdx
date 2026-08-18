@@ -29,6 +29,12 @@ and target path. A URL response or object-store object is streamed into a
 temporary file and verified before replacement; failed updates leave the prior
 target intact.
 
+`data status` reports a per-source dimension matrix in JSON: `workspace`,
+`descriptor`, `git`, `lock`, `cache`, `source`, and `remote`. It never performs
+network I/O implicitly; `source` and `remote` are `not-checked` until a
+network-aware status operation is added. `cache=not-managed` is explicit for
+source descriptors that have not been promoted into the workflow cache.
+
 `data import-db` currently supports the bundled read-only SQLite connector.
 The query is materialized as deterministic JSONL (one object per row); binary
 columns use a $binary_base64 value. The database path and query identity are

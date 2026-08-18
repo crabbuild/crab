@@ -1060,21 +1060,30 @@ pub fn run_migrate_from_dvc_with_options(
                 .iter()
                 .any(|remote| remote.destination.is_some())
             {
-                let remote_evidence = verify_mapped_remote_destinations(
+                let remote_evidence = match verify_mapped_remote_destinations(
                     project_root,
                     &out_path,
                     &inventory,
                     &journal,
-                )
-                .map_err(|error| {
-                    journal
-                        .blocking_reasons
-                        .push("dvc_remote_clean_clone_unverified".to_owned());
-                    journal.blocking_reasons.sort();
-                    journal.blocking_reasons.dedup();
-                    journal.save_atomic(&journal_path).ok();
-                    error
-                })?;
+                ) {
+                    Ok(evidence) => evidence,
+                    Err(error) => {
+                        journal
+                            .blocking_reasons
+                            .push("dvc_remote_clean_clone_unverified".to_owned());
+                        journal.blocking_reasons.sort();
+                        journal.blocking_reasons.dedup();
+                        if let Err(save_error) = journal.save_atomic(&journal_path) {
+                            return Err(CrabError::Configuration {
+                                key: "dvc_migration_journal_save_failed".to_owned(),
+                                origin: format!(
+                                    "remote verification failed: {error}; journal save failed: {save_error}"
+                                ),
+                            });
+                        }
+                        return Err(error);
+                    }
+                };
                 journal.remote_verifications = remote_evidence;
                 journal.blocking_reasons.retain(|reason| {
                     reason != "dvc_remote_destination_unverified"

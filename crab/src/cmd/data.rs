@@ -151,7 +151,8 @@ impl DataCommand {
 
     /// Execute a data command after parsing has completed.
     pub fn run(self) -> Result<()> {
-        let root = std::env::current_dir().map_err(CrabError::Io)?;
+        let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+        let root = resolve_data_root(&cwd)?;
         match self {
             Self::List(args) => run_list(&root, &args),
             Self::Import(args) => run_import(&root, &args),
@@ -163,12 +164,27 @@ impl DataCommand {
     }
 }
 
+fn resolve_data_root(start: &Path) -> Result<PathBuf> {
+    crate::git::worktree::WorktreeContext::resolve_from_path(start)
+        .map(|context| context.current_worktree_root)
+}
+
 #[derive(Debug, Serialize)]
 struct DataEntry {
     path: String,
     kind: String,
     size: Option<u64>,
     source_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DataStatusEntry {
+    path: String,
+    kind: String,
+    size: Option<u64>,
+    source_id: Option<String>,
+    /// Stable per-dimension states; network-backed dimensions are explicit when not checked.
+    dimensions: BTreeMap<&'static str, &'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -623,25 +639,7 @@ fn run_status(root: &Path, args: &DataStatusArgs) -> Result<()> {
                 .as_deref()
                 .is_none_or(|target| descriptor.id == target || descriptor.target == target)
         })
-        .map(|descriptor| {
-            let state = match safe_target(root, Path::new(&descriptor.target)) {
-                Err(_) => "unsafe",
-                Ok(target) if !target.exists() => "missing",
-                Ok(target) => match hash_path(&target) {
-                    Ok((hash, _)) if format!("b3:{}", hex(&hash)) == descriptor.content_hash => {
-                        "up-to-date"
-                    }
-                    Ok(_) => "changed",
-                    Err(_) => "unreadable",
-                },
-            };
-            DataEntry {
-                path: descriptor.target,
-                kind: format!("source:{state}"),
-                size: Some(descriptor.size),
-                source_id: Some(descriptor.id),
-            }
-        })
+        .map(|descriptor| status_entry(root, descriptor))
         .collect::<Vec<_>>();
     emit(
         OutputMode::from_flags(args.json, args.jsonl),
@@ -651,11 +649,72 @@ fn run_status(root: &Path, args: &DataStatusArgs) -> Result<()> {
         },
         |payload| {
             for entry in &payload.entries {
-                println!("{}\t{}", entry.kind, entry.path);
+                let dimensions = entry
+                    .dimensions
+                    .iter()
+                    .map(|(name, state)| format!("{name}={state}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("{}\t{}\t{}", entry.kind, entry.path, dimensions);
             }
         },
     );
     Ok(())
+}
+
+fn status_entry(root: &Path, descriptor: SourceDescriptor) -> DataStatusEntry {
+    let workspace = match safe_target(root, Path::new(&descriptor.target)) {
+        Err(_) => "unsafe",
+        Ok(target) if !target.exists() => "missing",
+        Ok(target) => match hash_path(&target) {
+            Ok((hash, _)) if format!("b3:{}", hex(&hash)) == descriptor.content_hash => {
+                "up-to-date"
+            }
+            Ok(_) => "changed",
+            Err(_) => "unreadable",
+        },
+    };
+    let target = Path::new(&descriptor.target);
+    let mut dimensions = BTreeMap::new();
+    dimensions.insert("workspace", workspace);
+    dimensions.insert("descriptor", "present");
+    dimensions.insert("git", git_worktree_state(root, target));
+    dimensions.insert("cache", "not-managed");
+    dimensions.insert("remote", "not-checked");
+    dimensions.insert("source", "not-checked");
+    dimensions.insert(
+        "lock",
+        if descriptor.revision.is_some() || descriptor.validator.is_some() {
+            "locked"
+        } else {
+            "unlocked"
+        },
+    );
+    DataStatusEntry {
+        path: descriptor.target,
+        kind: format!("source:{workspace}"),
+        size: Some(descriptor.size),
+        source_id: Some(descriptor.id),
+        dimensions,
+    }
+}
+
+fn git_worktree_state(root: &Path, target: &Path) -> &'static str {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain=v1", "--untracked-files=all", "--"])
+        .arg(target)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            if output.stdout.is_empty() {
+                "clean"
+            } else {
+                "changed"
+            }
+        }
+        _ => "unavailable",
+    }
 }
 
 struct FetchedSource {
@@ -2213,6 +2272,15 @@ mod tests {
             },
         )
         .unwrap();
+
+        let status = status_entry(root.path(), updated);
+        assert_eq!(status.kind, "source:up-to-date");
+        assert_eq!(status.dimensions.get("workspace"), Some(&"up-to-date"));
+        assert_eq!(status.dimensions.get("descriptor"), Some(&"present"));
+        assert_eq!(status.dimensions.get("lock"), Some(&"unlocked"));
+        assert_eq!(status.dimensions.get("source"), Some(&"not-checked"));
+        assert_eq!(status.dimensions.get("remote"), Some(&"not-checked"));
+        assert_eq!(status.dimensions.get("cache"), Some(&"not-managed"));
     }
 
     fn git_fixture() -> TempDir {
@@ -2229,6 +2297,18 @@ mod tests {
         run(&["config", "user.email", "test@example.invalid"]);
         run(&["config", "user.name", "Crab Test"]);
         repository
+    }
+
+    #[test]
+    fn data_commands_resolve_the_worktree_root_from_nested_directories() {
+        let repository = git_fixture();
+        let nested = repository.path().join("src").join("deep");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            resolve_data_root(&nested).unwrap(),
+            repository.path().canonicalize().unwrap()
+        );
     }
 
     fn commit_fixture(repository: &TempDir) -> String {

@@ -10,6 +10,15 @@ descriptor records the source kind, canonical locator, locked revision or
 validator, target path, byte count, and recomputed `b3:` content identity.
 Secrets from URL userinfo and query fields are never serialized.
 
+The command boundary resolves the current Git worktree root, so invocations
+from nested directories use the same descriptor and target root. `data status`
+keeps the workspace result compatible with the existing `source:<state>` text
+label and adds explicit JSON dimensions for workspace, descriptor, Git, lock,
+cache, source freshness, and remote availability. It does not perform network
+I/O implicitly: unchecked source/remote state is reported as `not-checked`,
+and source descriptors not promoted to the workflow cache report
+`cache=not-managed`.
+
 `data update` resolves the descriptor, streams a new candidate into a sibling
 temporary path, verifies it, and only then replaces the target and descriptor.
 HTTP(S) and S3/GCS/Azure-compatible object URLs use provider validators when
