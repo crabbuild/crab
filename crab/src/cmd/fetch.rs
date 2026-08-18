@@ -73,10 +73,7 @@ fn emit_phase(stream: Option<&Mutex<JsonlStream<Stdout>>>, payload: PerfPhasePay
 /// HEAD's tree, and downloads any missing xorbs/shards into the local
 /// cache directory.
 pub async fn run_fetch_in(root: &Path, args: &FetchArgs, cancel: &CancellationToken) -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load config, using defaults");
-        Config::default()
-    });
+    let config = Config::resolve_for_repo(root)?;
 
     run_fetch_in_with_selector(
         root,

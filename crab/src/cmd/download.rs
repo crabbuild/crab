@@ -154,10 +154,7 @@ pub async fn run_download(
     check_cancelled(cancel)?;
 
     let start = Instant::now();
-    let mut config = Config::resolve_local().unwrap_or_else(|e| {
-        tracing::debug!(error = %e, "download: failed to resolve local config, using defaults");
-        Config::default()
-    });
+    let mut config = Config::resolve_local()?;
     let max_workers = effective_max_workers(args, &config)?;
     config.hydrate.download_concurrency = max_workers;
 
