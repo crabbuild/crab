@@ -20,7 +20,8 @@ and records the resolved commit id. A directory at a revision is rejected
 until its tree materialization contract is implemented. Remote Git transport
 is not inferred from a URL or local path.
 
-Database import is intentionally an explicit connector boundary: until a
-reviewed connector is compiled, `data import-db` fails before writing files.
-Non-file URL schemes likewise fail closed instead of pretending that a parser
-acceptance is a runtime adapter.
+Database import has an explicit connector boundary. The bundled SQLite
+connector opens databases read-only, materializes deterministic JSONL, and
+records the query identity so `data update` can rerun it transactionally.
+Other connectors and non-file URL schemes fail closed instead of pretending
+that parser acceptance is a runtime adapter.

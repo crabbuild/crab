@@ -10,7 +10,10 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use clap::{Args, Subcommand};
+use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde::Serialize;
 
 use crate::core::error::{CrabError, Result};
@@ -91,8 +94,11 @@ pub struct DataImportUrlArgs {
 
 #[derive(Debug, Args)]
 pub struct DataImportDbArgs {
-    /// Connector name. Connectors are explicit; no DSN is accepted here.
+    /// Connector name. The bundled connector is sqlite.
     pub connector: String,
+    /// Read-only SQLite database path.
+    #[arg(long)]
+    pub database: PathBuf,
     /// Canonical query text or query-file path.
     #[arg(long)]
     pub query: String,
@@ -147,7 +153,7 @@ impl DataCommand {
             Self::List(args) => run_list(&root, &args),
             Self::Import(args) => run_import(&root, &args),
             Self::ImportUrl(args) => run_import_url(&root, &args),
-            Self::ImportDb(args) => run_import_db(&args),
+            Self::ImportDb(args) => run_import_db(&root, &args),
             Self::Update(args) => run_update(&root, &args),
             Self::Status(args) => run_status(&root, &args),
         }
@@ -387,12 +393,149 @@ fn run_import_url(root: &Path, args: &DataImportUrlArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_import_db(args: &DataImportDbArgs) -> Result<()> {
-    let _ = (&args.connector, &args.query, &args.output);
-    Err(CrabError::Configuration {
-        key: "data_import_db_connector_unavailable".into(),
-        origin: "no database connector is compiled; choose a reviewed connector feature".into(),
-    })
+fn run_import_db(root: &Path, args: &DataImportDbArgs) -> Result<()> {
+    if !args.connector.eq_ignore_ascii_case("sqlite") {
+        return Err(CrabError::Configuration {
+            key: "data_import_db_connector_unsupported".into(),
+            origin: args.connector.clone(),
+        });
+    }
+    let target = safe_target(root, &args.output)?;
+    reject_existing_target(&target)?;
+    let database = canonicalize_source(&args.database)?;
+    if !database.is_file() {
+        return Err(CrabError::Configuration {
+            key: "data_import_db_source_invalid".into(),
+            origin: database.display().to_string(),
+        });
+    }
+    let query = load_db_query(&args.query)?;
+    let temporary = temporary_target(&target);
+    let mut cleanup = TemporaryPathCleanup::new(temporary.clone());
+    write_sqlite_jsonl(&database, &query, &temporary)?;
+    let (hash, size) = hash_path(&temporary)?;
+    let mut descriptor = descriptor_for(
+        "sqlite",
+        &database.to_string_lossy(),
+        Some(format!("b3:{}", blake3::hash(query.as_bytes()).to_hex())),
+        None,
+        hash,
+        size,
+        &args.output,
+    );
+    descriptor
+        .metadata
+        .insert("query".to_owned(), query.clone());
+    if let Err(error) = install_new_payload(&temporary, &target) {
+        return Err(error);
+    }
+    cleanup.disarm();
+    if let Err(error) = save_descriptor(root, &descriptor) {
+        let _ = remove_existing_path(&target);
+        return Err(error);
+    }
+    emit_import(
+        OutputMode::from_flags(args.json, args.jsonl),
+        descriptor,
+        true,
+        false,
+    );
+    Ok(())
+}
+
+fn load_db_query(raw: &str) -> Result<String> {
+    let query = if Path::new(raw).is_file() {
+        fs::read_to_string(raw).map_err(CrabError::Io)?
+    } else {
+        raw.to_owned()
+    };
+    let query = query.trim().to_owned();
+    if query.is_empty() || query.len() > 1024 || query.chars().any(char::is_control) {
+        return Err(CrabError::Configuration {
+            key: "data_import_db_query_invalid".into(),
+            origin: "query must be a non-empty UTF-8 string no longer than 1024 bytes".into(),
+        });
+    }
+    Ok(query)
+}
+
+fn write_sqlite_jsonl(database: &Path, query: &str, destination: &Path) -> Result<()> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| CrabError::Configuration {
+            key: "data_import_db_open_failed".into(),
+            origin: error.to_string(),
+        })?;
+    connection
+        .execute_batch("PRAGMA query_only = ON;")
+        .map_err(|error| CrabError::Configuration {
+            key: "data_import_db_read_only_failed".into(),
+            origin: error.to_string(),
+        })?;
+    let mut statement = connection
+        .prepare(query)
+        .map_err(|error| CrabError::Configuration {
+            key: "data_import_db_query_failed".into(),
+            origin: error.to_string(),
+        })?;
+    let columns = statement
+        .column_names()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if columns
+        .iter()
+        .any(|column| column.chars().any(char::is_control))
+    {
+        return Err(CrabError::Configuration {
+            key: "data_import_db_column_invalid".into(),
+            origin: "query returned a control character in a column name".into(),
+        });
+    }
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(CrabError::Io)?;
+    let mut output = File::create(destination).map_err(CrabError::Io)?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| CrabError::Configuration {
+            key: "data_import_db_query_failed".into(),
+            origin: error.to_string(),
+        })?;
+    while let Some(row) = rows.next().map_err(|error| CrabError::Configuration {
+        key: "data_import_db_row_failed".into(),
+        origin: error.to_string(),
+    })? {
+        let mut values = BTreeMap::new();
+        for (index, column) in columns.iter().enumerate() {
+            let value = row
+                .get_ref(index)
+                .map_err(|error| CrabError::Configuration {
+                    key: "data_import_db_row_failed".into(),
+                    origin: error.to_string(),
+                })?;
+            values.insert(column.clone(), sqlite_json_value(value));
+        }
+        serde_json::to_writer(&mut output, &values).map_err(|error| CrabError::Configuration {
+            key: "data_import_db_serialize_failed".into(),
+            origin: error.to_string(),
+        })?;
+        output.write_all(b"\n").map_err(CrabError::Io)?;
+    }
+    output.sync_all().map_err(CrabError::Io)
+}
+
+fn sqlite_json_value(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(value) => serde_json::Value::from(value),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        ValueRef::Text(value) => {
+            serde_json::Value::String(String::from_utf8_lossy(value).into_owned())
+        }
+        ValueRef::Blob(value) => serde_json::json!({
+            "$binary_base64": BASE64_STANDARD.encode(value),
+        }),
+    }
 }
 
 fn run_update(root: &Path, args: &DataUpdateArgs) -> Result<()> {
@@ -654,6 +797,27 @@ fn fetch_descriptor_source(descriptor: &SourceDescriptor, target: &Path) -> Resu
                     origin: scheme.to_owned(),
                 }),
             }
+        }
+        "sqlite" => {
+            let database = canonicalize_source(Path::new(&descriptor.locator))?;
+            let query =
+                descriptor
+                    .metadata
+                    .get("query")
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: "data_source_query_missing".into(),
+                        origin: descriptor.target.clone(),
+                    })?;
+            write_sqlite_jsonl(&database, query, &temporary)?;
+            let (hash, size) = hash_path(&temporary)?;
+            temporary_cleanup.disarm();
+            Ok(FetchedSource {
+                hash,
+                size,
+                revision: Some(format!("b3:{}", blake3::hash(query.as_bytes()).to_hex())),
+                validator: None,
+                temporary: Some(temporary),
+            })
         }
         _ => Err(CrabError::Configuration {
             key: "data_update_source_unsupported".into(),
@@ -1548,6 +1712,97 @@ where
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn sqlite_import_writes_verified_jsonl_and_descriptor() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("source.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "create table samples (id integer, label text, blob blob);
+                 insert into samples values (2, 'two', x'0102');
+                 insert into samples values (1, 'one', null);",
+            )
+            .unwrap();
+        drop(connection);
+
+        run_import_db(
+            temp.path(),
+            &DataImportDbArgs {
+                connector: "sqlite".to_owned(),
+                database,
+                query: "select id, label, blob from samples order by id".to_owned(),
+                output: PathBuf::from("data/samples.jsonl"),
+                json: false,
+                jsonl: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join("data/samples.jsonl")).unwrap(),
+            "{\"blob\":null,\"id\":1,\"label\":\"one\"}\n\
+             {\"blob\":{\"$binary_base64\":\"AQI=\"},\"id\":2,\"label\":\"two\"}\n"
+        );
+        let descriptors = load_descriptors(temp.path()).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].kind, "sqlite");
+        assert_eq!(
+            descriptors[0].metadata.get("query").map(String::as_str),
+            Some("select id, label, blob from samples order by id")
+        );
+    }
+
+    #[test]
+    fn sqlite_update_refreshes_snapshot_without_changing_query_identity() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("source.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "create table samples (id integer, label text);
+                 insert into samples values (1, 'one');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let args = DataImportDbArgs {
+            connector: "sqlite".to_owned(),
+            database: database.clone(),
+            query: "select id, label from samples order by id".to_owned(),
+            output: PathBuf::from("data/samples.jsonl"),
+            json: false,
+            jsonl: false,
+        };
+        run_import_db(temp.path(), &args).unwrap();
+        let before = load_descriptors(temp.path()).unwrap().pop().unwrap();
+
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute("insert into samples values (2, 'two')", [])
+            .unwrap();
+        drop(connection);
+
+        run_update(
+            temp.path(),
+            &DataUpdateArgs {
+                target: "data/samples.jsonl".to_owned(),
+                dry_run: false,
+                json: false,
+                jsonl: false,
+            },
+        )
+        .unwrap();
+
+        let after = load_descriptors(temp.path()).unwrap().pop().unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_ne!(after.content_hash, before.content_hash);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("data/samples.jsonl")).unwrap(),
+            "{\"id\":1,\"label\":\"one\"}\n{\"id\":2,\"label\":\"two\"}\n"
+        );
+    }
 
     #[test]
     fn redact_url_drops_secret_query_fields() {

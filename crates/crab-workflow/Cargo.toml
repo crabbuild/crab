@@ -41,6 +41,7 @@ petgraph = "0.6"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs", "time", "signal", "process"] }
+tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = "0.1"

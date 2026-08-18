@@ -15,6 +15,8 @@ crab data list --rev HEAD~1 data --recursive --json
 crab data import ../source-repo --path data/train.csv --rev HEAD \
   --output data/train.csv
 crab data import-url https://example.test/data.csv --output data/data.csv
+crab data import-db sqlite --database data/source.db \
+  --query 'select * from samples order by id' --output data/samples.jsonl
 crab data status --json
 crab data update data/data.csv --dry-run --json
 ```
@@ -25,13 +27,14 @@ locked revision or validator, recomputed `b3:` content identity, byte count,
 and target path. A URL response is streamed into a temporary file and
 verified before replacement; failed updates leave the prior target intact.
 
-`data import-db` is an explicit connector boundary. It fails with a typed
-unsupported diagnostic until a connector with documented snapshot/isolation
-and credential handling is compiled. Likewise, a URL scheme without a live
-provider adapter fails before writing data.
+`data import-db` currently supports the bundled read-only SQLite connector.
+The query is materialized as deterministic JSONL (one object per row); binary
+columns use a $binary_base64 value. The database path and query identity are
+recorded in the credential-free descriptor, and updates rerun the same query
+transactionally. Other connector names fail before writing data.
 
 `--rev` currently targets a local Git repository: `data list` reads committed
 tree entries, while `data import` accepts one committed file, records the
 resolved commit id, and preserves its executable bit. Directory-at-revision,
-remote Git transport, database connectors, and non-file URL providers remain
-explicitly unsupported and fail before writing a target.
+remote Git transport, non-SQLite database connectors, and non-file URL
+providers remain explicitly unsupported and fail before writing a target.

@@ -119,7 +119,7 @@ Most DVC fields map directly:
 | `matrix` | Supported. |
 | `vars` and `${...}` | Supported for templating. |
 | `always_changed` | Supported as DVC-compatible spelling for nondeterministic stages. |
-| `artifacts` | Preserved and validated as catalog metadata. Local `crab artifacts` list/show/get/version/promote/history is available; migration remains cutover-blocked until remote publication, clean-clone, and GC evidence pass. |
+| `artifacts` | Preserved and validated as catalog metadata. `crab artifacts` list/show/get/version/promote/history use the primary Crab remote when configured (with a local mirror); migration remains cutover-blocked until clean-clone and GC evidence pass. |
 
 ## Behavior Differences
 
@@ -136,9 +136,8 @@ Most DVC fields map directly:
   `--remote-map`, then satisfy the provider and clean-clone gates before
   treating the result as safe.
 - Top-level `artifacts:` declarations are preserved and validated as catalog
-  metadata. See the artifact lifecycle pages for local versioning and
-  promotion; remote publication and GC reachability are not claimed by
-  migration until their release evidence exists.
+  metadata. See the artifact lifecycle pages for remote-backed versioning and
+  promotion; remote artifact GC reachability remains a release gate.
 - Local experiment metadata lives under `.crab/workflow/exp/`.
 - Run journals live under `.crab/workflow/runs/`.
 - Split workflow files can use `workflow.discover recursive` and

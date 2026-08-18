@@ -91,7 +91,7 @@ crab run --validate
 | `metrics:` | `metrics:` | Direct copy, including stage-level DVC path-key output settings such as `cache`, `persist`, and `push`; produced metric hashes are recorded in `crab.lock`; `crab metrics show` uses declared metrics by default and accepts DVC-style targets, `-R`, `-a`, `-T`, `--all-commits`, `--json`, and `--md`; `crab metrics diff` accepts DVC-style `--targets <path>... -- [a_rev] [b_rev]`, `--all`, `--json`, and `--md` |
 | `plots:` | `plots:` | Plot source paths, arbitrary plot IDs, DVC multi-source `x`/`y` mappings, cross-file `x`/`y` sources, headerless data, axis labels, custom HTML wrappers, and basic metadata are preserved; produced stage plot hashes are recorded in `crab.lock`, and plots can be rendered with `crab plots show --show-vega`, `--no-header`, `--x-label`, `--y-label`, `--html-template`, `--format html`, `--open`, or `crab plots diff` |
 | `live:` | `outs:` + `metrics:` | Legacy DVCLive sections become a cached directory output plus `<live-dir>/metrics.json`; modern DVCLive-generated `params:`, `metrics:`, and `plots:` pass through normally |
-| `artifacts:` | `artifacts:` | Preserved and validated as catalog metadata; local `crab artifacts` list/show/get/version/promote/history lifecycle is available, while remote publication and clean-clone GC remain gated |
+| `artifacts:` | `artifacts:` | Preserved and validated as catalog metadata; a configured primary Crab remote provides immutable publication, CAS promotion, and clean-clone retrieval, while artifact GC reachability remains gated |
 | `wdir:` | `wdir:` | Direct copy; stage-local `params.yaml` and file-scoped stage params remain relative to `wdir` |
 | `frozen:` | `frozen:` | Direct copy; `crab freeze <stage>` and `crab unfreeze <stage>` toggle it after migration |
 | `always_changed:` | `always_changed:` or `nondeterministic:` | Directly accepted; migration emits the native Crab spelling |
@@ -179,8 +179,9 @@ ignored:
   objects, remotes, workspace data, and `dvc.lock`, but live remote fetch and
   clean-clone cutover remain gated until their evidence is available.
 - Top-level artifact declarations are retained as validated catalog metadata;
-  local `crab artifacts` list/show/get/version/promote/history is available,
-  while remote publication and clean-clone GC remain gated.
+  a configured primary Crab remote provides immutable publication, CAS
+  promotion, and clean-clone retrieval, while artifact GC reachability remains
+  gated.
 
 Unsupported DVC features are reported as typed findings. Fatal semantic or
 source failures leave the target unchanged; migration never deletes `.dvc/`.

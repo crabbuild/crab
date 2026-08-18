@@ -16,9 +16,10 @@ to one immutable version and is updated with compare-and-swap. The expected
 version must be supplied for concurrent automation; conflicts report the
 current and expected values. Promotion never copies artifact bytes.
 
-The local lifecycle is intentionally conservative. list, show, get, version
-create, promote, and history have text, JSON, and JSONL contracts. get selects
-one immutable version or stage and refuses to overwrite an existing path.
-Remote ref publication, clean-clone enumeration, shared GC reachability, and
-canonical hydration integration are not advertised until the remote artifact
-gate passes.
+The CLI keeps a local mirror for recovery, but a configured primary `crab://`
+remote is canonical: list, show, get, version create, promote, and history
+read and publish the remote manifest, payload, stage, and promotion records.
+Remote downloads stream into a verified, non-overwriting destination and
+preserve directory trees and modes. Shared GC reachability and automatic old-
+version retention are deliberately not enabled until the artifact GC gate
+passes.

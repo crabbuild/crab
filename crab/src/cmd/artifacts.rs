@@ -13,8 +13,9 @@ use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crab_workflow::{
     ArtifactCatalog, ArtifactDecl, ArtifactManifest, ArtifactRegistry, Lockfile,
-    artifact_stage_ref, artifact_version_ref, manifest_from_path, parse_yaml, snapshot_payload,
-    verify_payload,
+    artifact_stage_ref, artifact_version_ref, download_remote_artifact, manifest_from_path,
+    parse_yaml, promote_remote_artifact, publish_remote_artifact, read_remote_artifact,
+    read_remote_artifact_registry, snapshot_payload, verify_payload,
 };
 
 pub const ARTIFACTS_SCHEMA: &str = "artifacts";
@@ -187,7 +188,16 @@ struct ArtifactGetPayload {
 }
 
 fn run_list(root: &Path, args: &ArtifactListArgs) -> Result<()> {
-    let (catalog, registry, _) = load_state(root)?;
+    let (catalog, local_registry, _) = load_state(root)?;
+    let registry = if let Some((store, prefix)) = remote_context(root)? {
+        crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact_registry(&store, &prefix)
+                .await
+                .map_err(CrabError::from)
+        })?
+    } else {
+        local_registry
+    };
     let payload = ArtifactListPayload { catalog, registry };
     emit_payload(
         args.json,
@@ -206,7 +216,16 @@ fn run_list(root: &Path, args: &ArtifactListArgs) -> Result<()> {
 }
 
 fn run_show(root: &Path, args: &ArtifactShowArgs) -> Result<()> {
-    let (catalog, registry, _) = load_state(root)?;
+    let (catalog, local_registry, _) = load_state(root)?;
+    let registry = if let Some((store, prefix)) = remote_context(root)? {
+        crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact_registry(&store, &prefix)
+                .await
+                .map_err(CrabError::from)
+        })?
+    } else {
+        local_registry
+    };
     let declaration = catalog
         .declarations
         .get(&args.name)
@@ -244,6 +263,7 @@ fn run_show(root: &Path, args: &ArtifactShowArgs) -> Result<()> {
 }
 
 fn run_version_create(root: &Path, args: &ArtifactVersionCreateArgs) -> Result<()> {
+    let remote = remote_context(root)?;
     let registry_path = registry_path(root);
     let _registry_lock = lock_registry(&registry_path)?;
     let (catalog, mut registry, registry_path) = load_state(root)?;
@@ -281,6 +301,18 @@ fn run_version_create(root: &Path, args: &ArtifactVersionCreateArgs) -> Result<(
         }
         return Err(error.into());
     }
+    if let Some((store, prefix)) = remote.as_ref() {
+        if let Err(error) = crate::cmd::lfs::block_on_runtime(async {
+            publish_remote_artifact(store, prefix, &manifest, &payload_path)
+                .await
+                .map_err(CrabError::from)
+        }) {
+            if !payload_existed {
+                let _ = remove_existing_path(&payload_path);
+            }
+            return Err(error);
+        }
+    }
     if let Err(error) = registry
         .insert_version(manifest.clone())
         .and_then(|()| registry.save_atomic(&registry_path))
@@ -313,15 +345,39 @@ fn run_version_create(root: &Path, args: &ArtifactVersionCreateArgs) -> Result<(
 }
 
 fn run_promote(root: &Path, args: &ArtifactPromoteArgs) -> Result<()> {
+    let remote = remote_context(root)?;
     let registry_path = registry_path(root);
     let _registry_lock = lock_registry(&registry_path)?;
     let (_, mut registry, registry_path) = load_state(root)?;
-    registry.promote(
-        &args.name,
-        &args.version,
-        &args.stage,
-        args.expected.as_deref(),
-    )?;
+    if let Some((store, prefix)) = remote.as_ref() {
+        crate::cmd::lfs::block_on_runtime(async {
+            promote_remote_artifact(
+                store,
+                prefix,
+                &args.name,
+                &args.version,
+                &args.stage,
+                args.expected.as_deref(),
+            )
+            .await
+            .map_err(CrabError::from)
+        })?;
+        // Refresh the local mirror from the canonical remote after the CAS
+        // succeeds. This retains prior versions referenced by the promotion
+        // history even when the command runs in a fresh clone.
+        registry = crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact_registry(store, prefix)
+                .await
+                .map_err(CrabError::from)
+        })?;
+    } else {
+        registry.promote(
+            &args.name,
+            &args.version,
+            &args.stage,
+            args.expected.as_deref(),
+        )?;
+    }
     registry.save_atomic(&registry_path)?;
     let payload = ArtifactPromotionPayload {
         name: args.name.clone(),
@@ -345,10 +401,68 @@ fn run_promote(root: &Path, args: &ArtifactPromoteArgs) -> Result<()> {
 }
 
 fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {
-    let (_, registry, registry_path) = load_state(root)?;
+    let (_, local_registry, registry_path) = load_state(root)?;
+    let remote = remote_context(root)?;
+    let registry = if let Some((store, prefix)) = remote.as_ref() {
+        crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact_registry(store, prefix)
+                .await
+                .map_err(CrabError::from)
+        })?
+    } else {
+        local_registry
+    };
     let manifest = registry
         .resolve(&args.name, args.version.as_deref(), args.stage.as_deref())?
         .clone();
+    let output = args.output.clone().unwrap_or_else(|| {
+        PathBuf::from(
+            Path::new(&manifest.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact"),
+        )
+    });
+    let output = safe_output_path(root, &output)?;
+    if let Some((store, prefix)) = remote {
+        let envelope = crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact(
+                &store,
+                &prefix,
+                &args.name,
+                args.version.as_deref(),
+                args.stage.as_deref(),
+            )
+            .await
+            .map_err(CrabError::from)
+        })?;
+        crate::cmd::lfs::block_on_runtime(async {
+            download_remote_artifact(&store, &prefix, &envelope, &output)
+                .await
+                .map_err(CrabError::from)
+        })?;
+        let output_display = output.strip_prefix(root).map_or_else(
+            |_| output.display().to_string(),
+            |path| path.display().to_string(),
+        );
+        let payload = ArtifactGetPayload {
+            name: args.name.clone(),
+            version_id: envelope.manifest.version_id,
+            output: output_display,
+            content_hash: envelope.manifest.content_hash,
+            size: envelope.manifest.size,
+        };
+        emit_payload(
+            args.json,
+            args.jsonl,
+            ARTIFACTS_SCHEMA,
+            payload,
+            |payload| {
+                println!("Wrote {} ({})", payload.output, payload.version_id);
+            },
+        );
+        return Ok(());
+    }
     let source = version_payload_path(&registry_path, &manifest.version_id);
     match fs::symlink_metadata(&source) {
         Ok(_) => {}
@@ -366,15 +480,6 @@ fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {
             origin: error.to_string(),
         }
     })?;
-    let output = args.output.clone().unwrap_or_else(|| {
-        PathBuf::from(
-            Path::new(&manifest.path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("artifact"),
-        )
-    });
-    let output = safe_output_path(root, &output)?;
     materialize_payload(&source, &output, &manifest.content_hash, manifest.size)?;
     let output_display = output.strip_prefix(root).map_or_else(
         |_| output.display().to_string(),
@@ -400,7 +505,16 @@ fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {
 }
 
 fn run_history(root: &Path, args: &ArtifactHistoryArgs) -> Result<()> {
-    let (_, registry, _) = load_state(root)?;
+    let (_, local_registry, _) = load_state(root)?;
+    let registry = if let Some((store, prefix)) = remote_context(root)? {
+        crate::cmd::lfs::block_on_runtime(async {
+            read_remote_artifact_registry(&store, &prefix)
+                .await
+                .map_err(CrabError::from)
+        })?
+    } else {
+        local_registry
+    };
     let history = registry
         .history
         .iter()
@@ -430,6 +544,19 @@ fn load_state(root: &Path) -> Result<(ArtifactCatalog, ArtifactRegistry, PathBuf
     let registry_path = registry_path(root);
     let registry = ArtifactRegistry::load(&registry_path)?;
     Ok((catalog, registry, registry_path))
+}
+
+fn remote_context(root: &Path) -> Result<Option<(crate::workflow::WorkflowStore, String)>> {
+    match crate::cmd::workflow::read_crab_remote_url(root) {
+        Ok(_) => {}
+        Err(CrabError::Configuration { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+    let (store, prefix) = crate::cmd::lfs::block_on_runtime(
+        crate::cmd::workflow::build_remote_store_for(root, &config, None),
+    )?;
+    Ok(Some((store, prefix)))
 }
 
 fn registry_path(root: &Path) -> PathBuf {

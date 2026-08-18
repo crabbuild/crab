@@ -156,7 +156,7 @@ they do not make `safe_to_remove_dvc` true.
 | `push: false` on outputs | Preserved in the converted declaration; remote stage-cache publication remains disabled for that stage. |
 | `remote:` per output | The redacted remote is inventoried. Supply an explicit `--remote-map`; destination population and live verification are still required before cutover. |
 | DVC checkpoints | Rejected with `dvc_checkpoint_unsupported`; Crab checkpoints are explicit experiment lineage and are not rewritten to `persist`. |
-| `artifacts:` declarations | Preserved and validated as catalog metadata. They keep migration unsafe until the artifact lifecycle and remote reachability gates pass; use `crab artifacts` for the local lifecycle. |
+| `artifacts:` declarations | Preserved and validated as catalog metadata. A configured primary Crab remote provides immutable publication and CAS promotion; migration remains unsafe until clean-clone and artifact-GC reachability gates pass. |
 | `live:` (DVCLive integration) | Use crab's metrics and plots directly. DVCLive callbacks write standard JSON/CSV that crab can track. |
 | DVC import provenance or unsupported providers | The inventory preserves only credential-free provenance. SSH/SFTP, HDFS/WebHDFS, WebDAV, Drive, and OSS remain unsupported until their live provider gates pass; unsupported provenance blocks cutover. |
 | Hydra composition (`dvc exp run` with Hydra) | Use `crab exp run --set key=value` for param overrides. For complex Hydra configs, run Hydra as part of your stage command. |
