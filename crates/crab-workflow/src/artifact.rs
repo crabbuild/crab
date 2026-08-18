@@ -593,7 +593,10 @@ pub async fn publish_remote_artifact(
         .map_err(|error| invalid_detail("artifact_remote_manifest_serialize", error))?;
     store.put(&manifest_path, Bytes::from(bytes)).await?;
 
-    let version_ref = ObjectPath::from(artifact_version_ref(&manifest.name, &manifest.version_id)?);
+    let version_ref = ObjectPath::from(remote_join(
+        prefix,
+        &artifact_version_ref(&manifest.name, &manifest.version_id)?,
+    ));
     store
         .put(
             &version_ref,
@@ -1978,6 +1981,23 @@ mod tests {
         publish_remote_artifact(&store, "repo", &manifest, &source_path)
             .await
             .unwrap();
+        let version_ref = ObjectPath::from(format!(
+            "repo/{}",
+            artifact_version_ref("model", &manifest.version_id).unwrap()
+        ));
+        assert!(store.get_with_etag(&version_ref).await.is_ok());
+        assert!(
+            store
+                .get_with_etag(&ObjectPath::from(
+                    artifact_version_ref("model", &manifest.version_id).unwrap()
+                ))
+                .await
+                .is_err()
+        );
+        let reachable = reachable_remote_artifact_objects(&store, "repo")
+            .await
+            .unwrap();
+        assert!(reachable.contains(version_ref.as_ref()));
         let event = promote_remote_artifact(
             &store,
             "repo",
