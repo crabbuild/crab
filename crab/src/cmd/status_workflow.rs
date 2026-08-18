@@ -243,7 +243,7 @@ pub async fn run_async(args: &StatusArgs, repo_root: &Path, mode: OutputMode) ->
         return run_local(args, repo_root, mode);
     }
 
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     let Some(mut entries) = status_entries(args, repo_root, &config, mode)? else {
         return Ok(());
     };
@@ -253,7 +253,7 @@ pub async fn run_async(args: &StatusArgs, repo_root: &Path, mode: OutputMode) ->
 }
 
 fn run_local(args: &StatusArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     let Some(entries) = status_entries(args, repo_root, &config, mode)? else {
         return Ok(());
     };

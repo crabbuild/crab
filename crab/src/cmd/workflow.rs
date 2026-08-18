@@ -60,7 +60,7 @@ pub async fn exec_push_cache(args: PushCacheArgs) -> Result<()> {
 
 /// Testable entry point.
 pub async fn exec_push_cache_in(args: &PushCacheArgs, repo_root: &Path) -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }

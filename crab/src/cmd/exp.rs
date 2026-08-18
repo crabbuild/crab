@@ -2508,7 +2508,7 @@ pub fn run_exp_rename(args: &RenameArgs, repo_root: &Path) -> Result<ExpRenamePa
 /// Testable `exp push` entry point. Uploads experiment metadata and
 /// its captured apply snapshot to the configured Crab remote.
 pub async fn run_exp_push(args: &PushArgs, repo_root: &Path) -> Result<ExpPushPayload> {
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -2532,7 +2532,7 @@ pub async fn run_exp_push(args: &PushArgs, repo_root: &Path) -> Result<ExpPushPa
 /// Testable `exp pull` entry point. Downloads remote experiment
 /// metadata and apply snapshots into the local experiment cache.
 pub async fn run_exp_pull(args: &PullArgs, repo_root: &Path) -> Result<ExpPullPayload> {
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -2658,7 +2658,7 @@ async fn run_exp_remove_remote(args: &RemoveArgs, repo_root: &Path) -> Result<Ex
         });
     }
 
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }

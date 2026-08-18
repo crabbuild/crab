@@ -474,7 +474,7 @@ pub(crate) async fn run_in_with_options(
 ) -> Result<()> {
     // Config gate: fresh configs run workflows by default, while an explicit
     // `[workflow] enabled = false` remains a hard opt-out.
-    let config = Config::resolve_for_repo(repo_root).unwrap_or_default();
+    let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
     }
@@ -1097,15 +1097,19 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
     // failure. Keep the same alias expansion and scheme registry used by the
     // execution path so `--validate` cannot report a workflow as runnable
     // when an external dependency or output has no live provider.
-    let config = Config::resolve_for_repo(repo_root).unwrap_or_default();
-    let remote_aliases = workflow_remote_aliases(&config);
-    for stage in workflow.stages.values() {
-        if let Err(error) = validate_checkpoint_execution(stage, false) {
-            errors.push(yaml_error_to_json(&error));
+    match Config::resolve_for_repo(repo_root) {
+        Ok(config) => {
+            let remote_aliases = workflow_remote_aliases(&config);
+            for stage in workflow.stages.values() {
+                if let Err(error) = validate_checkpoint_execution(stage, false) {
+                    errors.push(yaml_error_to_json(&error));
+                }
+                if let Err(error) = validate_stage_remote_capabilities(stage, &remote_aliases) {
+                    errors.push(yaml_error_to_json(&error));
+                }
+            }
         }
-        if let Err(error) = validate_stage_remote_capabilities(stage, &remote_aliases) {
-            errors.push(yaml_error_to_json(&error));
-        }
+        Err(error) => errors.push(yaml_error_to_json(&error)),
     }
 
     // Layer 3b: Graph-level checks (duplicate outs, cycles).

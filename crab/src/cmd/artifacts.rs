@@ -552,7 +552,7 @@ fn remote_context(root: &Path) -> Result<Option<(crate::workflow::WorkflowStore,
         Err(CrabError::Configuration { .. }) => return Ok(None),
         Err(error) => return Err(error),
     }
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+    let config = crate::core::config::Config::resolve_for_repo(root)?;
     let (store, prefix) = crate::cmd::lfs::block_on_runtime(
         crate::cmd::workflow::build_remote_store_for(root, &config, None),
     )?;
