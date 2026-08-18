@@ -108,7 +108,7 @@ pub use source::{
 pub use stage::Stage;
 pub use stage_cache_entry::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_MAX_SUPPORTED, ENTRY_SCHEMA_VERSION, StageCacheEntry,
-    TreeManifestEntry, cached_artifacts,
+    TreeManifestEntry, cached_artifacts, validate_stage_cache_entry,
 };
 pub use stage_cmd::Cmd;
 pub use stage_condition::{StageCondition, evaluate_expr};

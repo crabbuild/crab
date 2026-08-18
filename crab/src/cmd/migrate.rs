@@ -852,12 +852,10 @@ pub fn run_migrate_import(args: &MigrateImportArgs) -> Result<()> {
         args.include,
     );
 
-    // The actual rewrite would use git-filter-repo with a blob callback
-    // that replaces matching blobs with crab pointer content.
-    // This is a placeholder for the full implementation.
-    eprintln!("migrate import: full rewrite engine not yet wired");
-
-    Ok(())
+    Err(CrabError::LfsUnsupported {
+        command: "migrate import".to_owned(),
+        reason: "history rewrite engine is not yet wired; no changes were made".to_owned(),
+    })
 }
 
 /// Rewrite history to convert crab pointers back to full files.
@@ -869,8 +867,10 @@ pub fn run_migrate_export(args: &MigrateExportArgs) -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("migrate export: full rewrite engine not yet wired");
-    Ok(())
+    Err(CrabError::LfsUnsupported {
+        command: "migrate export".to_owned(),
+        reason: "history rewrite engine is not yet wired; no changes were made".to_owned(),
+    })
 }
 
 /// Convert a DVC pipeline (`dvc.yaml`) to `crab.yaml`.
@@ -2996,6 +2996,16 @@ mod tests {
         };
         let result = run_migrate_export(&args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn migrate_export_non_dry_run_fails_closed_until_rewrite_engine_exists() {
+        let args = MigrateExportArgs {
+            include: vec!["*.bin".into()],
+            dry_run: false,
+        };
+        let result = run_migrate_export(&args);
+        assert!(matches!(result, Err(CrabError::LfsUnsupported { .. })));
     }
 
     #[test]

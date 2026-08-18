@@ -759,7 +759,8 @@ pub async fn reachable_remote_artifact_objects(
     }
 
     let manifest_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/manifests"));
-    let mut payload_hashes = BTreeSet::new();
+    let mut payload_roots = BTreeSet::new();
+    let mut expected_payloads = BTreeSet::new();
     for object in store.list_prefix(&manifest_prefix).await? {
         let key = object.location.as_ref();
         if !manifest_paths.contains(key) {
@@ -771,7 +772,23 @@ pub async fn reachable_remote_artifact_objects(
         validate_remote_envelope(&envelope)?;
         reachable.insert(key.to_owned());
         seen_manifests.insert(key.to_owned());
-        payload_hashes.insert(envelope.manifest.content_hash);
+        let payload_root = remote_artifact_payload_root(prefix, &envelope.manifest.content_hash)?;
+        match envelope.payload_kind {
+            RemoteArtifactPayloadKind::File => {
+                expected_payloads.insert(remote_artifact_file_path(&payload_root).to_string());
+            }
+            RemoteArtifactPayloadKind::Directory => {
+                expected_payloads.insert(remote_artifact_tree_path(&payload_root).to_string());
+                if let Some(tree) = envelope.tree.as_deref() {
+                    for entry in tree.iter().filter(|entry| entry.kind == "file") {
+                        expected_payloads.insert(
+                            remote_artifact_tree_file_path(&payload_root, &entry.path)?.to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        payload_roots.insert(payload_root.to_string());
     }
 
     if let Some(missing) = manifest_paths.difference(&seen_manifests).next() {
@@ -782,16 +799,23 @@ pub async fn reachable_remote_artifact_objects(
     }
 
     let payload_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/payloads"));
+    let mut listed_payloads = BTreeSet::new();
     for object in store.list_prefix(&payload_prefix).await? {
         let key = object.location.as_ref();
-        if payload_hashes.iter().any(|hash| {
-            let Ok(root) = remote_artifact_payload_root(prefix, hash) else {
-                return false;
-            };
-            key.starts_with(&format!("{}/", root.as_ref()))
-        }) {
+        listed_payloads.insert(key.to_owned());
+        if payload_roots
+            .iter()
+            .any(|root| key.starts_with(&format!("{root}/")))
+        {
             reachable.insert(key.to_owned());
         }
+    }
+
+    if let Some(missing) = expected_payloads.difference(&listed_payloads).next() {
+        return Err(invalid(
+            "artifact_remote_payload_missing",
+            missing.to_owned(),
+        ));
     }
 
     Ok(reachable)
@@ -2048,6 +2072,41 @@ mod tests {
         assert_eq!(next_event.previous_version_id, Some(manifest.version_id));
         let registry = read_remote_artifact_registry(&store, "repo").await.unwrap();
         assert_eq!(registry.history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn remote_artifact_reachability_fails_when_payload_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("model.bin");
+        fs::write(&source, b"remote-model").unwrap();
+        let declaration = ArtifactDecl {
+            name: "model".to_owned(),
+            path: "model.bin".to_owned(),
+            kind: "model".to_owned(),
+            description: None,
+            labels: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+        let (manifest, source_path) = manifest_from_path(temp.path(), &declaration, None).unwrap();
+        let store = WorkflowStore::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        publish_remote_artifact(&store, "repo", &manifest, &source_path)
+            .await
+            .unwrap();
+
+        let payload_root = remote_artifact_payload_root("repo", &manifest.content_hash).unwrap();
+        store
+            .delete(&remote_artifact_file_path(&payload_root))
+            .await
+            .unwrap();
+
+        let error = reachable_remote_artifact_objects(&store, "repo")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::DvcMigrationInvalid { key, .. }
+                if key == "artifact_remote_payload_missing"
+        ));
     }
 
     #[tokio::test]
