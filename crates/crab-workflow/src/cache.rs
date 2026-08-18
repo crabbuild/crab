@@ -186,7 +186,7 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
             local_hash: hash.as_hex(),
         });
     }
-    validate_stage_cache_entry_at(&entry, Some(cache_worktree_root(cache_root)))?;
+    validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root))?;
     Ok(Some(entry))
 }
 
@@ -200,7 +200,7 @@ pub fn write_local(cache_root: &Path, entry: &StageCacheEntry) -> Result<()> {
     if is_cache_disabled() {
         return Ok(());
     }
-    validate_stage_cache_entry_at(entry, Some(cache_worktree_root(cache_root)))?;
+    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     let path = entry_path(cache_root, &entry.stage_hash);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -736,7 +736,7 @@ pub async fn push_remote_with_artifact_stores(
     entry: &StageCacheEntry,
     cache_root: &Path,
 ) -> Result<bool> {
-    validate_stage_cache_entry_at(entry, Some(cache_worktree_root(cache_root)))?;
+    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     if !entry.remote_push_enabled() {
         debug!(
             stage = %entry.stage_name,
@@ -963,6 +963,14 @@ fn cache_worktree_root(cache_root: &Path) -> &Path {
         .unwrap_or(cache_root)
         .parent()
         .unwrap_or(cache_root)
+}
+
+fn cache_validation_root(cache_root: &Path) -> Option<&Path> {
+    let crab_root = cache_root.parent()?;
+    if crab_root.file_name().is_some_and(|name| name == ".crab") {
+        return crab_root.parent();
+    }
+    None
 }
 
 fn xorb_bytes_for_remote_push(
@@ -1309,8 +1317,7 @@ pub async fn push_all_local_with_artifact_stores(
                 }
             };
 
-            if validate_stage_cache_entry_at(&entry, Some(cache_worktree_root(cache_root))).is_err()
-            {
+            if validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root)).is_err() {
                 errors += 1;
                 continue;
             }
