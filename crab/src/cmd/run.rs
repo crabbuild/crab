@@ -3021,8 +3021,6 @@ async fn cache_only_path(
     } else {
         // Local miss — try remote before giving up.
         let mut tried_remote = false;
-        let mut last_error = None;
-
         for candidate in ctx.remote.candidates().into_iter().flatten() {
             tried_remote = true;
             match crate::workflow::cache::pull_remote_with_artifact_stores(
@@ -3060,25 +3058,14 @@ async fn cache_only_path(
                         "cache-only: remote miss"
                     );
                 }
-                Err(e) => {
-                    debug!(
-                        stage = %stage_name,
-                        remote_source = candidate.source,
-                        error = %e,
-                        "cache-only: remote pull failed"
-                    );
-                    last_error = Some(e.to_string());
-                }
+                Err(e) => return Err(e.into()),
             }
         }
 
         if tried_remote {
             return Err(CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
-                reason: last_error.map_or_else(
-                    || format!("no local or remote cache entry for {stage_hash}"),
-                    |error| format!("no local cache entry for {stage_hash}; remote error: {error}"),
-                ),
+                reason: format!("no local or remote cache entry for {stage_hash}"),
             });
         }
 

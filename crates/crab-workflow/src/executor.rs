@@ -386,8 +386,11 @@ async fn run_inner(
     }
 
     // Remote cache pull: check the remote for a matching stage entry
-    // before falling through to local execution. Network errors are
-    // logged at debug! and fall through transparently.
+    // before falling through to local execution. `pull_remote` converts
+    // absent objects and transport failures into `Ok(None)`; an error that
+    // reaches this boundary is therefore an integrity, configuration, or
+    // local materialization failure and must not be hidden by rerunning the
+    // stage.
     let remote_candidates = [
         cfg.remote_store
             .as_ref()
@@ -449,16 +452,7 @@ async fn run_inner(
                         "remote cache miss"
                     );
                 }
-                Err(e) => {
-                    // Remote pull error — log and fall through.
-                    debug!(
-                        stage = %stage_name,
-                        stage_hash = %stage_hash,
-                        remote_source = source,
-                        error = %e,
-                        "remote cache pull error"
-                    );
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -3397,6 +3391,56 @@ mod tests {
         let snap = metrics.snapshot();
         assert_eq!(snap.workflow_stage_cache_hits_remote, 1);
         assert_eq!(snap.workflow_stages_executed, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_cache_integrity_errors_do_not_fall_through_to_execution() {
+        let tmp = TempDir::new().unwrap();
+        let stage = Stage {
+            outs: vec![Out::new(PathBuf::from("../escape.txt"), OutKind::File)],
+            ..Stage::new(
+                StageName::parse("remoteinvalid").unwrap(),
+                Cmd::Shell("printf executed > executed.txt".into()),
+            )
+        };
+        let resolved = make_resolved(stage);
+        let stage_hash = crate::hasher::compute(&resolved);
+        let mut remote_entry = make_cache_entry(
+            "remoteinvalid",
+            Path::new("../escape.txt"),
+            *blake3::hash(b"r").as_bytes(),
+        );
+        remote_entry.stage_hash = stage_hash;
+        let remote = Arc::new(crate::WorkflowStore::new(Arc::new(
+            object_store::memory::InMemory::new(),
+        )));
+        let hash = stage_hash.as_hex();
+        let manifest_path = object_store::path::Path::from(format!(
+            "org/repo/workflow/stages/{}/{hash}.json",
+            &hash[..2]
+        ));
+        remote
+            .put(
+                &manifest_path,
+                bytes::Bytes::from(serde_json::to_vec(&remote_entry).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let mut cfg = test_cfg(&tmp);
+        cfg.working_dir = Some(tmp.path().to_path_buf());
+        cfg.remote_store = Some(remote);
+        cfg.remote_prefix = Some("org/repo".into());
+        let run_id = Uuid::now_v7();
+        let journal = open_journal(&tmp, run_id);
+        prepare_stage(&journal, run_id, "remoteinvalid");
+
+        let error = run_local(&resolved, &cfg, &journal, run_id, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CrabError::CacheEntryInvalid { .. }));
+        assert!(!tmp.path().join("executed.txt").exists());
+        assert!(!tmp.path().join("escape.txt").exists());
     }
 
     #[test]
