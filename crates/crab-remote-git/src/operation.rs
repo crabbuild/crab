@@ -10,7 +10,7 @@ use tracing::Instrument as _;
 
 use crate::budget::{BudgetUsage, OperationBudget};
 use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
-use crate::reader::{GitObject, GitObjectMetadata};
+use crate::reader::{GitObject, RemoteGitObjectMetadata};
 use crate::state::RepositoryState;
 use crate::{
     AnnotatedTag, Blame, BudgetDimension, Commit, Error, GitPath, MetricKind, MetricObservation,
@@ -49,6 +49,8 @@ pub enum OperationKind {
     Blame,
     /// Snapshot archive traversal.
     Archive,
+    /// Protocol-v2 upload-pack generation.
+    UploadPack,
     /// Symbolic-link target metadata.
     Symlink,
     /// Submodule gitlink metadata.
@@ -72,6 +74,7 @@ impl OperationKind {
             Self::Diff => "diff",
             Self::Blame => "blame",
             Self::Archive => "archive",
+            Self::UploadPack => "upload_pack",
             Self::Symlink => "symlink",
             Self::Submodule => "submodule",
         }
@@ -309,7 +312,20 @@ impl OperationContext {
         Arc::ptr_eq(&self.state, state)
     }
 
-    pub(crate) async fn read_object(&self, oid: gix_hash::ObjectId) -> Result<GitObject> {
+    /// Return the maximum number of logical objects this operation may read.
+    #[must_use]
+    pub fn max_logical_objects(&self) -> u64 {
+        self.state.options.operation_limits().max_logical_objects
+    }
+
+    /// Return the maximum complete pack response size for this operation.
+    #[must_use]
+    pub fn max_response_bytes(&self) -> u64 {
+        self.state.options.operation_limits().max_response_bytes
+    }
+
+    /// Read one verified Git object from the pinned repository generation.
+    pub async fn read_object(&self, oid: gix_hash::ObjectId) -> Result<crate::RemoteGitObject> {
         check_cancelled(&self.cancellation)?;
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)
@@ -402,7 +418,11 @@ impl OperationContext {
         materialize_tree(&tree, parent)
     }
 
-    pub(crate) async fn read_objects(&self, oids: &[gix_hash::ObjectId]) -> Result<Vec<GitObject>> {
+    /// Read a bounded batch of verified Git objects in request order.
+    pub async fn read_objects(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::RemoteGitObject>> {
         check_cancelled(&self.cancellation)?;
         self.budget
             .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
@@ -431,10 +451,10 @@ impl OperationContext {
             .await
     }
 
-    pub(crate) async fn read_object_metadata(
+    pub async fn read_object_metadata(
         &self,
         oid: gix_hash::ObjectId,
-    ) -> Result<GitObjectMetadata> {
+    ) -> Result<RemoteGitObjectMetadata> {
         check_cancelled(&self.cancellation)?;
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)

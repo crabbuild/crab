@@ -47,8 +47,10 @@ impl GitObjectLocatorSession {
     /// Open a locator whose SlateDB checkpoint cannot refresh before `minimum`.
     ///
     /// The caller must close the session before `minimum` elapses. This keeps
-    /// coverage, pack bindings, and object rows on one immutable manifest while
-    /// avoiding a durable checkpoint write for every read operation.
+    /// coverage, pack bindings, and object rows on one immutable manifest. A
+    /// published locator checkpoint is opened explicitly, so the operation
+    /// does not create or refresh durable reader state. A legacy database with
+    /// no checkpoint uses SlateDB's one-time compatibility checkpoint path.
     pub async fn open_for_operation(
         store: Arc<dyn ObjectStore>,
         repo_prefix: &str,
@@ -74,8 +76,13 @@ impl GitObjectLocatorSession {
         options: DbReaderOptions,
     ) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
-        let reader = match slatedb::DbReader::builder(ObjectPath::from(path.as_str()), store)
-            .with_options(options)
+        let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path).await?;
+        let mut builder = slatedb::DbReader::builder(ObjectPath::from(path.as_str()), store)
+            .with_options(options);
+        if let Some(checkpoint) = checkpoint {
+            builder = builder.with_checkpoint_id(checkpoint.id);
+        }
+        let reader = match builder
             // Push sessions are short-lived and query each candidate once. The
             // default 640 MiB cache multiplies RSS across concurrent pushes.
             .with_db_cache_disabled()
@@ -180,6 +187,48 @@ impl GitObjectLocatorSession {
                 source,
             })
     }
+}
+
+async fn reader_checkpoint_id(
+    store: Arc<dyn ObjectStore>,
+    path: &str,
+) -> Result<Option<slatedb::Checkpoint>> {
+    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    let named = match admin
+        .list_checkpoints(Some(super::READER_CHECKPOINT_NAME))
+        .await
+    {
+        Ok(checkpoints) => checkpoints,
+        Err(error) if is_manifest_missing(&error) => return Ok(None),
+        Err(source) => {
+            return Err(MetadataError::SlateDbOpen {
+                db: DB_LABEL.to_owned(),
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if let Some(checkpoint) = named
+        .into_iter()
+        .max_by_key(|checkpoint| checkpoint.manifest_id)
+    {
+        return Ok(Some(checkpoint));
+    }
+
+    let checkpoints = match admin.list_checkpoints(None).await {
+        Ok(checkpoints) => checkpoints,
+        Err(error) if is_manifest_missing(&error) => return Ok(None),
+        Err(source) => {
+            return Err(MetadataError::SlateDbOpen {
+                db: DB_LABEL.to_owned(),
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    Ok(checkpoints
+        .into_iter()
+        .max_by_key(|checkpoint| checkpoint.manifest_id))
 }
 
 fn locator_reader_options() -> DbReaderOptions {
@@ -404,6 +453,34 @@ mod tests {
             vec![GitObjectLookup::Miss]
         );
         session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn operation_reader_does_not_write_a_checkpoint() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        publish(Arc::clone(&store), pack(1), [31; 20], None).await;
+        let prefix = ObjectPath::from("org/repo/git_locator_db");
+        let before = store
+            .list(Some(&prefix))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list before reader");
+
+        let session = GitObjectLocatorSession::open_for_operation(
+            Arc::clone(&store),
+            "org/repo",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("open operation reader");
+        session.close().await.expect("close operation reader");
+
+        let after = store
+            .list(Some(&prefix))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list after reader");
+        assert_eq!(before, after);
     }
 
     #[tokio::test]

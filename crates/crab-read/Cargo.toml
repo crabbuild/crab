@@ -13,15 +13,20 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 blake3 = { workspace = true }
+bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
 crab-cache-store = { workspace = true }
 crab-diff = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader"] }
+crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
 globset = { workspace = true }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-ignore = { workspace = true }
+gix-object = { workspace = true }
 object_store = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

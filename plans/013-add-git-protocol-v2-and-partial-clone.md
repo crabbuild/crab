@@ -25,8 +25,10 @@
 
 - **Priority**: P1
 - **Effort**: XL, approximately 4–8 engineer-weeks for protocol v2 plus
-  `blob:none`; broader filters and release qualification add more work
+  the bounded filter matrix; provider and release qualification add more work
 - **Risk**: HIGH
+- **Implementation**: Development-line profile implemented and RustFS-qualified;
+  provider, packaged-artifact, cross-platform, and release gates remain
 - **Depends on**: Plan 012; a reviewed, current-main version of the remote Git
   object reader currently developed on `agent/object-store-remote-git-reader`
 - **Category**: feature / architecture / security / performance / tests / docs
@@ -46,8 +48,10 @@ The first generally available profile is:
 3. `ls-refs` support for ref prefixes, symrefs, peeled tags, and unborn HEAD.
 4. Fetch negotiation for wants, haves, done/ready, tags, shallow/deepen, pack
    responses, sideband/progress, cancellation, and bounded malformed input.
-5. `filter=blob:none` initial clone and incremental fetch, followed by batched
-   lazy fetch of promised objects.
+5. Filtered initial clone and incremental fetch for `blob:none`,
+   `blob:limit=<n>[kmg]`, `tree:<depth>`, `object:type={tag,commit,tree,blob}`,
+   full-SHA-1 `sparse:oid`, and bounded repeated/combine intersections,
+   followed by batched lazy fetch of promised objects.
 6. Generation-pinned authorization for commits, trees, blobs, and tags. A
    locator hit is location proof, not authorization proof.
 7. Git-owned promisor configuration and pack installation on the v2 path,
@@ -64,8 +68,9 @@ unsupported extensions explicitly.
 
 “Full partial clone” means the complete lifecycle for every filter Crab
 advertises: correct omission, promisor metadata, lazy retrieval, maintenance,
-offline errors, authorization, and measured object-store savings. Phase 5 adds
-the broader upstream filter grammar only after `blob:none` is production-ready.
+offline errors, authorization, and measured object-store savings. The current
+development-line matrix is intentionally bounded; unlisted upstream forms
+remain rejected before object I/O.
 
 ## Non-negotiable client-only deployment invariant
 
@@ -176,20 +181,18 @@ or visibility evidence from another.
 
 | Surface | Current behavior | Evidence |
 |---|---|---|
-| Helper entry | Line-oriented helper loop owns stdin/stdout throughout | `crab/src/git/remote_helper.rs:562`, `crab/src/git/remote_helper.rs:744` |
-| Command parser | No `connect` or `stateless-connect` command | `crab/src/git/remote_helper.rs:373` |
-| Capability | v2 takeover is deliberately not advertised | `crab/src/git/remote_helper.rs:1608` |
-| v2 scaffold | Client transport; handshake/request fail closed | `crab/src/git/fetch_transport.rs:292`, `crab/src/git/fetch_transport.rs:391` |
-| Dependency | `gix-protocol` and `gix-transport` enable client APIs | `crab/Cargo.toml:306` |
-| Legacy fetch | Downloads complete immutable packs into the local ODB | `crab/src/git/fetch.rs:155`, `crab/src/git/fetch.rs:337` |
-| Filter | Current hardened contract rejects it before object I/O | `crab/src/git/fetch.rs:155`, `crab/src/git/remote_helper.rs:825` |
-| Admission | Wants are modeled with ref names and default to visible tips | `crates/crab-read/src/fetch_admission.rs:20`, `crates/crab-read/src/fetch_admission.rs:55` |
-| Reachability | Existing manifest helper covers tips/commit ancestry, not all trees/blobs | `crates/crab-metadata/src/manifests.rs:361` |
-| Locator | Exact generation-covered OID-to-pack range exists | `crates/crab-metadata/src/git_object_locator/mod.rs:12`, `crates/crab-metadata/src/git_object_locator/mod.rs:76` |
-| Remote reader | Bounded range reads, delta reconstruction, CRC and OID verification exist off main | `crates/crab-remote-git/src/reader.rs:83` |
-| VFS | Requests `blob:none` and expects `git cat-file` lazy retrieval | `crates/crab-vfs/src/pipeline.rs:260`, `crates/crab-vfs/src/engine.rs:327` |
-| VFS size | Missing blobs can be recorded as zero and reported as a placeholder size | `crates/crab-vfs/src/snapshot.rs:583`, `crates/crab-vfs/src/resolver.rs:300` |
-| Tests | v2 tests are explicit unsupported/scaffold tests | `crab/tests/v2_fetch_transport.rs:1` |
+| Helper entry | Parses the line protocol, then permanently transfers stdio to terminal `stateless-connect git-upload-pack`; unsupported services return the documented `fallback` response | `crab/src/git/remote_helper.rs:402`, `crab/src/git/remote_helper.rs:726` |
+| Capability | Advertises `stateless-connect` only after a generation-bound visibility proof is available; legacy capabilities remain the default | `crab/src/git/remote_helper.rs:1114`, `crab/src/git/remote_helper.rs:1743` |
+| v2 wire session | Bounded pkt-line parser/writer owns `ls-refs`, fetch negotiation, shallow state, sideband, response-end, and cancellation | `crab/src/git/upload_pack_wire.rs:83`, `crab/src/git/upload_pack_wire.rs:702` |
+| Legacy fetch | Existing line-oriented complete-pack fetch remains available, including protocol-v0 and legacy promisor requests | `crab/src/git/fetch.rs:155`, `crab/src/git/remote_helper.rs:2288` |
+| Filter | The v2 profile accepts `blob:none`, `blob:limit=<n>[kmg]`, `tree:<depth>`, `object:type={tag,commit,tree,blob}`, full-SHA-1 `sparse:oid`, and bounded repeated/combine intersections; unsupported grammar fails before planning or object I/O | `crab/src/git/upload_pack_wire.rs:420`, `crates/crab-read/src/upload_pack.rs:24`, `crates/crab-read/src/upload_pack.rs:692` |
+| Admission | Raw wants and lazy OIDs require visible-generation membership before remote bytes are read | `crab/src/git/upload_pack_wire.rs:522`, `crates/crab-read/src/upload_pack.rs:123` |
+| Reachability | Bounded commit/tree/blob/tag traversal publishes an immutable visibility proof with hidden-ref filtering | `crates/crab-git/src/walk.rs:28`, `crates/crab-metadata/src/git_visibility.rs:1` |
+| Locator | Exact generation-covered OID-to-pack ranges remain location proof, separate from visibility authorization | `crates/crab-remote-git/src/repository.rs:174`, `crates/crab-metadata/src/git_object_locator/mod.rs:12` |
+| Remote reader/pack | Range reads, coalescing, delta reconstruction, CRC/OID verification, bounded allocation, and bounded temporary pack output are enforced | `crates/crab-remote-git/src/reader.rs:83`, `crates/crab-remote-git/src/pack.rs:1` |
+| Promisor lifecycle | Git owns v2 pack installation/configuration; legacy lazy packs install `.promisor` atomically with rollback | `crab/src/git/remote_helper.rs:2288`, `crab/src/git/remote_helper.rs:2377` |
+| VFS | FUSE/NFS resolve exact omitted-blob size through the bounded ODB reader and backfill the snapshot; no placeholder size remains | `crates/crab-vfs/src/fuse.rs:390`, `crates/crab-vfs/src/nfs.rs:156`, `crates/crab-vfs/src/engine.rs:1229` |
+| Qualification | Focused Rust suites plus a 76-check real-Git RustFS report cover the published filter matrix, separate Crab/LFS pointer fixtures, lifecycle, security, concurrent lazy fetch, performance fixtures, resource sampling, read-only remote state, and release provenance; Linux Git-version matrix, packaged-artifact matrix, AWS, and cross-platform execution remain release gates | `crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py:967`, `crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py:1191`, `.github/workflows/git-protocol-v2-partial-clone.yml:107`, `.github/workflows/release.yml:1126` |
 
 ## Phase 0: Correct the contract and land prerequisites
 
@@ -338,20 +341,26 @@ canonical producer; do not add a silent second protocol fallback.
 - `git fsck --strict` passes for complete clones.
 - Concurrent manifest publication does not mix generations.
 
-## Phase 4: Add `blob:none` and the complete promisor lifecycle
+## Phase 4: Add filtered fetch and the complete promisor lifecycle
 
 ### Tasks
 
 1. Advertise v2 fetch `filter` only for repositories whose selected snapshot
    has complete locator and visibility coverage.
-2. Strictly parse `blob:none`. Initial and incremental filtered packs include
-   required commits, trees, and tags and omit ordinary blob objects.
+2. Strictly parse and plan the bounded filter matrix: `blob:none`,
+   `blob:limit=<n>[kmg]`, `tree:<depth>`, `object:type={tag,commit,tree,blob}`,
+   full-SHA-1 `sparse:oid`, and bounded repeated/combine intersections. Initial
+   and incremental filtered packs apply the selected object policy without
+   silently converting an unsupported request into a complete pack.
 3. Support batched raw-OID lazy wants. Admit them through Phase 1 visibility,
    return the requested object and required delta bases, and reject hidden,
    dangling, unknown, or stale-generation objects.
-4. Let standard Git own pack installation on the v2 path. Verify that Git
-   writes `extensions.partialClone`, `remote.<name>.promisor`,
-   `remote.<name>.partialCloneFilter`, and matching `.promisor` sidecars.
+4. Let standard Git own pack installation on the v2 path. Verify the
+   version-appropriate promisor contract: current Git records
+   `remote.<name>.promisor`, `remote.<name>.partialCloneFilter`, and matching
+   `.promisor` sidecars. Record `extensions.partialClone` when a supported Git
+   version writes it, but do not require that legacy key when the version uses
+   the remote-scoped configuration as the authoritative state.
 5. If legacy helper partial clone is also retained, extend its pack installer
    and rollback contract transactionally for `.promisor`; do not share a pack
    install path that can forget the sidecar.
@@ -377,7 +386,7 @@ canonical producer; do not add a silent second protocol fallback.
   Crab pointers can mask the Git-level benefit.
 - Hidden-ref and arbitrary-OID security tests pass.
 
-## Phase 5: Fix VFS and broaden the advertised filter matrix
+## Phase 5: Fix VFS, verify the filter matrix, and close release gates
 
 ### Tasks
 
@@ -387,11 +396,12 @@ canonical producer; do not add a silent second protocol fallback.
    applications must see correct file sizes.
 3. Qualify ordinary blobs, Crab pointer blobs, and LFS pointers separately.
    Avoid recursive lazy Git fetch plus Crab smudge/hydration deadlocks.
-4. Add upstream filter specs one by one. For each, read the pinned Git
-   documentation/source, add a canonical AST, authorization rules, object
-   selection tests, promisor lifecycle tests, and performance proof before it
-   is accepted. Expected order: `blob:limit`, tree depth, object type, then
-   sparse/combine forms.
+4. Implement and qualify the published filter matrix. `blob:limit` follows
+   Git's binary suffixes and strict size boundary; `tree:<depth>` and
+   `object:type` retain their documented object classes; `sparse:oid` requires
+   a visible full-SHA-1 specification blob; repeated filters and `combine:`
+   intersect under bounded parser limits. Each form has canonical AST,
+   authorization, object-selection, promisor-lifecycle, and performance proof.
 5. Unsupported filter syntax must produce a protocol error before object I/O;
    never acknowledge and download complete packs.
 6. Treat optional v2 extensions (`packfile-uris`, `object-info`,
@@ -403,6 +413,9 @@ canonical producer; do not add a silent second protocol fallback.
 - RustFS VFS tests prove initial omission, exact `stat` size, lazy fetch, exact
   bytes, refresh, concurrent reads, and cache reuse.
 - The public support matrix exactly matches accepted filters and v2 commands.
+- The release-shaped RustFS run passes all 76 checks, including every
+  supported filter, separate Crab/LFS pointer handling, concurrent lazy fetch,
+  lazy byte identity, maintenance, security, and read-only remote-state checks.
 
 ## Phase 6: CI, release, rollout, and downgrade safety
 
@@ -413,7 +426,7 @@ canonical producer; do not add a silent second protocol fallback.
 | Unit/property | pkt-line framing/limits, filter grammar, visibility, delta closure, transactional promisor state | PR |
 | Transcript | Legacy helper byte compatibility; v2 capability, `ls-refs`, fetch, shallow/tag/error exchanges | PR |
 | Real Git | Minimum supported Git, representative intermediate versions, current Git; Linux/macOS/Windows | PR/nightly/release |
-| Partial lifecycle | `blob:none`, absent-blob proof, config/sidecars, fsck, lazy checkout, offline error, GC/repack, push | Release |
+| Partial lifecycle | The published filter matrix, absent-blob proof, config/sidecars, separate Crab/LFS pointer fixtures, fsck, lazy checkout, concurrent lazy fetch, offline error, GC/repack, push, and read-only remote state | Release |
 | Object stores | RustFS on PR/nightly; AWS S3 before S3 claim; GCS/Azure/R2 before their claims | Release |
 | Security/chaos | hidden refs, arbitrary OIDs, stale generation, corrupt/truncated objects, disconnect, concurrent lazy fetch | Release |
 | Performance | normal blobs, deep history, many small files, pointer-heavy repos | Release |
@@ -508,11 +521,14 @@ Not in the first GA profile:
 After all phases pass, Crab may truthfully say:
 
 > Crab supports Git wire protocol v2 fetch over `crab://` object-store remotes,
-> including the documented partial-clone filters. A `blob:none` clone omits
-> blobs, records standard Git promisor state, lazily retrieves authorized
-> objects from the same generation-pinned repository, and is qualified against
-> real Git and S3. All protocol, traversal, filtering, and pack work runs in
-> the locally installed Crab CLI; no Crab server is deployed.
+> including the documented partial-clone filters. The bounded filter matrix
+> omits the selected objects, records standard Git promisor state, lazily
+> retrieves authorized objects from the same generation-pinned repository, and
+> is qualified against real Git and RustFS. All protocol, traversal, filtering,
+> and pack work runs in the locally installed Crab CLI; no Crab server is
+> deployed.
 
-Until the final release gate passes, documentation must continue to say that
-wire protocol v2 and partial clone are unsupported.
+Until the final release gate passes, documentation must label wire protocol v2
+and partial clone as development-line/canary behavior rather than a released
+support claim. The capability remains proof-gated and the documented support
+matrix must not imply provider or released-artifact qualification.

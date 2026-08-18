@@ -1,0 +1,319 @@
+name: Git protocol v2 partial-clone qualification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/git-protocol-v2-partial-clone.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crab/Cargo.toml"
+      - "crab/src/git/**"
+      - "crab/src/core/error.rs"
+      - "crab/src/core/config.rs"
+      - "crab/src/cmd/fsck*.rs"
+      - "crab/src/cmd/history_recovery.rs"
+      - "crab/src/cmd/metadb.rs"
+      - "crab/src/cmd/repack.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/replication/**"
+      - "crab/src/metadata/**"
+      - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/tests/**"
+      - "crates/crab-git/**"
+      - "crates/crab-auth-server/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-read/**"
+      - "crates/crab-remote-git/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-vfs/**"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
+      - "plans/013-add-git-protocol-v2-and-partial-clone.md"
+      - "plans/designs/client-side-git-v2-partial-clone.md"
+  pull_request:
+    paths:
+      - ".github/workflows/git-protocol-v2-partial-clone.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crab/Cargo.toml"
+      - "crab/src/git/**"
+      - "crab/src/core/error.rs"
+      - "crab/src/core/config.rs"
+      - "crab/src/cmd/fsck*.rs"
+      - "crab/src/cmd/history_recovery.rs"
+      - "crab/src/cmd/metadb.rs"
+      - "crab/src/cmd/repack.rs"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/replication/**"
+      - "crab/src/metadata/**"
+      - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/tests/**"
+      - "crates/crab-git/**"
+      - "crates/crab-auth-server/**"
+      - "crates/crab-metadata/**"
+      - "crates/crab-read/**"
+      - "crates/crab-remote-git/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-vfs/**"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
+      - "plans/013-add-git-protocol-v2-and-partial-clone.md"
+      - "plans/designs/client-side-git-v2-partial-clone.md"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/crab-protocol-v2-target
+
+jobs:
+  unit-and-transcript:
+    name: Protocol unit and transcript tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Run protocol and reader tests
+        run: |
+          cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
+          cargo test -p crab --locked --features gix-transport \
+            --test v2_fetch_transport --test remote_helper_transcript
+
+      - name: Check protocol formatting
+        run: |
+          rustfmt --edition 2024 --check \
+            crab/src/git/remote_helper.rs \
+            crab/src/git/upload_pack_wire.rs \
+            crates/crab-git/src/walk.rs \
+            crates/crab-metadata/src/git_visibility.rs \
+            crates/crab-read/src/upload_pack.rs \
+            crates/crab-remote-git/src/pack.rs \
+            crates/crab-remote-git/src/operation.rs \
+            crates/crab-remote-git/src/reader.rs \
+            crates/crab-remote-git/src/repository.rs
+
+  real-git-version-matrix:
+    name: Real Git compatibility (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    needs: unit-and-transcript
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: git-2-30
+            git_version: 2.30.9
+          - label: git-2-40
+            git_version: 2.40.4
+          - label: git-2-45
+            git_version: 2.45.4
+          - label: git-current
+            git_version: current
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-git-${{ matrix.label }}
+      CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ matrix.label }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install compatibility dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
+            libexpat1-dev libfuse3-dev libpcre2-dev libssl-dev pipx xz-utils \
+            zlib1g-dev
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build release artifact with source provenance
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)" \
+            cargo build -p crab --release --locked --features gix-transport
+
+      - name: Install selected Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ matrix.git_version }}"
+          if [ "$version" = "current" ]; then
+            git_bin="$(command -v git)"
+          else
+            archive="$RUNNER_TEMP/git-${version}.tar.xz"
+            source_dir="$RUNNER_TEMP/git-${version}"
+            prefix="$RUNNER_TEMP/git-install-${version}"
+            curl --fail --location --silent --show-error \
+              "https://www.kernel.org/pub/software/scm/git/git-${version}.tar.xz" \
+              --output "$archive"
+            tar -xJf "$archive" -C "$RUNNER_TEMP"
+            (
+              cd "$source_dir"
+              make configure
+              ./configure --prefix="$prefix" --without-tcltk
+              make -j"$(nproc)" all
+              make install
+            )
+            git_bin="$prefix/bin/git"
+          fi
+          "$git_bin" --version
+          echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run --rm -d \
+            --name "crab-protocol-v2-${{ matrix.label }}" \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs "crab-protocol-v2-${{ matrix.label }}" >&2 || true
+          exit 1
+
+      - name: Run real-Git RustFS lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --git-bin "$GIT_BIN" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs "crab-protocol-v2-${{ matrix.label }}" > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f "crab-protocol-v2-${{ matrix.label }}" >/dev/null 2>&1 || true
+
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-protocol-v2-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  rustfs-lifecycle:
+    name: Released-shape RustFS partial-clone lifecycle
+    runs-on: ubuntu-latest
+    needs: unit-and-transcript
+    timeout-minutes: 45
+    env:
+      CRAB_E2E_BUCKET: crab
+      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-smoke
+      CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install smoke dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build release artifact with source provenance
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)" \
+            cargo build -p crab --release --locked --features gix-transport
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run --rm -d \
+            --name crab-protocol-v2-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
+            if [ "${status:-000}" = "200" ]; then exit 0; fi
+            sleep 1
+          done
+          docker logs crab-protocol-v2-rustfs >&2 || true
+          exit 1
+
+      - name: Run real-Git RustFS lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}" \
+            --source-root "${GITHUB_WORKSPACE}"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${CRAB_E2E_ROOT}"
+          docker logs crab-protocol-v2-rustfs > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-protocol-v2-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-protocol-v2-partial-clone-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/crab-protocol-v2-smoke/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ runner.temp }}/crab-protocol-v2-smoke/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ runner.temp }}/crab-protocol-v2-smoke/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14

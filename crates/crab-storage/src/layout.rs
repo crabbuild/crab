@@ -171,6 +171,14 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("metadata/pack-origin/{pack_id}.json"))
     }
 
+    /// Path to one immutable Git object visibility proof.
+    #[must_use]
+    pub fn git_visibility_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility/{generation:020}-{pack_index_hash}.json"
+        ))
+    }
+
     /// Convenience: bucket-level ref-registry path.
     #[must_use]
     pub fn ref_registry_path(&self) -> ObjectPath {

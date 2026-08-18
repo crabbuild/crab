@@ -351,9 +351,10 @@ impl RemoteGitRepository {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                session = GitObjectLocatorSession::open(
+                session = GitObjectLocatorSession::open_for_operation(
                     Arc::clone(store.inner()),
                     layout.repo_prefix(),
+                    options.operation_limits().max_duration,
                 ) => session?,
             };
             let session = TrackedLocatorSession::new(session, Arc::clone(&runtime));
@@ -463,6 +464,63 @@ impl RemoteGitRepository {
     #[must_use]
     pub fn pack_count(&self) -> usize {
         self.state.inventory.len()
+    }
+
+    /// Read the immutable object-visibility proof for this pinned generation.
+    pub async fn visibility_index(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let runtime_cancellation = self.state.runtime.background_cancellation();
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        let index = if let Some(coverage) = self.state.coverage {
+            let pack_index_hash = coverage.pack_index_hash.to_string();
+            let read = crab_metadata::git_visibility::read(
+                &self.state.store,
+                &self.state.layout,
+                self.state.generation,
+                &pack_index_hash,
+            );
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+                result = read => result.map_err(Error::Metadata)?,
+            }
+        } else if self.state.refs.is_empty() {
+            // An empty repository has no pack index or locator coverage to
+            // bind. Its empty closure is still a complete snapshot proof.
+            crab_metadata::git_visibility::GitVisibilityIndex::new(
+                self.state.generation,
+                String::new(),
+                std::collections::BTreeMap::new(),
+            )
+        } else {
+            return Err(Error::EmptyRepository);
+        };
+
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+
+        if index.refs.len() != self.state.refs.entries.len()
+            || self.state.refs.entries.iter().any(|reference| {
+                let Some(objects) = index.refs.get(&reference.name) else {
+                    return true;
+                };
+                let target = reference.target.to_hex().to_string();
+                objects.binary_search(&target).is_err()
+                    || reference.peeled.is_some_and(|peeled| {
+                        let peeled = peeled.to_hex().to_string();
+                        objects.binary_search(&peeled).is_err()
+                    })
+            })
+        {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+        Ok(index)
     }
 
     /// Check whether the canonical manifest still names this pinned generation.
@@ -662,8 +720,8 @@ fn parse_refs(manifest: &crab_metadata::manifests::Manifest) -> Result<Repositor
             peeled,
         });
     }
-    let head = if entries.is_empty() {
-        None
+    let (head, unborn_head) = if entries.is_empty() {
+        (None, Some(manifest.head.clone()))
     } else {
         let target = manifest
             .refs
@@ -671,12 +729,19 @@ fn parse_refs(manifest: &crab_metadata::manifests::Manifest) -> Result<Repositor
             .ok_or(Error::RepositoryState {
                 reason: RepositoryStateError::HeadDoesNotResolve,
             })?;
-        Some(HeadReference {
-            name: manifest.head.clone(),
-            target: parse_oid(target)?,
-        })
+        (
+            Some(HeadReference {
+                name: manifest.head.clone(),
+                target: parse_oid(target)?,
+            }),
+            None,
+        )
     };
-    Ok(RepositoryRefs { head, entries })
+    Ok(RepositoryRefs {
+        head,
+        unborn_head,
+        entries,
+    })
 }
 
 fn parse_inventory(
@@ -1531,6 +1596,7 @@ mod tests {
         let oid = parse_oid("1111111111111111111111111111111111111111").expect("OID");
         let refs = RepositoryRefs {
             head: None,
+            unborn_head: None,
             entries: vec![
                 RepositoryRef {
                     name: "refs/heads/release".to_owned(),

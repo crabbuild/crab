@@ -10,7 +10,7 @@
 //! Individual steps are filled in by later tasks — this module provides
 //! the skeleton and step boundaries.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{SeekFrom, Write};
@@ -2016,6 +2016,7 @@ fn build_active_active_push_plan(
     uploaded_shards: &[MerkleHash],
     uploaded_packs: &[PackManifestEntry],
     uploaded_xorbs: &[MerkleHash],
+    visibility_proof_published: bool,
 ) -> Result<ActiveActivePushPlan> {
     let refs = active_active_ref_updates(specs, base_manifest, candidate, decisions, sha_map)?;
     let uploaded_objects = active_active_uploaded_objects(
@@ -2024,6 +2025,8 @@ fn build_active_active_push_plan(
         uploaded_shards,
         uploaded_packs,
         uploaded_xorbs,
+        candidate,
+        visibility_proof_published,
     );
     crate::replication::plan_active_active_push(
         replication,
@@ -2092,6 +2095,8 @@ fn active_active_uploaded_objects(
     uploaded_shards: &[MerkleHash],
     uploaded_packs: &[PackManifestEntry],
     uploaded_xorbs: &[MerkleHash],
+    candidate: &Manifest,
+    visibility_proof_published: bool,
 ) -> Vec<String> {
     let mut keys = BTreeSet::new();
 
@@ -2108,6 +2113,17 @@ fn active_active_uploaded_objects(
     }
     insert_segment_write_paths(&mut keys, router, &bulk.shard_index);
     insert_segment_write_paths(&mut keys, router, &bulk.pack_index);
+    if visibility_proof_published
+        && !candidate.refs.is_empty()
+        && !candidate.pack_index_hash.is_empty()
+    {
+        keys.insert(
+            router
+                .git_visibility_path(candidate.generation, &candidate.pack_index_hash)
+                .as_ref()
+                .to_owned(),
+        );
+    }
 
     keys.into_iter().collect()
 }
@@ -6217,6 +6233,7 @@ impl PushPipeline {
         bulk: &BulkData,
         decisions: &HashMap<String, RefUpdateDecision>,
         sha_map: &HashMap<String, String>,
+        visibility_proof_published: bool,
     ) -> Result<Option<ActiveActivePushPlan>> {
         if self.config.protected_push.is_some() {
             return Ok(None);
@@ -6260,6 +6277,7 @@ impl PushPipeline {
             &uploaded_shards,
             &uploaded_packs,
             &uploaded_xorbs,
+            visibility_proof_published,
         )
         .map(Some)
     }
@@ -6274,7 +6292,7 @@ impl PushPipeline {
         validate_manifest_payload(manifest)?;
         self.validate_push_commit_receipt(manifest).await?;
         let Some(plan) = self
-            .active_active_commit_plan(manifest, bulk, decisions, sha_map)
+            .active_active_commit_plan(manifest, bulk, decisions, sha_map, false)
             .await?
         else {
             return Ok(None);
@@ -6303,6 +6321,35 @@ impl PushPipeline {
         self.register_active_active_coordinator_for_bucket_gc(replication)
             .await?;
         upload_segmented_bulk(store, &self.router, bulk).await?;
+        // The coordinator owns ref publication, but the local helper still
+        // owns the immutable object-visibility proof used by v2 admission.
+        // Publish it before the coordinator can expose the candidate refs;
+        // a failure keeps v2 gated and remains repairable without weakening
+        // the existing push commit contract.
+        let visibility_proof_published =
+            match self.publish_git_visibility_index(manifest, store).await {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        generation = manifest.generation,
+                        "active-active push committed; Git visibility proof requires repair"
+                    );
+                    false
+                }
+            };
+        let plan = if visibility_proof_published {
+            self.active_active_commit_plan(manifest, bulk, decisions, sha_map, true)
+                .await?
+                .ok_or_else(|| {
+                    CrabError::Internal(
+                        "active-active push lost its coordinator plan after publishing the Git visibility proof"
+                            .to_owned(),
+                    )
+                })?
+        } else {
+            plan
+        };
         let mut outcome =
             commit_uploaded_push_refs(coordinator.as_ref(), plan.request.clone()).await?;
         match self.materialize_active_active_manifest(manifest).await {
@@ -6469,6 +6516,18 @@ impl PushPipeline {
         for attempt in 0..max_retries {
             check_cancelled(&self.cancel)?;
             self.validate_push_commit_receipt(&manifest).await?;
+
+            // Publish the complete ref-rooted object proof before exposing the
+            // manifest. Missing proof disables protocol-v2 advertisement, but
+            // must not turn an otherwise valid legacy push into a data loss
+            // event; repair can rebuild this immutable artifact later.
+            if let Err(error) = self.publish_git_visibility_index(&manifest, store).await {
+                warn!(
+                    error = %error,
+                    generation = manifest.generation,
+                    "Git visibility proof publication failed; v2 remains gated"
+                );
+            }
 
             let etag_guard = self.manifest_etag.lock().await;
             let current_etag = etag_guard.clone();
@@ -6703,6 +6762,18 @@ impl PushPipeline {
             path: self.router.manifest_path().to_string(),
             expected_etag,
         })
+    }
+
+    async fn publish_git_visibility_index(
+        &self,
+        manifest: &Manifest,
+        store: &crate::storage::store::Store,
+    ) -> Result<()> {
+        let git_dir = self
+            .git_dir_override()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crab_git::discover::discover_git_dir);
+        publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router).await
     }
 
     async fn publish_commit_graph_summary(&self) -> Result<()> {
@@ -13672,6 +13743,94 @@ fn reject_batch_for_error(specs: &[PushSpec], error: &CrabError) -> PushResult {
             .map(|spec| (spec.dst.clone(), RefPushOutcome::Rejected(reason.clone())))
             .collect(),
     )
+}
+
+/// Publish the generation-bound Git object visibility proof from a local ODB.
+pub(crate) async fn publish_git_visibility_index_from_git_dir(
+    git_dir: &Path,
+    manifest: &Manifest,
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+) -> Result<()> {
+    let storage = store.as_storage();
+    let storage_router =
+        crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+    publish_git_visibility_index_from_storage_git_dir(git_dir, manifest, &storage, &storage_router)
+        .await
+}
+
+/// Publish the same visibility proof for callers that already own the shared
+/// storage-domain store, such as metadata rebuild and maintenance commands.
+pub(crate) async fn publish_git_visibility_index_from_storage_git_dir(
+    git_dir: &Path,
+    manifest: &Manifest,
+    store: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<()> {
+    let index = build_git_visibility_index_from_storage_git_dir(git_dir, manifest).await?;
+    crab_metadata::git_visibility::upload_if_absent(store, router, &index)
+        .await
+        .map_err(CrabError::from)
+}
+
+/// Build the generation-bound Git visibility proof from a local ODB.
+pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
+    git_dir: &Path,
+    manifest: &Manifest,
+) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(crab_metadata::git_visibility::GitVisibilityIndex::new(
+            manifest.generation,
+            manifest.pack_index_hash.clone(),
+            BTreeMap::new(),
+        ));
+    }
+    let refs = manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    let peeled_refs = manifest.peeled_refs.clone();
+    let git_dir = git_dir.to_owned();
+    let closures = tokio::task::spawn_blocking(move || {
+        crab_git::walk::walk_reachable_by_ref_bounded(
+            &git_dir,
+            &refs,
+            &peeled_refs,
+            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize,
+        )
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git visibility walk join failed: {error}")))?
+    .map_err(CrabError::from)?;
+
+    let refs = closures
+        .into_iter()
+        .map(|(name, closure)| {
+            let mut objects = BTreeSet::new();
+            objects.extend(closure.commits.iter().map(sha1_hex));
+            objects.extend(closure.trees.iter().map(sha1_hex));
+            objects.extend(closure.blobs.iter().map(sha1_hex));
+            objects.extend(closure.tags.iter().map(sha1_hex));
+            (name, objects.into_iter().collect::<Vec<_>>())
+        })
+        .collect();
+    let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        refs,
+    );
+    Ok(index)
+}
+
+fn sha1_hex(oid: &[u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(40);
+    for byte in oid {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 ///
 /// Walks commits reachable from the tips using `gix-traverse`, recording each
@@ -25832,6 +25991,7 @@ mod tests {
             &[shard_hash],
             &[pack, second_pack],
             &[xorb_hash],
+            false,
         )
         .unwrap();
 
@@ -25938,6 +26098,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .unwrap_err();
 

@@ -1,17 +1,15 @@
-//! Fetch-side payload framing via `gix-protocol` + `gix-transport` +
-//! `gix-negotiate` + `gix-refspec`.
+//! Compatibility helpers for the released gix transport API.
 //!
-//! This module is the scaffold for routing crab's fetch path
-//! through gitoxide's typed fetch machinery. The real remote helper
-//! at [`crate::git::remote_helper`] still owns the outer line
-//! dispatcher (`capabilities` / `list` / `fetch` / `push` /
-//! `option` / `connect` / `stateless-connect`) because gitoxide has
-//! no helper-protocol implementation to replace it. What lives here
-//! are the *fetch-side* payload primitives the helper would reach
-//! for once stateless-connect is wired end-to-end:
+//! Production protocol-v2 fetches are served by
+//! [`crate::git::upload_pack_wire`], where the local remote helper performs
+//! the upload-pack protocol role. The client-oriented gix transport scaffold
+//! remains behind its released feature for source compatibility, but is
+//! deliberately deprecated and fails closed if called.
 //!
-//! - [`StdioTransport`] — a minimal `gix_transport::client::Transport`
-//!   over stdin/stdout for the stateless-connect case.
+//! The other helpers in this module are still useful, narrowly scoped
+//! gitoxide adapters:
+//!
+//! - [`StdioTransport`] — the retained, deprecated client transport type.
 //! - [`parse_refspec_gix`] — refspec parsing via `gix_refspec::parse`,
 //!   gated behind `gix-transport` to keep the legacy hand-rolled
 //!   `push <src>:<dst>` parser in `parse_command` serving builds
@@ -20,31 +18,22 @@
 //!   formatter that walks `gix_ref::Reference` values from
 //!   [`crab_git::ref_resolve::resolve_refs_typed_batch`] instead of
 //!   string-concatenating from a [`crate::git::remote_helper::ListOutput`].
-//! - [`negotiate_session`] — `gix_negotiate::Algorithm` scaffold for
-//!   driving haves/wants once negotiation actually runs. The function
-//!   constructs the state machine but is never invoked from
-//!   production paths today.
+//! - [`negotiate_session`] — a small adapter for callers that still need the
+//!   released gix negotiation type; production upload-pack negotiation is
+//!   owned by the local wire path.
 //! - [`remote_origin_url`] — `gix::Repository::find_remote("origin")`
 //!   replacement for the legacy `git remote get-url origin` shellout
 //!   at the fetch-path write site.
 //!
-//! ## Why it's all feature-gated and not yet wired
+//! The code here is kept feature-gated because the public transport type was
+//! released. It is not the owner of the terminal helper session, and the
+//! capability advertisement is controlled by the proof-gated
+//! [`crate::git::remote_helper::format_capabilities_with_v2`].
 //!
-//! Crab's `crab://` remote helper advertises `fetch` and `push`
-//! — not `connect` / `stateless-connect`. Real-world fetches today
-//! come through the batched `fetch` command path, where the remote
-//! helper pulls packs from S3 directly rather than proxying a
-//! stateless-connect transport. Advertising `connect` or
-//! `stateless-connect` before the transport is fully wired would
-//! break existing clients, so [`format_capabilities`][crate::git::remote_helper::format_capabilities]
-//! does *not* emit those capabilities even under the feature flag.
+//! The remaining adapters are intentionally independent of that session:
 //!
-//! The code here is structured so each piece can be lit up
-//! individually once the surrounding pipeline is ready:
-//!
-//! - **5.1 StdioTransport** — implements the `Transport` /
-//!   `TransportWithoutIO` traits but is only exercised by compile-
-//!   check tests until the helper dispatcher calls it.
+//! - **Compatibility transport** — implements the released `Transport` /
+//!   `TransportWithoutIO` traits but remains fail-closed.
 //! - **5.2 Typed ref advertisement** — ships an alternative
 //!   formatter; the remote helper's `list` branch still uses the
 //!   string builder until we flip one call site behind the feature.
@@ -53,8 +42,8 @@
 //! - **5.4 Refspec parse** — the gix-backed parser lives here; the
 //!   outer `parse_command` still dispatches push lines with the
 //!   legacy split when `gix-transport` is off.
-//! - **5.5 Capability advertisement** — see the comment block in
-//!   [`crate::git::remote_helper::format_capabilities`].
+//! - **Capability advertisement** — see
+//!   [`crate::git::remote_helper::format_capabilities_with_v2`].
 //! - **5.6 `remote get-url origin`** — [`remote_origin_url`] is the
 //!   call site; the legacy shellout in [`crate::git::remote_helper::fetch_packs`]
 //!   is feature-gated to prefer it when the feature is on.
@@ -66,6 +55,10 @@
 //! CPU time to the gitoxide side of the adoption frontier.
 
 #![cfg(feature = "gix-transport")]
+#![expect(
+    deprecated,
+    reason = "the released StdioTransport compatibility surface is intentionally retained here"
+)]
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -227,21 +220,12 @@ where
 
 // --- 5.3 Negotiation scaffold ---------------------------------------
 
-/// Construct a `gix_negotiate::Algorithm` state machine for a fetch
-/// session.
+/// Construct a `gix_negotiate::Algorithm` state machine for compatibility
+/// callers that still use the released client-side API.
 ///
-/// Crab's current fetch path — the batch `fetch` command served by
-/// [`crate::git::remote_helper::fetch_packs`] — downloads packs from
-/// S3 directly and doesn't negotiate haves/wants over a stateless
-/// transport. Negotiation matters only once the helper serves a real
-/// stateless-connect session (which is *not* the case today).
-///
-/// This function is the landing pad for that wiring. It returns a
-/// boxed negotiator from the chosen algorithm so callers can drop it
-/// into `gix_protocol::fetch` once the transport, refmap, and
-/// connectivity pieces are all hooked up. Today the only caller is
-/// contract tests that prove construction remains available without
-/// advertising or starting a session.
+/// The production local upload-pack path owns negotiation in
+/// `crate::git::upload_pack_wire` and `crab-read`; this adapter is not a
+/// second fetch implementation.
 pub fn negotiate_session(
     algorithm: gix_negotiate::Algorithm,
 ) -> Box<dyn gix_negotiate::Negotiator> {
@@ -289,20 +273,19 @@ pub fn remote_origin_url(repo_path: &std::path::Path) -> Result<Option<String>> 
 
 // --- 5.1 StdioTransport ---------------------------------------------
 
-/// Reserved [`gix_transport::client::Transport`] API for a future
-/// remote-helper `stateless-connect` fetch path.
+/// Retained released client transport API; use the remote helper's local
+/// upload-pack session for protocol-v2 fetches.
 ///
-/// Today crab's remote helper does *not* advertise `connect` or
-/// `stateless-connect`, so this transport is not exercised from the
-/// protocol loop. Shipping it behind the `gix-transport` feature
-/// flag preserves the released type. Its I/O methods fail closed until
-/// stateless-connect is wired end-to-end; executable contract tests ensure the
-/// helper does not advertise or accidentally enter this incomplete path.
+/// This type is deprecated for one release cycle. Its I/O methods fail closed
+/// so a caller cannot accidentally create a second, role-inverted fetch path.
 ///
 /// Generic over the reader and writer so tests can swap in in-memory
 /// buffers instead of real stdin/stdout. The blanket impl assumes
 /// the reader yields git protocol-v2 packet-line payloads on demand;
 /// it does not own any additional framing state.
+#[deprecated(
+    note = "use the local upload-pack session in git::upload_pack_wire; this client transport is retained only for compatibility"
+)]
 pub struct StdioTransport<R: BufRead, W: Write> {
     /// Canonical URL stored so [`TransportWithoutIO::to_url`] can
     /// return it without re-allocating. Built once at construction
@@ -321,8 +304,7 @@ pub struct StdioTransport<R: BufRead, W: Write> {
 impl<R: BufRead, W: Write> StdioTransport<R, W> {
     /// Build a transport over an arbitrary reader/writer pair.
     ///
-    /// Prefer [`StdioTransport::from_stdio`] for the production path
-    /// that wires real stdin/stdout.
+    /// This constructor is retained for compatibility tests and integrations.
     pub fn new(url: impl Into<BString>, reader: R, writer: W) -> Self {
         Self {
             url: url.into(),
@@ -333,7 +315,7 @@ impl<R: BufRead, W: Write> StdioTransport<R, W> {
 }
 
 impl StdioTransport<BufReader<Stdin>, Stdout> {
-    /// Build a transport over the process's real stdin/stdout.
+    /// Build the retained compatibility transport over process stdin/stdout.
     ///
     /// `url` is the canonical `crab://bucket/repo` URL the remote
     /// helper was invoked with; it is only used to answer
@@ -371,37 +353,24 @@ impl<R: BufRead, W: Write> TransportWithoutIO for StdioTransport<R, W> {
         &mut self,
         _config: &dyn Any,
     ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-        // Stateless-connect has no per-request configuration knobs
-        // crab cares about today. The trait requires the method
-        // be present, so keep it a no-op and document why.
+        // The compatibility trait has no configuration knobs used by the
+        // local upload-pack session, so retain the released no-op contract.
         Ok(())
     }
 }
 
-/// The `Transport` impl is intentionally split into a separate
-/// `impl` block from `TransportWithoutIO` so the file reads top-to-
-/// bottom the same way the gitoxide docs describe: declare the
-/// non-IO surface, then layer the IO surface on top. Neither
-/// [`gix_transport::client::Transport::handshake`] nor
-/// [`gix_transport::client::Transport::request`] is reachable from
-/// crab's production code paths today — the implementations below
-/// return `Error::AuthenticationUnsupported`, the dependency's only generic
-/// unsupported-operation variant, so any attempt to exercise them fails
-/// explicitly rather than panicking or silently succeeding with empty output.
+/// The `Transport` impl remains split from `TransportWithoutIO` to preserve
+/// the released API shape. Neither method is used by production fetches; both
+/// return the dependency's explicit unsupported-operation error.
 impl<R: BufRead + Send, W: Write + Send> BlockingTransport for StdioTransport<R, W> {
     fn handshake<'a>(
         &mut self,
         _service: gix_transport::Service,
         _extra_parameters: &'a [(&'a str, Option<&'a str>)],
     ) -> std::result::Result<SetServiceResponse<'_>, TransportError> {
-        // Wiring note: the real implementation reads the server's
-        // banner + capability advertisement off the stdin side and
-        // hands back a `SetServiceResponse` whose `capabilities` are
-        // parsed from the v2 `version 2` / `agent=...` packet-lines.
-        // That work lives in the not-yet-written stateless-connect
-        // pipeline; returning the "unsupported" error here preserves
-        // the "code exists, not yet wired" invariant described in
-        // the module docs.
+        // Git is already the protocol client after terminal takeover. The
+        // production helper therefore cannot route this client API back into
+        // the same stream without reversing the protocol roles.
         Err(TransportError::AuthenticationUnsupported)
     }
 

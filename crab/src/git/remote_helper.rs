@@ -7,6 +7,7 @@
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -233,11 +234,11 @@ pub struct PushSpec {
     pub dst: String,
 }
 
-/// Partial-clone filter values retained for API compatibility.
+/// Partial-clone filter values retained for the legacy helper API.
 ///
-/// Crab does not currently produce promisor packs, so fetch rejects every
-/// filter request instead of silently installing a complete repository. This
-/// type is deprecated and scheduled for removal in the next major version.
+/// Protocol-v2 clients send this value inside the upload-pack request. The
+/// legacy batched `fetch` path does not receive this option for a v2 fetch;
+/// it remains for callers that exercise the released helper API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterSpec {
     /// `blob:none` — exclude all blob objects.
@@ -255,16 +256,15 @@ impl fmt::Display for FilterSpec {
 /// Fetch constraints passed to the pack download pipeline.
 ///
 /// The remote helper populates `depth`. The public `filter` field is retained
-/// for compatibility, but any populated value is rejected by the fetch
-/// pipeline because Crab does not implement partial-clone promisor semantics.
+/// for the legacy helper API; filtered fetches use protocol-v2 instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FetchOptions {
     /// Shallow clone depth (`--depth N`). `None` means full clone.
     pub depth: Option<u32>,
     /// Whether `depth` extends the repository's current shallow boundary.
     pub deepen_relative: bool,
-    /// Deprecated compatibility field; every populated value is rejected
-    /// before filesystem or object-store I/O and will be removed next major.
+    /// Legacy helper filter. A populated value is rejected before legacy pack
+    /// I/O; protocol-v2 carries the supported filtered request separately.
     pub filter: Option<FilterSpec>,
 }
 
@@ -286,6 +286,10 @@ pub struct HelperOptions {
     pub check_connectivity: bool,
     /// Fetch constraints accumulated from supported option commands.
     pub fetch_options: FetchOptions,
+    /// Git requested a filtered legacy fetch. The request is retained even
+    /// when the option is reported unsupported so a missing v2 path cannot
+    /// silently fall back to a complete pack.
+    pub filter_requested: bool,
     /// When `true`, the whole batch either commits or rolls back — no
     /// partial writes when any ref is rejected. Set by git via
     /// `option atomic true` during smart-HTTP receive-pack.
@@ -309,6 +313,7 @@ impl Default for HelperOptions {
             verbosity: 1,
             check_connectivity: false,
             fetch_options: FetchOptions::default(),
+            filter_requested: false,
             atomic: false,
             followtags: false,
             include_tag: false,
@@ -320,6 +325,9 @@ impl Default for HelperOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HelperCommand {
     Capabilities,
+    StatelessConnect {
+        service: String,
+    },
     List {
         for_push: bool,
     },
@@ -345,6 +353,9 @@ impl fmt::Display for HelperCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Capabilities => write!(f, "capabilities"),
+            Self::StatelessConnect { service } => {
+                write!(f, "stateless-connect {service}")
+            }
             Self::List { for_push } => {
                 if *for_push {
                     write!(f, "list for-push")
@@ -381,6 +392,7 @@ pub(crate) enum PushItem {
 #[derive(Debug)]
 enum Batch {
     Capabilities,
+    StatelessConnect { service: String },
     List { for_push: bool },
     Fetch(Vec<FetchEntry>),
     Push(Vec<PushItem>),
@@ -398,6 +410,16 @@ fn parse_command(line: &str) -> Result<HelperCommand> {
 
     if line == "capabilities" {
         return Ok(HelperCommand::Capabilities);
+    }
+    if let Some(service) = line.strip_prefix("stateless-connect ") {
+        if service.is_empty() || service.contains(char::is_whitespace) {
+            return Err(CrabError::Protocol(format!(
+                "malformed stateless-connect command: {line}"
+            )));
+        }
+        return Ok(HelperCommand::StatelessConnect {
+            service: service.to_owned(),
+        });
     }
     if line == "list" {
         return Ok(HelperCommand::List { for_push: false });
@@ -707,7 +729,14 @@ async fn run_remote_helper_with_context(
     } = context;
 
     loop {
-        let Some(batch) = read_batch(&mut reader, &mut line_buf, &mut options, &mut writer).await?
+        let Some(batch) = read_batch(
+            &mut reader,
+            &mut line_buf,
+            &mut options,
+            &mut writer,
+            &cancel,
+        )
+        .await?
         else {
             // Save push state on clean exit.
             if let Err(e) = push_state.save(&push_state_repo_root) {
@@ -715,6 +744,32 @@ async fn run_remote_helper_with_context(
             }
             return Ok(());
         };
+        if let Batch::StatelessConnect { service } = &batch {
+            let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
+            let result = if service == "git-upload-pack" {
+                crate::git::upload_pack_wire::serve(
+                    &mut reader,
+                    &mut writer,
+                    store.as_storage(),
+                    &prefix,
+                    &hidden_ref_patterns,
+                    options.progress,
+                    &cancel,
+                )
+                .await
+            } else {
+                // The helper protocol defines `fallback` as the only
+                // non-error response that lets Git select another fetch or
+                // push mechanism before terminal stdio takeover.
+                writer.write_all(b"fallback\n").await?;
+                writer.flush().await?;
+                Ok(())
+            };
+            if let Err(error) = push_state.save(&push_state_repo_root) {
+                tracing::warn!(error = %error, "failed to save push state");
+            }
+            return result;
+        }
         dispatch_batch(
             &batch,
             &options,
@@ -803,6 +858,7 @@ async fn read_batch<R, W>(
     line_buf: &mut String,
     options: &mut HelperOptions,
     writer: &mut W,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<Batch>>
 where
     R: tokio::io::AsyncBufRead + Unpin,
@@ -811,10 +867,13 @@ where
     let mut fetch_entries: Vec<FetchEntry> = Vec::new();
     let mut push_items: Vec<PushItem> = Vec::new();
     let mut batch_kind: Option<BatchKind> = None;
-
     loop {
         line_buf.clear();
-        let n = reader.read_line(line_buf).await?;
+        let n = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = reader.read_line(line_buf) => result?,
+        };
         if n == 0 {
             return if batch_kind.is_some() {
                 Ok(Some(finalize_batch(batch_kind, fetch_entries, push_items)?))
@@ -840,6 +899,17 @@ where
             }
             HelperCommand::Capabilities => {
                 return Ok(Some(Batch::Capabilities));
+            }
+            HelperCommand::StatelessConnect { service } => {
+                if batch_kind.is_some() {
+                    return Err(CrabError::Protocol(
+                        "stateless-connect cannot be mixed with another command".into(),
+                    ));
+                }
+                // Git's transport-helper sends this command without a
+                // terminating blank line, then waits for the positive blank
+                // response before writing the protocol-v2 request bytes.
+                return Ok(Some(Batch::StatelessConnect { service }));
             }
             HelperCommand::List { for_push } => {
                 return Ok(Some(Batch::List { for_push }));
@@ -950,8 +1020,20 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
             }
         },
         "filter" => {
-            tracing::debug!(filter = %value, "partial clone filters are not supported");
-            writer.write_all(b"unsupported\n").await?;
+            options.filter_requested = true;
+            if crab_read::parse_upload_pack_filter(value).is_ok() {
+                tracing::debug!(
+                    filter = %value,
+                    "filter option is handled by the terminal protocol-v2 path"
+                );
+                writer.write_all(b"ok\n").await?;
+            } else {
+                tracing::debug!(
+                    filter = %value,
+                    "filter option is outside the terminal protocol-v2 support matrix"
+                );
+                writer.write_all(b"unsupported\n").await?;
+            }
         }
         "check-connectivity" => match value {
             "true" => {
@@ -1046,11 +1128,35 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     match batch {
+        Batch::StatelessConnect { .. } => {
+            return Err(CrabError::Protocol(
+                "terminal stateless-connect batch reached ordinary dispatcher".into(),
+            ));
+        }
         Batch::Capabilities => {
             tracing::debug!("responding to capabilities");
             let router = store.map(|s| StoreLayout::new(s.clone(), prefix.to_owned()));
             let has_graph = has_commit_graph_summary(store, prefix, router.as_ref(), cache).await;
-            let caps = format_capabilities(has_graph);
+            let v2_ready = if let Some(store) = store {
+                if crate::git::upload_pack_wire::hidden_ref_patterns_are_valid(
+                    &cache.config().transfer_hide_refs,
+                ) {
+                    crate::git::upload_pack_wire::snapshot_available(
+                        store.as_storage(),
+                        prefix,
+                        cancel,
+                    )
+                    .await
+                } else {
+                    tracing::warn!(
+                        "invalid transfer.hideRefs pattern; protocol-v2 remains unavailable"
+                    );
+                    false
+                }
+            } else {
+                false
+            };
+            let caps = format_capabilities_with_v2(has_graph, v2_ready);
             writer.write_all(caps.as_bytes()).await?;
             writer.flush().await?;
         }
@@ -1454,6 +1560,11 @@ where
     Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
 {
     tracing::debug!(entries = entries.len(), "fetch batch");
+    if options.filter_requested || options.fetch_options.filter.is_some() {
+        return Err(CrabError::Protocol(
+            "filtered fetch requires protocol v2".to_owned(),
+        ));
+    }
     let mut connectivity_lock = None;
     if let Some(s) = store {
         let cfg = cache.config().clone();
@@ -1660,46 +1771,26 @@ async fn has_commit_graph_summary(
     result
 }
 
-/// Build the capabilities response string.
+/// Build the legacy remote-helper capability response.
 ///
 /// Always advertises `fetch`, `push`, `option`, and `check-connectivity`.
-/// When the remote has a `CommitGraphSummary`, also advertises `shallow` so git
-/// knows it can send `--depth`. Partial-clone filtering is not advertised
-/// because Crab does not implement promisor-object fetches.
-///
-/// ## v2 capabilities under `gix-transport`
-///
-/// The `gix-transport` feature makes the machinery to drive protocol
-/// v2 stateless-connect available in
-/// [`crate::git::fetch_transport`]. It does **not** currently flip
-/// the advertisement here. Advertising `connect` / `stateless-connect`
-/// signals to git that the helper is ready to proxy a full
-/// stateless-connect session; wiring that session requires
-/// `gix_protocol::handshake`, a refmap, negotiation, and a pack
-/// install pipeline that reads from the stdio transport instead of
-/// S3. Until those pieces are hooked up, emitting the capabilities
-/// would break existing fetch clients that currently drive the
-/// batched `fetch` command path.
-///
-/// The gate point is kept here (rather than at the caller) so the
-/// advertisement lights up in exactly one place once the rest of
-/// the pipeline is ready. When that happens the two `connect\n` and
-/// `stateless-connect\n` lines go behind a
-/// `#[cfg(feature = "gix-transport")]` block just before the final
-/// newline.
+/// When the legacy remote has a `CommitGraphSummary`, it also advertises
+/// `shallow`. The proof-gated v2 capability is added only by
+/// [`format_capabilities_with_v2`].
 pub fn format_capabilities(has_commit_graph: bool) -> String {
+    format_capabilities_with_v2(has_commit_graph, false)
+}
+
+/// Build the remote-helper capability response, including terminal v2 only
+/// when the generation-bound remote upload-pack proof is available.
+pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> String {
     let mut caps = String::from("fetch\npush\noption\ncheck-connectivity\n");
     if has_commit_graph {
         caps.push_str("shallow\n");
     }
-    // DO NOT emit `connect` / `stateless-connect` yet — see the
-    // doc comment above for the gating rationale. The scaffold in
-    // `fetch_transport` is ready to receive requests, but the rest
-    // of the fetch-over-stateless-connect pipeline is not wired.
-    //
-    // `agent=...` goes last so clients parsing line-by-line see
-    // the standard capability keywords first, matching git's own
-    // `receive-pack` / `upload-pack` ordering.
+    if v2_ready {
+        caps.push_str("stateless-connect\n");
+    }
     caps.push_str("agent=crab/");
     caps.push_str(env!("CARGO_PKG_VERSION"));
     caps.push('\n');
@@ -2041,6 +2132,20 @@ async fn fetch_packs(
         config.download_concurrency,
     ));
 
+    let raw_object_count = entries
+        .iter()
+        .filter(|entry| entry.sha == entry.ref_name)
+        .count();
+    if raw_object_count > 0 {
+        if raw_object_count != entries.len() {
+            return Err(CrabError::Protocol(
+                "raw object fetches cannot be mixed with ref fetches".to_owned(),
+            ));
+        }
+        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
+        return Ok(None);
+    }
+
     // Upload-pack policy gate. Raw-SHA `fetch <sha> <ref>` lines
     // must be validated before we hand the client back any pack
     // bytes, otherwise a client can ask for an arbitrary interior
@@ -2209,6 +2314,128 @@ async fn fetch_packs(
         &manifest.git_validation_digest,
     )
     .await
+}
+
+async fn fetch_promisor_objects(
+    store: &crate::storage::store::Store,
+    prefix: &str,
+    entries: &[FetchEntry],
+    config: &crate::core::config::Config,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let wants = entries
+        .iter()
+        .map(|entry| {
+            gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|_| {
+                CrabError::Protocol(format!(
+                    "promisor fetch object ID is not a full SHA-1: {}",
+                    entry.sha
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let repository =
+        crate::git::upload_pack_wire::open_repository(store.as_storage(), prefix, cancel).await?;
+    let visibility = repository.visibility_index(cancel).await.map_err(|error| {
+        CrabError::Protocol(format!("promisor visibility proof failed: {error}"))
+    })?;
+    let visible_refs =
+        crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
+    let request = crab_read::UploadPackRequest {
+        wants,
+        filter: crab_read::UploadPackFilter::None,
+        ..Default::default()
+    };
+    let plan =
+        crab_read::plan_upload_pack(&repository, &visibility, &visible_refs, &request, cancel)
+            .await?;
+    let pack = repository
+        .generate_pack(&plan.object_ids, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("promisor pack generation failed: {error}"))
+        })?;
+    tracing::info!(
+        protocol_version = 0,
+        canonical_filter = "none",
+        lazy = true,
+        requested_objects = entries.len(),
+        planned_objects = pack.object_count(),
+        reconstructed_objects = pack.object_count(),
+        transferred_bytes = pack.size(),
+        lazy_fetch_latency_ms = started.elapsed().as_millis() as u64,
+        "legacy promisor pack generated"
+    );
+    let git_dir = super::discover::discover_git_dir()?;
+    let pack_dir = git_dir.join("objects").join("pack");
+    let canonical_name = format!("promisor-{}", pack.checksum_hex());
+    let pack_was_present = pack_dir
+        .join(format!("pack-{canonical_name}.pack"))
+        .exists()
+        && pack_dir.join(format!("pack-{canonical_name}.idx")).exists();
+    crate::git::pack::install_pack_file_locally_with_timeout(
+        &pack_dir,
+        pack.path(),
+        &canonical_name,
+        0,
+        true,
+    )
+    .await?;
+    if let Err(error) = install_promisor_sidecar(&pack_dir, &canonical_name).await {
+        if !pack_was_present
+            && let Err(rollback_error) =
+                crate::git::pack::rollback_installed_pack(&pack_dir, &canonical_name).await
+        {
+            tracing::warn!(
+                error = %rollback_error,
+                pack = %canonical_name,
+                "failed to roll back a promisor pack after sidecar installation failed"
+            );
+        }
+        return Err(error);
+    }
+    tracing::debug!(
+        objects = plan.object_ids.len(),
+        pack = %canonical_name,
+        "installed promised Git objects"
+    );
+    Ok(())
+}
+
+static PROMISOR_SIDECAR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &str) -> Result<()> {
+    let sidecar = pack_dir.join(format!("pack-{canonical_name}.promisor"));
+    if tokio::fs::try_exists(&sidecar).await? {
+        return Ok(());
+    }
+    let suffix = PROMISOR_SIDECAR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = pack_dir.join(format!(
+        ".{canonical_name}.promisor.tmp-{}-{suffix}",
+        std::process::id()
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await?;
+    if let Err(error) = file.write_all(b"").await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    if let Err(error) = file.sync_all().await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::rename(&temporary, &sidecar).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        if tokio::fs::try_exists(&sidecar).await? {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn ensure_lazy_checkout_config_for_new_helper_repo(repo_root: &std::path::Path) {
@@ -3134,10 +3361,16 @@ mod tests {
         let mut options = HelperOptions::default();
         let mut line_buf = String::new();
 
-        let batch = read_batch(&mut reader, &mut line_buf, &mut options, &mut writer)
-            .await
-            .expect("read fetch batch")
-            .expect("fetch batch");
+        let batch = read_batch(
+            &mut reader,
+            &mut line_buf,
+            &mut options,
+            &mut writer,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("read fetch batch")
+        .expect("fetch batch");
 
         let Batch::Fetch(entries) = batch else {
             panic!("expected fetch batch");
@@ -3156,6 +3389,102 @@ mod tests {
             ]
         );
         assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_batch_read_stops_before_waiting_for_input() {
+        let mut reader = BufReader::new(tokio::io::empty());
+        let mut writer = Vec::new();
+        let mut options = HelperOptions::default();
+        let mut line_buf = String::new();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let error = read_batch(
+            &mut reader,
+            &mut line_buf,
+            &mut options,
+            &mut writer,
+            &cancellation,
+        )
+        .await
+        .expect_err("cancelled batch read should fail");
+
+        assert!(matches!(error, CrabError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn stateless_connect_dispatches_before_protocol_payload() {
+        let input = "stateless-connect git-upload-pack\n0014command=ls-refs\n00010000";
+        let mut reader = BufReader::new(Cursor::new(input.as_bytes()));
+        let mut writer = Vec::new();
+        let mut options = HelperOptions::default();
+        let mut line_buf = String::new();
+
+        let batch = read_batch(
+            &mut reader,
+            &mut line_buf,
+            &mut options,
+            &mut writer,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("read stateless-connect command")
+        .expect("stateless-connect batch");
+        assert!(matches!(
+            batch,
+            Batch::StatelessConnect { service } if service == "git-upload-pack"
+        ));
+
+        let mut payload = Vec::new();
+        reader
+            .read_to_end(&mut payload)
+            .await
+            .expect("protocol payload should remain unread");
+        assert_eq!(payload, b"0014command=ls-refs\n00010000");
+        assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_stateless_connect_returns_protocol_fallback() {
+        let output = run("stateless-connect git-receive-pack\n").await;
+        assert_eq!(output, "fallback\n");
+    }
+
+    #[tokio::test]
+    async fn promisor_sidecar_install_is_atomic_and_idempotent() {
+        let tempdir = tempfile::tempdir().expect("promisor sidecar tempdir");
+        let pack_dir = tempdir.path().join("pack");
+        tokio::fs::create_dir(&pack_dir)
+            .await
+            .expect("create pack directory");
+
+        install_promisor_sidecar(&pack_dir, "promisor-test")
+            .await
+            .expect("install promisor sidecar");
+        install_promisor_sidecar(&pack_dir, "promisor-test")
+            .await
+            .expect("reinstall promisor sidecar");
+
+        let sidecar = pack_dir.join("pack-promisor-test.promisor");
+        assert!(sidecar.is_file());
+        assert_eq!(tokio::fs::read(&sidecar).await.expect("read sidecar"), b"");
+        let mut entries = tokio::fs::read_dir(&pack_dir)
+            .await
+            .expect("read pack directory");
+        let entry = entries
+            .next_entry()
+            .await
+            .expect("read sidecar entry")
+            .expect("sidecar should remain installed");
+        assert_eq!(entry.file_name(), "pack-promisor-test.promisor");
+        assert!(
+            entries
+                .next_entry()
+                .await
+                .expect("read remaining entries")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4145,14 +4474,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn option_filter_blob_none_is_unsupported() {
+    async fn option_filter_blob_none_is_supported() {
         let output = run("option filter blob:none\n").await;
-        assert_eq!(output, "unsupported\n");
+        assert_eq!(output, "ok\n");
     }
 
     #[tokio::test]
     async fn option_filter_unsupported_spec() {
-        let output = run("option filter tree:0\n").await;
+        let output = run("option filter blob:depth=1\n").await;
         assert_eq!(output, "unsupported\n");
     }
 
@@ -4249,11 +4578,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(options.fetch_options.filter, None);
-        assert_eq!(String::from_utf8(writer).unwrap(), "unsupported\n");
+        assert!(options.filter_requested);
+        assert_eq!(String::from_utf8(writer).unwrap(), "ok\n");
     }
 
     #[tokio::test]
-    async fn unsupported_filter_does_not_change_depth_constraint() {
+    async fn supported_filter_does_not_change_depth_constraint() {
         let mut options = HelperOptions::default();
         let mut writer: Vec<u8> = Vec::new();
         handle_option("depth", "2", &mut options, &mut writer)
@@ -4264,7 +4594,45 @@ mod tests {
             .unwrap();
         assert_eq!(options.fetch_options.depth, Some(2));
         assert_eq!(options.fetch_options.filter, None);
+        assert!(options.filter_requested);
         assert!(options.fetch_options.has_constraints());
+    }
+
+    #[tokio::test]
+    async fn legacy_filtered_fetch_fails_before_store_selection() {
+        let options = HelperOptions {
+            fetch_options: FetchOptions {
+                filter: Some(FilterSpec::BlobNone),
+                ..FetchOptions::default()
+            },
+            ..HelperOptions::default()
+        };
+        let mut cache = SessionCache::new(crate::core::config::Config::default());
+        let mut writer = Vec::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let entries = vec![FetchEntry {
+            sha: "a".repeat(40),
+            ref_name: "refs/heads/main".into(),
+        }];
+
+        let result = dispatch_fetch_batch_with_selector(
+            &entries,
+            &options,
+            &mut writer,
+            None,
+            "org/repo",
+            &mut cache,
+            Some("crab://bucket/org/repo"),
+            None,
+            &cancel,
+            |_, _, _| async { Err(CrabError::Internal("selector must not run".into())) },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CrabError::Protocol(message)) if message == "filtered fetch requires protocol v2")
+        );
+        assert!(writer.is_empty());
     }
 
     // --- option atomic parsing ---

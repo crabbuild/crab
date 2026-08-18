@@ -40,4 +40,7 @@ pub use url::{
     RepositoryLocator, RepositoryUrl, UrlError, UrlForm, normalize_repository_bucket,
     normalize_repository_prefix,
 };
-pub use walk::{PointerBlob, ReachableSet, WalkError, walk_reachable};
+pub use walk::{
+    PointerBlob, ReachableSet, WalkError, walk_reachable, walk_reachable_bounded,
+    walk_reachable_by_ref, walk_reachable_by_ref_bounded,
+};

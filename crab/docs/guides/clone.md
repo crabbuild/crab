@@ -18,8 +18,8 @@ By default, clones are lazy: files are checked out as lightweight pointer stubs
 rather than full content. This makes cloning multi-GB repositories nearly
 instant when most repository weight is in Crab-managed payloads. You can then
 selectively hydrate only the files you need. Lazy checkout is not Git partial
-clone: Crab still installs the remote's complete Git packs, and Git
-`--filter=blob:none` is currently unsupported.
+clone: the wrapper does not request `--filter=blob:none`, so it installs the
+complete Git packs while deferring Crab-managed payload bytes.
 
 ## Arguments
 
@@ -161,12 +161,17 @@ supported. Git's date and ref-exclusion selectors (`--shallow-since` and
 `--shallow-exclude`) are not yet supported and fail explicitly; Crab does not
 silently replace either request with a full clone.
 
-Git partial-clone filters and remote-helper `connect`/`stateless-connect` are
-not supported. The helper does not advertise these capabilities and returns
-`unsupported` for `option filter blob:none`; it never silently substitutes a
-complete fetch for a requested partial clone. See
-[Git Integration](../architecture/git-integration.md) for the complete support
-and verification matrix.
+The current development-line helper can run a proof-gated partial clone with
+the supported `--filter=...` forms: `blob:none`, `blob:limit=<n>[kmg]`,
+`tree:<depth>`, `object:type={tag,commit,tree,blob}`, full-SHA-1
+`sparse:oid`, and bounded repeated/combine intersections. It records the
+standard Git promisor state and fetches omitted blobs lazily. RustFS
+qualification is green, while provider and released-artifact qualification
+remain; do not treat this as a released support claim yet. If the remote lacks
+the generation-bound locator or visibility proof, the v2 capability is withheld
+and the filtered operation fails rather than silently becoming a complete
+clone. See [Git Integration](../architecture/git-integration.md) for the exact
+semantics and unsupported v2 extensions.
 
 ## Related Commands
 

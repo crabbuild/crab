@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
-use slatedb::config::{CompressionCodec, Settings, WriteOptions};
+use slatedb::config::{
+    CheckpointOptions, CheckpointScope, CompressionCodec, Settings, WriteOptions,
+};
 
 use super::format::{
     LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation,
@@ -50,6 +52,8 @@ pub struct LocatorWriteStats {
 /// Exclusive writer for the compact Git object locator.
 pub struct GitObjectLocatorWriter {
     db: slatedb::Db,
+    path: String,
+    store: Arc<dyn ObjectStore>,
     metadata: LocatorMetadata,
     bindings: HashMap<u64, GitPackLocatorRecord>,
     stats: LocatorWriteStats,
@@ -59,7 +63,7 @@ impl GitObjectLocatorWriter {
     /// Open the compact locator and require its exact format metadata.
     pub async fn open(store: Arc<dyn ObjectStore>, repo_prefix: &str) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
-        let db = slatedb::Db::builder(ObjectPath::from(path.as_str()), store)
+        let db = slatedb::Db::builder(ObjectPath::from(path.as_str()), Arc::clone(&store))
             .with_settings(locator_settings())
             // Publication writes each row once and stale-row cleanup performs
             // one sequential scan. Caching that scan in SlateDB's default
@@ -69,11 +73,11 @@ impl GitObjectLocatorWriter {
             .await
             .map_err(|source| MetadataError::SlateDbOpen {
                 db: DB_LABEL.to_owned(),
-                path,
+                path: path.clone(),
                 source,
             })?;
 
-        let open_result = Self::load_or_initialize(db).await;
+        let open_result = Self::load_or_initialize(db, path, store).await;
         match open_result {
             Ok(writer) => Ok(writer),
             Err((db, operation)) => close_after_error(db, operation).await,
@@ -82,6 +86,8 @@ impl GitObjectLocatorWriter {
 
     async fn load_or_initialize(
         db: slatedb::Db,
+        path: String,
+        store: Arc<dyn ObjectStore>,
     ) -> std::result::Result<Self, (slatedb::Db, MetadataError)> {
         let value = match db.get(METADATA_KEY).await {
             Ok(value) => value,
@@ -140,6 +146,8 @@ impl GitObjectLocatorWriter {
         };
         Ok(Self {
             db,
+            path,
+            store,
             metadata,
             bindings,
             stats: LocatorWriteStats::default(),
@@ -384,14 +392,45 @@ impl GitObjectLocatorWriter {
 
     /// Flush and close the SlateDB writer.
     pub async fn close(self) -> Result<LocatorWriteStats> {
-        self.db
-            .close()
-            .await
-            .map_err(|source| MetadataError::SlateDbClose {
+        let Self {
+            db,
+            path,
+            store,
+            stats,
+            ..
+        } = self;
+        let checkpoint = db
+            .create_checkpoint(
+                CheckpointScope::All,
+                &CheckpointOptions {
+                    name: Some(super::READER_CHECKPOINT_NAME.to_owned()),
+                    ..CheckpointOptions::default()
+                },
+            )
+            .await;
+        let checkpoint = match checkpoint {
+            Ok(checkpoint) => checkpoint,
+            Err(source) => {
+                return close_after_error(
+                    db,
+                    MetadataError::SlateDbWrite {
+                        db: DB_LABEL.to_owned(),
+                        source,
+                    },
+                )
+                .await;
+            }
+        };
+        let mut stats = stats;
+        stats.flushes = stats.flushes.saturating_add(1);
+        if let Err(source) = db.close().await {
+            return Err(MetadataError::SlateDbClose {
                 db: DB_LABEL.to_owned(),
                 source,
-            })?;
-        Ok(self.stats)
+            });
+        }
+        remove_old_reader_checkpoints(&path, store, &checkpoint).await?;
+        Ok(stats)
     }
 
     fn record_object_batch(&mut self, rows: usize, bytes: usize) {
@@ -401,6 +440,34 @@ impl GitObjectLocatorWriter {
             .logical_bytes_written
             .saturating_add(bytes as u64);
     }
+}
+
+async fn remove_old_reader_checkpoints(
+    path: &str,
+    store: Arc<dyn ObjectStore>,
+    current: &slatedb::CheckpointCreateResult,
+) -> Result<()> {
+    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    let checkpoints = admin
+        .list_checkpoints(Some(super::READER_CHECKPOINT_NAME))
+        .await
+        .map_err(|source| MetadataError::SlateDbWrite {
+            db: DB_LABEL.to_owned(),
+            source,
+        })?;
+    for checkpoint in checkpoints {
+        if checkpoint.id == current.id {
+            continue;
+        }
+        admin
+            .delete_checkpoint(checkpoint.id)
+            .await
+            .map_err(|source| MetadataError::SlateDbWrite {
+                db: DB_LABEL.to_owned(),
+                source,
+            })?;
+    }
+    Ok(())
 }
 
 fn locator_settings() -> Settings {

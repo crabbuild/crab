@@ -106,6 +106,7 @@ async-trait = "0.1"
 blake3 = "1.8"
 bytes = "1.11"
 futures-util = "0.3"
+flate2 = "1"
 globset = "0.4"
 object_store = { version = "0.14.1", default-features = false }
 reqwest = { version = "0.12", default-features = false }

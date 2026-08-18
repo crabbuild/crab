@@ -1242,7 +1242,9 @@ async fn metadata_batch_concurrency_is_bounded_by_aggregate_byte_limits() {
                 .count()
                 > 16
         );
-        assert_eq!(fixture.backend.max_active_pack_gets(), 2);
+        // Coalescing can complete the page through one range lane; the
+        // aggregate byte limit still caps the number of concurrent lanes.
+        assert!((1..=2).contains(&fixture.backend.max_active_pack_gets()));
         Ok(())
     }
     .await;

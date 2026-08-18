@@ -74,7 +74,7 @@ impl ReaderLimits {
 
 /// A verified, fully reconstructed Git object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GitObject {
+pub struct RemoteGitObject {
     /// Object ID verified against `kind` and `data`.
     pub oid: gix_hash::ObjectId,
     /// Git object kind inherited from the full base of any delta chain.
@@ -83,11 +83,26 @@ pub(crate) struct GitObject {
     pub data: Bytes,
 }
 
+pub(crate) type GitObject = RemoteGitObject;
+
+const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_COALESCED_GAP_BYTES: u64 = 4 * 1024;
+
+struct CoalescedRange {
+    pack_id: MerkleHash,
+    start: u64,
+    end: u64,
+    entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GitObjectMetadata {
-    pub(crate) oid: gix_hash::ObjectId,
-    pub(crate) kind: gix_object::Kind,
-    pub(crate) size: u64,
+pub struct RemoteGitObjectMetadata {
+    /// Object ID whose packed entry was inspected.
+    pub oid: gix_hash::ObjectId,
+    /// Verified or pack-header-derived Git object kind.
+    pub kind: gix_object::Kind,
+    /// Reconstructed Git object size in bytes.
+    pub size: u64,
 }
 
 /// Reads Git objects directly from immutable Crab packs in object storage.
@@ -186,7 +201,7 @@ impl RemoteGitReader {
         requested: gix_hash::ObjectId,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
-    ) -> Result<GitObjectMetadata> {
+    ) -> Result<RemoteGitObjectMetadata> {
         let mut current = requested;
         let mut visited = HashSet::new();
         let mut deltas = Vec::new();
@@ -242,7 +257,7 @@ impl RemoteGitReader {
             }
             size = delta.result_size;
         }
-        Ok(GitObjectMetadata {
+        Ok(RemoteGitObjectMetadata {
             oid: requested,
             kind,
             size,
@@ -307,6 +322,9 @@ impl RemoteGitReader {
                 missing.push(oid);
             }
         }
+        if missing.is_empty() {
+            return order_completed_objects(requested, &completed);
+        }
         let oid_bytes = missing
             .iter()
             .map(|oid| {
@@ -316,6 +334,11 @@ impl RemoteGitReader {
             })
             .collect::<Result<Vec<[u8; 20]>>>()?;
         budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        tracing::debug!(
+            storage_request = "locator_lookup",
+            storage_bytes = 0u64,
+            "remote Git object-store request"
+        );
         let lookups = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -347,35 +370,83 @@ impl RemoteGitReader {
                 }
                 GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
             };
+            check_limit(
+                "packed entry bytes",
+                locator.location.entry_len,
+                self.limits.max_packed_entry_bytes,
+            )?;
             ready.push((oid, locator));
         }
+        let ranges = coalesce_ranges(ready)?;
+        tracing::debug!(
+            storage_request = "range_get_coalesced",
+            range_count = ranges.len(),
+            object_count = missing.len(),
+            "coalesced remote Git object ranges"
+        );
         let caller_cancellation = cancellation.clone();
         // `stream::iter` is lazy: at most this byte- and object-derived number
         // of futures owns fetched or inflated bytes at once.
-        let results = stream::iter(ready.into_iter().map(|(oid, locator)| {
+        let results = stream::iter(ranges.into_iter().map(|range| {
             let reader = Arc::clone(self);
             let caller_cancellation = caller_cancellation.clone();
             async move {
-                let key =
-                    crate::runtime::ObjectCacheKey::new(&reader.identity, reader.generation, oid);
-                let result = reader
-                    .read_from_locator(
-                        session,
-                        oid,
-                        locator,
-                        reader.limits.max_object_bytes,
-                        reader.limits.max_delta_depth,
-                        budget,
-                        &caller_cancellation,
-                    )
-                    .await;
-                if let Ok(object) = &result {
-                    reader
-                        .runtime
-                        .insert_object(key, Arc::new(object.clone()))
+                let bytes = reader
+                    .read_coalesced_range(&range, budget, &caller_cancellation)
+                    .await?;
+                let mut group_results = Vec::with_capacity(range.entries.len());
+                for (oid, locator) in range.entries {
+                    let relative_start = locator
+                        .location
+                        .pack_offset
+                        .checked_sub(range.start)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                    let relative_end = relative_start
+                        .checked_add(locator.location.entry_len)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                    let start = usize::try_from(relative_start).map_err(|_| Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    let end = usize::try_from(relative_end).map_err(|_| Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    if gix_features::hash::crc32(entry_bytes) != locator.location.crc32 {
+                        group_results.push((oid, Err(Error::PackedEntryCrcMismatch { oid })));
+                        continue;
+                    }
+                    let result = reader
+                        .read_from_prefetched_locator(
+                            session,
+                            oid,
+                            locator,
+                            Bytes::copy_from_slice(entry_bytes),
+                            reader.limits.max_object_bytes,
+                            reader.limits.max_delta_depth,
+                            budget,
+                            &caller_cancellation,
+                        )
                         .await;
+                    if let Ok(object) = &result {
+                        let key = crate::runtime::ObjectCacheKey::new(
+                            &reader.identity,
+                            reader.generation,
+                            oid,
+                        );
+                        reader
+                            .runtime
+                            .insert_object(key, Arc::new(object.clone()))
+                            .await;
+                    }
+                    group_results.push((oid, result));
                 }
-                (oid, result)
+                Ok::<_, Error>(group_results)
             }
         }))
         .buffer_unordered(concurrency)
@@ -383,32 +454,12 @@ impl RemoteGitReader {
         // single-flight work is separately owned by the runtime task tracker.
         .collect::<Vec<_>>()
         .await;
-        for (oid, result) in results {
-            completed.insert(oid, result?);
+        for group_result in results {
+            for (oid, result) in group_result? {
+                completed.insert(oid, result?);
+            }
         }
-        let mut ordered = Vec::new();
-        ordered
-            .try_reserve_exact(requested.len())
-            .map_err(|source| Error::Allocation {
-                requested: requested
-                    .len()
-                    .saturating_mul(std::mem::size_of::<GitObject>()),
-                source,
-            })?;
-        for oid in requested {
-            let _position = positions.get(oid).ok_or(Error::InternalInvariant {
-                invariant: "deduplicated object position is absent",
-            })?;
-            ordered.push(
-                completed
-                    .get(oid)
-                    .cloned()
-                    .ok_or(Error::InternalInvariant {
-                        invariant: "completed object is absent from batch result",
-                    })?,
-            );
-        }
-        Ok(ordered)
+        order_completed_objects(requested, &completed)
     }
 
     async fn read_from_locator(
@@ -424,6 +475,72 @@ impl RemoteGitReader {
         let packed = self
             .read_packed_entry(requested, locator, max_object_bytes, budget, cancellation)
             .await?;
+        self.resolve_packed_entry(
+            session,
+            requested,
+            locator,
+            packed,
+            max_object_bytes,
+            remaining_delta_depth,
+            budget,
+            cancellation,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "prefetched reads carry the same explicit verification and budget inputs as locator reads"
+    )]
+    async fn read_from_prefetched_locator(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        requested: gix_hash::ObjectId,
+        locator: GitObjectLocator,
+        bytes: Bytes,
+        max_object_bytes: u64,
+        remaining_delta_depth: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<GitObject> {
+        let packed = self
+            .decode_prefetched_entry(
+                requested,
+                locator.location.pack_offset,
+                bytes,
+                max_object_bytes,
+                budget,
+                cancellation,
+            )
+            .await?;
+        self.resolve_packed_entry(
+            session,
+            requested,
+            locator,
+            packed,
+            max_object_bytes,
+            remaining_delta_depth,
+            budget,
+            cancellation,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "delta resolution carries explicit session, verification, budget, and cancellation inputs"
+    )]
+    async fn resolve_packed_entry(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        requested: gix_hash::ObjectId,
+        locator: GitObjectLocator,
+        packed: PackedEntry,
+        max_object_bytes: u64,
+        remaining_delta_depth: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<GitObject> {
         if let Some(kind) = packed.header.as_kind() {
             verify_object(requested, kind, &packed.inflated)?;
             return Ok(GitObject {
@@ -514,6 +631,77 @@ impl RemoteGitReader {
         })
     }
 
+    async fn read_coalesced_range(
+        &self,
+        range: &CoalescedRange,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        let path = repo_pack_path(&self.repo_prefix, &range.pack_id);
+        charge_origin_range(budget, length).await?;
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let bytes = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            bytes = self.store.range_get(&path, range.start..range.end) => bytes?,
+        };
+        drop(origin_permit);
+        check_cancelled(cancellation)?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
+    }
+
+    async fn decode_prefetched_entry(
+        &self,
+        oid: gix_hash::ObjectId,
+        pack_offset: u64,
+        bytes: Bytes,
+        max_object_bytes: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<PackedEntry> {
+        let inflated_bytes = packed_entry_allocation_bytes(
+            oid,
+            pack_offset,
+            &bytes,
+            self.limits.max_inflated_entry_bytes,
+            max_object_bytes,
+        )?;
+        budget
+            .charge(BudgetDimension::InflatedBytes, inflated_bytes)
+            .await?;
+        let decode_permit = self.runtime.decode_permit(cancellation).await?;
+        let decode_cancellation = cancellation.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let max_inflated = self.limits.max_inflated_entry_bytes;
+        let packed = runtime
+            .spawn_blocking(move || {
+                inflate_entry(
+                    oid,
+                    pack_offset,
+                    bytes,
+                    max_inflated,
+                    max_object_bytes,
+                    &decode_cancellation,
+                )
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })??;
+        drop(decode_permit);
+        Ok(PackedEntry {
+            header: packed.header,
+            inflated: packed.inflated,
+            charged_budget: Some(budget.id()),
+        })
+    }
+
     async fn locate(
         &self,
         session: &GitObjectLocatorSession,
@@ -526,6 +714,11 @@ impl RemoteGitReader {
             .try_into()
             .map_err(|_| Error::UnsupportedObjectFormat)?;
         budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        tracing::debug!(
+            storage_request = "locator_lookup",
+            storage_bytes = 0u64,
+            "remote Git object-store request"
+        );
         let oid_batch = [oid_bytes];
         let lookup = tokio::select! {
             biased;
@@ -848,9 +1041,101 @@ impl RemoteGitReader {
     }
 }
 
+fn coalesce_ranges(
+    entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+) -> Result<Vec<CoalescedRange>> {
+    let mut by_pack: HashMap<MerkleHash, Vec<(gix_hash::ObjectId, GitObjectLocator)>> =
+        HashMap::new();
+    for (oid, locator) in entries {
+        locator
+            .location
+            .pack_offset
+            .checked_add(locator.location.entry_len)
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+        by_pack
+            .entry(locator.pack_id)
+            .or_default()
+            .push((oid, locator));
+    }
+
+    let mut ranges = Vec::new();
+    for mut entries in by_pack.into_values() {
+        entries.sort_unstable_by_key(|(_, locator)| locator.location.pack_offset);
+        let mut current: Option<CoalescedRange> = None;
+        for (oid, locator) in entries {
+            let start = locator.location.pack_offset;
+            let end = start
+                .checked_add(locator.location.entry_len)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+            let can_extend = current.as_ref().is_some_and(|range| {
+                range.pack_id == locator.pack_id
+                    && start <= range.end.saturating_add(MAX_COALESCED_GAP_BYTES)
+                    && end.saturating_sub(range.start) <= MAX_COALESCED_RANGE_BYTES
+            });
+            if can_extend {
+                let range = current.as_mut().ok_or(Error::InternalInvariant {
+                    invariant: "coalesced range disappeared while extending",
+                })?;
+                range.end = range.end.max(end);
+                range.entries.push((oid, locator));
+                continue;
+            }
+            if let Some(range) = current.take() {
+                ranges.push(range);
+            }
+            current = Some(CoalescedRange {
+                pack_id: locator.pack_id,
+                start,
+                end,
+                entries: vec![(oid, locator)],
+            });
+        }
+        if let Some(range) = current {
+            ranges.push(range);
+        }
+    }
+    Ok(ranges)
+}
+
+fn order_completed_objects(
+    requested: &[gix_hash::ObjectId],
+    completed: &HashMap<gix_hash::ObjectId, GitObject>,
+) -> Result<Vec<GitObject>> {
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(requested.len())
+        .map_err(|source| Error::Allocation {
+            requested: requested
+                .len()
+                .saturating_mul(std::mem::size_of::<GitObject>()),
+            source,
+        })?;
+    for oid in requested {
+        ordered.push(
+            completed
+                .get(oid)
+                .cloned()
+                .ok_or(Error::InternalInvariant {
+                    invariant: "completed object is absent from batch result",
+                })?,
+        );
+    }
+    Ok(ordered)
+}
+
 async fn charge_origin_range(budget: &OperationBudget, bytes: u64) -> Result<()> {
     budget.charge(BudgetDimension::StorageRequests, 1).await?;
-    budget.charge(BudgetDimension::FetchedBytes, bytes).await
+    budget.charge(BudgetDimension::FetchedBytes, bytes).await?;
+    tracing::debug!(
+        storage_request = "range_get",
+        storage_bytes = bytes,
+        "remote Git object-store request"
+    );
+    Ok(())
 }
 
 pub(crate) struct PackedEntry {
@@ -1238,5 +1523,42 @@ mod tests {
             .expect_err("corrupt cache entry must fail");
         assert!(matches!(error, Error::CacheCorrupt { .. }));
         assert!(runtime.cached_object(&key).await.is_none());
+    }
+
+    #[test]
+    fn coalesces_nearby_entries_without_crossing_bounds() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let locator = |pack_id, pack_offset, entry_len| GitObjectLocator {
+            pack_id,
+            location: crab_metadata::git_object_locator::GitObjectLocation {
+                pack_offset,
+                entry_len,
+                crc32: 0,
+            },
+        };
+        let ranges = coalesce_ranges(vec![
+            (oid, locator(first_pack, 100, 20)),
+            (oid, locator(first_pack, 130, 20)),
+            (oid, locator(first_pack, 5_000, 20)),
+            (oid, locator(second_pack, 100, 20)),
+        ])
+        .expect("valid ranges");
+
+        assert_eq!(ranges.len(), 3);
+        let merged = ranges
+            .iter()
+            .find(|range| range.entries.len() == 2)
+            .expect("nearby entries must share one range");
+        assert_eq!(merged.start, 100);
+        assert_eq!(merged.end, 150);
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|range| range.entries.len() == 1)
+                .count(),
+            2
+        );
     }
 }
