@@ -296,34 +296,56 @@ fn recover_migration_pointer_publication(project_root: &Path) -> Result<()> {
 
     match (root_exists, temporary_exists, backup_exists, marker.phase) {
         // No swap started: the previous pointer tree is authoritative.
-        (true, true, false, MigrationPointerPublicationPhase::Preparing)
-        | (true, true, false, MigrationPointerPublicationPhase::Ready) => {
+        (
+            true,
+            true,
+            false,
+            MigrationPointerPublicationPhase::Preparing | MigrationPointerPublicationPhase::Ready,
+        ) => {
             remove_existing_path(&temporary)?;
         }
-        (true, true, true, MigrationPointerPublicationPhase::Preparing)
-        | (true, true, true, MigrationPointerPublicationPhase::Ready) => {
+        (
+            true,
+            true,
+            true,
+            MigrationPointerPublicationPhase::Preparing | MigrationPointerPublicationPhase::Ready,
+        ) => {
             remove_existing_path(&temporary)?;
             remove_existing_path(&backup)?;
         }
         // A first migration may have no previous pointer tree. Its
         // temporary tree can simply be discarded on restart.
-        (false, true, false, MigrationPointerPublicationPhase::Preparing)
-        | (false, true, false, MigrationPointerPublicationPhase::Ready) => {
+        (
+            false,
+            true,
+            false,
+            MigrationPointerPublicationPhase::Preparing | MigrationPointerPublicationPhase::Ready,
+        ) => {
             remove_existing_path(&temporary)?;
         }
-        (true, false, false, MigrationPointerPublicationPhase::Preparing)
-        | (true, false, false, MigrationPointerPublicationPhase::Ready)
-        | (false, false, false, MigrationPointerPublicationPhase::Preparing)
-        | (false, false, false, MigrationPointerPublicationPhase::Ready) => {}
+        (
+            _,
+            false,
+            false,
+            MigrationPointerPublicationPhase::Preparing | MigrationPointerPublicationPhase::Ready,
+        ) => {}
         // First rename completed: restore the old tree before retrying.
-        (false, true, true, MigrationPointerPublicationPhase::Preparing)
-        | (false, true, true, MigrationPointerPublicationPhase::Ready) => {
+        (
+            false,
+            true,
+            true,
+            MigrationPointerPublicationPhase::Preparing | MigrationPointerPublicationPhase::Ready,
+        ) => {
             fs::rename(&backup, &pointer_root).map_err(CrabError::Io)?;
             remove_existing_path(&temporary)?;
         }
         // New tree is in place. Keep it and finish cleanup.
-        (true, false, true, MigrationPointerPublicationPhase::Ready)
-        | (true, false, true, MigrationPointerPublicationPhase::Committed) => {
+        (
+            true,
+            false,
+            true,
+            MigrationPointerPublicationPhase::Ready | MigrationPointerPublicationPhase::Committed,
+        ) => {
             remove_existing_path(&backup)?;
         }
         // A committed marker with no backup is already fully cleaned.
@@ -2343,7 +2365,7 @@ fn create_migration_verification_commit(project_root: &Path, output_path: &Path)
     match (result, cleanup) {
         (Ok(commit), Ok(())) => Ok(commit),
         (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+        (Ok(_) | Err(_), Err(error)) => Err(error),
     }
 }
 
@@ -2417,7 +2439,7 @@ where
         match (result, restore) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+            (Ok(_) | Err(_), Err(error)) => Err(error),
         }
     };
     match tokio::runtime::Handle::try_current() {

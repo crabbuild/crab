@@ -13,8 +13,11 @@ use std::process::{Command, Stdio};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use clap::{Args, Subcommand};
+use futures_util::StreamExt;
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
@@ -81,7 +84,7 @@ pub struct DataImportArgs {
 
 #[derive(Debug, Args)]
 pub struct DataImportUrlArgs {
-    /// HTTP(S) or file URL.
+    /// HTTP(S), object-store, or file URL.
     pub url: String,
     /// Destination path in the current worktree.
     #[arg(long, short)]
@@ -366,6 +369,19 @@ fn run_import_url(root: &Path, args: &DataImportUrlArgs) -> Result<()> {
             let mut file = File::create(&temporary).map_err(CrabError::Io)?;
             let (hash, size) = stream_to_hash(response, &mut file)?;
             file.sync_all().map_err(CrabError::Io)?;
+            (hash, size, validator)
+        }
+        "s3" | "s3a" | "gs" | "az" | "azure" | "abfs" | "abfss" | "adl" => {
+            let (store, location) = parse_object_store_url(&parsed)?;
+            let (_, size, validator) =
+                fetch_object_store_object(store, location, temporary.clone())?;
+            let (hash, verified_size) = hash_path(&temporary)?;
+            if verified_size != size {
+                return Err(CrabError::Configuration {
+                    key: "data_import_url_size_mismatch".into(),
+                    origin: locator.clone(),
+                });
+            }
             (hash, size, validator)
         }
         scheme => {
@@ -792,6 +808,46 @@ fn fetch_descriptor_source(descriptor: &SourceDescriptor, target: &Path) -> Resu
                         temporary: Some(temporary),
                     })
                 }
+                "s3" | "s3a" | "gs" | "az" | "azure" | "abfs" | "abfss" | "adl" => {
+                    let (store, location) = parse_object_store_url(&url)?;
+                    let metadata = crate::cmd::lfs::block_on_runtime({
+                        let store = store.as_ref();
+                        let location = location.clone();
+                        async move { store.head(&location).await.map_err(CrabError::Storage) }
+                    })?;
+                    let validator = object_store_validator(&metadata);
+                    if target.exists()
+                        && descriptor.size == metadata.size
+                        && descriptor.validator.as_deref() == validator.as_deref()
+                        && validator.is_some()
+                    {
+                        let (hash, size) = hash_path(target)?;
+                        return Ok(FetchedSource {
+                            hash,
+                            size,
+                            revision: descriptor.revision.clone(),
+                            validator,
+                            temporary: None,
+                        });
+                    }
+                    let (_, size, validator) =
+                        fetch_object_store_object(store, location, temporary.clone())?;
+                    let (hash, verified_size) = hash_path(&temporary)?;
+                    if size != verified_size {
+                        return Err(CrabError::Configuration {
+                            key: "data_update_url_size_mismatch".into(),
+                            origin: descriptor.locator.clone(),
+                        });
+                    }
+                    temporary_cleanup.disarm();
+                    Ok(FetchedSource {
+                        hash,
+                        size,
+                        revision: descriptor.revision.clone(),
+                        validator,
+                        temporary: Some(temporary),
+                    })
+                }
                 scheme => Err(CrabError::Configuration {
                     key: "data_update_provider_unsupported".into(),
                     origin: scheme.to_owned(),
@@ -824,6 +880,64 @@ fn fetch_descriptor_source(descriptor: &SourceDescriptor, target: &Path) -> Resu
             origin: descriptor.kind.clone(),
         }),
     }
+}
+
+fn parse_object_store_url(url: &url::Url) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
+    let options = std::env::vars()
+        .map(|(key, value)| (key.to_ascii_lowercase(), value))
+        .collect::<Vec<_>>();
+    object_store::parse_url_opts(
+        url,
+        options
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
+    .map_err(CrabError::Storage)
+}
+
+fn fetch_object_store_object(
+    store: Box<dyn ObjectStore>,
+    location: ObjectPath,
+    temporary: PathBuf,
+) -> Result<([u8; 32], u64, Option<String>)> {
+    crate::cmd::lfs::block_on_runtime(async move {
+        let metadata = store.head(&location).await.map_err(CrabError::Storage)?;
+        let result = store.get(&location).await.map_err(CrabError::Storage)?;
+        let parent = temporary.parent().unwrap_or_else(|| Path::new("."));
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(CrabError::Io)?;
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(CrabError::Io)?;
+        let mut stream = result.into_stream();
+        let mut hasher = blake3::Hasher::new();
+        let mut size = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(CrabError::Storage)?;
+            file.write_all(&chunk).await.map_err(CrabError::Io)?;
+            hasher.update(&chunk);
+            size = size.saturating_add(chunk.len() as u64);
+        }
+        file.sync_all().await.map_err(CrabError::Io)?;
+        let validator = object_store_validator(&metadata);
+        if size != metadata.size {
+            return Err(CrabError::Configuration {
+                key: "data_import_url_size_mismatch".into(),
+                origin: location.to_string(),
+            });
+        }
+        Ok((*hasher.finalize().as_bytes(), size, validator))
+    })
+}
+
+fn object_store_validator(metadata: &object_store::ObjectMeta) -> Option<String> {
+    metadata.version.clone().or_else(|| {
+        metadata
+            .e_tag
+            .clone()
+            .filter(|value| !value.trim_start().starts_with("W/"))
+    })
 }
 
 fn descriptor_for(
@@ -1711,7 +1825,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use object_store::ObjectStoreExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn object_store_import_streams_and_verifies_payload() {
+        let store = object_store::memory::InMemory::new();
+        crate::cmd::lfs::block_on_runtime(async {
+            store
+                .put(
+                    &ObjectPath::from("data/sample.bin"),
+                    Bytes::from_static(b"object-store-data").into(),
+                )
+                .await
+                .map_err(CrabError::Storage)
+        })
+        .unwrap();
+        let temp = TempDir::new().unwrap();
+        let destination = temp.path().join("sample.bin");
+        let (_, size, validator) = fetch_object_store_object(
+            Box::new(store),
+            ObjectPath::from("data/sample.bin"),
+            destination.clone(),
+        )
+        .unwrap();
+        assert_eq!(size, b"object-store-data".len() as u64);
+        assert!(validator.is_some());
+        assert_eq!(fs::read(destination).unwrap(), b"object-store-data");
+    }
 
     #[test]
     fn sqlite_import_writes_verified_jsonl_and_descriptor() {

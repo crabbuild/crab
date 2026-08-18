@@ -61,8 +61,8 @@ pub use artifact::{
     ArtifactDecl, ArtifactManifest, ArtifactPromotion, ArtifactRegistry, RemoteArtifactEnvelope,
     RemoteArtifactPayloadKind, RemoteArtifactTreeEntry, artifact_stage_ref, artifact_version_ref,
     download_remote_artifact, manifest_from_path, promote_remote_artifact, publish_remote_artifact,
-    read_remote_artifact, read_remote_artifact_registry, remote_artifact_manifest_path,
-    snapshot_payload, validate_artifact_name, verify_payload,
+    reachable_remote_artifact_objects, read_remote_artifact, read_remote_artifact_registry,
+    remote_artifact_manifest_path, snapshot_payload, validate_artifact_name, verify_payload,
 };
 pub use checkpoint::{
     CHECKPOINT_PROTOCOL_VERSION, CHECKPOINT_SCHEMA_VERSION, CheckpointLineage, CheckpointRecord,

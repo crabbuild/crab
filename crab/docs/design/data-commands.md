@@ -12,6 +12,8 @@ Secrets from URL userinfo and query fields are never serialized.
 
 `data update` resolves the descriptor, streams a new candidate into a sibling
 temporary path, verifies it, and only then replaces the target and descriptor.
+HTTP(S) and S3/GCS/Azure-compatible object URLs use provider validators when
+available; a matching strong validator avoids transferring the body again.
 
 Git revision reads are available for local repositories. `data list --rev
 <revision>` reads the committed tree, and `data import <repo> --path <file>
@@ -23,5 +25,7 @@ is not inferred from a URL or local path.
 Database import has an explicit connector boundary. The bundled SQLite
 connector opens databases read-only, materializes deterministic JSONL, and
 records the query identity so `data update` can rerun it transactionally.
-Other connectors and non-file URL schemes fail closed instead of pretending
-that parser acceptance is a runtime adapter.
+Other connectors and SSH/SFTP, WebDAV, HDFS, Drive, and OSS URL schemes fail
+closed instead of pretending that parser acceptance is a runtime adapter.
+Object-store URL credentials come from the configured cloud credential chain,
+never from persisted source URLs.

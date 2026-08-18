@@ -679,6 +679,121 @@ pub async fn read_remote_artifact_registry(
     Ok(registry)
 }
 
+/// Return remote artifact objects that are reachable from immutable version
+/// refs, mutable stage refs, and promotion history.
+///
+/// Artifact publication is intentionally two-phase: a failed upload may leave
+/// an orphaned payload or manifest. Repo GC may reclaim those objects after
+/// the grace period, but it must retain every object reachable from a ref or
+/// history event. A malformed registry fails closed instead of widening the
+/// deletion set.
+pub async fn reachable_remote_artifact_objects(
+    store: &WorkflowStore,
+    prefix: &str,
+) -> Result<BTreeSet<String>> {
+    let registry = read_remote_artifact_registry(store, prefix).await?;
+    let refs_prefix = ObjectPath::from(remote_join(prefix, "refs/crab/artifacts"));
+    let mut reachable = BTreeSet::new();
+    let mut manifest_paths = BTreeSet::new();
+    let mut seen_manifests = BTreeSet::new();
+
+    for object in store.list_prefix(&refs_prefix).await? {
+        let key = object.location.as_ref().to_owned();
+        reachable.insert(key.clone());
+        if let Some((name, version)) = parse_version_ref_key(prefix, &key) {
+            let (bytes, _) = store.get_with_etag(&object.location).await?;
+            let manifest_path = String::from_utf8(bytes.to_vec())
+                .map_err(|_| invalid("artifact_remote_version_ref_invalid", key.clone()))?;
+            let expected = remote_artifact_manifest_path(prefix, &name, &version)?;
+            if manifest_path != expected.to_string() {
+                return Err(invalid("artifact_remote_version_ref_invalid", key));
+            }
+            manifest_paths.insert(manifest_path);
+        } else if let Some((name, stage)) = parse_stage_key(prefix, &key) {
+            let (bytes, _) = store.get_with_etag(&object.location).await?;
+            let version = String::from_utf8(bytes.to_vec())
+                .map_err(|_| invalid("artifact_remote_stage_invalid", key.clone()))?;
+            let manifest_path = remote_artifact_manifest_path(prefix, &name, &version)?;
+            if registry
+                .versions
+                .get(&name)
+                .is_none_or(|versions| !versions.contains_key(&version))
+            {
+                return Err(invalid(
+                    "artifact_remote_stage_version_missing",
+                    format!("{stage}:{version}"),
+                ));
+            }
+            manifest_paths.insert(manifest_path.to_string());
+        }
+    }
+
+    let history_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/history"));
+    for object in store.list_prefix(&history_prefix).await? {
+        let key = object.location.as_ref().to_owned();
+        if !key.ends_with(".json") {
+            continue;
+        }
+        reachable.insert(key.clone());
+        let (bytes, _) = store.get_with_etag(&object.location).await?;
+        let event: ArtifactPromotion = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_detail("artifact_remote_history_parse", error))?;
+        let versions = registry.versions.get(&event.name).ok_or_else(|| {
+            invalid(
+                "artifact_remote_history_version_missing",
+                event.version_id.clone(),
+            )
+        })?;
+        if !versions.contains_key(&event.version_id) {
+            return Err(invalid(
+                "artifact_remote_history_version_missing",
+                event.version_id,
+            ));
+        }
+        manifest_paths.insert(
+            remote_artifact_manifest_path(prefix, &event.name, &event.version_id)?.to_string(),
+        );
+    }
+
+    let manifest_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/manifests"));
+    let mut payload_hashes = BTreeSet::new();
+    for object in store.list_prefix(&manifest_prefix).await? {
+        let key = object.location.as_ref();
+        if !manifest_paths.contains(key) {
+            continue;
+        }
+        let (bytes, _) = store.get_with_etag(&object.location).await?;
+        let envelope: RemoteArtifactEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_detail("artifact_remote_manifest_parse", error))?;
+        validate_remote_envelope(&envelope)?;
+        reachable.insert(key.to_owned());
+        seen_manifests.insert(key.to_owned());
+        payload_hashes.insert(envelope.manifest.content_hash);
+    }
+
+    if let Some(missing) = manifest_paths.difference(&seen_manifests).next() {
+        return Err(invalid(
+            "artifact_remote_manifest_missing",
+            missing.to_owned(),
+        ));
+    }
+
+    let payload_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/payloads"));
+    for object in store.list_prefix(&payload_prefix).await? {
+        let key = object.location.as_ref();
+        if payload_hashes.iter().any(|hash| {
+            let Ok(root) = remote_artifact_payload_root(prefix, hash) else {
+                return false;
+            };
+            key.starts_with(&format!("{}/", root.as_ref()))
+        }) {
+            reachable.insert(key.to_owned());
+        }
+    }
+
+    Ok(reachable)
+}
+
 /// Promote a remote immutable version using a compare-and-swap stage label.
 pub async fn promote_remote_artifact(
     store: &WorkflowStore,
@@ -1191,6 +1306,18 @@ fn parse_stage_key(prefix: &str, key: &str) -> Option<(String, String)> {
     let (encoded_name, rest) = relative.split_once('/')?;
     let stage = rest.strip_prefix("stages/")?;
     Some((percent_decode_name(encoded_name)?, stage.to_owned()))
+}
+
+fn parse_version_ref_key(prefix: &str, key: &str) -> Option<(String, String)> {
+    let root = remote_join(prefix, "refs/crab/artifacts");
+    let relative = key.strip_prefix(&format!("{root}/"))?;
+    let (encoded_name, version) = relative.split_once('/')?;
+    let version = version.strip_prefix("versions/")?;
+    let version = version.strip_prefix("b3:").unwrap_or(version);
+    if version.len() != 64 || !version.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((percent_decode_name(encoded_name)?, format!("b3:{version}")))
 }
 
 fn remote_join(prefix: &str, suffix: &str) -> String {
