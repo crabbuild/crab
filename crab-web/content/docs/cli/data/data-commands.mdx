@@ -36,10 +36,11 @@ recorded in the credential-free descriptor, and updates rerun the same query
 transactionally. Other connector names fail before writing data.
 
 `--rev` currently targets a local Git repository: `data list` reads committed
-tree entries, while `data import` accepts one committed file, records the
-resolved commit id, and preserves its executable bit. Directory-at-revision,
-remote Git transport, non-SQLite database connectors, and SSH/WebDAV/HDFS/
-Drive/OSS URL providers remain explicitly unsupported and fail before writing a
-target. Object-store URLs use the configured cloud credential chain for S3,
-GCS, and Azure-compatible schemes; credentials are never read from or written
-to the source URL.
+tree entries, while `data import` accepts a committed file, directory, or the
+repository root, records the resolved commit id, and preserves executable
+bits. Symlinks and submodules are rejected before writing a target. Remote Git
+transport, non-SQLite database connectors, and SSH/WebDAV/HDFS/Drive/OSS URL
+providers remain explicitly unsupported and fail before writing a target.
+Object-store URLs use the configured cloud credential chain for S3, GCS, and
+Azure-compatible schemes; credentials are never read from or written to the
+source URL.

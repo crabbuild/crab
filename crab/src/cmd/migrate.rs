@@ -932,6 +932,9 @@ pub fn run_migrate_from_dvc_with_options(
     })?;
 
     if to_stdout {
+        for warning in &report.warnings {
+            eprintln!("warning [{}]: {}", warning.stage, warning.message);
+        }
         print!("{yaml_content}");
     } else {
         let mut inventory = inventory_project(project_root)?;

@@ -548,6 +548,17 @@ pub fn inventory_project(root: &Path) -> Result<DvcInventory> {
         &mut pointers,
         &mut findings,
     )?;
+    for relative in metadata_files
+        .iter()
+        .filter(|path| path.ends_with("dvc.yaml") && path.as_str() != "dvc.yaml")
+    {
+        findings.push(finding(
+            "dvc_multiple_pipeline_files",
+            Some(relative),
+            "nested dvc.yaml is inventoried but the single-file converter cannot publish it safely",
+            true,
+        ));
+    }
     let mut outputs = Vec::new();
     for pointer in pointers {
         let declaration = relative_path(&root, &pointer)?;
@@ -2593,6 +2604,26 @@ mod tests {
                 .iter()
                 .any(|finding| finding.code == "dvc_output_checksum_missing")
         );
+    }
+
+    #[test]
+    fn nested_pipeline_files_block_single_file_cutover() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::write(temp.path().join("dvc.yaml"), "stages: {}\n").expect("root pipeline");
+        fs::create_dir_all(temp.path().join("nested")).expect("nested directory");
+        fs::write(
+            temp.path().join("nested/dvc.yaml"),
+            "stages:\n  train:\n    cmd: train\n",
+        )
+        .expect("nested pipeline");
+
+        let inventory = inventory_project(temp.path()).expect("inventory");
+        assert!(inventory.findings.iter().any(|finding| {
+            finding.code == "dvc_multiple_pipeline_files"
+                && finding.source.as_deref() == Some("nested/dvc.yaml")
+                && finding.blocking
+        }));
+        assert!(!inventory.safe_to_remove_dvc);
     }
 
     #[test]

@@ -228,16 +228,10 @@ fn run_import(root: &Path, args: &DataImportArgs) -> Result<()> {
     let (hash, size, revision, source_relative, temporary_source) =
         if let Some(requested_revision) = args.rev.as_deref() {
             let source_relative = normalize_git_relative_path(source_path)?;
-            if source_relative == "." {
-                return Err(CrabError::Configuration {
-                    key: "data_import_revision_path_required".into(),
-                    origin: "a file path is required when importing a Git revision".into(),
-                });
-            }
             let commit = resolve_git_revision(&source_root, requested_revision)?;
             let temporary = temporary_target(&target);
             let (hash, size) =
-                materialize_git_blob(&source_root, &commit, &source_relative, &temporary)?;
+                materialize_git_revision_path(&source_root, &commit, &source_relative, &temporary)?;
             (hash, size, Some(commit), source_relative, Some(temporary))
         } else {
             let source = source_root.join(source_path);
@@ -689,15 +683,13 @@ fn fetch_descriptor_source(descriptor: &SourceDescriptor, target: &Path) -> Resu
                         origin: descriptor.target.clone(),
                     })?;
                 let source_relative = normalize_git_relative_path(&source_path)?;
-                if source_relative == "." {
-                    return Err(CrabError::Configuration {
-                        key: "data_source_path_missing".into(),
-                        origin: descriptor.target.clone(),
-                    });
-                }
                 let revision = resolve_git_revision(&source_root, requested_revision)?;
-                let (hash, size) =
-                    materialize_git_blob(&source_root, &revision, &source_relative, &temporary)?;
+                let (hash, size) = materialize_git_revision_path(
+                    &source_root,
+                    &revision,
+                    &source_relative,
+                    &temporary,
+                )?;
                 temporary_cleanup.disarm();
                 Ok(FetchedSource {
                     hash,
@@ -1275,47 +1267,152 @@ fn source_relative_path(source: &Path, root: &Path) -> String {
         .unwrap_or_else(|| ".".to_owned())
 }
 
-fn materialize_git_blob(
+fn materialize_git_revision_path(
     root: &Path,
     commit: &str,
     relative: &str,
     target: &Path,
 ) -> Result<([u8; 32], u64)> {
-    let object = format!("{commit}:{relative}");
-    let entry = git_output(root, &["ls-tree", "-z", "--long", commit, "--", relative])?;
-    let record = entry
-        .as_bytes()
+    reject_existing_target(target)?;
+    let mut cleanup = TemporaryPathCleanup::new(target.to_owned());
+    if relative == "." {
+        let recursive =
+            git_output_bytes(root, &["ls-tree", "-z", "-r", "--long", commit, "--", "."])?;
+        fs::create_dir_all(target).map_err(CrabError::Io)?;
+        materialize_git_tree_records(root, commit, relative, &recursive, target)?;
+        let result = hash_path(target)?;
+        cleanup.disarm();
+        return Ok(result);
+    }
+
+    let selected = git_output_bytes(root, &["ls-tree", "-z", "--long", commit, "--", relative])?;
+    let records = selected
         .split(|byte| *byte == 0)
-        .find(|record| !record.is_empty())
-        .ok_or_else(|| CrabError::Configuration {
-            key: "data_import_revision_path_missing".into(),
-            origin: relative.to_owned(),
-        })?;
-    let (header, path) = split_tree_record(record)?;
-    let fields = split_ascii_fields(header);
-    if fields.len() != 4 || fields[1] != b"blob" || path != relative.as_bytes() {
+        .filter(|record| !record.is_empty())
+        .collect::<Vec<_>>();
+    let record = records.first().ok_or_else(|| CrabError::Configuration {
+        key: "data_import_revision_path_missing".into(),
+        origin: relative.to_owned(),
+    })?;
+    if records.len() != 1 {
         return Err(CrabError::Configuration {
-            key: "data_import_revision_path_not_file".into(),
+            key: "data_import_revision_path_invalid".into(),
             origin: relative.to_owned(),
         });
     }
-    let mode = u32::from_str_radix(
-        std::str::from_utf8(fields[0]).map_err(|_| CrabError::Configuration {
+    let (header, path) = split_tree_record(record)?;
+    let fields = split_ascii_fields(header);
+    if fields.len() != 4 {
+        return Err(CrabError::Configuration {
             key: "data_import_revision_invalid".into(),
-            origin: "Git tree entry has an invalid mode".into(),
-        })?,
-        8,
-    )
-    .map_err(|_| CrabError::Configuration {
+            origin: "Git tree entry is malformed".into(),
+        });
+    }
+    if fields[1] == b"blob" {
+        if path != relative.as_bytes() {
+            return Err(CrabError::Configuration {
+                key: "data_import_revision_path_invalid".into(),
+                origin: relative.to_owned(),
+            });
+        }
+        let mode = parse_git_file_mode(fields[0], relative)?;
+        let object = format!("{commit}:{relative}");
+        let result = materialize_git_blob_object(root, &object, relative, mode, target)?;
+        cleanup.disarm();
+        return Ok(result);
+    }
+    if fields[1] != b"tree" || path != relative.as_bytes() {
+        return Err(CrabError::Configuration {
+            key: "data_import_revision_path_unsupported".into(),
+            origin: relative.to_owned(),
+        });
+    }
+
+    let recursive = git_output_bytes(
+        root,
+        &["ls-tree", "-z", "-r", "--long", commit, "--", relative],
+    )?;
+    fs::create_dir_all(target).map_err(CrabError::Io)?;
+    materialize_git_tree_records(root, commit, relative, &recursive, target)?;
+    let result = hash_path(target)?;
+    cleanup.disarm();
+    Ok(result)
+}
+
+fn materialize_git_tree_records(
+    root: &Path,
+    commit: &str,
+    relative: &str,
+    records: &[u8],
+    target: &Path,
+) -> Result<()> {
+    let prefix = (relative != ".").then_some(format!("{relative}/"));
+    for record in records
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let (header, path) = split_tree_record(record)?;
+        let fields = split_ascii_fields(header);
+        if fields.len() != 4 || fields[1] != b"blob" {
+            return Err(CrabError::Configuration {
+                key: "data_import_revision_entry_unsupported".into(),
+                origin: relative.to_owned(),
+            });
+        }
+        let path = String::from_utf8(path.to_vec()).map_err(|_| CrabError::Configuration {
+            key: "data_import_revision_invalid".into(),
+            origin: "Git tree entry has an invalid path".into(),
+        })?;
+        let relative_file = match prefix.as_deref() {
+            Some(prefix) => path
+                .strip_prefix(prefix)
+                .ok_or_else(|| CrabError::Configuration {
+                    key: "data_import_revision_invalid".into(),
+                    origin: "Git tree entry escaped the selected directory".into(),
+                })?,
+            None => path.as_str(),
+        };
+        let relative_file_path = Path::new(relative_file);
+        ensure_safe_relative(relative_file_path)?;
+        let mode = parse_git_file_mode(fields[0], &path)?;
+        let object = format!("{commit}:{path}");
+        let destination = target.join(relative_file_path);
+        materialize_git_blob_object(root, &object, &path, mode, &destination)?;
+    }
+    Ok(())
+}
+
+fn parse_git_file_mode(mode: &[u8], relative: &str) -> Result<u32> {
+    let mode = std::str::from_utf8(mode).map_err(|_| CrabError::Configuration {
         key: "data_import_revision_invalid".into(),
         origin: "Git tree entry has an invalid mode".into(),
     })?;
+    let mode = u32::from_str_radix(mode, 8).map_err(|_| CrabError::Configuration {
+        key: "data_import_revision_invalid".into(),
+        origin: "Git tree entry has an invalid mode".into(),
+    })?;
+    if !matches!(mode, 0o100644 | 0o100755) {
+        return Err(CrabError::Configuration {
+            key: "data_import_revision_entry_unsupported".into(),
+            origin: relative.to_owned(),
+        });
+    }
+    Ok(mode)
+}
+
+fn materialize_git_blob_object(
+    root: &Path,
+    object: &str,
+    origin: &str,
+    mode: u32,
+    target: &Path,
+) -> Result<([u8; 32], u64)> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(CrabError::Io)?;
     let mut child = Command::new("git")
         .current_dir(root)
         .args(["cat-file", "blob"])
-        .arg(&object)
+        .arg(object)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1325,7 +1422,7 @@ fn materialize_git_blob(
         .take()
         .ok_or_else(|| CrabError::Configuration {
             key: "data_import_revision_failed".into(),
-            origin: relative.to_owned(),
+            origin: origin.to_owned(),
         })?;
     let mut file = match File::options().write(true).create_new(true).open(target) {
         Ok(file) => file,
@@ -1366,7 +1463,7 @@ fn materialize_git_blob(
         let _ = remove_existing_path(target);
         return Err(CrabError::Configuration {
             key: "data_import_revision_failed".into(),
-            origin: relative.to_owned(),
+            origin: origin.to_owned(),
         });
     }
     set_executable_mode(target, mode)?;
@@ -1403,6 +1500,21 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
         key: "data_git_command_invalid".into(),
         origin: args.first().copied().unwrap_or("git").to_owned(),
     })
+}
+
+fn git_output_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(CrabError::Io)?;
+    if !output.status.success() {
+        return Err(CrabError::Configuration {
+            key: "data_git_command_failed".into(),
+            origin: args.first().copied().unwrap_or("git").to_owned(),
+        });
+    }
+    Ok(output.stdout)
 }
 
 fn split_tree_record(record: &[u8]) -> Result<(&[u8], &[u8])> {
@@ -2234,6 +2346,103 @@ mod tests {
                 0o111
             );
         }
+    }
+
+    #[test]
+    fn import_git_revision_directory_materializes_tree_and_modes() {
+        let root = TempDir::new().unwrap();
+        let repository = git_fixture();
+        let dataset = repository.path().join("dataset");
+        let executable = dataset.join("bin/run.sh");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(dataset.join("README.md"), b"dataset\n").unwrap();
+        fs::write(&executable, b"#!/bin/sh\necho ok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let commit = commit_fixture(&repository);
+
+        run_import(
+            root.path(),
+            &DataImportArgs {
+                source: repository.path().to_owned(),
+                path: Some(PathBuf::from("dataset")),
+                output: PathBuf::from("data/dataset"),
+                rev: Some("HEAD".to_owned()),
+                json: false,
+                jsonl: false,
+            },
+        )
+        .unwrap();
+
+        let descriptor = find_descriptor(root.path(), "data/dataset").unwrap();
+        assert_eq!(descriptor.revision.as_deref(), Some(commit.as_str()));
+        assert_eq!(
+            descriptor.metadata.get("source_path").map(String::as_str),
+            Some("dataset")
+        );
+        assert_eq!(
+            fs::read(root.path().join("data/dataset/README.md")).unwrap(),
+            b"dataset\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.path().join("data/dataset/bin/run.sh"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0o111
+            );
+        }
+
+        fs::write(dataset.join("new.txt"), b"new\n").unwrap();
+        commit_fixture(&repository);
+        run_update(
+            root.path(),
+            &DataUpdateArgs {
+                target: "data/dataset".to_owned(),
+                dry_run: false,
+                json: false,
+                jsonl: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.path().join("data/dataset/new.txt")).unwrap(),
+            b"new\n"
+        );
+    }
+
+    #[test]
+    fn import_git_revision_defaults_to_repository_tree() {
+        let root = TempDir::new().unwrap();
+        let repository = git_fixture();
+        fs::create_dir_all(repository.path().join("nested")).unwrap();
+        fs::write(repository.path().join("nested/value.txt"), b"value").unwrap();
+        commit_fixture(&repository);
+
+        run_import(
+            root.path(),
+            &DataImportArgs {
+                source: repository.path().to_owned(),
+                path: None,
+                output: PathBuf::from("data/repository"),
+                rev: Some("HEAD".to_owned()),
+                json: false,
+                jsonl: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(root.path().join("data/repository/nested/value.txt")).unwrap(),
+            b"value"
+        );
     }
 
     #[test]

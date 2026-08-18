@@ -1,6 +1,9 @@
 # crab migrate
 
-Rewrite history to move files into or out of crab tracking.
+Inspect large-file history and convert DVC workflow state into Crab metadata.
+The history-rewrite commands are currently dry-run only: non-dry-run requests
+fail explicitly without changing the repository. Use `crab adopt` for the
+supported working-tree cutover path.
 
 ## Synopsis
 
@@ -12,13 +15,12 @@ crab migrate export [OPTIONS]
 
 ## Description
 
-`crab migrate` rewrites git history to convert large files to crab pointers
-(import) or convert crab pointers back to full files (export). It also
-provides an analysis tool (info) to identify which file types would benefit from
-migration.
+`crab migrate` provides an analysis tool (info) and dry-run previews for
+history conversion. Applying the history rewrite is not yet supported and
+returns an explicit error without changing the repository.
 
-This is the crab equivalent of `git lfs migrate`. It uses `git-filter-repo`
-for the actual history rewrite.
+Use `crab adopt` for the supported working-tree conversion path. Keep a
+repository backup before any future history-rewrite implementation is used.
 
 ## Subcommands
 
@@ -32,7 +34,7 @@ tracking.
 | `--above` | `1048576` (1 MB) | Only consider files above this size in bytes |
 | `--top` | `10` | Show the top N file extensions |
 
-### crab migrate import
+### crab migrate import (dry-run only)
 
 Convert large files in history to crab pointers.
 
@@ -41,17 +43,17 @@ Convert large files in history to crab pointers.
 | `--include` | (required) | Glob patterns for files to convert |
 | `--exclude` | | Glob patterns to exclude from migration |
 | `--above` | `1048576` (1 MB) | Only migrate files above this size |
-| `--dry-run` | `false` | Report what would be migrated without rewriting |
-| `--everything` | `false` | Rewrite all branches, not just the current one |
+| `--dry-run` | `required` | Report what would be migrated; applying the rewrite is unsupported |
+| `--everything` | `false` | Include all branches in the dry-run report |
 
-### crab migrate export
+### crab migrate export (dry-run only)
 
 Convert crab pointers back to full files in history.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--include` | (required) | Glob patterns for files to convert back |
-| `--dry-run` | `false` | Report what would be exported without rewriting |
+| `--dry-run` | `required` | Report what would be exported; applying the rewrite is unsupported |
 
 ## Examples
 

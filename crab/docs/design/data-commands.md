@@ -16,11 +16,11 @@ HTTP(S) and S3/GCS/Azure-compatible object URLs use provider validators when
 available; a matching strong validator avoids transferring the body again.
 
 Git revision reads are available for local repositories. `data list --rev
-<revision>` reads the committed tree, and `data import <repo> --path <file>
---rev <revision>` streams one committed blob, preserves its executable bit,
-and records the resolved commit id. A directory at a revision is rejected
-until its tree materialization contract is implemented. Remote Git transport
-is not inferred from a URL or local path.
+<revision>` reads the committed tree, and `data import <repo> --path <path>
+--rev <revision>` materializes a committed file, directory, or repository root,
+preserves executable bits, and records the resolved commit id. Symlinks and
+submodules are rejected before writing. Remote Git transport is not inferred
+from a URL or local path.
 
 Database import has an explicit connector boundary. The bundled SQLite
 connector opens databases read-only, materializes deterministic JSONL, and
