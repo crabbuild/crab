@@ -843,7 +843,7 @@ fn parse_pointer(
     };
     report_unknown_yaml_keys(
         map,
-        &["outs"],
+        &["outs", "deps", "wdir", "md5", "frozen"],
         declaration,
         "dvc_pointer_construct_unsupported",
         findings,
@@ -863,6 +863,49 @@ fn parse_pointer(
     let pointer_dir = Path::new(declaration)
         .parent()
         .unwrap_or_else(|| Path::new(""));
+    let output_base = if let Some(wdir) = yaml_string(map, "wdir") {
+        if wdir == "." {
+            pointer_dir.to_path_buf()
+        } else {
+            PathBuf::from(safe_output_path(
+                root,
+                &pointer_dir.join(&wdir).to_string_lossy(),
+                declaration,
+                findings,
+            )?)
+        }
+    } else {
+        pointer_dir.to_path_buf()
+    };
+    inspect_pointer_dependencies(map, declaration, findings);
+    let (pointer_provenance, dependency_provenance_present, pointer_db_present) =
+        pointer_provenance(map);
+    let pointer_provenance = pointer_provenance.or_else(|| provenance_from_map(map));
+    let pointer_provenance_present = dependency_provenance_present || has_provenance_fields(map);
+    if pointer_db_present {
+        findings.push(finding(
+            "dvc_import_db_unsupported",
+            Some(declaration),
+            "DVC database import metadata is retained by DVC but Crab has no compatible database source adapter",
+            true,
+        ));
+    }
+    if pointer_provenance_present && pointer_provenance.is_none() {
+        findings.push(finding(
+            "dvc_import_provenance_unsupported",
+            Some(declaration),
+            "import provenance has an unsupported or credential-bearing locator",
+            true,
+        ));
+    }
+    if pointer_provenance.is_some() {
+        findings.push(finding(
+            "dvc_import_runtime_unsupported",
+            Some(declaration),
+            "Crab records imported-source provenance but does not yet implement DVC import/update semantics for this source",
+            true,
+        ));
+    }
     for output in sequence {
         let Some(output_map) = output.as_mapping() else {
             findings.push(finding(
@@ -885,11 +928,13 @@ fn parse_pointer(
                 "checksum",
                 "version_id",
                 "cloud_version_id",
+                "nfiles",
                 "remote",
                 "files",
                 "type",
                 "cache",
                 "persist",
+                "push",
                 "checkpoint",
                 "meta",
                 "desc",
@@ -902,7 +947,7 @@ fn parse_pointer(
             .ok_or_else(|| invalid_detail("dvc_output_path_missing", declaration))?;
         let path = safe_output_path(
             root,
-            &pointer_dir.join(&raw_path).to_string_lossy(),
+            &output_base.join(&raw_path).to_string_lossy(),
             declaration,
             findings,
         )?;
@@ -927,9 +972,10 @@ fn parse_pointer(
         let directory = dvc_md5
             .as_deref()
             .is_some_and(|value| value.ends_with(".dir"));
-        let provenance = provenance_from_map(output_map).or_else(|| provenance_from_map(map));
-        if (has_provenance_fields(output_map) || has_provenance_fields(map)) && provenance.is_none()
-        {
+        let provenance = pointer_provenance
+            .clone()
+            .or_else(|| provenance_from_map(output_map));
+        if has_provenance_fields(output_map) && provenance.is_none() {
             findings.push(finding(
                 "dvc_import_provenance_unsupported",
                 Some(declaration),
@@ -2335,23 +2381,139 @@ fn relative_or_absolute(root: &Path, path: &Path) -> String {
 }
 
 fn provenance_from_map(map: &serde_yaml::Mapping) -> Option<DvcImportProvenance> {
-    let raw_locator = yaml_string(map, "repo").or_else(|| yaml_string(map, "url"))?;
-    let (scheme, locator) = redact_locator(&raw_locator)?;
-    let kind = if matches!(scheme.as_str(), "http" | "https" | "file") {
-        "url"
+    let (raw_locator, kind) = if let Some(locator) = yaml_string(map, "repo") {
+        (locator, "repo")
     } else {
+        (yaml_string(map, "url")?, "url")
+    };
+    let (scheme, locator) = redact_locator(&raw_locator)?;
+    let kind = if kind == "url" && !matches!(scheme.as_str(), "http" | "https" | "file") {
         "repo"
+    } else {
+        kind
     };
     Some(DvcImportProvenance {
         kind: kind.to_owned(),
         locator,
-        revision: yaml_string(map, "rev").or_else(|| yaml_string(map, "version")),
+        revision: yaml_string(map, "rev")
+            .or_else(|| yaml_string(map, "rev_lock"))
+            .or_else(|| yaml_string(map, "version")),
         source_path: yaml_string(map, "path"),
     })
 }
 
 fn has_provenance_fields(map: &serde_yaml::Mapping) -> bool {
-    yaml_string(map, "repo").is_some() || yaml_string(map, "url").is_some()
+    yaml_string(map, "repo").is_some()
+        || yaml_string(map, "url").is_some()
+        || map.contains_key(Value::String("repo".to_owned()))
+        || map.contains_key(Value::String("url".to_owned()))
+}
+
+fn pointer_provenance(map: &serde_yaml::Mapping) -> (Option<DvcImportProvenance>, bool, bool) {
+    let Some(deps) = map
+        .get(Value::String("deps".to_owned()))
+        .and_then(Value::as_sequence)
+    else {
+        return (None, false, false);
+    };
+    let mut provenance = None;
+    let mut provenance_present = false;
+    let mut database_present = false;
+    for dependency in deps {
+        let Some(dependency) = dependency.as_mapping() else {
+            continue;
+        };
+        if let Some(repo) = dependency
+            .get(Value::String("repo".to_owned()))
+            .and_then(Value::as_mapping)
+        {
+            provenance_present = true;
+            if let Some(mut candidate) = provenance_from_map(repo) {
+                candidate.kind = "repo".to_owned();
+                candidate.source_path = yaml_string(dependency, "path");
+                if provenance.is_none() {
+                    provenance = Some(candidate);
+                }
+            }
+        }
+        if dependency.contains_key(Value::String("db".to_owned())) {
+            database_present = true;
+        }
+        if has_provenance_fields(dependency) {
+            provenance_present = true;
+            if provenance.is_none() {
+                provenance = provenance_from_map(dependency);
+            }
+        }
+    }
+    (provenance, provenance_present, database_present)
+}
+
+fn inspect_pointer_dependencies(
+    map: &serde_yaml::Mapping,
+    declaration: &str,
+    findings: &mut Vec<DvcFinding>,
+) {
+    let Some(deps) = map
+        .get(Value::String("deps".to_owned()))
+        .or_else(|| map.get(Value::String("dependencies".to_owned())))
+    else {
+        return;
+    };
+    let Some(deps) = deps.as_sequence() else {
+        findings.push(finding(
+            "dvc_pointer_deps_shape_unsupported",
+            Some(declaration),
+            "pointer deps is not a sequence",
+            true,
+        ));
+        return;
+    };
+    for (index, dependency) in deps.iter().enumerate() {
+        let source = format!("{declaration}#deps[{index}]");
+        let Some(dependency) = dependency.as_mapping() else {
+            findings.push(finding(
+                "dvc_dependency_shape_unsupported",
+                Some(&source),
+                "dependency is not a mapping",
+                true,
+            ));
+            continue;
+        };
+        report_unknown_yaml_keys(
+            dependency,
+            &[
+                "path", "hash", "md5", "etag", "checksum", "size", "nfiles", "repo", "db", "url",
+            ],
+            &source,
+            "dvc_dependency_construct_unsupported",
+            findings,
+        );
+        if let Some(repo) = dependency
+            .get(Value::String("repo".to_owned()))
+            .and_then(Value::as_mapping)
+        {
+            report_unknown_yaml_keys(
+                repo,
+                &["url", "rev", "rev_lock", "config", "remote"],
+                &format!("{source}.repo"),
+                "dvc_import_repo_construct_unsupported",
+                findings,
+            );
+        }
+        if let Some(db) = dependency
+            .get(Value::String("db".to_owned()))
+            .and_then(Value::as_mapping)
+        {
+            report_unknown_yaml_keys(
+                db,
+                &["connection", "file_format", "query", "table"],
+                &format!("{source}.db"),
+                "dvc_import_db_construct_unsupported",
+                findings,
+            );
+        }
+    }
 }
 
 fn redact_locator(raw: &str) -> Option<(String, String)> {
@@ -2725,6 +2887,66 @@ mod tests {
             finding.code == "dvc_import_provenance_unsupported" && finding.blocking
         }));
         assert!(inventory.outputs[0].provenance.is_none());
+    }
+
+    #[test]
+    fn inventory_preserves_nested_repo_import_provenance_and_blocks_runtime_cutover() {
+        let temp = TempDir::new().expect("tempdir");
+        let md5 = hex_bytes(&Md5::digest(b"payload"));
+        fs::create_dir_all(temp.path().join("data")).expect("data directory");
+        fs::write(temp.path().join("data/model.bin"), b"payload").expect("output");
+        fs::write(
+            temp.path().join("data/model.bin.dvc"),
+            format!(
+                "wdir: .\ndeps:\n  - path: models/model.bin\n    repo:\n      url: https://github.com/example/models.git\n      rev: main\n      rev_lock: 0123456789abcdef\nouts:\n  - path: model.bin\n    md5: {md5}\n"
+            ),
+        )
+        .expect("pointer");
+
+        let inventory = inventory_project(temp.path()).expect("inventory");
+        let output = inventory
+            .outputs
+            .iter()
+            .find(|output| output.path == "data/model.bin")
+            .expect("import output");
+        let provenance = output.provenance.as_ref().expect("nested provenance");
+        assert_eq!(provenance.kind, "repo");
+        assert_eq!(provenance.locator, "https://github.com/example/models.git");
+        assert_eq!(provenance.revision.as_deref(), Some("main"));
+        assert_eq!(provenance.source_path.as_deref(), Some("models/model.bin"));
+        assert!(inventory.findings.iter().any(|finding| {
+            finding.code == "dvc_import_runtime_unsupported" && finding.blocking
+        }));
+        assert!(!inventory.findings.iter().any(|finding| {
+            finding.code == "dvc_pointer_construct_unsupported" && finding.detail.contains("deps")
+        }));
+        assert!(!inventory.safe_to_remove_dvc);
+    }
+
+    #[test]
+    fn inventory_blocks_nested_database_import_without_dropping_metadata() {
+        let temp = TempDir::new().expect("tempdir");
+        let md5 = hex_bytes(&Md5::digest(b"payload"));
+        fs::write(temp.path().join("customers.csv"), b"id,name\n1,Ada\n").expect("output");
+        fs::write(
+            temp.path().join("customers.csv.dvc"),
+            format!(
+                "md5: {md5}\nfrozen: true\ndeps:\n  - db:\n      connection: analytics\n      file_format: csv\n      table: customers\nouts:\n  - path: customers.csv\n    md5: {md5}\n"
+            ),
+        )
+        .expect("pointer");
+
+        let inventory = inventory_project(temp.path()).expect("inventory");
+        assert!(
+            inventory
+                .findings
+                .iter()
+                .any(|finding| { finding.code == "dvc_import_db_unsupported" && finding.blocking })
+        );
+        assert!(!inventory.findings.iter().any(|finding| {
+            finding.code == "dvc_pointer_construct_unsupported" && finding.detail.contains("deps")
+        }));
+        assert!(!inventory.safe_to_remove_dvc);
     }
 
     #[test]
