@@ -67,7 +67,9 @@ impl GitObjectLocatorSession {
             checkpoint_lifetime,
             ..locator_reader_options()
         };
-        Self::open_with_options(store, repo_prefix, options).await
+        let path = git_object_locator_path(repo_prefix);
+        let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path).await?;
+        Self::open_with_checkpoint(store, repo_prefix, options, checkpoint).await
     }
 
     async fn open_with_options(
@@ -75,8 +77,16 @@ impl GitObjectLocatorSession {
         repo_prefix: &str,
         options: DbReaderOptions,
     ) -> Result<Self> {
+        Self::open_with_checkpoint(store, repo_prefix, options, None).await
+    }
+
+    async fn open_with_checkpoint(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+        options: DbReaderOptions,
+        checkpoint: Option<slatedb::Checkpoint>,
+    ) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
-        let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path).await?;
         let mut builder = slatedb::DbReader::builder(ObjectPath::from(path.as_str()), store)
             .with_options(options);
         if let Some(checkpoint) = checkpoint {
