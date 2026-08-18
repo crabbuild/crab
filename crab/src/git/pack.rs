@@ -1580,18 +1580,14 @@ fn install_pack_blocking(
     #[cfg(not(feature = "gix-pack-native"))]
     let output = std::process::Command::new("git")
         .arg("index-pack")
-        .arg("--rev-index")
         .arg("-o")
         .arg(&idx_tmp_path)
         .arg(&pack_tmp_path)
         .output()
         .map_err(CrabError::Io)?;
 
-    // git index-pack 2.31+ also writes a `.rev` reverse-index sidecar
-    // alongside the `-o` output. Its name is derived from the -o path
-    // (strip `.idx`, append `.rev`), so it lives under our tempfile
-    // name and needs to be renamed into place too — or cleaned up on
-    // older gits where the file doesn't exist at all.
+    // Generate the reverse-index sidecar ourselves below. This keeps the
+    // install path compatible with Git 2.30, which predates `--rev-index`.
     let rev_tmp_path = idx_tmp_path.with_extension("rev");
     let final_rev = final_idx.with_extension("rev");
 

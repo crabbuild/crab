@@ -14303,7 +14303,6 @@ mod tests {
         run(
             &[
                 "index-pack",
-                "--rev-index",
                 "-o",
                 idx_path.to_str().expect("idx path UTF-8"),
                 pack_path.to_str().expect("pack path UTF-8"),
@@ -14311,6 +14310,8 @@ mod tests {
             None,
         );
         let rev_path = idx_path.with_extension("rev");
+        crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+            .expect("write reverse index");
         let index =
             gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1).expect("open fixture index");
         let git_sha1 = index.pack_checksum().to_string();

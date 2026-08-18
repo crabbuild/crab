@@ -433,16 +433,17 @@ fn build_and_validate_pack(
     run_git(
         Command::new("git")
             .arg("index-pack")
-            .arg("--rev-index")
             .arg("-o")
             .arg(&index_path)
             .arg(&pack_path)
             .stdout(Stdio::null()),
         "index replacement pack",
     )?;
+    write_pack_reverse_index(&index_path, &reverse_index_path)
+        .map_err(crab_git::pack::PackError::from)?;
     if !reverse_index_path.is_file() {
         return Err(CrabError::Internal(
-            "git index-pack did not create the canonical reverse index".to_owned(),
+            "reverse-index generation did not create the canonical reverse index".to_owned(),
         ));
     }
     let pack_size = std::fs::metadata(&pack_path)?.len();
