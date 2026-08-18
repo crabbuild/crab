@@ -128,7 +128,10 @@ pub fn decide(state: StageState, fs: FsState, cli: CliFlags) -> ResumeAction {
         // EntryWritten is the commit point; after it we never restart.
         StageState::EntryWritten => ResumeAction::ResumeFromRefPublished,
         StageState::RefPublished => ResumeAction::ResumeFromRefPublished,
-        StageState::LockfileUpdated => ResumeAction::AlreadyTerminal,
+        // The lockfile transition precedes the final commit. A crash here
+        // can still have pending cache-hit materialization, so restart through
+        // the normal cache probe instead of treating the row as terminal.
+        StageState::LockfileUpdated => ResumeAction::RestartFromResolved,
 
         // Terminal states.
         StageState::Committed | StageState::Failed | StageState::Aborted => {
@@ -483,6 +486,18 @@ mod tests {
                 CliFlags::default()
             ),
             ResumeAction::ResumeFromRefPublished
+        );
+    }
+
+    #[test]
+    fn lockfile_updated_restarts_before_materialized_commit() {
+        assert_eq!(
+            decide(
+                StageState::LockfileUpdated,
+                FsState::default(),
+                CliFlags::default()
+            ),
+            ResumeAction::RestartFromResolved
         );
     }
 

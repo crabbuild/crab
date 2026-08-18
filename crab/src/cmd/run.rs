@@ -74,6 +74,7 @@ use crate::core::output::{
     WorkflowStageProduced, WorkflowStageResult, WorkflowStageRetry, WorkflowStageStarted,
     emit_json,
 };
+use crate::read::{RepositoryOpenOptions, RepositoryReader};
 use crate::workflow::cache::{
     CurrentFile, OverwriteDecision, OverwriteFlags, RemoteArtifactStores, StageCacheEntry,
     cached_artifacts, overwrite_policy, read_local, read_local_xorb,
@@ -101,6 +102,7 @@ use crab_workflow::{
     FailureKind, Graph, LockedDep, Lockfile, RetryDecision, RunState, StageState, Workflow, retry,
     yaml,
 };
+use tokio_util::sync::CancellationToken;
 
 pub use crate::core::output::WorkflowStageOut as StageResultOut;
 /// Re-export of the canonical single-envelope schema for
@@ -578,7 +580,7 @@ async fn run_inline_single_stage(
     // become `StageDepMalformed`.
     // When --pull is set, attempt to download missing deps first.
     if args.pull {
-        try_pull_missing_deps(&stage, &stage_name, repo_root);
+        try_pull_missing_deps(&stage, &stage_name, repo_root, config).await?;
     }
     let remote_aliases = workflow_remote_aliases(config);
     let dep_hashes =
@@ -864,6 +866,13 @@ async fn run_inline_single_stage(
                         );
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             } else if !from_remote {
                 // Miss-path events — emit after the executor has
                 // produced/hashed but before we mark `Committed` so
@@ -1327,6 +1336,7 @@ async fn run_yaml_single_stage(
         stage,
         &stage_name,
         repo_root,
+        config,
         &workflow.params,
         &run_state,
         Some(&lockfile),
@@ -1702,6 +1712,7 @@ async fn run_dag(
             let args_force = args.force;
             let args_allow_missing = args.allow_missing;
             let args_pull = args.pull;
+            let config_clone = config.clone();
             let cache_root_clone = cache_root.clone();
             let param_files_clone = workflow.params.clone();
             let jsonl_shared_clone = jsonl_shared.clone();
@@ -1754,6 +1765,7 @@ async fn run_dag(
                     &param_files_clone,
                     args_allow_missing,
                     args_pull,
+                    config_clone,
                     jsonl_shared_clone,
                     started_at,
                 )
@@ -2039,6 +2051,7 @@ async fn execute_stage_parallel(
     param_files: &[PathBuf],
     allow_missing: bool,
     pull: bool,
+    config: Config,
     jsonl: Option<Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
     run_started_at: Instant,
 ) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
@@ -2053,7 +2066,7 @@ async fn execute_stage_parallel(
     // When --pull is set, attempt to download missing dep files from
     // the remote before resolving hashes.
     if pull {
-        try_pull_missing_deps(stage, stage_name, repo_root);
+        try_pull_missing_deps(stage, stage_name, repo_root, &config).await?;
     }
 
     // Build a fresh RunState for dep resolution. In parallel mode,
@@ -2181,6 +2194,13 @@ async fn execute_stage_parallel(
                         });
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             Ok((entry, cache_hit, duration_ms, params))
@@ -2556,6 +2576,7 @@ async fn execute_one_stage_from_yaml(
     stage: &Stage,
     stage_name: &StageName,
     repo_root: &Path,
+    config: &Config,
     param_files: &[PathBuf],
     run_state: &RunState,
     lockfile: Option<&Lockfile>,
@@ -2568,6 +2589,7 @@ async fn execute_one_stage_from_yaml(
         stage,
         stage_name,
         repo_root,
+        config,
         param_files,
         run_state,
         lockfile,
@@ -2593,6 +2615,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     stage: &Stage,
     stage_name: &StageName,
     repo_root: &Path,
+    config: &Config,
     param_files: &[PathBuf],
     run_state: &RunState,
     lockfile: Option<&Lockfile>,
@@ -2612,7 +2635,7 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     // resolution so that successfully pulled files are picked up by
     // the normal hash computation.
     if args.pull {
-        try_pull_missing_deps(stage, stage_name, repo_root);
+        try_pull_missing_deps(stage, stage_name, repo_root, config).await?;
     }
 
     let resolver = StageOutResolver::new(run_state, lockfile, repo_root);
@@ -2742,6 +2765,13 @@ async fn execute_one_stage_from_yaml_with_jsonl(
                         );
                     }
                 }
+                journal.transition(
+                    run_id,
+                    stage_name.as_str(),
+                    attempt,
+                    StageState::Committed,
+                    r#"{"source":"Cache","materialized":true}"#,
+                )?;
             }
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             Ok((entry, cache_hit, duration_ms, params))
@@ -4295,41 +4325,144 @@ fn clean_partial_outputs(stage: &Stage, repo_root: &Path) {
     }
 }
 
-/// Attempt to download missing dep files from the remote before
-/// executing a stage. When `--pull` is set and a `Dep::Path` file
-/// is absent from the workspace, this function tries to hydrate it
-/// from the configured remote.
+/// Attempt to materialize missing path deps from the current Crab snapshot.
 ///
-/// Returns the list of dep paths that were successfully pulled.
-/// Deps that fail to download are left missing — the normal dep
-/// resolution will surface `StageDepMissing` for them.
-fn try_pull_missing_deps(stage: &Stage, stage_name: &StageName, repo_root: &Path) -> Vec<PathBuf> {
-    let pulled = Vec::new();
-    for dep in &stage.deps {
-        if let Dep::Path(p) = dep {
-            let abs = if p.is_absolute() {
-                p.clone()
-            } else if let Some(wdir) = &stage.wdir {
-                repo_root.join(wdir).join(p)
-            } else {
-                repo_root.join(p)
+/// Pulling is deliberately best-effort: `--allow-missing` relies on the
+/// resolver's lockfile fallback when a remote is unavailable. Every successful
+/// download is published with a same-directory, no-clobber rename so a failed
+/// transfer cannot leave a partial dependency or overwrite a concurrent
+/// producer before a later hash.
+async fn try_pull_missing_deps(
+    stage: &Stage,
+    stage_name: &StageName,
+    repo_root: &Path,
+    config: &Config,
+) -> Result<Vec<PathBuf>> {
+    let missing = stage
+        .deps
+        .iter()
+        .filter_map(|dep| {
+            let Dep::Path(path) = dep else { return None };
+            if path.is_absolute() {
+                return None;
+            }
+            let destination = match &stage.wdir {
+                Some(wdir) => repo_root.join(wdir).join(path),
+                None => repo_root.join(path),
             };
-            if !abs.exists() {
-                // The dep file is missing — attempt to pull from remote.
+            if destination.exists() {
+                return None;
+            }
+            let repo_path =
+                local_repo_relative_dep_key(path, stage.wdir.as_deref()).replace('\\', "/");
+            if repo_path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+            {
                 warn!(
                     stage = %stage_name,
-                    dep = %p.display(),
-                    "pull: dep file missing; remote hydration not yet connected"
+                    dep = %path.display(),
+                    "pull: refusing a dependency path outside the repository snapshot"
                 );
-                // Stub: actual remote download will be wired once the
-                // storage layer integration for dep-level hydration is
-                // complete. For now, the missing dep falls through to
-                // normal resolution which will either use the lockfile
-                // hash (--allow-missing) or error with StageDepMissing.
+                return None;
             }
+            Some((path.clone(), destination, repo_path))
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = repo_root.to_string_lossy().into_owned();
+    let reader = match RepositoryReader::open(
+        &repo,
+        RepositoryOpenOptions {
+            cache_dir: None,
+            config: config.clone(),
+            cancel: CancellationToken::new(),
+        },
+    )
+    .await
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            warn!(
+                stage = %stage_name,
+                error = %error,
+                "pull: unable to open the Crab snapshot for missing dependencies"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    let snapshot = match reader.snapshot(Some("HEAD")).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(
+                stage = %stage_name,
+                error = %error,
+                "pull: unable to resolve HEAD for missing dependencies"
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut pulled = Vec::with_capacity(missing.len());
+    for (declared_path, destination, repo_path) in missing {
+        let entry = match snapshot.entry_for_path(&repo_path).await {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(
+                    stage = %stage_name,
+                    dep = %declared_path.display(),
+                    error = %error,
+                    "pull: dependency is not available in the Crab snapshot"
+                );
+                continue;
+            }
+        };
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        tokio::fs::create_dir_all(parent).await?;
+        let temp = tempfile::Builder::new()
+            .prefix(".crab-pull-")
+            .tempfile_in(parent)?
+            .into_temp_path();
+        let temp_path = temp.to_path_buf();
+        let bytes = match snapshot.download_to_path(&repo_path, &temp_path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warn!(
+                    stage = %stage_name,
+                    dep = %declared_path.display(),
+                    error = %error,
+                    "pull: dependency hydration failed"
+                );
+                continue;
+            }
+        };
+        if bytes != entry.size {
+            warn!(
+                stage = %stage_name,
+                dep = %declared_path.display(),
+                expected = entry.size,
+                actual = bytes,
+                "pull: dependency hydration returned an unexpected size"
+            );
+            continue;
+        }
+        match temp.persist_noclobber(&destination) {
+            Ok(()) => pulled.push(declared_path),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another parallel stage may have hydrated the same dep
+                // between our existence check and the rename.
+                drop(error.path);
+                pulled.push(declared_path);
+            }
+            Err(error) => return Err(CrabError::Io(error.error)),
         }
     }
-    pulled
+
+    Ok(pulled)
 }
 
 fn emit_miss_explanation(
@@ -4744,6 +4877,7 @@ mod tests {
     use super::*;
     use crab_workflow::Defaults;
     use std::fs;
+    use std::process::Command;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -4810,7 +4944,7 @@ mod tests {
     fn run_resolver_accepts_unpinned_http_url_dep() {
         let tmp = TempDir::new().unwrap();
         let stage = StageName::parse("fetch").unwrap();
-        let url = crate::workflow::stage::test_support::serve_http_body_once(b"run-url-body");
+        let url = crate::workflow::stage::test_support::serve_http_body_n(b"run-url-body", 2);
         let deps = vec![Dep::Url {
             url: url.clone(),
             digest: None,
@@ -4828,7 +4962,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let stage = StageName::parse("fetch").unwrap();
         let base_url =
-            crate::workflow::stage::test_support::serve_http_body_once(b"run-alias-body");
+            crate::workflow::stage::test_support::serve_http_body_n(b"run-alias-body", 2);
         let base_url = base_url.trim_end_matches("data.bin").to_owned();
         let deps = vec![Dep::Url {
             url: "remote://datasets/raw.csv".to_owned(),
@@ -5051,6 +5185,58 @@ mod tests {
         assert!(
             matches!(err, CrabError::StageDepMissing { .. }),
             "wrong variant: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pull_hydrates_missing_tracked_dependency_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).success());
+        fs::write(tmp.path().join("dep.txt"), b"snapshot payload").unwrap();
+        assert!(git(&["add", "dep.txt"]).success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Crab Test",
+                "-c",
+                "user.email=crab-test@example.invalid",
+                "commit",
+                "-qm",
+                "snapshot",
+            ])
+            .success()
+        );
+        fs::remove_file(tmp.path().join("dep.txt")).unwrap();
+
+        let mut stage = Stage::new(
+            StageName::parse("train").unwrap(),
+            Cmd::Argv(vec!["true".to_owned()]),
+        );
+        stage.deps.push(Dep::Path(PathBuf::from("dep.txt")));
+        let pulled = try_pull_missing_deps(&stage, &stage.name, tmp.path(), &Config::default())
+            .await
+            .unwrap();
+
+        assert_eq!(pulled, vec![PathBuf::from("dep.txt")]);
+        assert_eq!(
+            fs::read(tmp.path().join("dep.txt")).unwrap(),
+            b"snapshot payload"
+        );
+        assert!(
+            fs::read_dir(tmp.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".crab-pull-"))
         );
     }
 

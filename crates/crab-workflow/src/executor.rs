@@ -260,11 +260,11 @@ fn default_host_fingerprint() -> String {
 /// [`StageState::Resolved`]). `run_local` drives the rest of the
 /// state machine forward.
 ///
-/// On a cache hit this short-circuits: the executor fast-forwards
-/// the journal with virtual transitions carrying the cached entry's
-/// hash and returns the existing entry. The caller is responsible
-/// for materializing its outs (that's a separate concern wired in
-/// task 1.17).
+/// On a local cache hit this short-circuits: the executor fast-forwards
+/// the journal through `LockfileUpdated`, returns the existing entry, and
+/// leaves the final `Committed` transition to the caller after output
+/// materialization. Remote hits are materialized by the remote pull path and
+/// are committed before returning.
 ///
 /// Errors propagate after the journal has recorded the `Failed`
 /// transition. Callers receive the same error value they would see
@@ -359,11 +359,11 @@ async fn run_inner(
     )?;
 
     if let Some(entry) = hit {
-        // Cache-hit fast-forward. The executor doesn't materialize
-        // outs on this code path — the caller coordinates
-        // cache-hit materialization through `materialize::` helpers
-        // (task 1.17). Walking the state machine here still keeps
-        // the journal honest for resume.
+        // Cache-hit fast-forward. Local cache bytes still need to be
+        // materialized by the caller before the stage can be considered
+        // committed. Leaving the journal at LockfileUpdated makes a crash
+        // before that rename visible to the next run instead of reporting a
+        // false durable success.
         for next in [
             StageState::Produced,
             StageState::Hashed,
@@ -371,7 +371,6 @@ async fn run_inner(
             StageState::EntryWritten,
             StageState::RefPublished,
             StageState::LockfileUpdated,
-            StageState::Committed,
         ] {
             journal.transition(run_id, stage_name, attempt, next, r#"{"source":"Cache"}"#)?;
         }
@@ -3967,7 +3966,7 @@ mod tests {
         let state = RunState::new();
         let resolver = StageOutResolver::new(&state, None, tmp.path());
         let consumer = StageName::parse("evaluate").unwrap();
-        let url = crate::stage::test_support::serve_http_body_once(b"executor-url-body");
+        let url = crate::stage::test_support::serve_http_body_n(b"executor-url-body", 2);
         let deps = vec![Dep::Url {
             url: url.clone(),
             digest: None,
