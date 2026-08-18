@@ -452,9 +452,7 @@ fn run_import_db(root: &Path, args: &DataImportDbArgs) -> Result<()> {
     descriptor
         .metadata
         .insert("query".to_owned(), query.clone());
-    if let Err(error) = install_new_payload(&temporary, &target) {
-        return Err(error);
-    }
+    install_new_payload(&temporary, &target)?;
     cleanup.disarm();
     if let Err(error) = save_descriptor(root, &descriptor) {
         let _ = remove_existing_path(&target);
@@ -1088,7 +1086,7 @@ fn collect_entries(
             name != ".git" && name != ".crab" && name != "target"
         })
         .collect::<Vec<_>>();
-    children.sort_by_key(|entry| entry.file_name());
+    children.sort_by_key(std::fs::DirEntry::file_name);
     for entry in children {
         let child = relative.join(entry.file_name());
         let child_metadata = fs::symlink_metadata(entry.path()).map_err(CrabError::Io)?;
@@ -1124,7 +1122,9 @@ fn collect_git_entries(
     source_ids: &BTreeMap<String, String>,
 ) -> Result<Vec<DataEntry>> {
     let prefix = normalize_git_relative_path(prefix)?;
-    let prefix_kind = if prefix != "." {
+    let prefix_kind = if prefix == "." {
+        None
+    } else {
         let object = format!("{commit}:{prefix}");
         let kind = git_output(root, &["cat-file", "-t", &object])?;
         if kind.trim() != "tree" && kind.trim() != "blob" {
@@ -1134,8 +1134,6 @@ fn collect_git_entries(
             });
         }
         Some(kind.trim().to_owned())
-    } else {
-        None
     };
     let mut command = Command::new("git");
     command
@@ -1232,7 +1230,7 @@ fn collect_git_entries(
         }
         let child = relative.split('/').next().unwrap_or(relative);
         let child_path = match prefix.as_deref() {
-            Some(prefix) => format!("{}{}", prefix, child),
+            Some(prefix) => format!("{prefix}{child}"),
             None => child.to_owned(),
         };
         let is_direct_file = relative == child;
@@ -1450,7 +1448,7 @@ fn parse_git_file_mode(mode: &[u8], relative: &str) -> Result<u32> {
         key: "data_import_revision_invalid".into(),
         origin: "Git tree entry has an invalid mode".into(),
     })?;
-    if !matches!(mode, 0o100644 | 0o100755) {
+    if !matches!(mode, 0o100_644 | 0o100_755) {
         return Err(CrabError::Configuration {
             key: "data_import_revision_entry_unsupported".into(),
             origin: relative.to_owned(),
@@ -1589,7 +1587,7 @@ fn split_tree_record(record: &[u8]) -> Result<(&[u8], &[u8])> {
 
 fn split_ascii_fields(value: &[u8]) -> Vec<&[u8]> {
     value
-        .split(|byte| byte.is_ascii_whitespace())
+        .split(u8::is_ascii_whitespace)
         .filter(|field| !field.is_empty())
         .collect()
 }
