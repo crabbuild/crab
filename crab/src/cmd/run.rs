@@ -3195,11 +3195,10 @@ fn cached_file_bytes(
     cache_root: &Path,
     out: &crate::workflow::cache::CachedOut,
 ) -> Result<Vec<u8>> {
-    if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
-        return Ok(bytes);
-    }
-
-    std::fs::read(&out.path).map_err(|e| {
+    let bytes = if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
+        bytes
+    } else {
+        std::fs::read(&out.path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
@@ -3211,7 +3210,18 @@ fn cached_file_bytes(
         } else {
             CrabError::Io(e)
         }
-    })
+        })?
+    };
+    let actual_hash = format!("b3:{}", blake3::hash(&bytes).to_hex());
+    if actual_hash != out.file_hash || bytes.len() as u64 != out.size {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: out.path.display().to_string(),
+            expected: format!("{} bytes with {}", out.size, out.file_hash),
+            actual: format!("{} bytes with {actual_hash}", bytes.len()),
+        });
+    }
+    Ok(bytes)
 }
 
 /// Inspect a file that sits at a declared out path. Used by the
