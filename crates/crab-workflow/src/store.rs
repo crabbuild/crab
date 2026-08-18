@@ -48,6 +48,17 @@ impl WorkflowStore {
         self.inner.put(path, bytes).await.map_err(Into::into)
     }
 
+    /// Creates a coordination object only when the path is absent.
+    ///
+    /// Unlike [`Self::put`], this preserves an existing-object conflict even
+    /// when the backend does not implement conditional create correctly.
+    pub async fn create_strict(&self, path: &Path, bytes: Bytes) -> Result<()> {
+        self.inner
+            .create_strict(path, bytes)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Fetches object metadata without reading its body.
     pub async fn head(&self, path: &Path) -> Result<ObjectMeta> {
         self.inner.head(path).await.map_err(Into::into)

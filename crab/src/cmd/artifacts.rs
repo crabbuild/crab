@@ -137,7 +137,9 @@ impl ArtifactsCommand {
     }
 
     pub fn run(self) -> Result<()> {
-        let root = std::env::current_dir().map_err(CrabError::Io)?;
+        let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+        let root =
+            crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?.current_worktree_root;
         match self {
             Self::List(args) => run_list(&root, &args),
             Self::Show(args) => run_show(&root, &args),

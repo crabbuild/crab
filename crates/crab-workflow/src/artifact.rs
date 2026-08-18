@@ -675,6 +675,25 @@ pub async fn read_remote_artifact_registry(
         }
         registry.history.push(event);
     }
+    for (_, _, event) in read_remote_pending_promotions(store, prefix).await? {
+        if registry
+            .versions
+            .get(&event.name)
+            .is_none_or(|versions| !versions.contains_key(&event.version_id))
+        {
+            return Err(invalid(
+                "artifact_remote_pending_version_missing",
+                event.version_id,
+            ));
+        }
+        let current = registry
+            .stages
+            .get(&event.name)
+            .and_then(|stages| stages.get(&event.stage));
+        if current == Some(&event.version_id) && !registry.history.contains(&event) {
+            registry.history.push(event);
+        }
+    }
     registry
         .history
         .sort_by_key(|event| event.created_at_unix_ms);
@@ -695,6 +714,7 @@ pub async fn reachable_remote_artifact_objects(
     prefix: &str,
 ) -> Result<BTreeSet<String>> {
     let registry = read_remote_artifact_registry(store, prefix).await?;
+    let pending = read_remote_pending_promotions(store, prefix).await?;
     let refs_prefix = ObjectPath::from(remote_join(prefix, "refs/crab/artifacts"));
     let mut reachable = BTreeSet::new();
     let mut manifest_paths = BTreeSet::new();
@@ -751,6 +771,25 @@ pub async fn reachable_remote_artifact_objects(
             return Err(invalid(
                 "artifact_remote_history_version_missing",
                 event.version_id,
+            ));
+        }
+        manifest_paths.insert(
+            remote_artifact_manifest_path(prefix, &event.name, &event.version_id)?.to_string(),
+        );
+    }
+
+    for (key, _, event) in &pending {
+        reachable.insert(key.clone());
+        let versions = registry.versions.get(&event.name).ok_or_else(|| {
+            invalid(
+                "artifact_remote_pending_version_missing",
+                event.version_id.clone(),
+            )
+        })?;
+        if !versions.contains_key(&event.version_id) {
+            return Err(invalid(
+                "artifact_remote_pending_version_missing",
+                event.version_id.clone(),
             ));
         }
         manifest_paths.insert(
@@ -832,31 +871,29 @@ pub async fn promote_remote_artifact(
 ) -> Result<ArtifactPromotion> {
     validate_artifact_name(name)?;
     validate_artifact_stage(stage)?;
+    let normalized_stage = stage.to_ascii_lowercase();
+    let recovered = finalize_pending_promotions(store, prefix).await?;
+    if let Some(event) = recovered.into_iter().find(|event| {
+        event.name == name
+            && event.stage == normalized_stage
+            && event.version_id == version_id
+            && expected.is_none_or(|value| event.previous_version_id.as_deref() == Some(value))
+    }) {
+        return Ok(event);
+    }
     let envelope = read_remote_artifact(store, prefix, name, Some(version_id), None).await?;
-    let stage = stage.to_ascii_lowercase();
-    let stage_path = ObjectPath::from(remote_stage_path(prefix, name, &stage)?);
-    let previous = match store.get_with_etag(&stage_path).await {
+    let stage_path = ObjectPath::from(remote_stage_path(prefix, name, &normalized_stage)?);
+    let current = match store.get_with_etag(&stage_path).await {
         Ok((bytes, etag)) => {
             let current = String::from_utf8(bytes.to_vec())
-                .map_err(|_| invalid("artifact_remote_stage_invalid", stage.clone()))?;
+                .map_err(|_| invalid("artifact_remote_stage_invalid", normalized_stage.clone()))?;
             if expected.is_some_and(|wanted| wanted != current) {
                 return Err(WorkflowError::CasConflict {
                     path: stage_path.to_string(),
                     expected_etag: expected.map(ToOwned::to_owned),
                 });
             }
-            if current != version_id {
-                store
-                    .as_storage()
-                    .update(
-                        &stage_path,
-                        Bytes::from(version_id.as_bytes().to_vec()),
-                        etag,
-                    )
-                    .await
-                    .map_err(WorkflowError::StorageDomain)?;
-            }
-            Some(current)
+            Some((current, etag))
         }
         Err(WorkflowError::NotFound { .. })
         | Err(WorkflowError::StorageDomain(crab_storage::StorageError::NotFound { .. })) => {
@@ -866,9 +903,6 @@ pub async fn promote_remote_artifact(
                     expected_etag: expected.map(ToOwned::to_owned),
                 });
             }
-            store
-                .put(&stage_path, Bytes::from(version_id.as_bytes().to_vec()))
-                .await?;
             None
         }
         Err(error) => return Err(error),
@@ -876,15 +910,54 @@ pub async fn promote_remote_artifact(
 
     let event = ArtifactPromotion {
         name: name.to_owned(),
-        stage,
+        stage: normalized_stage,
         version_id: envelope.manifest.version_id,
-        previous_version_id: previous,
+        previous_version_id: current.as_ref().map(|(value, _)| value.clone()),
         created_at_unix_ms: now_unix_ms(),
     };
-    let history_path = ObjectPath::from(remote_history_path(prefix, &event)?);
+    let promotion_id = Uuid::now_v7().to_string();
     let bytes = serde_json::to_vec(&event)
         .map_err(|error| invalid_detail("artifact_remote_history_serialize", error))?;
+    let pending_path = ObjectPath::from(remote_pending_path(prefix, &promotion_id)?);
+    store
+        .create_strict(&pending_path, Bytes::from(bytes.clone()))
+        .await?;
+
+    let stage_result = match current {
+        Some((_, etag)) => store
+            .as_storage()
+            .update(
+                &stage_path,
+                Bytes::from(version_id.as_bytes().to_vec()),
+                etag,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| match error {
+                crab_storage::StorageError::StateConflict { path } => WorkflowError::CasConflict {
+                    path,
+                    expected_etag: None,
+                },
+                error => WorkflowError::StorageDomain(error),
+            }),
+        None => {
+            store
+                .create_strict(&stage_path, Bytes::from(version_id.as_bytes().to_vec()))
+                .await
+        }
+    };
+    if let Err(error) = stage_result {
+        if matches!(error, WorkflowError::CasConflict { .. }) {
+            let _ = store.delete(&pending_path).await;
+        }
+        return Err(error);
+    }
+
+    let history_path = ObjectPath::from(remote_history_path(prefix, &event, &promotion_id)?);
     store.put(&history_path, Bytes::from(bytes)).await?;
+    // The history object is the durable commit record. A failed cleanup leaves
+    // a recoverable marker, which registry reads and the next promotion reconcile.
+    let _ = store.delete(&pending_path).await;
     Ok(event)
 }
 
@@ -1305,18 +1378,118 @@ fn remote_stage_path(prefix: &str, name: &str, stage: &str) -> Result<String> {
     ))
 }
 
-fn remote_history_path(prefix: &str, event: &ArtifactPromotion) -> Result<String> {
+fn remote_pending_path(prefix: &str, promotion_id: &str) -> Result<String> {
+    validate_promotion_id(promotion_id)?;
+    Ok(remote_join(
+        prefix,
+        &format!("workflow/artifacts/pending/{promotion_id}.json"),
+    ))
+}
+
+fn remote_history_path(
+    prefix: &str,
+    event: &ArtifactPromotion,
+    promotion_id: &str,
+) -> Result<String> {
     validate_artifact_name(&event.name)?;
     validate_artifact_stage(&event.stage)?;
+    validate_promotion_id(promotion_id)?;
     Ok(remote_join(
         prefix,
         &format!(
-            "workflow/artifacts/history/{}/{}-{}.json",
+            "workflow/artifacts/history/{}/{}-{promotion_id}.json",
             percent_encode_name(&event.name),
-            event.created_at_unix_ms,
-            Uuid::now_v7()
+            event.created_at_unix_ms
         ),
     ))
+}
+
+fn validate_promotion_id(value: &str) -> Result<()> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| invalid("artifact_promotion_id_invalid", value.to_owned()))?;
+    if parsed.to_string() != value {
+        return Err(invalid("artifact_promotion_id_invalid", value.to_owned()));
+    }
+    Ok(())
+}
+
+async fn read_remote_pending_promotions(
+    store: &WorkflowStore,
+    prefix: &str,
+) -> Result<Vec<(String, String, ArtifactPromotion)>> {
+    let pending_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/pending"));
+    let mut pending = Vec::new();
+    for object in store.list_prefix(&pending_prefix).await? {
+        let key = object.location.as_ref().to_owned();
+        let Some(promotion_id) = parse_pending_key(prefix, &key) else {
+            continue;
+        };
+        let (bytes, _) = store.get_with_etag(&object.location).await?;
+        let event: ArtifactPromotion = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_detail("artifact_remote_pending_parse", error))?;
+        validate_promotion_event(&event)?;
+        pending.push((key, promotion_id, event));
+    }
+    Ok(pending)
+}
+
+async fn finalize_pending_promotions(
+    store: &WorkflowStore,
+    prefix: &str,
+) -> Result<Vec<ArtifactPromotion>> {
+    let pending = read_remote_pending_promotions(store, prefix).await?;
+    let mut finalized = Vec::new();
+    for (key, promotion_id, event) in pending {
+        let stage_path = ObjectPath::from(remote_stage_path(prefix, &event.name, &event.stage)?);
+        let current = match store.get_with_etag(&stage_path).await {
+            Ok((bytes, _)) => String::from_utf8(bytes.to_vec())
+                .map_err(|_| invalid("artifact_remote_stage_invalid", event.stage.clone()))?,
+            Err(WorkflowError::NotFound { .. })
+            | Err(WorkflowError::StorageDomain(crab_storage::StorageError::NotFound { .. })) => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if current != event.version_id {
+            continue;
+        }
+
+        // Verify the immutable manifest before making the pending event
+        // durable. A corrupt or deleted version must fail closed.
+        read_remote_artifact(store, prefix, &event.name, Some(&event.version_id), None).await?;
+        let history_path = ObjectPath::from(remote_history_path(prefix, &event, &promotion_id)?);
+        let bytes = serde_json::to_vec(&event)
+            .map_err(|error| invalid_detail("artifact_remote_history_serialize", error))?;
+        match store.get_with_etag(&history_path).await {
+            Ok((existing, _)) if existing != bytes => {
+                return Err(invalid(
+                    "artifact_remote_history_collision",
+                    history_path.to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(WorkflowError::NotFound { .. })
+            | Err(WorkflowError::StorageDomain(crab_storage::StorageError::NotFound { .. })) => {
+                store.put(&history_path, Bytes::from(bytes)).await?;
+            }
+            Err(error) => return Err(error),
+        }
+        // Cleanup is deliberately best-effort: the history object is the
+        // durable commit record, and a retained marker is recoverable.
+        let _ = store.delete(&ObjectPath::from(key)).await;
+        finalized.push(event);
+    }
+    Ok(finalized)
+}
+
+fn validate_promotion_event(event: &ArtifactPromotion) -> Result<()> {
+    validate_artifact_name(&event.name)?;
+    validate_artifact_stage(&event.stage)?;
+    artifact_version_ref(&event.name, &event.version_id)?;
+    if let Some(previous) = event.previous_version_id.as_deref() {
+        artifact_version_ref(&event.name, previous)?;
+    }
+    Ok(())
 }
 
 fn parse_manifest_key(prefix: &str, key: &str) -> Option<(String, String)> {
@@ -1333,6 +1506,14 @@ fn parse_stage_key(prefix: &str, key: &str) -> Option<(String, String)> {
     let (encoded_name, rest) = relative.split_once('/')?;
     let stage = rest.strip_prefix("stages/")?;
     Some((percent_decode_name(encoded_name)?, stage.to_owned()))
+}
+
+fn parse_pending_key(prefix: &str, key: &str) -> Option<String> {
+    let root = remote_join(prefix, "workflow/artifacts/pending");
+    let relative = key.strip_prefix(&format!("{root}/"))?;
+    let promotion_id = relative.strip_suffix(".json")?;
+    validate_promotion_id(promotion_id).ok()?;
+    Some(promotion_id.to_owned())
 }
 
 fn parse_version_ref_key(prefix: &str, key: &str) -> Option<(String, String)> {
@@ -2107,6 +2288,65 @@ mod tests {
             WorkflowError::DvcMigrationInvalid { key, .. }
                 if key == "artifact_remote_payload_missing"
         ));
+    }
+
+    #[tokio::test]
+    async fn pending_remote_promotion_is_visible_and_recoverable() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("model.bin");
+        fs::write(&source, b"pending-model").unwrap();
+        let declaration = ArtifactDecl {
+            name: "model".to_owned(),
+            path: "model.bin".to_owned(),
+            kind: "model".to_owned(),
+            description: None,
+            labels: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+        let (manifest, source_path) = manifest_from_path(temp.path(), &declaration, None).unwrap();
+        let store = WorkflowStore::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        publish_remote_artifact(&store, "repo", &manifest, &source_path)
+            .await
+            .unwrap();
+
+        let event = ArtifactPromotion {
+            name: "model".to_owned(),
+            stage: "production".to_owned(),
+            version_id: manifest.version_id.clone(),
+            previous_version_id: None,
+            created_at_unix_ms: now_unix_ms(),
+        };
+        let promotion_id = Uuid::now_v7().to_string();
+        let pending_path = ObjectPath::from(remote_pending_path("repo", &promotion_id).unwrap());
+        store
+            .create_strict(
+                &pending_path,
+                Bytes::from(serde_json::to_vec(&event).unwrap()),
+            )
+            .await
+            .unwrap();
+        let stage_path =
+            ObjectPath::from(remote_stage_path("repo", "model", "production").unwrap());
+        store
+            .create_strict(
+                &stage_path,
+                Bytes::from(manifest.version_id.as_bytes().to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let registry = read_remote_artifact_registry(&store, "repo").await.unwrap();
+        assert_eq!(registry.history, vec![event.clone()]);
+        let reachable = reachable_remote_artifact_objects(&store, "repo")
+            .await
+            .unwrap();
+        assert!(reachable.contains(pending_path.as_ref()));
+
+        let finalized = finalize_pending_promotions(&store, "repo").await.unwrap();
+        assert_eq!(finalized, vec![event]);
+        assert!(store.get_with_etag(&pending_path).await.is_err());
+        let history_prefix = ObjectPath::from("repo/workflow/artifacts/history");
+        assert_eq!(store.list_prefix(&history_prefix).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
