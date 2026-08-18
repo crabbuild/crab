@@ -754,6 +754,9 @@ async fn read_packet<R: AsyncBufRead + Unpin>(
 
 fn text_line(data: &[u8]) -> Result<&str> {
     let data = data.strip_suffix(b"\n").unwrap_or(data);
+    if data.contains(&b'\n') {
+        return Err(protocol("protocol-v2 line contains an embedded LF"));
+    }
     std::str::from_utf8(data).map_err(|_| protocol("packet-line data is not UTF-8"))
 }
 
@@ -882,6 +885,21 @@ mod tests {
         assert!(parse_oid(&"a".repeat(40)).is_ok());
         assert!(parse_oid(&"a".repeat(39)).is_err());
         assert!(parse_oid(&format!("{}z", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn accepts_optional_terminal_line_feed_and_rejects_embedded_lf() {
+        assert_eq!(
+            text_line(b"want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .expect("a packet line without a terminal line feed should be accepted"),
+            "want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(text_line(b"want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nextra\n").is_err());
+        assert_eq!(
+            text_line(b"want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+                .expect("a terminal line feed should be accepted"),
+            "want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
     }
 
     #[test]
