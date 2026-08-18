@@ -696,18 +696,7 @@ async fn run_inner(
                     )?;
                 }
                 Err(e) => {
-                    debug!(
-                        stage = %stage_name,
-                        error = %e,
-                        "remote xorb staging failed; continuing without remote cache"
-                    );
-                    journal.transition(
-                        run_id,
-                        stage_name,
-                        attempt,
-                        StageState::Staged,
-                        r#"{"remote":"failed"}"#,
-                    )?;
+                    return Err(e);
                 }
             }
         } else {
@@ -773,19 +762,7 @@ async fn run_inner(
                     )?;
                 }
                 Err(e) => {
-                    // Remote push failure is non-fatal — log and continue.
-                    debug!(
-                        stage = %stage_name,
-                        error = %e,
-                        "remote cache push failed; continuing without remote ref"
-                    );
-                    journal.transition(
-                        run_id,
-                        stage_name,
-                        attempt,
-                        StageState::RefPublished,
-                        r#"{"remote":"failed"}"#,
-                    )?;
+                    return Err(e);
                 }
             }
         } else {

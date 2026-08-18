@@ -624,8 +624,9 @@ async fn run_inline_single_stage(
     }
 
     // Build the remote store for cache pull (and push if --cache-push).
-    // Failures are non-fatal — we fall through to local-only mode.
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await;
+    // An explicitly requested push must not silently become a local-only run;
+    // callers can resume from the local journal/cache after the remote error.
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
     let remote_store = remote.as_ref().map(|remote| remote.store.clone());
     let remote_prefix = remote.as_ref().map(|remote| remote.prefix.clone());
     let remote_primary_fallback_store = remote
@@ -1292,7 +1293,8 @@ async fn run_yaml_single_stage(
     journal.insert_run_start(run_id, env!("CARGO_PKG_VERSION"), &host_fingerprint())?;
 
     let run_state = RunState::new();
-    let executor_cfg = build_executor_cfg(
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
         config,
@@ -1301,6 +1303,7 @@ async fn run_yaml_single_stage(
         args.no_commit,
         options,
     );
+    apply_workflow_remote(&mut executor_cfg, remote, args.cache_push);
 
     // JSONL stream for `--jsonl` mode in single-stage-from-yaml.
     let mut jsonl = if mode == OutputMode::Jsonl {
@@ -1439,7 +1442,8 @@ async fn run_dag(
     // (skipped) so the scheduler never dispatches them.
     let stage_filter = filter_stages(args, workflow, graph)?;
 
-    let executor_cfg = build_executor_cfg(
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
         config,
@@ -1448,6 +1452,7 @@ async fn run_dag(
         args.no_commit,
         options,
     );
+    apply_workflow_remote(&mut executor_cfg, remote, args.cache_push);
 
     // Open the JSONL stream up-front so every stage event lands on
     // the same writer. The stream's umbrella schema is the stage-
@@ -2447,6 +2452,28 @@ fn build_executor_cfg(
     }
 }
 
+fn apply_workflow_remote(
+    executor_cfg: &mut ExecutorConfig,
+    remote: Option<WorkflowRemote>,
+    cache_push: bool,
+) {
+    executor_cfg.cache_push = cache_push;
+    let Some(remote) = remote else {
+        return;
+    };
+    executor_cfg.remote_store = Some(remote.store);
+    executor_cfg.remote_prefix = Some(remote.prefix);
+    executor_cfg.remote_primary_fallback_store = remote
+        .primary_fallback
+        .as_ref()
+        .map(|fallback| fallback.store.clone());
+    executor_cfg.remote_primary_fallback_prefix = remote
+        .primary_fallback
+        .as_ref()
+        .map(|fallback| fallback.prefix.clone());
+    executor_cfg.remote_artifact_stores = remote.artifact_stores;
+}
+
 fn workflow_remote_aliases(config: &Config) -> std::collections::BTreeMap<String, String> {
     config
         .workflow
@@ -2499,19 +2526,31 @@ struct CacheOnlyContext<'a> {
 
 /// Build a remote store for workflow cache operations.
 ///
-/// Returns `None` when no crab remote is configured or credentials
-/// are unavailable — the caller falls through to local-only mode.
+/// A repository without a configured Crab remote remains local-only unless
+/// `--cache-push` explicitly requires durable remote state. Once a remote is
+/// configured, malformed configuration or credential/transport failures are
+/// returned instead of being downgraded to a local-only run.
 async fn try_build_workflow_remote(
     repo_root: &Path,
     config: &Config,
     cache_push: bool,
-) -> Option<WorkflowRemote> {
-    let Ok(url_str) = crate::cmd::workflow::read_crab_remote_url(repo_root) else {
-        return None;
+) -> Result<Option<WorkflowRemote>> {
+    let url_str = match crate::cmd::workflow::read_crab_remote_url(repo_root) {
+        Ok(url) => url,
+        Err(CrabError::Configuration { .. }) if !cache_push => return Ok(None),
+        Err(CrabError::Configuration { .. }) => {
+            return Err(CrabError::Configuration {
+                key: "workflow_remote_required".into(),
+                origin: "--cache-push requires a configured crab:// remote".into(),
+            });
+        }
+        Err(error) => return Err(error),
     };
-    let Ok(crab_url) = crate::git::url::CrabUrl::parse(&url_str) else {
-        return None;
-    };
+    let crab_url =
+        crate::git::url::CrabUrl::parse(&url_str).map_err(|error| CrabError::Configuration {
+            key: "workflow_remote_url_invalid".into(),
+            origin: error.to_string(),
+        })?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let resolver = crate::replication::StoreResolver::new(config, &crab_url, &cancel);
     let artifact_stores =
@@ -2519,18 +2558,24 @@ async fn try_build_workflow_remote(
     let artifact_stores = (!artifact_stores.is_empty()).then_some(artifact_stores);
 
     if cache_push {
-        let selection = resolver.write_store("workflow-cache-push").await.ok()?;
-        return Some(WorkflowRemote {
+        let selection = resolver
+            .write_store("workflow-cache-push")
+            .await
+            .map_err(CrabError::from)?;
+        return Ok(Some(WorkflowRemote {
             store: Arc::new(crate::workflow::WorkflowStore::from_storage(
                 selection.store.into_storage(),
             )),
             prefix: selection.router.repo_prefix().to_owned(),
             primary_fallback: None,
             artifact_stores,
-        });
+        }));
     }
 
-    let selection = resolver.read_store("workflow-cache-pull").await.ok()?;
+    let selection = resolver
+        .read_store("workflow-cache-pull")
+        .await
+        .map_err(CrabError::from)?;
     let primary_fallback = if matches!(
         &selection.source,
         crate::replication::ReadSource::Replica { .. }
@@ -2538,7 +2583,7 @@ async fn try_build_workflow_remote(
         let primary = resolver
             .write_store("workflow-cache-pull-primary-fallback")
             .await
-            .ok()?;
+            .map_err(CrabError::from)?;
         Some(WorkflowPrimaryFallback {
             store: Arc::new(crate::workflow::WorkflowStore::from_storage(
                 primary.store.into_storage(),
@@ -2549,14 +2594,14 @@ async fn try_build_workflow_remote(
         None
     };
 
-    Some(WorkflowRemote {
+    Ok(Some(WorkflowRemote {
         store: Arc::new(crate::workflow::WorkflowStore::from_storage(
             selection.store.into_storage(),
         )),
         prefix: selection.router.repo_prefix().to_owned(),
         primary_fallback,
         artifact_stores,
-    })
+    }))
 }
 
 /// Execute one stage defined in `crab.yaml`, resolving its deps
@@ -5060,6 +5105,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cache_push_requires_a_configured_remote() {
+        let (_lock, _guard) = EnabledGuard::new();
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
+
+        let mut args = base_args(tmp.path());
+        args.cache_push = true;
+        let error = run_in(&args, tmp.path(), OutputMode::Text)
+            .await
+            .expect_err("cache push must not silently fall back to local-only execution");
+        assert!(
+            matches!(
+                &error,
+                CrabError::Configuration { key, .. } if key == "workflow_remote_required"
+            ),
+            "wrong variant: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn hermetic_flag_executes_or_reports_unsupported_backend() {
         let (_lock, _guard) = EnabledGuard::new();
         let tmp = TempDir::new().unwrap();
@@ -5958,6 +6023,30 @@ mod tests {
         assert!(
             matches!(err, CrabError::Configuration { .. }),
             "wrong variant: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_push_requires_a_configured_remote() {
+        let (_lock, _guard) = EnabledGuard::new();
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("crab.yaml"),
+            "stages:\n  train:\n    cmd: \"true\"\n",
+        )
+        .unwrap();
+
+        let mut args = yaml_base_args();
+        args.cache_push = true;
+        let error = run_in(&args, tmp.path(), OutputMode::Text)
+            .await
+            .expect_err("yaml cache push must not silently skip remote publication");
+        assert!(
+            matches!(
+                &error,
+                CrabError::Configuration { key, .. } if key == "workflow_remote_required"
+            ),
+            "wrong variant: {error:?}"
         );
     }
 
