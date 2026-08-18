@@ -80,13 +80,18 @@ impl StageCacheEntry {
     }
 }
 
-/// Iterate every cached artifact record in stable output/metric/plot order.
+/// Iterate cached artifacts in stable output/metric/plot order.
+///
+/// A structured metric or plot may also appear in `outs` to carry its cache
+/// policy. Identical records are emitted once; validation rejects conflicts.
 pub fn cached_artifacts(entry: &StageCacheEntry) -> impl Iterator<Item = &CachedOut> {
+    let mut paths = BTreeSet::new();
     entry
         .outs
         .iter()
         .chain(entry.metrics.iter())
         .chain(entry.plots.iter())
+        .filter(move |output| paths.insert(output.path.clone()))
 }
 
 /// Validate a cache entry before it is read, materialized, or published.
@@ -123,7 +128,7 @@ pub(crate) fn validate_stage_cache_entry_at(
         ));
     }
 
-    let mut paths = BTreeSet::new();
+    let mut paths = BTreeMap::new();
     for (kind, outputs) in [
         ("out", entry.outs.as_slice()),
         ("metric", entry.metrics.as_slice()),
@@ -277,19 +282,26 @@ fn validate_cached_out(
     category: &str,
     index: usize,
     repository_root: Option<&Path>,
-    paths: &mut BTreeSet<PathBuf>,
+    paths: &mut BTreeMap<PathBuf, (String, CachedOut)>,
 ) -> Result<()> {
     let path = validate_cached_path(
         &output.path,
         &format!("{category}[{index}] path"),
         repository_root,
     )?;
-    if !paths.insert(path) {
-        return Err(cache_entry_invalid(
-            stage_hash,
-            format!("duplicate cached artifact path {:?}", output.path),
-        ));
+    if let Some((existing_category, existing)) = paths.get(&path) {
+        if existing != output {
+            return Err(cache_entry_invalid(
+                stage_hash,
+                format!(
+                    "cached artifact path {:?} has conflicting {existing_category} and {category} records",
+                    output.path
+                ),
+            ));
+        }
+        return Ok(());
     }
+    paths.insert(path, (category.to_owned(), output.clone()));
     if output
         .remote
         .as_deref()
@@ -486,6 +498,25 @@ mod tests {
             .map(|out| out.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(paths, ["model.bin", "metrics.json", "plots/curve.json"]);
+    }
+
+    #[test]
+    fn cache_entry_validation_accepts_identical_policy_and_metric_records() {
+        let entry = entry_with_outs(vec![cached_out("metrics.json", true)]);
+        validate_stage_cache_entry(&entry).unwrap();
+
+        let paths: Vec<_> = cached_artifacts(&entry)
+            .map(|out| out.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, ["metrics.json", "plots/curve.json"]);
+    }
+
+    #[test]
+    fn cache_entry_validation_rejects_conflicting_duplicate_records() {
+        let entry = entry_with_outs(vec![cached_out("metrics.json", false)]);
+        let error = validate_stage_cache_entry(&entry).unwrap_err();
+        assert!(matches!(error, WorkflowError::CacheEntryInvalid { .. }));
+        assert!(error.to_string().contains("conflicting"));
     }
 
     #[test]
