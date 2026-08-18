@@ -209,6 +209,10 @@ class ProtocolV2PartialCloneSmoke:
                 "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "GIT_TERMINAL_PROMPT": "0",
+                "GIT_AUTHOR_NAME": "Crab protocol smoke",
+                "GIT_AUTHOR_EMAIL": "smoke@example.invalid",
+                "GIT_COMMITTER_NAME": "Crab protocol smoke",
+                "GIT_COMMITTER_EMAIL": "smoke@example.invalid",
                 "CRAB_LOG": "crab=debug,crab_remote_git=debug",
             }
         )
