@@ -112,6 +112,27 @@ pub async fn run_init_with_storage_provider(
     mode: OutputMode,
     storage_provider: Option<StorageProvider>,
 ) -> Result<()> {
+    run_init_inner(url, root, cancel, mode, storage_provider, true).await
+}
+
+/// Initialize a repository as the first phase of guided configuration.
+pub(crate) async fn run_init_for_configure(
+    url: &str,
+    root: &Path,
+    cancel: &CancellationToken,
+    storage_provider: Option<StorageProvider>,
+) -> Result<()> {
+    run_init_inner(url, root, cancel, OutputMode::Text, storage_provider, false).await
+}
+
+async fn run_init_inner(
+    url: &str,
+    root: &Path,
+    cancel: &CancellationToken,
+    mode: OutputMode,
+    storage_provider: Option<StorageProvider>,
+    show_next_steps: bool,
+) -> Result<()> {
     check_cancelled(cancel)?;
 
     // Parse and normalize the URL before doing any work. Provider-prefixed
@@ -267,13 +288,9 @@ pub async fn run_init_with_storage_provider(
     let credential_status = if cred_result.source == CredentialSource::None {
         let style = CliStyle::resolve(mode);
         if !mode.is_machine() {
-            eprintln!(
-                "{}",
-                style.warn(&format!(
-                    "No credentials found. {}",
-                    cred_result.description
-                ))
-            );
+            eprintln!("{}", style.warn("Cloud credentials are not ready."));
+            eprintln!("  {}", cred_result.description);
+            eprintln!("  Verify after signing in: crab doctor");
         }
         CredentialStatus {
             found: false,
@@ -330,7 +347,7 @@ pub async fn run_init_with_storage_provider(
          manifest creation pending Store wiring"
     );
 
-    if !mode.is_machine() {
+    if !mode.is_machine() && show_next_steps {
         eprintln!("\nNext:");
         eprintln!("  1. crab setup            # detect large files and write .gitattributes");
         eprintln!("  2. git status            # review .crab.toml and tracking rules");

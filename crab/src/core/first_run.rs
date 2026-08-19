@@ -31,11 +31,12 @@ pub fn maybe_show_welcome(mode: OutputMode) {
     }
 
     eprintln!();
-    eprintln!("  Welcome to crab \u{2014} serverless git for large files.");
+    eprintln!("  Welcome to Crab — serverless Git for large files.");
     eprintln!();
     eprintln!("  Get started:");
-    eprintln!("    crab init <crab://bucket/repo>   Initialize a repository");
-    eprintln!("    crab clone <url>                 Clone an existing repo");
+    eprintln!("    crab configure       Guided cloud and repository setup");
+    eprintln!("    crab clone <remote>  Join an existing repository");
+    eprintln!("    crab --help          Browse commands by task");
     eprintln!();
     eprintln!("  Docs: https://crab.build/docs/cli");
     eprintln!();

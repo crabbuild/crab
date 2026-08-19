@@ -9,6 +9,10 @@ This page reflects the current top-level command surface of the open-source Crab
 CLI. Reference pages cover the higher-use commands and workflows. For the full
 option set for any installed binary, run `crab <command> --help`.
 
+Running `crab --help` shows these same top-level commands in task-oriented
+sections. The sections are visual navigation only; commands remain directly
+available as `crab hydrate`, `crab exp`, `crab gc`, and so on.
+
 The CLI also exposes aliases such as `crab get` for `crab download` and
 `crab repro` for `crab run`. Internal Git filter and remote-helper entry points
 are intentionally omitted from this user-facing index.
@@ -17,6 +21,7 @@ are intentionally omitted from this user-facing index.
 
 | Command | Purpose |
 | --- | --- |
+| [`crab configure`](/docs/cli/reference/crab-configure) | Guided cloud, credential, Git, and large-file setup |
 | [`crab init`](/docs/cli/reference/crab-init) | Initialize or re-apply a Crab repository connection |
 | [`crab setup`](/docs/cli/reference/crab-setup) | Scan for large files and configure tracking |
 | [`crab clone`](/docs/cli/reference/crab-clone) | Clone a repository with Crab filter and hydration setup |
@@ -53,7 +58,6 @@ are intentionally omitted from this user-facing index.
 | [`crab dehydrate`](/docs/cli/reference/crab-dehydrate) | Replace materialized files with pointers |
 | [`crab fetch`](/docs/cli/reference/crab-fetch) | Pre-fetch remote objects into the local cache |
 | [`crab diff`](/docs/cli/reference/crab-diff) | Compare file content between Git refs |
-| `crab diff-driver` | Run the Git external diff driver |
 | [`crab ls-files`](/docs/cli/reference/crab-ls-files) | List Crab-tracked files and state |
 | [`crab du`](/docs/cli/reference/crab-du) | Show Crab-managed disk usage |
 | [`crab stat`](/docs/cli/reference/crab-stat) | Show staging or performance statistics |
