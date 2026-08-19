@@ -58,6 +58,18 @@ The support matrix is:
 A client request for an unsupported form receives a protocol error; Crab never
 acknowledges it and downloads a complete pack as a substitute.
 
+Fresh, unfiltered fetches of exact visible ref targets use the visibility
+proof's complete per-ref closure directly. Requests with haves, shallow or
+depth semantics, filters, tag expansion, or a want that is not an exact ref
+target use the bounded traversal planner. Pack generation reads up to the
+operation's default 10,000-object bound as one locator batch so adjacent pack
+ranges can be coalesced; fetched-byte and inflated-byte budgets remain the
+memory and I/O bounds.
+
+Failures detected before the `packfile` response section use Git's terminal
+`ERR` packet. Failures after that section begins use sideband channel 3. This
+keeps request rejections distinguishable from truncated pack generation.
+
 Every requested OID is admitted from the immutable visibility proof before the
 remote reader obtains object bytes. The proof and locator are tied to the same
 manifest generation and pack-index hash. Invalid or missing proof suppresses

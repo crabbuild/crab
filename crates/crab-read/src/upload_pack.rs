@@ -6,7 +6,7 @@ use bstr::ByteSlice;
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
     CorruptionStage, Error as RemoteGitError, OperationContext, OperationKind, RemoteGitObject,
-    RemoteGitRepository,
+    RemoteGitRepository, RepositoryRef, RepositoryStateError,
 };
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
@@ -403,6 +403,21 @@ async fn plan_with_operation(
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<PackPlan> {
+    let maximum_objects = operation.max_logical_objects();
+    if let Some(plan) = plan_from_visibility(
+        &repository.refs().entries,
+        visible_ref_names,
+        visibility,
+        request,
+        maximum_objects,
+    )? {
+        tracing::debug!(
+            planned_objects = plan.object_ids.len(),
+            "planned full ref closure from visibility proof"
+        );
+        return Ok(plan);
+    }
+
     let common_haves = request
         .haves
         .iter()
@@ -415,7 +430,6 @@ async fn plan_with_operation(
         .copied()
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
-    let maximum_objects = operation.max_logical_objects();
     let deduplicate_by_oid = request.deepen.is_none()
         && !request.deepen_relative
         && !filter_requires_traversal_context(&request.filter);
@@ -604,6 +618,87 @@ async fn plan_with_operation(
         shallow,
         unshallow,
     })
+}
+
+fn plan_from_visibility(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    visibility: &GitVisibilityIndex,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if request.wants.is_empty()
+        || !request.haves.is_empty()
+        || !request.shallow.is_empty()
+        || request.deepen.is_some()
+        || request.deepen_relative
+        || request.include_tags
+        || !matches!(request.filter, UploadPackFilter::None)
+    {
+        return Ok(None);
+    }
+
+    let visible = visible_ref_names
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let selected_refs = request
+        .wants
+        .iter()
+        .map(|want| {
+            references
+                .iter()
+                .find(|reference| {
+                    visible.contains(reference.name.as_str()) && reference.target == *want
+                })
+                .map(|reference| reference.name.as_str())
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(selected_refs) = selected_refs else {
+        return Ok(None);
+    };
+
+    for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
+        let target = want.to_hex().to_string();
+        if visibility
+            .refs
+            .get(*reference_name)
+            .is_none_or(|objects| objects.binary_search(&target).is_err())
+        {
+            return Err(RemoteGitError::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+    }
+
+    let objects = visibility.objects_for_refs(selected_refs.iter().copied());
+    let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
+    if actual > maximum_objects {
+        return Err(RemoteGitError::LimitExceeded {
+            limit: "upload-pack planned objects",
+            actual,
+            maximum: maximum_objects,
+        });
+    }
+    let object_ids = objects
+        .into_iter()
+        .map(|oid| {
+            ObjectId::from_hex(oid.as_bytes()).map_err(|_| RemoteGitError::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            })
+        })
+        .collect::<crab_remote_git::Result<Vec<_>>>()?;
+
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
+        common_haves: Vec::new(),
+        filter: request.filter.clone(),
+        include_tags: false,
+        object_ids,
+        required_bases: Vec::new(),
+        shallow: Vec::new(),
+        unshallow: Vec::new(),
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -1085,6 +1180,8 @@ fn enqueue(
 
 #[cfg(test)]
 mod tests {
+    use crab_remote_git::RepositoryRef;
+
     use super::*;
 
     fn oid(value: char) -> ObjectId {
@@ -1108,6 +1205,143 @@ mod tests {
             .into_iter()
             .collect(),
         )
+    }
+
+    fn references() -> Vec<RepositoryRef> {
+        vec![
+            RepositoryRef {
+                name: "refs/heads/main".to_owned(),
+                target: oid('1'),
+                peeled: None,
+            },
+            RepositoryRef {
+                name: "refs/heads/secret".to_owned(),
+                target: oid('2'),
+                peeled: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn full_ref_visibility_plan_deduplicates_duplicate_wants() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1'), oid('1')],
+            ..UploadPackRequest::default()
+        };
+        let plan = plan_from_visibility(
+            &references(),
+            &["refs/heads/main".to_owned()],
+            &visibility(),
+            &request,
+            10,
+        )
+        .expect("valid visibility closure")
+        .expect("fresh full ref fetch should use the visibility plan");
+
+        assert_eq!(plan.object_ids, [oid('1'), oid('3')]);
+        assert_eq!(plan.wants, request.wants);
+        assert!(plan.common_haves.is_empty());
+        assert!(plan.shallow.is_empty());
+        assert!(plan.unshallow.is_empty());
+    }
+
+    #[test]
+    fn visibility_plan_falls_back_when_request_semantics_need_traversal() {
+        let cases = [
+            UploadPackRequest {
+                wants: vec![oid('3')],
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                haves: vec![oid('3')],
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                shallow: vec![oid('3')],
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                deepen: Some(1),
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                include_tags: true,
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                filter: UploadPackFilter::BlobNone,
+                ..UploadPackRequest::default()
+            },
+        ];
+
+        for request in cases {
+            assert!(
+                plan_from_visibility(
+                    &references(),
+                    &["refs/heads/main".to_owned()],
+                    &visibility(),
+                    &request,
+                    10,
+                )
+                .expect("fallback decision")
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_plan_enforces_the_operation_object_bound() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            ..UploadPackRequest::default()
+        };
+        let error = plan_from_visibility(
+            &references(),
+            &["refs/heads/main".to_owned()],
+            &visibility(),
+            &request,
+            1,
+        )
+        .expect_err("two-object closure must exceed a one-object operation bound");
+
+        assert!(matches!(
+            error,
+            RemoteGitError::LimitExceeded {
+                actual: 2,
+                maximum: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn visibility_plan_rejects_a_closure_missing_its_ref_target() {
+        let proof = GitVisibilityIndex::new(
+            7,
+            "a".repeat(64),
+            [("refs/heads/main".to_owned(), vec![oid('3').to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            ..UploadPackRequest::default()
+        };
+        let error = plan_from_visibility(
+            &references(),
+            &["refs/heads/main".to_owned()],
+            &proof,
+            &request,
+            10,
+        )
+        .expect_err("a visibility closure must contain its exact ref target");
+
+        assert!(matches!(error, RemoteGitError::RepositoryState { .. }));
     }
 
     #[test]

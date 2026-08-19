@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRepository, Result};
 
-const OBJECT_BATCH_SIZE: usize = 32;
+// Large locator batches let the reader coalesce adjacent pack ranges across the
+// whole batch. The operation's object and byte budgets still bound residency.
+const OBJECT_BATCH_SIZE: usize = 10_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
 
 /// A temporary, checksummed Git pack generated from one pinned snapshot.
@@ -473,5 +475,13 @@ mod tests {
         };
         let result = writer.write_objects(vec![object], &CancellationToken::new());
         assert!(matches!(result, Err(Error::LimitExceeded { .. })));
+    }
+
+    #[test]
+    fn generation_batch_covers_the_default_operation_object_bound() {
+        let maximum = usize::try_from(crate::OperationLimits::default().max_logical_objects)
+            .expect("default logical-object bound fits usize");
+
+        assert!(OBJECT_BATCH_SIZE >= maximum);
     }
 }

@@ -42,6 +42,12 @@ pack-index hash. Every want, traversal child, and lazy raw OID is admitted
 before its bytes are read. The standard Git process owns promisor pack
 installation and configuration on the local repository.
 
+An unfiltered fresh fetch of exact visible ref targets may plan directly from
+the proof's complete per-ref closure. Negotiated, shallow, filtered, tag-expanded,
+and arbitrary-object requests retain bounded traversal. Pack generation batches
+the default operation object bound for range coalescing while preserving the
+existing aggregate byte budgets.
+
 ## Consequences
 
 - Direct object-store operation remains the canonical and complete topology.
