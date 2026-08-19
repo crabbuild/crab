@@ -28,20 +28,18 @@ The result:
 # 1. Install Crab
 curl -fsSL https://crab.build/install.sh | bash
 
-# 2. Initialize a repository with your bucket
+# 2. Configure a repository with your bucket
 cd my-project
-crab init crab://my-bucket/my-repo
+crab configure s3://my-bucket/my-repo
 
-# 3. Configure large-file tracking
-crab setup
-
-# 4. Ship your first commit
+# 3. Ship your first commit
 crab ship . -m "initial commit"
 ```
 
-`crab init` wires the repository to the remote and writes the project config.
-`crab setup` scans for large files, writes tracking rules, and stages the setup
-files. `crab ship` handles staging, committing, and pushing in one command.
+`crab configure` guides you through cloud selection, checks credential
+discovery, wires the repository to the remote, and scans for large files.
+`crab ship` handles staging, committing, and pushing in one command. You can
+still run `crab init` and `crab setup` separately when you want finer control.
 
 ## Quick Start: Existing Repository (Collaborator)
 

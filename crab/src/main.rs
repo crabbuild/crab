@@ -21,6 +21,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![warn(clippy::perf, clippy::pedantic)]
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -55,7 +56,11 @@ const SYMLINK_PREFIX: &str = "crab-";
 const DEFAULT_FILE_PROCESSING_JOBS: usize = 16;
 
 #[derive(Parser)]
-#[command(name = "crab", version)]
+#[command(
+    name = "crab",
+    version,
+    about = "Serverless Git for large files, datasets, and reproducible workflows"
+)]
 struct Cli {
     /// Set the log verbosity level.
     ///
@@ -71,6 +76,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Guided cloud, credential, repository, and large-file setup.
+    Configure {
+        /// Remote URL, or omit it for an interactive prompt.
+        #[arg(value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Cloud storage provider.
+        #[arg(long, value_name = "PROVIDER", value_parser = ["s3", "gcs", "azure"])]
+        provider: Option<String>,
+        /// Track an explicit large-file pattern (can repeat).
+        #[arg(long = "track", value_name = "PATTERN")]
+        track: Vec<String>,
+        /// Install Crab without scanning for large files.
+        #[arg(long)]
+        no_auto_track: bool,
+        /// Preview the setup plan without changing files or Git config.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Initialize a new crab repository at a remote URL.
     Init {
         /// Remote URL to initialize (e.g. `crab://bucket/repo`).
@@ -608,7 +631,7 @@ enum Cmd {
     ///
     /// Conforms to git's external diff driver protocol. Not intended for
     /// direct user invocation — register via .gitattributes and .git/config.
-    #[command(name = "diff-driver")]
+    #[command(name = "diff-driver", hide = true)]
     DiffDriver {
         /// File path being diffed.
         path: String,
@@ -2233,6 +2256,7 @@ impl Cmd {
     /// Matches the canonical names from the structured-output spec.
     fn schema_name(&self) -> &'static str {
         match self {
+            Self::Configure { .. } => "configure",
             Self::Init { .. } => "init",
             Self::Setup { .. } => "setup",
             Self::Add { .. } => "add",
@@ -2769,10 +2793,39 @@ fn dirs_env_path() -> Option<std::path::PathBuf> {
         .map(|home| home.join(".config/crab/.env"))
 }
 
+fn root_help_requested(args: &[OsString]) -> bool {
+    let mut visible = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        let Some(value) = args[index].to_str() else {
+            return false;
+        };
+        if value == "--log-level" {
+            index += 2;
+            continue;
+        }
+        if value.starts_with("--log-level=") {
+            index += 1;
+            continue;
+        }
+        visible.push(value);
+        index += 1;
+    }
+    matches!(visible.as_slice(), ["-h" | "--help" | "help"])
+}
+
 fn run(
     is_remote_helper: bool,
     symlink_subcmd: Option<String>,
 ) -> std::result::Result<ExitCode, (OutputMode, &'static str, CrabError)> {
+    if !is_remote_helper && symlink_subcmd.is_none() {
+        let args: Vec<OsString> = std::env::args_os().collect();
+        if root_help_requested(&args) {
+            crab::cmd::help::print_root_help(&Cli::command());
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+
     if !is_remote_helper
         && symlink_subcmd.is_none()
         && let Some(code) = maybe_run_coordinator_start_standalone()?
@@ -2804,8 +2857,8 @@ fn run(
         } else {
             let cli = match symlink_subcmd {
                 Some(subcmd) => {
-                    let mut args = vec!["crab".to_string(), subcmd];
-                    args.extend(std::env::args().skip(1));
+                    let mut args = vec![OsString::from("crab"), OsString::from(subcmd)];
+                    args.extend(std::env::args_os().skip(1));
                     Cli::parse_from(args)
                 }
                 None => Cli::parse(),
@@ -2958,6 +3011,30 @@ impl StdIo for RealStdIo {
 #[allow(clippy::too_many_lines)]
 async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
     match cli.cmd {
+        Some(Cmd::Configure {
+            remote,
+            provider,
+            track,
+            no_auto_track,
+            dry_run,
+        }) => {
+            let storage_provider = provider
+                .as_deref()
+                .map(crab::cmd::init::parse_storage_provider_arg)
+                .transpose()?;
+            crab::cmd::configure::run_configure(
+                crab::cmd::configure::ConfigureArgs {
+                    remote,
+                    storage_provider,
+                    track,
+                    no_auto_track,
+                    dry_run,
+                },
+                &cancel,
+            )
+            .await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Stat { json, sub }) => match sub {
             Some(StatCmd::Perf) => {
                 let _span = tracing::info_span!("stat_perf").entered();
@@ -5029,8 +5106,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         }
         // No subcommand — print help.
         None => {
-            Cli::command().print_help().ok();
-            println!();
+            crab::cmd::help::print_root_help(&Cli::command());
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -5899,8 +5975,9 @@ async fn run_cache_stats() -> Result<()> {
 mod tests {
     use std::path::Path;
 
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _};
 
+    use crab::cmd::help::{COMMAND_SECTIONS, render_root_help};
     use crab::core::config::Config;
     use crab::core::error::CrabError;
     use crab::core::output::OutputMode;
@@ -5909,8 +5986,78 @@ mod tests {
         Cli, Cmd, OptimizeCacheCmd, OptimizeCmd, OptimizeIndexesCmd, OptimizeLfsCmd,
         OptimizeReplicasCmd, OptimizeWorkflowCacheCmd, REMOTE_HELPER_STEM,
         coordinator_start_owns_logging, filter_process_should_wire_remote_smudge,
-        resolve_hydrate_remote_url, symlink_subcommand_for_stem,
+        resolve_hydrate_remote_url, root_help_requested, symlink_subcommand_for_stem,
     };
+
+    fn with_cli_command(test: impl FnOnce(clap::Command) + Send + 'static) {
+        std::thread::Builder::new()
+            .name("cli-command-test".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || test(Cli::command()))
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn root_help_groups_every_user_facing_command_once() {
+        with_cli_command(|command| {
+            let internal = [
+                "coordinator",
+                "filter-process",
+                "lfs-transfer-agent",
+                "diff-driver",
+                "help",
+            ];
+            let mut expected: Vec<&str> = command
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .filter(|name| !internal.contains(name))
+                .collect();
+            expected.sort_unstable();
+
+            let mut categorized: Vec<&str> = COMMAND_SECTIONS
+                .iter()
+                .flat_map(|(_, names)| names.iter().copied())
+                .collect();
+            let categorized_count = categorized.len();
+            categorized.sort_unstable();
+            categorized.dedup();
+
+            assert_eq!(categorized.len(), categorized_count);
+            assert_eq!(categorized, expected);
+        });
+    }
+
+    #[test]
+    fn root_help_renders_top_level_commands_in_sections() {
+        with_cli_command(|command| {
+            let help = render_root_help(&command);
+
+            assert!(help.contains("Get started"));
+            assert!(help.contains("Large files and working tree"));
+            assert!(help.contains("Workflows, data, and experiments"));
+            assert!(help.contains("  hydrate"));
+            assert!(help.contains("  exp"));
+            assert!(!help.contains("crab files"));
+        });
+    }
+
+    #[test]
+    fn root_help_flags_are_intercepted_without_hiding_command_help() {
+        assert!(root_help_requested(&["crab".into(), "--help".into()]));
+        assert!(root_help_requested(&[
+            "crab".into(),
+            "--log-level".into(),
+            "debug".into(),
+            "help".into(),
+        ]));
+        assert!(!root_help_requested(&[
+            "crab".into(),
+            "hydrate".into(),
+            "--help".into(),
+        ]));
+    }
 
     #[test]
     fn bare_name_detected_as_remote_helper() {

@@ -120,13 +120,13 @@ provider. During initialization, provider-prefixed URLs such as `s3://`,
 Crab persists the canonical Git remote as `crab://...` so Git invokes the
 Crab helper.
 
-Choose the provider explicitly when a repository must be portable across
-machines:
+Choose the provider explicitly when configuring a repository that must be
+portable across machines:
 
 ~~~bash
-crab init --storage-provider s3 crab://my-bucket/my-project
-crab init --storage-provider gcs crab://my-gcs-bucket/my-project
-crab init --storage-provider azure crab://my-container/my-project
+crab configure crab://my-bucket/my-project --provider s3
+crab configure crab://my-gcs-bucket/my-project --provider gcs
+crab configure crab://my-container/my-project --provider azure
 ~~~
 
 For local S3-compatible development, set the standard AWS variables and an
@@ -204,11 +204,8 @@ matching credentials.
 mkdir my-project
 cd my-project
 
-# crab init runs git init when this directory is not already a Git repository.
-crab init --storage-provider s3 crab://my-bucket/my-project
-
-# Scan for large files, write .gitattributes, and finish local Git setup.
-crab setup
+# Select storage, discover credentials, initialize Git, and track large files.
+crab configure s3://my-bucket/my-project
 
 # Review the generated tracking rules and repository state.
 git status

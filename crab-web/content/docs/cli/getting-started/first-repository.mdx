@@ -11,20 +11,17 @@ A Crab repository is a standard git repository with a cloud storage backend for 
 
 ```bash
 mkdir my-project && cd my-project
-crab init crab://my-bucket/my-project
-crab setup
+crab configure s3://my-bucket/my-project
 crab ship . -m "initial commit"
 ```
 
-`crab init` creates the Git and Crab configuration. `crab setup` detects or
-applies large-file tracking rules. The same setup works with `crab ship` for
-the first commit:
+`crab configure` selects the cloud provider, checks credential discovery,
+creates the Git and Crab configuration, and detects large-file tracking rules.
+Use the interactive form if you prefer prompts:
 
 ```bash
 mkdir my-project && cd my-project
-crab init crab://my-bucket/my-project
-crab setup
-crab ship . -m "initial commit"
+crab configure
 ```
 
 ## What You Need
@@ -34,21 +31,27 @@ Before creating a Crab repository, you need:
 1. **A cloud storage bucket** — S3, GCS, or Azure Blob Storage
 2. **Credentials** — Access to write to that bucket (AWS keys, GCP service account, or Azure credentials)
 
-You do **not** need to run `git init` separately — `crab init` handles that automatically.
+You do **not** need to run `git init` separately — `crab configure` handles that automatically.
 
-## Initialize
+## Guided configuration
 
 ```bash
 cd my-project
-crab init crab://my-bucket/my-project
-crab setup
+crab configure s3://my-bucket/my-project
 ```
 
-These commands:
-1. Runs `git init` if no git repository exists
-2. Creates `.crab/` and `.crab.toml` with remote configuration
-3. Registers the filter and diff drivers in `.git/config`
-4. Scans for large files and writes matching `.gitattributes` rules when you run `crab setup`
+This command:
+
+1. Selects or infers S3, GCS, or Azure Blob Storage
+2. Finds credentials from environment variables or cloud SDK profiles and prints provider-specific setup help when none are available
+3. Runs `git init` if no Git repository exists
+4. Creates `.crab/` and `.crab.toml` with remote configuration
+5. Registers the filter and diff drivers in `.git/config`
+6. Scans for large files and writes matching `.gitattributes` rules
+
+Run `crab configure <REMOTE> --dry-run` to preview the setup plan. The lower-level
+`crab init` and `crab setup` commands remain available when you want to perform
+the two phases separately.
 
 ### Example output
 
@@ -104,16 +107,16 @@ The `<repo-path>` isolates this repository's data within the bucket. Multiple re
 
 | Provider | URL Format | Example |
 |----------|-----------|---------|
-| AWS S3 | `crab://<bucket>/<path>` | `crab init --storage-provider s3 crab://ml-data/models` |
-| Google Cloud Storage | `gs://<bucket>/<path>` or `crab://<bucket>/<path>` with `--storage-provider gcs` | `crab init gs://ml-data/models` |
-| Azure Blob Storage | `az://<container>/<path>` or `azure://<container>/<path>` | `crab init azure://ml-data/models` |
-| S3-compatible (MinIO, R2, Ceph) | `crab://<bucket>/<path>` | `crab://my-minio-bucket/data` |
+| AWS S3 | `s3://<bucket>/<path>` | `crab configure s3://ml-data/models` |
+| Google Cloud Storage | `gs://<bucket>/<path>` | `crab configure gs://ml-data/models` |
+| Azure Blob Storage | `az://<container>/<path>` or `azure://<container>/<path>` | `crab configure azure://ml-data/models` |
+| S3-compatible (MinIO, R2, Ceph) | `crab://<bucket>/<path>` | `crab configure crab://my-minio-bucket/data --provider s3` |
 
 ### How Provider Detection Works
 
-For `crab init`, Crab infers the provider from a provider-prefixed input URL
+For `crab configure` and `crab init`, Crab infers the provider from a provider-prefixed input URL
 (`s3://`, `gs://`/`gcs://`, or `az://`/`azure://`) or uses the explicit
-`--storage-provider` flag. Provider-prefixed inputs are normalized to a
+provider flag (`--provider` for `configure`, `--storage-provider` for `init`). Provider-prefixed inputs are normalized to a
 canonical `crab://` Git remote. For an unprefixed `crab://` URL, set the
 provider explicitly when it is not S3:
 

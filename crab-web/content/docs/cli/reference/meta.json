@@ -4,6 +4,7 @@
     "index",
     "structured-output",
     "pricing-tables",
+    "crab-configure",
     "crab-init",
     "crab-setup",
     "crab-clone",

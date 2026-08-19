@@ -1,0 +1,92 @@
+---
+title: "crab configure"
+description: "Guided first-repository setup for cloud storage, credential discovery, Git integration, and large-file tracking."
+---
+
+# crab configure
+
+Set up a new Crab repository in one guided flow.
+
+```bash
+crab configure [REMOTE] [OPTIONS]
+```
+
+`crab configure` combines the normal `crab init` and `crab setup` steps. It:
+
+1. Selects Amazon S3, Google Cloud Storage, or Azure Blob Storage
+2. Connects the current directory to a remote bucket/container
+3. Detects credentials from environment variables and cloud SDK profiles
+4. Installs the Git filter and diff drivers
+5. Scans for large files and writes tracking rules
+6. Prints the next commands to verify and ship the repository
+
+Crab never copies long-lived cloud secrets into `.crab.toml`. When credentials
+are missing, the setup output gives the provider-specific login command; run
+`crab doctor` afterward to verify access.
+
+## Interactive setup
+
+Run with no arguments in a terminal:
+
+```bash
+mkdir models && cd models
+crab configure
+```
+
+Crab asks for the cloud provider and a bucket/container plus repository path.
+Amazon S3 is the default choice.
+
+## Explicit setup
+
+Use flags in scripts or when you already know the remote:
+
+```bash
+# Amazon S3 or S3-compatible storage
+crab configure s3://team-data/models --provider s3
+
+# Google Cloud Storage
+crab configure gs://team-data/models --provider gcs
+
+# Azure Blob Storage
+crab configure azure://team-data/models --provider azure
+```
+
+Provider-prefixed URLs let Crab infer the provider, so `--provider` is optional
+in those examples. Use it with a canonical `crab://` URL when the provider is
+not S3.
+
+## Tracking options
+
+Pass explicit patterns instead of relying only on the repository scan:
+
+```bash
+crab configure s3://team-data/models \
+  --track '*.safetensors' \
+  --track 'datasets/**'
+```
+
+Install the integration without scanning:
+
+```bash
+crab configure s3://team-data/models --no-auto-track
+```
+
+Preview the plan without creating `.git`, `.crab/`, `.crab.toml`, or tracking
+rules:
+
+```bash
+crab configure s3://team-data/models --provider s3 --dry-run
+```
+
+## Existing project configuration
+
+With no `REMOTE`, `crab configure` reuses a discovered `.crab.toml`. This is a
+convenient way to repair local Git integration and refresh tracking after a
+regular Git clone.
+
+## Related commands
+
+- [`crab init`](/docs/cli/reference/crab-init) — configure only the repository connection
+- [`crab setup`](/docs/cli/reference/crab-setup) — rescan or change large-file tracking
+- [`crab doctor`](/docs/cli/reference/crab-doctor) — verify credentials and repository health
+- [Static credentials](/docs/cli/authentication/static-credentials) — provider credential discovery
