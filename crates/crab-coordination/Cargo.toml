@@ -8,7 +8,7 @@ description = "Coordination contracts for Crab active-active writes."
 
 [features]
 default = []
-object-store-lock = ["dep:bytes", "dep:futures-util", "dep:object_store", "dep:tracing", "tokio/rt"]
+object-store-lock = ["dep:bytes", "dep:futures-util", "dep:object_store", "dep:tracing", "dep:uuid", "tokio/rt", "tokio/time"]
 coordinator-dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
 coordinator-spanner = ["dep:google-cloud-storage", "dep:google-cloud-token", "dep:reqwest"]
 coordinator-cosmosdb = ["dep:azure_core", "dep:azure_identity", "dep:reqwest", "dep:urlencoding"]
@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }
 azure_core = { workspace = true, optional = true }

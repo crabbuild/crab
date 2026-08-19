@@ -524,7 +524,7 @@ async fn expire_stale_lock_at(
     }
 }
 
-async fn create_strict(
+pub(crate) async fn create_strict(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     body: Bytes,
@@ -535,7 +535,7 @@ async fn create_strict(
         .map(Into::into)
 }
 
-async fn get_with_version(
+pub(crate) async fn get_with_version(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
 ) -> object_store::Result<(Bytes, UpdateVersion)> {
@@ -547,7 +547,7 @@ async fn get_with_version(
     Ok((result.bytes().await?, version))
 }
 
-async fn update(
+pub(crate) async fn update(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     body: Bytes,
@@ -563,7 +563,7 @@ async fn update(
         .map(Into::into)
 }
 
-fn store_error(path: &str, source: object_store::Error) -> CoordinationError {
+pub(crate) fn store_error(path: &str, source: object_store::Error) -> CoordinationError {
     CoordinationError::ObjectStore {
         path: path.to_owned(),
         source,
@@ -587,7 +587,7 @@ fn deserialize_payload(path: &str, body: &[u8]) -> Result<PushLockPayload> {
     })
 }
 
-fn generate_holder_id() -> String {
+pub(crate) fn generate_holder_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HOLDER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
