@@ -15,7 +15,9 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::cmd::add::{AddArgs, AddSummary, run_add_without_terminal_output};
-use crate::cmd::push::{PushArgs, PushSummaryPayload, run_push_without_terminal_output};
+use crate::cmd::push::{
+    PushArgs, PushSummaryPayload, resolve_push_remote, run_push_without_terminal_output,
+};
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::core::style::CliStyle;
@@ -101,8 +103,9 @@ pub struct ShipArgs {
     pub message: String,
     /// Maximum number of concurrent file-processing tasks.
     pub jobs: usize,
-    /// Push to this remote (default: origin).
-    pub remote: String,
+    /// Push to this Git remote name or crab:// URL; auto-detects a Crab remote
+    /// when omitted.
+    pub remote: Option<String>,
     /// Push to this branch (default: current branch).
     pub branch: Option<String>,
     /// Integrate the current branch and retry after non-fast-forward or lock contention.
@@ -121,10 +124,15 @@ pub struct ShipArgs {
 pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()> {
     let start = Instant::now();
     let style = CliStyle::resolve(args.mode);
+    let resolved_remote = if args.no_push {
+        None
+    } else {
+        Some(resolve_push_remote(args.remote.as_deref())?)
+    };
 
     // Dry-run mode: show what would happen without making changes.
     if args.dry_run {
-        return run_ship_dry_run(args, cancel).await;
+        return run_ship_dry_run(args, resolved_remote.as_deref(), cancel).await;
     }
 
     // --- Phase 1: Staging (crab add) ---
@@ -214,7 +222,7 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
         };
 
         let push_args = PushArgs {
-            remote: Some(args.remote.clone()),
+            remote: resolved_remote.clone(),
             refspecs: refspec,
             upload_concurrency: None,
             lock_wait_secs: None,
@@ -263,11 +271,15 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
                     ))
                 );
             } else {
+                let remote_display = push_summary
+                    .as_ref()
+                    .map(|summary| summary.remote_url.as_str())
+                    .unwrap_or("(unknown remote)");
                 eprintln!(
                     "{}",
                     style.ok(&format!(
                         "Shipped to {} ({commit_word}) in {:.1}s — {}",
-                        args.remote,
+                        remote_display,
                         elapsed.as_secs_f64(),
                         timing_line
                     ))
@@ -340,7 +352,11 @@ fn resolve_head_oid(repo_root: &std::path::Path) -> Result<String> {
 }
 
 /// Dry-run mode: show what would be staged, committed, and pushed.
-async fn run_ship_dry_run(args: &ShipArgs, cancel: &CancellationToken) -> Result<()> {
+async fn run_ship_dry_run(
+    args: &ShipArgs,
+    resolved_remote: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<()> {
     // Run add in dry-run mode to show what would be staged.
     let add_args = AddArgs {
         patterns: args.patterns.clone(),
@@ -394,7 +410,10 @@ async fn run_ship_dry_run(args: &ShipArgs, cancel: &CancellationToken) -> Result
     // Show push target.
     eprintln!("\n=== Push target ===");
     let branch_display = args.branch.as_deref().unwrap_or("(current branch)");
-    eprintln!("  Remote: {}", args.remote);
+    let remote_display = resolved_remote
+        .or(args.remote.as_deref())
+        .unwrap_or("(not selected: --no-push)");
+    eprintln!("  Remote: {remote_display}");
     eprintln!("  Branch: {branch_display}");
 
     if args.no_push {

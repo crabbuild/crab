@@ -821,9 +821,10 @@ enum Cmd {
         /// Maximum number of concurrent file-processing tasks.
         #[arg(long, short = 'j', default_value_t = DEFAULT_FILE_PROCESSING_JOBS)]
         jobs: usize,
-        /// Push to this remote (default: origin).
-        #[arg(long, default_value = "origin")]
-        remote: String,
+        /// Push to this Git remote name or crab:// URL. Auto-detects a Crab
+        /// remote when omitted.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
         /// Push to this branch (default: current branch).
         #[arg(long, short)]
         branch: Option<String>,
@@ -6672,8 +6673,13 @@ mod tests {
 
             match cli.cmd {
                 Some(Cmd::Ship {
-                    rebase_retry_limit, ..
-                }) => assert_eq!(rebase_retry_limit, 256),
+                    rebase_retry_limit,
+                    remote,
+                    ..
+                }) => {
+                    assert_eq!(rebase_retry_limit, 256);
+                    assert_eq!(remote, None);
+                }
                 _ => unreachable!("ship command should parse"),
             }
         });
