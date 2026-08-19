@@ -17,6 +17,8 @@ pub const DEFAULT_PUSH_LOCK_TTL: Duration = Duration::from_secs(300);
 
 /// Internal resource serializing Git object-locator publication.
 pub const GIT_OBJECT_LOCATOR_RESOURCE: &str = "git-object-locator";
+/// Internal resource serializing unified manifest publication.
+pub const GIT_MANIFEST_RESOURCE: &str = "git-manifest";
 /// Internal resource serializing repository repacks.
 pub const REPACK_RESOURCE: &str = "repack";
 /// Internal resource used when a push has no destination ref.
@@ -756,6 +758,10 @@ mod tests {
         assert_eq!(
             internal_lock_path("org/repo", GIT_OBJECT_LOCATOR_RESOURCE).unwrap(),
             "org/repo/locks/internal/git-object-locator/lock"
+        );
+        assert_eq!(
+            internal_lock_path("org/repo", GIT_MANIFEST_RESOURCE).unwrap(),
+            "org/repo/locks/internal/git-manifest/lock"
         );
         assert_eq!(push_locks_prefix("org/repo").unwrap(), "org/repo/locks");
     }

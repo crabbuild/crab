@@ -2411,6 +2411,14 @@ const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
+const MANIFEST_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(50);
+const MANIFEST_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_millis(500);
+const PUSH_ADMISSION_SLOTS: usize = 5;
+const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
+const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(500);
+const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
+const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
+
 /// Multipart threshold: xorbs larger than this use multipart upload.
 const XORB_MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
 
@@ -2948,6 +2956,30 @@ fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let exp = PUSH_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
     let bound = exp.min(PUSH_LOCK_WAIT_BACKOFF_CAP).min(remaining);
+    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+    if bound_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let pick = rand::rng().random_range(1..=bound_nanos);
+    Duration::from_nanos(pick)
+}
+
+fn manifest_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
+    let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
+    let exp = MANIFEST_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
+    let bound = exp.min(MANIFEST_LOCK_WAIT_BACKOFF_CAP).min(remaining);
+    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+    if bound_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let pick = rand::rng().random_range(1..=bound_nanos);
+    Duration::from_nanos(pick)
+}
+
+fn push_admission_wait_delay(attempt: u32, remaining: Duration) -> Duration {
+    let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
+    let exp = PUSH_ADMISSION_WAIT_BACKOFF_BASE.saturating_mul(shift);
+    let bound = exp.min(PUSH_ADMISSION_WAIT_BACKOFF_CAP).min(remaining);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
     if bound_nanos == 0 {
         return Duration::ZERO;
@@ -4633,6 +4665,91 @@ pub(crate) async fn acquire_push_lock_leases(
     }
 }
 
+async fn acquire_internal_push_lock_with_wait(
+    store: &Store,
+    prefix: &str,
+    resource: &str,
+    ttl: Duration,
+    wait: Duration,
+    cancel: &CancellationToken,
+) -> Result<PushLock> {
+    let deadline = Instant::now() + wait;
+    let mut attempt = 0;
+    loop {
+        check_cancelled(cancel)?;
+        match PushLock::acquire_internal(store.inner(), prefix, resource, ttl)
+            .await
+            .map_err(CrabError::from)
+        {
+            Ok(lock) => return Ok(lock),
+            Err(error @ CrabError::PushLockHeld { .. }) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                let delay =
+                    manifest_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    resource,
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    "internal push lock held, waiting before retry"
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn acquire_push_admission_lock(
+    store: &Store,
+    prefix: &str,
+    ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<PushLock> {
+    // Admission is a capacity queue, not a correctness lease. Give queued
+    // writers more than one lease lifetime so a healthy long push cannot
+    // make an unrelated branch fail only because all slots remained busy.
+    let deadline = Instant::now() + ttl.saturating_mul(PUSH_ADMISSION_WAIT_TTL_MULTIPLIER);
+    let mut attempt = 0;
+    loop {
+        check_cancelled(cancel)?;
+        let slot = rand::rng().random_range(0..PUSH_ADMISSION_SLOTS);
+        let resource = format!("push-admission-{slot}");
+        match PushLock::acquire_internal(store.inner(), prefix, &resource, ttl)
+            .await
+            .map_err(CrabError::from)
+        {
+            Ok(lock) => return Ok(lock),
+            Err(CrabError::PushLockHeld { .. }) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(CrabError::Throttled { retry_after: None });
+                }
+                let delay =
+                    push_admission_wait_delay(attempt, deadline.saturating_duration_since(now));
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    slot,
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    "push admission is full, waiting before retry"
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
     while let Some(PushLockLease { lock, heartbeat }) = leases.pop() {
         if let Some(hb) = heartbeat {
@@ -4645,7 +4762,7 @@ pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
     }
 }
 
-pub(crate) async fn while_renewing_locator_lock<T>(
+pub(crate) async fn while_renewing_internal_lock<T>(
     lock: &PushLock,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -4664,6 +4781,51 @@ pub(crate) async fn while_renewing_locator_lock<T>(
                         None => Ok(value),
                     },
                 };
+            }
+            _ = ticker.tick(), if renewal_error.is_none() => {
+                if let Err(error) = lock.renew().await {
+                    renewal_error = Some(error);
+                }
+            }
+        }
+    }
+}
+
+async fn while_admitted_until_commit<T>(
+    lock: PushLock,
+    operation: impl Future<Output = Result<T>>,
+    mut committed: tokio::sync::oneshot::Receiver<()>,
+) -> Result<T> {
+    let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+    let mut operation = std::pin::pin!(operation);
+    let mut renewal_error = None;
+    let mut commit_signal_open = true;
+
+    loop {
+        tokio::select! {
+            result = &mut operation => {
+                if let Err(error) = lock.release().await {
+                    warn!(error = %error, "push admission lock release failed");
+                }
+                return match (result, renewal_error) {
+                    (Ok(_), Some(error)) => Err(CrabError::from(error)),
+                    (result, _) => result,
+                };
+            }
+            signal = &mut committed, if commit_signal_open => {
+                if signal.is_err() {
+                    commit_signal_open = false;
+                    continue;
+                }
+                if let Err(error) = lock.release().await {
+                    warn!(error = %error, "push admission lock release failed after commit");
+                }
+                // Derived indexes and cache warming are repairable and must
+                // not retain scarce write capacity after the ref is visible.
+                return operation.await;
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
                 if let Err(error) = lock.renew().await {
@@ -4725,6 +4887,16 @@ pub(crate) async fn publish_committed_pack_locators(
         ));
     }
 
+    // Most fanout writers are stale by the time they reach derived indexing.
+    // Reject them before lock traffic or opening SlateDB; the check under the
+    // lock remains authoritative against a concurrent manifest advance.
+    let (current, _) = read_manifest(store, router).await?;
+    if current.generation != anchor.generation
+        || current.pack_index_hash != anchor.pack_index_hash.hex()
+    {
+        return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
+    }
+
     let lock = PushLock::acquire_internal(
         store.inner(),
         router.repo_prefix(),
@@ -4733,7 +4905,7 @@ pub(crate) async fn publish_committed_pack_locators(
     )
     .await?;
     let publication_started = Instant::now();
-    let write_result = Box::pin(while_renewing_locator_lock(&lock, async {
+    let write_result = Box::pin(while_renewing_internal_lock(&lock, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != anchor.generation
             || current.pack_index_hash != anchor.pack_index_hash.hex()
@@ -6487,10 +6659,11 @@ impl PushPipeline {
     )]
     async fn unified_manifest_cas(
         &self,
-        mut manifest: Manifest,
+        manifest: Manifest,
         bulk: BulkData,
         sha_map: &HashMap<String, String>,
-        mut decisions: HashMap<String, RefUpdateDecision>,
+        decisions: HashMap<String, RefUpdateDecision>,
+        admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<HashMap<String, RefUpdateDecision>> {
         let t0 = Instant::now();
         let store = self.store.as_ref().ok_or_else(|| {
@@ -6501,6 +6674,62 @@ impl PushPipeline {
         // manifest pointer exposes them.
         upload_segmented_bulk(store, &self.router, &bulk).await?;
 
+        // Pack/chunk uploads remain concurrent, while the single manifest
+        // pointer has one repository-wide writer. Queue this short commit
+        // phase to avoid O(writers²) CAS retries under branch fanout.
+        let manifest_lock = acquire_internal_push_lock_with_wait(
+            store,
+            self.router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            self.config.lock_ttl,
+            self.config.lock_ttl,
+            &self.cancel,
+        )
+        .await?;
+        let result = while_renewing_internal_lock(
+            &manifest_lock,
+            self.unified_manifest_cas_under_lock(t0, manifest, sha_map, decisions, store),
+        )
+        .await;
+        let release = manifest_lock.release().await.map_err(CrabError::from);
+        match result {
+            Err(error) => {
+                if let Err(release_error) = release {
+                    warn!(
+                        error = %release_error,
+                        "manifest publication failed and its lock release also failed"
+                    );
+                }
+                Err(error)
+            }
+            Ok((value, committed_manifest)) => {
+                release?;
+                if let Some(committed) = admission_commit.take() {
+                    let _ = committed.send(());
+                }
+                if let Err(error) = self
+                    .publish_git_visibility_index(&committed_manifest, store)
+                    .await
+                {
+                    warn!(
+                        error = %error,
+                        generation = committed_manifest.generation,
+                        "Git visibility proof publication failed; v2 remains gated"
+                    );
+                }
+                Ok(value)
+            }
+        }
+    }
+
+    async fn unified_manifest_cas_under_lock(
+        &self,
+        t0: Instant,
+        mut manifest: Manifest,
+        sha_map: &HashMap<String, String>,
+        mut decisions: HashMap<String, RefUpdateDecision>,
+        store: &Store,
+    ) -> Result<(HashMap<String, RefUpdateDecision>, Manifest)> {
         let max_retries = self.config.max_cas_retries;
         // A retry may only shrink the planned ref set. Promoting a ref that
         // preflight rejected would commit it without the dependency walk,
@@ -6539,17 +6768,6 @@ impl PushPipeline {
                     *self.manifest_etag.lock().await =
                         Some(self.manifest_etag_or_read_current(store, new_etag).await);
 
-                    // Visibility is derived acceleration. Build it only for
-                    // the generation that won CAS; losing candidates would
-                    // repeat a full repository walk before every retry.
-                    if let Err(error) = self.publish_git_visibility_index(&manifest, store).await {
-                        warn!(
-                            error = %error,
-                            generation = manifest.generation,
-                            "Git visibility proof publication failed; v2 remains gated"
-                        );
-                    }
-
                     let span = tracing::Span::current();
                     span.record("generation", manifest.generation);
                     span.record("refs_count", manifest.refs.len());
@@ -6566,7 +6784,7 @@ impl PushPipeline {
                     );
                     let anchor = committed_manifest_anchor(&manifest)?;
                     *self.committed_manifest_anchor.lock().await = anchor;
-                    return Ok(decisions);
+                    return Ok((decisions, manifest));
                 }
                 Err(CrabError::CasConflict { .. }) => {
                     // Bump the CAS conflict counter.
@@ -6768,6 +6986,16 @@ impl PushPipeline {
         manifest: &Manifest,
         store: &crate::storage::store::Store,
     ) -> Result<()> {
+        let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
+        let packed_objects = packs
+            .iter()
+            .try_fold(0u64, |total, pack| total.checked_add(pack.object_count))
+            .ok_or_else(|| CrabError::Internal("Git pack object count overflow".to_owned()))?;
+        if packed_objects > MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS {
+            return Err(CrabError::Internal(format!(
+                "Git visibility proof deferred: {packed_objects} packed objects exceed the synchronous push budget of {MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS}"
+            )));
+        }
         let git_dir = self
             .git_dir_override()
             .map(Path::to_path_buf)
@@ -13084,7 +13312,34 @@ impl PushPipeline {
     /// level. Ref-level errors (non-fast-forward, connectivity
     /// missing) are already surfaced per-ref during their own steps.
     async fn execute(&self) -> PushResult {
-        let result = Box::pin(self.execute_inner()).await;
+        let admission_lock = if self.config.active_active_replication.is_none() {
+            match self.store.as_ref() {
+                Some(store) => acquire_push_admission_lock(
+                    store,
+                    self.router.repo_prefix(),
+                    self.config.lock_ttl,
+                    &self.cancel,
+                )
+                .await
+                .map(Some),
+                None => Ok(None),
+            }
+        } else {
+            Ok(None)
+        };
+        let result = match admission_lock {
+            Ok(Some(lock)) => {
+                let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+                while_admitted_until_commit(
+                    lock,
+                    self.execute_inner(Some(committed_tx)),
+                    committed_rx,
+                )
+                .await
+            }
+            Ok(None) => Box::pin(self.execute_inner(None)).await,
+            Err(error) => Err(error),
+        };
 
         // Close the MetaDb guard before returning on either path.
         // On the happy path, step 9b already committed every SlateDB
@@ -13140,7 +13395,10 @@ impl PushPipeline {
         (bytes, pointers.len() as u64)
     }
 
-    async fn execute_inner(&self) -> Result<PushResult> {
+    async fn execute_inner(
+        &self,
+        mut admission_commit: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<PushResult> {
         // Cancellation wins over configuration or remote preflight errors so
         // callers receive the stable cancellation contract even when no
         // network operation has started yet.
@@ -13392,8 +13650,14 @@ impl PushPipeline {
                 active_active_commit = self.protected_push_finalize(manifest, bulk).await?;
                 decisions
             } else {
-                self.unified_manifest_cas(manifest, bulk, &sha_map, decisions)
-                    .await?
+                self.unified_manifest_cas(
+                    manifest,
+                    bulk,
+                    &sha_map,
+                    decisions,
+                    &mut admission_commit,
+                )
+                .await?
             };
             self.emit_perf_phase(manifest_phase.finish(0, manifest_bytes_out, manifest_item_count));
             Some(committed_decisions)
@@ -13401,6 +13665,10 @@ impl PushPipeline {
             debug!("steps 11-12: no store, skipping manifest build and CAS");
             None
         };
+
+        if let Some(committed) = admission_commit.take() {
+            let _ = committed.send(());
+        }
 
         if decisions.is_some() && self.config.protected_push.is_none() {
             let file_index_plan = self.pending_file_index_plan.lock().await.clone();
@@ -16706,8 +16974,9 @@ mod tests {
             .await
             .expect("commit concurrent main update");
 
+        let mut admission_commit = None;
         let committed_decisions = pipeline
-            .unified_manifest_cas(candidate, bulk, &sha_map, decisions)
+            .unified_manifest_cas(candidate, bulk, &sha_map, decisions, &mut admission_commit)
             .await
             .expect("retry should commit unconflicted dev ref");
         assert!(matches!(
@@ -16927,6 +17196,132 @@ mod tests {
         .expect("partial acquisition must be released after later contention");
         lock.release().await.unwrap();
         blocker.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manifest_publication_waits_for_current_writer() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let blocker = PushLock::acquire_internal(
+            store.inner(),
+            "repo",
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            blocker.release().await.unwrap();
+        });
+
+        let started = Instant::now();
+        let lock = acquire_internal_push_lock_with_wait(
+            &store,
+            "repo",
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("queued manifest writer should acquire the released lease");
+
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        lock.release().await.unwrap();
+        release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_admission_waits_when_every_slot_is_occupied() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let mut blockers = Vec::new();
+        for slot in 0..PUSH_ADMISSION_SLOTS {
+            blockers.push(
+                PushLock::acquire_internal(
+                    store.inner(),
+                    "repo",
+                    &format!("push-admission-{slot}"),
+                    Duration::from_secs(60),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            for blocker in blockers {
+                blocker.release().await.unwrap();
+            }
+        });
+
+        let started = Instant::now();
+        let lock = acquire_push_admission_lock(
+            &store,
+            "repo",
+            Duration::from_secs(3),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("queued push should enter after an admission slot is released");
+
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        lock.release().await.unwrap();
+        release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_admission_releases_after_canonical_commit() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let resource = "push-admission-0";
+        let lock =
+            PushLock::acquire_internal(store.inner(), "repo", resource, Duration::from_secs(60))
+                .await
+                .unwrap();
+        let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let operation = tokio::spawn(async move {
+            while_admitted_until_commit(
+                lock,
+                async move {
+                    committed_tx.send(()).unwrap();
+                    finish_rx.await.unwrap();
+                    Ok(())
+                },
+                committed_rx,
+            )
+            .await
+        });
+
+        let contender = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match PushLock::acquire_internal(
+                    store.inner(),
+                    "repo",
+                    resource,
+                    Duration::from_secs(60),
+                )
+                .await
+                {
+                    Ok(lock) => break lock,
+                    Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("unexpected admission error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("canonical commit should release admission before repair finishes");
+
+        finish_tx.send(()).unwrap();
+        operation.await.unwrap().unwrap();
+        contender.release().await.unwrap();
     }
 
     #[tokio::test]
@@ -25733,8 +26128,15 @@ mod tests {
             .rebuild_push_commit_receipt(&manifest, &HashMap::new(), &HashMap::new(), 1, &[])
             .await
             .unwrap();
+        let mut admission_commit = None;
         pipeline
-            .unified_manifest_cas(manifest.clone(), bulk, &HashMap::new(), HashMap::new())
+            .unified_manifest_cas(
+                manifest.clone(),
+                bulk,
+                &HashMap::new(),
+                HashMap::new(),
+                &mut admission_commit,
+            )
             .await
             .unwrap();
 
