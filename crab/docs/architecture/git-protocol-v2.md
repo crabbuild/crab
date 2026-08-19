@@ -64,7 +64,11 @@ depth semantics, filters, tag expansion, or a want that is not an exact ref
 target use the bounded traversal planner. Pack generation reads up to the
 operation's default 10,000-object bound as one locator batch so adjacent pack
 ranges can be coalesced; fetched-byte and inflated-byte budgets remain the
-memory and I/O bounds.
+memory and I/O bounds. Locator batches spanning at least one exact-read wave
+and at least half of the pinned pack inventory use one ordered SlateDB scan,
+clipped to the requested SHA-1 range. The scan abandons itself and returns to
+exact reads if stale rows would make it examine more than twice the requested
+object count, so sparse and stale-heavy repositories remain bounded.
 
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
