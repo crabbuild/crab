@@ -1437,7 +1437,7 @@ async fn rebuild_git_object_locators(
         crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
     )
     .await?;
-    let write_result = crate::git::push::while_renewing_locator_lock(&lock, async {
+    let write_result = crate::git::push::while_renewing_internal_lock(&lock, async {
         let (current, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         if current.generation != manifest.generation
             || current.pack_index_hash != manifest.pack_index_hash

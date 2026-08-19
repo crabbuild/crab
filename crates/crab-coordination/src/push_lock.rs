@@ -17,6 +17,8 @@ pub const DEFAULT_PUSH_LOCK_TTL: Duration = Duration::from_secs(300);
 
 /// Internal resource serializing Git object-locator publication.
 pub const GIT_OBJECT_LOCATOR_RESOURCE: &str = "git-object-locator";
+/// Internal resource serializing unified manifest publication.
+pub const GIT_MANIFEST_RESOURCE: &str = "git-manifest";
 /// Internal resource serializing repository repacks.
 pub const REPACK_RESOURCE: &str = "repack";
 /// Internal resource used when a push has no destination ref.
@@ -522,7 +524,7 @@ async fn expire_stale_lock_at(
     }
 }
 
-async fn create_strict(
+pub(crate) async fn create_strict(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     body: Bytes,
@@ -533,7 +535,7 @@ async fn create_strict(
         .map(Into::into)
 }
 
-async fn get_with_version(
+pub(crate) async fn get_with_version(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
 ) -> object_store::Result<(Bytes, UpdateVersion)> {
@@ -545,7 +547,7 @@ async fn get_with_version(
     Ok((result.bytes().await?, version))
 }
 
-async fn update(
+pub(crate) async fn update(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     body: Bytes,
@@ -561,7 +563,7 @@ async fn update(
         .map(Into::into)
 }
 
-fn store_error(path: &str, source: object_store::Error) -> CoordinationError {
+pub(crate) fn store_error(path: &str, source: object_store::Error) -> CoordinationError {
     CoordinationError::ObjectStore {
         path: path.to_owned(),
         source,
@@ -585,7 +587,7 @@ fn deserialize_payload(path: &str, body: &[u8]) -> Result<PushLockPayload> {
     })
 }
 
-fn generate_holder_id() -> String {
+pub(crate) fn generate_holder_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HOLDER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -756,6 +758,10 @@ mod tests {
         assert_eq!(
             internal_lock_path("org/repo", GIT_OBJECT_LOCATOR_RESOURCE).unwrap(),
             "org/repo/locks/internal/git-object-locator/lock"
+        );
+        assert_eq!(
+            internal_lock_path("org/repo", GIT_MANIFEST_RESOURCE).unwrap(),
+            "org/repo/locks/internal/git-manifest/lock"
         );
         assert_eq!(push_locks_prefix("org/repo").unwrap(), "org/repo/locks");
     }

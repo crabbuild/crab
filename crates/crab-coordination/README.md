@@ -20,12 +20,11 @@ There are two complementary coordination paths:
 ```text
 Single repository mutation                 Active-active mutation
         │                                          │
-        ▼                                          ▼
-PushLock: short-TTL CAS lease          WriteCoordinator: durable state machine
-        │                                          │
-        └── object-store lock                      ├─ Pending
-                                                   ├─ ObjectsUploaded
-                                                   ├─ Committed
+        ├─ PushLock: short-TTL CAS lease           ▼
+        │                              WriteCoordinator: durable state machine
+        └─ PushAdmissionTicket: FIFO queue          ├─ Pending
+                   │                                ├─ ObjectsUploaded
+                   └─ object-store CAS              ├─ Committed
                                                    ├─ Materialized
                                                    └─ Aborted
 ```
@@ -33,6 +32,12 @@ PushLock: short-TTL CAS lease          WriteCoordinator: durable state machine
 `PushLock` protects a Git ref or internal resource under a repository prefix.
 It has a default five-minute TTL, holder-checked release, renewal, and
 expired-lease reclamation. Enable it with `object-store-lock`.
+
+`PushAdmissionTicket` bounds expensive single-repository push pipelines without
+random slot selection or a shared mutable queue object. Each writer creates one
+time-ordered ticket object, the oldest live tickets enter first, and writers
+refresh only their own short lease. Observers ignore expired tickets and remove
+a bounded number per poll, so enqueue and renewal do not contend on one hot key.
 
 `WriteCoordinator` exposes health, begin/upload/commit/materialize/abort,
 ref lookup, GC safety snapshots, repair snapshots, and write fencing. The
