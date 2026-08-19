@@ -6517,18 +6517,6 @@ impl PushPipeline {
             check_cancelled(&self.cancel)?;
             self.validate_push_commit_receipt(&manifest).await?;
 
-            // Publish the complete ref-rooted object proof before exposing the
-            // manifest. Missing proof disables protocol-v2 advertisement, but
-            // must not turn an otherwise valid legacy push into a data loss
-            // event; repair can rebuild this immutable artifact later.
-            if let Err(error) = self.publish_git_visibility_index(&manifest, store).await {
-                warn!(
-                    error = %error,
-                    generation = manifest.generation,
-                    "Git visibility proof publication failed; v2 remains gated"
-                );
-            }
-
             let etag_guard = self.manifest_etag.lock().await;
             let current_etag = etag_guard.clone();
             drop(etag_guard);
@@ -6550,6 +6538,17 @@ impl PushPipeline {
                     // Success — update the stored ETag.
                     *self.manifest_etag.lock().await =
                         Some(self.manifest_etag_or_read_current(store, new_etag).await);
+
+                    // Visibility is derived acceleration. Build it only for
+                    // the generation that won CAS; losing candidates would
+                    // repeat a full repository walk before every retry.
+                    if let Err(error) = self.publish_git_visibility_index(&manifest, store).await {
+                        warn!(
+                            error = %error,
+                            generation = manifest.generation,
+                            "Git visibility proof publication failed; v2 remains gated"
+                        );
+                    }
 
                     let span = tracing::Span::current();
                     span.record("generation", manifest.generation);

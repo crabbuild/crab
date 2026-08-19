@@ -243,6 +243,38 @@ fn walk_reachable_by_ref_with_limit(
     peeled_refs: &BTreeMap<String, String>,
     maximum: Option<usize>,
 ) -> Result<BTreeMap<String, ReachableSet>> {
+    let objects_dir = git_dir.join("objects");
+    if !objects_dir.is_dir() {
+        return Err(WalkError::ObjectsDirectoryNotFound {
+            path: objects_dir.display().to_string(),
+        });
+    }
+    let odb = gix_odb::at(&objects_dir).map_err(|source| WalkError::Git {
+        operation: format!("failed to open git ODB at {}", objects_dir.display()),
+        source: Box::new(source),
+    })?;
+
+    // A push client may not have tips concurrently published by another
+    // writer. Prove every root is locally available before walking any large
+    // closure so an incomplete ODB fails in O(refs), not O(repository size).
+    for (_, oid) in refs {
+        let root = ObjectId::from_hex(oid.as_bytes()).map_err(|source| WalkError::Git {
+            operation: format!("invalid ref object {oid}"),
+            source: Box::new(source),
+        })?;
+        let mut buf = Vec::new();
+        if odb
+            .try_find(&root, &mut buf)
+            .map_err(|source| WalkError::Git {
+                operation: format!("failed to read ref object {root}"),
+                source,
+            })?
+            .is_none()
+        {
+            return Err(WalkError::BeyondShallowBoundary { oid: oid.clone() });
+        }
+    }
+
     let mut closures = BTreeMap::new();
     let mut total_objects = 0usize;
     for (name, oid) in refs {
@@ -261,11 +293,6 @@ fn walk_reachable_by_ref_with_limit(
                 operation: format!("invalid ref object {traversal_tip}"),
                 source: Box::new(source),
             })?;
-        let objects_dir = git_dir.join("objects");
-        let odb = gix_odb::at(&objects_dir).map_err(|source| WalkError::Git {
-            operation: format!("failed to open git ODB at {}", objects_dir.display()),
-            source: Box::new(source),
-        })?;
         let mut buf = Vec::new();
         let data = odb
             .try_find(&root, &mut buf)
@@ -678,7 +705,7 @@ mod tests {
 
         let bounded = walk_reachable_bounded(
             &git_dir_path,
-            &[("refs/heads/main".to_owned(), head_sha)],
+            &[("refs/heads/main".to_owned(), head_sha.clone())],
             1,
         )
         .unwrap_err();
@@ -688,6 +715,22 @@ mod tests {
                 actual: 2,
                 maximum: 1
             }
+        ));
+
+        let missing_tip = "f".repeat(40);
+        let per_ref = walk_reachable_by_ref_bounded(
+            &git_dir_path,
+            &[
+                ("refs/heads/main".to_owned(), head_sha),
+                ("refs/heads/concurrent".to_owned(), missing_tip.clone()),
+            ],
+            &BTreeMap::new(),
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            per_ref,
+            WalkError::BeyondShallowBoundary { oid } if oid == missing_tip
         ));
     }
 
