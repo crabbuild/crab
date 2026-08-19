@@ -1,4 +1,0 @@
-interface:
-  display_name: "Crab CLI Verification"
-  short_description: "E2E-verify Crab CLI commands on RustFS"
-  default_prompt: "Use $crab-cli-verification to verify a Crab CLI command end to end against RustFS."
