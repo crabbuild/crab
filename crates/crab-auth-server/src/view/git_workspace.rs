@@ -162,7 +162,6 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<Vec<u8>> {
             path_str(filtered_git)?,
             "index-pack",
             "--strict",
-            "--rev-index",
             path_str(&validation_pack)?,
         ],
         None,

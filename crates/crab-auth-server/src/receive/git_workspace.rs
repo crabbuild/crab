@@ -361,12 +361,7 @@ impl<'a> GitReceiveWorkspace<'a> {
         let verify_path = temp_root.join(format!("pack-{pack_id}.pack"));
         fs::write(&verify_path, &pack_bytes)?;
         run_git(
-            [
-                "index-pack",
-                "--strict",
-                "--rev-index",
-                path_str(&verify_path)?,
-            ],
+            ["index-pack", "--strict", path_str(&verify_path)?],
             Some(git_dir),
         )?;
         Ok(PackManifestEntry {

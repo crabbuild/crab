@@ -518,17 +518,9 @@ mod tests {
                 .to_owned();
             let pack = temp.path().join(format!("fixture-{pack_hash}.pack"));
             let idx = temp.path().join("fixture.idx");
-            git(
-                &[
-                    "index-pack",
-                    "--rev-index",
-                    "-o",
-                    path_str(&idx),
-                    path_str(&pack),
-                ],
-                None,
-            );
+            git(&["index-pack", "-o", path_str(&idx), path_str(&pack)], None);
             let rev = idx.with_extension("rev");
+            write_pack_reverse_index(&idx, &rev).expect("write reverse index");
             assert!(pack.exists());
             assert!(idx.exists());
             assert!(rev.exists());

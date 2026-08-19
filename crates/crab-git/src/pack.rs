@@ -308,7 +308,10 @@ fn install_pack_file_blocking(
         // packs. Bind it to the owning repository instead of ambient cwd.
         index_pack.arg("--git-dir").arg(git_dir);
     }
-    index_pack.arg("index-pack").arg("--rev-index");
+    // Git 2.30, the minimum supported version, predates `--rev-index`.
+    // Crab writes its own reverse index below, so indexing must not depend
+    // on that newer optional Git sidecar.
+    index_pack.arg("index-pack");
     if fsck_objects {
         // Validate object bodies during the indexing pass. Broken links are
         // checked separately by the reachability owner after all packs land.

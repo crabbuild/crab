@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::pack::{PackError, install_pack_file_from_path};
-use crate::pack_locator::{PackLocationIter, PackLocatorError};
+use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 
 /// A downloaded canonical pack selected by a pinned repository manifest.
 #[derive(Debug, Clone)]
@@ -157,17 +157,17 @@ pub fn repack_repository(
     run_git(
         Command::new("git")
             .arg("index-pack")
-            .arg("--rev-index")
             .arg("-o")
             .arg(&index_path)
             .arg(&pack_path)
             .stdout(Stdio::null()),
         "index replacement pack",
     )?;
+    write_pack_reverse_index(&index_path, &reverse_index_path)?;
     if !reverse_index_path.is_file() {
         return Err(RepackError::SourceIntegrity {
             pack_id: "replacement".to_owned(),
-            reason: "git index-pack produced no reverse index".to_owned(),
+            reason: "reverse-index generation produced no reverse index".to_owned(),
         });
     }
     run_git(
