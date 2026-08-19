@@ -1,15 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
-use slatedb::config::DbReaderOptions;
+use slatedb::config::{DbReaderOptions, ScanOptions};
 
 use super::format::{
-    METADATA_KEY, PACK_FAMILY, decode_metadata, decode_object_location, decode_pack_key,
-    decode_pack_record, object_key, validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
+    decode_object_location, decode_pack_key, decode_pack_record, object_key,
+    validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectLocation, GitObjectLocator, GitPackInventoryEntry,
@@ -19,6 +20,18 @@ use crate::error::{MetadataError, Result};
 
 const DB_LABEL: &str = "git_locator_db";
 const LOOKUP_CONCURRENCY: usize = 256;
+// A scan must replace one full point-read wave and may inspect at most two
+// rows per requested object before the exact-key path becomes cheaper.
+const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
+const MAX_SCAN_AMPLIFICATION: usize = 2;
+const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
+const SCAN_FETCH_TASKS: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupStrategy {
+    Exact,
+    Scan { row_limit: usize },
+}
 
 /// Result of validating one compact row against a pinned pack inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +151,7 @@ impl GitObjectLocatorSession {
         self.coverage
     }
 
-    /// Resolve exact OID keys and validate every hit against pinned inventory.
+    /// Resolve OID keys and validate every hit against pinned inventory.
     pub async fn lookup_batch(
         &self,
         object_ids: &[[u8; 20]],
@@ -147,6 +160,49 @@ impl GitObjectLocatorSession {
         let Some(reader) = &self.reader else {
             return Ok(vec![GitObjectLookup::Miss; object_ids.len()]);
         };
+        let inventory_objects = inventory
+            .values()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        let mut unique_objects = object_ids.len();
+        let mut strategy = lookup_strategy(unique_objects, inventory_objects);
+        if matches!(strategy, LookupStrategy::Scan { .. }) {
+            unique_objects = object_ids.iter().collect::<HashSet<_>>().len();
+            strategy = lookup_strategy(unique_objects, inventory_objects);
+        }
+        if let LookupStrategy::Scan { row_limit } = strategy {
+            tracing::debug!(
+                locator_lookup_mode = "scan",
+                requested_objects = object_ids.len(),
+                unique_objects,
+                inventory_objects,
+                row_limit,
+                "compact Git locator lookup selected"
+            );
+            if let Some(lookups) = self
+                .lookup_batch_by_scan(reader, object_ids, inventory, row_limit)
+                .await?
+            {
+                return Ok(lookups);
+            }
+            tracing::debug!(
+                locator_lookup_mode = "exact_fallback",
+                requested_objects = object_ids.len(),
+                unique_objects,
+                inventory_objects,
+                row_limit,
+                "compact Git locator scan exceeded its amplification bound"
+            );
+        }
+
+        self.lookup_batch_exact(reader, object_ids, inventory).await
+    }
+
+    async fn lookup_batch_exact(
+        &self,
+        reader: &Arc<slatedb::DbReader>,
+        object_ids: &[[u8; 20]],
+        inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
+    ) -> Result<Vec<GitObjectLookup>> {
         let bindings = &self.bindings;
         let fetched: Vec<(usize, GitObjectLookup)> =
             stream::iter(object_ids.iter().copied().enumerate().map(|(index, oid)| {
@@ -168,6 +224,75 @@ impl GitObjectLocatorSession {
             lookups[index] = lookup;
         }
         Ok(lookups)
+    }
+
+    async fn lookup_batch_by_scan(
+        &self,
+        reader: &slatedb::DbReader,
+        object_ids: &[[u8; 20]],
+        inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
+        row_limit: usize,
+    ) -> Result<Option<Vec<GitObjectLookup>>> {
+        let mut requested = object_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, oid)| (oid, index))
+            .collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(oid, _)| *oid);
+        let Some((first_oid, _)) = requested.first() else {
+            return Ok(Some(Vec::new()));
+        };
+        let last_oid = requested
+            .last()
+            .map(|(oid, _)| oid)
+            .ok_or_else(|| MetadataError::Internal("locator scan lost its request".to_owned()))?;
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options(
+                [OBJECT_FAMILY],
+                first_oid.as_slice()..=last_oid.as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut lookups = vec![GitObjectLookup::Miss; object_ids.len()];
+        let mut request_index = 0_usize;
+        let mut rows_scanned = 0_usize;
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > row_limit {
+                return Ok(None);
+            }
+            let oid = decode_object_key(&row.key)
+                .ok_or_else(|| corrupt("object", "invalid compact locator object key"))?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(requested_oid, _)| *requested_oid < oid)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(requested_oid, _)| *requested_oid == oid)
+            {
+                let (_, output_index) = requested[request_index];
+                lookups[output_index] = classify_location(&row.value, &self.bindings, inventory);
+                request_index += 1;
+            }
+            if request_index == requested.len() {
+                break;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "scan",
+            requested_objects = object_ids.len(),
+            rows_scanned,
+            "compact Git locator lookup completed"
+        );
+        Ok(Some(lookups))
     }
 
     /// Return every validated slot binding in numeric slot order.
@@ -196,6 +321,19 @@ impl GitObjectLocatorSession {
                 db: DB_LABEL.to_owned(),
                 source,
             })
+    }
+}
+
+fn lookup_strategy(requested_objects: usize, inventory_objects: u64) -> LookupStrategy {
+    let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
+    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS
+        || inventory_objects == 0
+        || requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects
+    {
+        return LookupStrategy::Exact;
+    }
+    LookupStrategy::Scan {
+        row_limit: requested_objects.saturating_mul(MAX_SCAN_AMPLIFICATION),
     }
 }
 
@@ -391,9 +529,39 @@ mod tests {
         }
     }
 
+    fn oid(seed: u32) -> [u8; 20] {
+        let mut oid = [0_u8; 20];
+        oid[16..].copy_from_slice(&seed.to_be_bytes());
+        oid
+    }
+
     #[test]
     fn locator_reader_skips_wal_replay() {
         assert!(locator_reader_options().skip_wal_replay);
+    }
+
+    #[test]
+    fn dense_lookup_requires_a_full_exact_wave_and_bounded_scan_amplification() {
+        assert_eq!(
+            lookup_strategy(MIN_SCAN_LOOKUP_OBJECTS, MIN_SCAN_LOOKUP_OBJECTS as u64),
+            LookupStrategy::Scan {
+                row_limit: MIN_SCAN_LOOKUP_OBJECTS * 2,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(
+                MIN_SCAN_LOOKUP_OBJECTS - 1,
+                (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64
+            ),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(
+                MIN_SCAN_LOOKUP_OBJECTS,
+                (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64
+            ),
+            LookupStrategy::Exact
+        );
     }
 
     async fn publish(
@@ -437,6 +605,45 @@ mod tests {
                 pack_size: pack.pack_size,
             },
         }
+    }
+
+    async fn publish_many(
+        store: Arc<dyn ObjectStore>,
+        object_count: usize,
+    ) -> (Vec<[u8; 20]>, HashMap<MerkleHash, GitPackInventoryEntry>) {
+        let mut pack = pack(1);
+        pack.object_count = object_count as u64;
+        let object_ids = (0..object_count)
+            .map(|seed| oid(seed as u32))
+            .collect::<Vec<_>>();
+        let entries = object_ids
+            .iter()
+            .copied()
+            .map(|oid| GitObjectLocatorEntry {
+                oid,
+                location: GitObjectLocation {
+                    pack_offset: 12,
+                    entry_len: 96,
+                    crc32: 7,
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut writer = GitObjectLocatorWriter::open(store, "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(binding, &entries)
+            .await
+            .expect("write objects");
+        writer.flush_objects().await.expect("flush objects");
+        writer.close().await.expect("close writer");
+        let inventory = GitPackInventoryEntry {
+            pack_id: pack.pack_id,
+            object_count: pack.object_count,
+            pack_size: pack.pack_size,
+        };
+        (object_ids, HashMap::from([(pack.pack_id, inventory)]))
     }
 
     #[tokio::test]
@@ -534,6 +741,49 @@ mod tests {
                 GitObjectLookup::Miss
             ]
         ));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn dense_scan_preserves_request_order_and_reports_missing_ids() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (mut object_ids, inventory) =
+            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+        object_ids.reverse();
+        let missing_index = MIN_SCAN_LOOKUP_OBJECTS / 2;
+        object_ids[missing_index] = [0xff; 20];
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let lookups = session
+            .lookup_batch(&object_ids, &inventory)
+            .await
+            .expect("dense lookup");
+        assert_eq!(lookups.len(), object_ids.len());
+        assert_eq!(lookups[missing_index], GitObjectLookup::Miss);
+        assert!(lookups.iter().enumerate().all(|(index, lookup)| {
+            index == missing_index || matches!(lookup, GitObjectLookup::Hit(_))
+        }));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn dense_scan_abandons_work_beyond_its_row_limit() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (object_ids, inventory) = publish_many(Arc::clone(&store), 3).await;
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+        let reader = session.reader.as_ref().expect("reader exists");
+
+        assert_eq!(
+            session
+                .lookup_batch_by_scan(reader, &[object_ids[0], object_ids[2]], &inventory, 1)
+                .await
+                .expect("bounded scan"),
+            None
+        );
         session.close().await.expect("close reader");
     }
 
