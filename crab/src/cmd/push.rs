@@ -170,6 +170,12 @@ struct PushTarget {
     parsed_url: CrabUrl,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfiguredRemote {
+    name: String,
+    url: String,
+}
+
 enum PushAttempt {
     Done(PushSummaryPayload),
     Failed(Box<PushAttemptFailure>),
@@ -1071,27 +1077,103 @@ fn build_push_summary(
     }
 }
 
-/// Resolve the remote name from the user argument or git config.
+/// Resolve the remote name from the user argument or Git configuration.
 ///
-/// When no remote is specified, tries `git config branch.<current>.remote`,
-/// falling back to `"origin"`.
-pub(crate) fn resolve_remote_name(explicit: Option<&str>) -> String {
+/// When no remote is specified, a Crab-compatible upstream is preferred,
+/// followed by a remote named `crab` or the only other Crab-compatible
+/// remote. Non-Crab upstream/origin fallback is retained so the final target
+/// validation can provide the existing actionable error.
+pub(crate) fn resolve_remote_name(explicit: Option<&str>) -> Result<String> {
     if let Some(name) = explicit {
-        return name.to_owned();
+        return Ok(name.to_owned());
     }
 
-    // Try the current branch's configured remote.
-    if let Some(branch) = current_branch()
-        && let Some(remote) = git_config_value(&format!("branch.{branch}.remote"))
+    let branch_remote =
+        current_branch().and_then(|branch| git_config_value(&format!("branch.{branch}.remote")));
+    let configured_remotes = configured_git_remotes();
+    if let Some(remote) = select_default_crab_remote(branch_remote.as_deref(), &configured_remotes)?
     {
-        return remote;
+        return Ok(remote);
     }
 
-    "origin".to_owned()
+    Ok(branch_remote.unwrap_or_else(|| "origin".to_owned()))
+}
+
+/// Resolve and validate the target used by a higher-level command before it
+/// performs local mutations such as staging or committing.
+pub(crate) fn resolve_push_remote(explicit: Option<&str>) -> Result<String> {
+    Ok(resolve_push_target(explicit)?.remote)
+}
+
+fn configured_git_remotes() -> Vec<ConfiguredRemote> {
+    let output = match Command::new("git")
+        .args(["remote"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let name = line.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let url = git_config_value(&format!("remote.{name}.url"))?;
+            Some(ConfiguredRemote {
+                name: name.to_owned(),
+                url,
+            })
+        })
+        .collect()
+}
+
+fn select_default_crab_remote(
+    branch_remote: Option<&str>,
+    configured_remotes: &[ConfiguredRemote],
+) -> Result<Option<String>> {
+    let crab_remotes: Vec<&ConfiguredRemote> = configured_remotes
+        .iter()
+        .filter(|remote| remote.url.starts_with("crab://"))
+        .collect();
+
+    if let Some(branch_remote) = branch_remote
+        && crab_remotes
+            .iter()
+            .any(|remote| remote.name == branch_remote)
+    {
+        return Ok(Some(branch_remote.to_owned()));
+    }
+
+    if let Some(remote) = crab_remotes.iter().find(|remote| remote.name == "crab") {
+        return Ok(Some(remote.name.clone()));
+    }
+
+    match crab_remotes.as_slice() {
+        [] => Ok(None),
+        [remote] => Ok(Some(remote.name.clone())),
+        _ => {
+            let names = crab_remotes
+                .iter()
+                .map(|remote| format!("'{}'", remote.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(CrabError::Configuration {
+                key: format!(
+                    "multiple Crab remotes detected ({names}); choose one with `--remote <name>`"
+                ),
+                origin: "git remotes".into(),
+            })
+        }
+    }
 }
 
 fn resolve_push_target(explicit: Option<&str>) -> Result<PushTarget> {
-    let remote = resolve_remote_name(explicit);
+    let remote = resolve_remote_name(explicit)?;
     if remote.contains("://") {
         let parsed_url = CrabUrl::parse(&remote)?;
         return Ok(PushTarget {
@@ -1580,6 +1662,80 @@ mod tests {
 
         assert!(matches!(err, CrabError::Configuration { .. }));
         assert!(!err.to_string().contains("remote.https://"));
+    }
+
+    fn configured_remote(name: &str, url: &str) -> ConfiguredRemote {
+        ConfiguredRemote {
+            name: name.to_owned(),
+            url: url.to_owned(),
+        }
+    }
+
+    #[test]
+    fn default_remote_prefers_crab_compatible_upstream() {
+        let remotes = vec![
+            configured_remote("origin", "https://github.com/example/repo.git"),
+            configured_remote("backup", "crab://bucket/backup"),
+        ];
+
+        assert_eq!(
+            select_default_crab_remote(Some("backup"), &remotes).unwrap(),
+            Some("backup".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_remote_prefers_named_crab_when_upstream_is_not_compatible() {
+        let remotes = vec![
+            configured_remote("origin", "https://github.com/example/repo.git"),
+            configured_remote("crab", "crab://bucket/repo"),
+            configured_remote("backup", "crab://bucket/backup"),
+        ];
+
+        assert_eq!(
+            select_default_crab_remote(Some("origin"), &remotes).unwrap(),
+            Some("crab".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_remote_detects_the_only_crab_compatible_remote() {
+        let remotes = vec![
+            configured_remote("origin", "https://github.com/example/repo.git"),
+            configured_remote("storage", "crab://bucket/repo"),
+        ];
+
+        assert_eq!(
+            select_default_crab_remote(Some("origin"), &remotes).unwrap(),
+            Some("storage".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_remote_requires_explicit_choice_for_ambiguous_crab_remotes() {
+        let remotes = vec![
+            configured_remote("origin", "https://github.com/example/repo.git"),
+            configured_remote("primary", "crab://bucket/primary"),
+            configured_remote("backup", "crab://bucket/backup"),
+        ];
+
+        let err = select_default_crab_remote(Some("origin"), &remotes).unwrap_err();
+        assert!(err.to_string().contains("'primary'"));
+        assert!(err.to_string().contains("'backup'"));
+        assert!(err.to_string().contains("--remote <name>"));
+    }
+
+    #[test]
+    fn default_remote_returns_no_crab_match_for_non_crab_remotes() {
+        let remotes = vec![configured_remote(
+            "origin",
+            "https://github.com/example/repo.git",
+        )];
+
+        assert_eq!(
+            select_default_crab_remote(Some("origin"), &remotes).unwrap(),
+            None
+        );
     }
 
     fn test_push_args() -> PushArgs {

@@ -29,7 +29,7 @@ Uses the native `crab push` pipeline for concurrent xorb uploads rather than
 |--------|---------|-------------|
 | `-m, --message` | (required) | Commit message |
 | `-j, --jobs` | `16` | Maximum concurrent file-processing tasks |
-| `--remote` | `origin` | Git remote to push to |
+| `--remote` | Auto-detected | Git remote name or `crab://` URL; pass this option to choose a specific Crab remote |
 | `-b, --branch` | current branch | Branch to push |
 | `--rebase-on-non-fast-forward` | `false` | On a single current-branch non-fast-forward, run `git pull --rebase --autostash` and retry; retry transient push-lock contention in the same loop |
 | `--rebase-retry-limit` | `64` | Maximum integration retry attempts |
@@ -48,6 +48,11 @@ Uses the native `crab push` pipeline for concurrent xorb uploads rather than
 If no tracking patterns exist in `.gitattributes`, `crab ship` auto-detects
 large file extensions and tracks them before staging — the same auto-track
 behavior as `crab add`.
+
+When `--remote` is omitted, Crab selects the current branch's Crab-compatible
+upstream, then a remote named `crab`, then the only other Crab-compatible
+remote. If more than one remains, choose one explicitly with
+`--remote <name>`.
 
 ## JSON Output
 

@@ -124,6 +124,80 @@ fn ship_json_emits_one_terminal_envelope() {
 }
 
 #[test]
+fn ship_dry_run_auto_detects_crab_remote_when_origin_is_git_remote() {
+    let dir = repository();
+    write_large_model(dir.path());
+    assert_success(
+        &git(
+            dir.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/repo.git",
+            ],
+        ),
+        "set Git origin",
+    );
+    assert_success(
+        &git(
+            dir.path(),
+            &["remote", "add", "crab", "crab://contract-test/repo"],
+        ),
+        "add Crab remote",
+    );
+
+    let output = crab(
+        dir.path(),
+        &[
+            "ship",
+            "model.bin",
+            "--message",
+            "preview ship",
+            "--dry-run",
+        ],
+    );
+    assert_success(&output, "crab ship --dry-run");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Remote: crab"),
+        "ship should select the Crab remote\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn ship_dry_run_accepts_explicit_crab_remote_choice() {
+    let dir = repository();
+    write_large_model(dir.path());
+    assert_success(
+        &git(
+            dir.path(),
+            &["remote", "add", "backup", "crab://contract-test/backup"],
+        ),
+        "add backup Crab remote",
+    );
+
+    let output = crab(
+        dir.path(),
+        &[
+            "ship",
+            "model.bin",
+            "--message",
+            "preview backup ship",
+            "--dry-run",
+            "--remote",
+            "backup",
+        ],
+    );
+    assert_success(&output, "crab ship --dry-run --remote backup");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Remote: backup"),
+        "ship should honor the selected Crab remote\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn ship_json_stops_when_metadata_staging_fails() {
     let dir = repository();
     let head_before = git(dir.path(), &["rev-parse", "HEAD"]);

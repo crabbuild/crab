@@ -9,6 +9,10 @@ Push committed pointer blobs, backing objects, and Git refs. `crab push` uses
 the same repository outcome as `git push` through `git-remote-crab`, while its
 native pipeline can upload independent objects concurrently.
 
+When `REMOTE` is omitted, Crab prefers the current branch's Crab-compatible
+upstream, then a remote named `crab`, then the only other Crab-compatible
+remote. If several Crab remotes remain, pass the remote name explicitly.
+
 ## Synopsis
 
 ```text
@@ -19,7 +23,7 @@ crab push [OPTIONS] [REMOTE] [REFSPECS]...
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `REMOTE` | No | Remote name or URL; defaults to the upstream remote or `origin` |
+| `REMOTE` | No | Remote name or URL; auto-detects a Crab-compatible remote before falling back to the upstream remote or `origin` |
 | `REFSPECS` | No | Refspecs to push; defaults to the current branch |
 
 ## Managed push

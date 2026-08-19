@@ -227,7 +227,7 @@ async fn open_remote_plan_context(
     repo_root: &Path,
     cancel: &CancellationToken,
 ) -> Option<RemotePlanContext> {
-    let remote_name = crate::cmd::push::resolve_remote_name(None);
+    let remote_name = crate::cmd::push::resolve_remote_name(None).ok()?;
     let remote_url = match crate::cmd::push::git_config_value(&format!("remote.{remote_name}.url"))
     {
         Some(url) if url.starts_with("crab://") => url,

@@ -41,7 +41,7 @@ behavior as `crab add`.
 |--------|---------|-------------|
 | `-m, --message` | (required) | Commit message |
 | `-j, --jobs` | `16` | Maximum concurrent file-processing tasks |
-| `--remote` | `origin` | Git remote to push to |
+| `--remote` | Auto-detected | Git remote name or `crab://` URL; pass this option to choose a specific Crab remote |
 | `-b, --branch` | current branch | Branch to push |
 | `--rebase-on-non-fast-forward` | `false` | Integrate the current branch and retry after a non-fast-forward or lock conflict |
 | `--rebase-retry-limit` | `256` | Maximum integration retries when rebasing is enabled |
@@ -82,6 +82,11 @@ means xorb uploads happen concurrently (default 16 parallel uploads) and the
 push bypasses git's serial remote helper protocol. For repositories with many
 large files, this can be significantly faster than the equivalent
 `crab add && git commit && git push` sequence.
+
+When `--remote` is omitted, Crab selects the current branch's Crab-compatible
+upstream, then a remote named `crab`, then the only other Crab-compatible
+remote. If more than one remains, choose one explicitly with
+`--remote <name>`.
 
 ## When to Use `crab ship` vs Individual Commands
 
