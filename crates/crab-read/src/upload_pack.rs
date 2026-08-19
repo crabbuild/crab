@@ -416,6 +416,9 @@ async fn plan_with_operation(
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
     let maximum_objects = operation.max_logical_objects();
+    let deduplicate_by_oid = request.deepen.is_none()
+        && !request.deepen_relative
+        && !filter_requires_traversal_context(&request.filter);
     let sparse_matchers =
         prepare_sparse_matchers(operation, visibility, visible_ref_names, &request.filter).await?;
     let mut queue = VecDeque::new();
@@ -439,6 +442,7 @@ async fn plan_with_operation(
             &mut queue,
             &mut queued,
             maximum_objects,
+            deduplicate_by_oid,
         )?;
     }
 
@@ -524,6 +528,7 @@ async fn plan_with_operation(
                 &mut shallow,
                 &mut unshallow,
                 cancellation,
+                deduplicate_by_oid,
             )
             .await?;
         }
@@ -612,13 +617,16 @@ struct QueueItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct QueueKey {
-    oid: ObjectId,
-    depth: TraversalDepth,
-    tree_depth: u32,
-    path: Vec<u8>,
-    follow_children: bool,
-    known_kind: Option<gix_object::Kind>,
+enum QueueKey {
+    Object(ObjectId),
+    Context {
+        oid: ObjectId,
+        depth: TraversalDepth,
+        tree_depth: u32,
+        path: Vec<u8>,
+        follow_children: bool,
+        known_kind: Option<gix_object::Kind>,
+    },
 }
 
 struct SparseMatchers {
@@ -717,6 +725,14 @@ fn filter_requires_blob_size(filter: &UploadPackFilter) -> bool {
     }
 }
 
+fn filter_requires_traversal_context(filter: &UploadPackFilter) -> bool {
+    match filter {
+        UploadPackFilter::TreeDepth(_) | UploadPackFilter::Sparse { .. } => true,
+        UploadPackFilter::Combine(filters) => filters.iter().any(filter_requires_traversal_context),
+        _ => false,
+    }
+}
+
 fn ensure_visible_objects(
     visibility: &GitVisibilityIndex,
     visible_ref_names: &[String],
@@ -759,6 +775,7 @@ async fn enqueue_children(
     shallow: &mut HashSet<ObjectId>,
     unshallow: &mut HashSet<ObjectId>,
     cancellation: &CancellationToken,
+    deduplicate_by_oid: bool,
 ) -> crab_remote_git::Result<()> {
     if cancellation.is_cancelled() {
         return Err(RemoteGitError::Cancelled);
@@ -784,6 +801,7 @@ async fn enqueue_children(
                 queue,
                 queued,
                 maximum_objects,
+                deduplicate_by_oid,
             )?;
             match item.depth {
                 TraversalDepth::RelativeBoundary => {
@@ -802,6 +820,7 @@ async fn enqueue_children(
                                 queue,
                                 queued,
                                 maximum_objects,
+                                deduplicate_by_oid,
                             )?;
                         }
                     } else {
@@ -818,6 +837,7 @@ async fn enqueue_children(
                                 queue,
                                 queued,
                                 maximum_objects,
+                                deduplicate_by_oid,
                             )?;
                         }
                     }
@@ -850,6 +870,7 @@ async fn enqueue_children(
                             queue,
                             queued,
                             maximum_objects,
+                            deduplicate_by_oid,
                         )?;
                     }
                 }
@@ -873,6 +894,7 @@ async fn enqueue_children(
                             queue,
                             queued,
                             maximum_objects,
+                            deduplicate_by_oid,
                         )?;
                     }
                 }
@@ -933,6 +955,7 @@ async fn enqueue_children(
                         queue,
                         queued,
                         maximum_objects,
+                        deduplicate_by_oid,
                     )?;
                 }
             }
@@ -956,6 +979,7 @@ async fn enqueue_children(
                     queue,
                     queued,
                     maximum_objects,
+                    deduplicate_by_oid,
                 )?;
             }
         }
@@ -1029,14 +1053,19 @@ fn enqueue(
     queue: &mut VecDeque<QueueItem>,
     queued: &mut HashSet<QueueKey>,
     maximum_objects: u64,
+    deduplicate_by_oid: bool,
 ) -> crab_remote_git::Result<()> {
-    let key = QueueKey {
-        oid: item.oid,
-        depth: item.depth,
-        tree_depth: item.tree_depth,
-        path: item.path.clone(),
-        follow_children: item.follow_children,
-        known_kind: item.known_kind,
+    let key = if deduplicate_by_oid {
+        QueueKey::Object(item.oid)
+    } else {
+        QueueKey::Context {
+            oid: item.oid,
+            depth: item.depth,
+            tree_depth: item.tree_depth,
+            path: item.path.clone(),
+            follow_children: item.follow_children,
+            known_kind: item.known_kind,
+        }
     };
     if queued.contains(&key) {
         return Ok(());
@@ -1144,6 +1173,7 @@ mod tests {
             &mut queue,
             &mut queued,
             1,
+            false,
         )
         .expect("first object fits the bound");
         let error = enqueue(
@@ -1158,9 +1188,52 @@ mod tests {
             &mut queue,
             &mut queued,
             1,
+            false,
         )
         .expect_err("second object must exceed the bound");
         assert!(matches!(error, RemoteGitError::LimitExceeded { .. }));
+    }
+
+    #[test]
+    fn path_independent_filters_deduplicate_shared_objects() {
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
+        for path in [b"first/path".as_slice(), b"second/path".as_slice()] {
+            enqueue(
+                QueueItem {
+                    oid: oid('1'),
+                    depth: TraversalDepth::Absolute(0),
+                    tree_depth: 2,
+                    path: path.to_vec(),
+                    follow_children: false,
+                    known_kind: Some(gix_object::Kind::Blob),
+                },
+                &mut queue,
+                &mut queued,
+                1,
+                true,
+            )
+            .expect("shared object should be queued once");
+        }
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queued.len(), 1);
+    }
+
+    #[test]
+    fn path_and_depth_filters_retain_traversal_context() {
+        assert!(!filter_requires_traversal_context(&UploadPackFilter::None));
+        assert!(!filter_requires_traversal_context(
+            &UploadPackFilter::BlobLimit(1)
+        ));
+        assert!(filter_requires_traversal_context(
+            &UploadPackFilter::TreeDepth(1)
+        ));
+        assert!(filter_requires_traversal_context(
+            &UploadPackFilter::Sparse { oid: oid('1') }
+        ));
+        assert!(filter_requires_traversal_context(
+            &UploadPackFilter::Combine(vec![UploadPackFilter::TreeDepth(1)])
+        ));
     }
 
     #[test]
@@ -1254,6 +1327,7 @@ mod tests {
             &mut shallow,
             &mut unshallow,
             &CancellationToken::new(),
+            false,
         )
         .await
         .expect("gitlink traversal should succeed without a submodule object");
