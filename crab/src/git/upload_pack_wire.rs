@@ -119,14 +119,23 @@ where
     let mut negotiation_rounds = 0u32;
     loop {
         tracing::debug!("waiting for protocol-v2 command request");
-        let Some(request) = read_command_request(reader, cancellation).await? else {
-            tracing::debug!("protocol-v2 client closed the session");
-            return Ok(());
+        let request = match read_command_request(reader, cancellation).await {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                tracing::debug!("protocol-v2 client closed the session");
+                return Ok(());
+            }
+            Err(error) => return reject_protocol_request(writer, error, cancellation).await,
         };
         tracing::debug!(command = %request.command, args = request.args.len(), "protocol-v2 command request received");
         match request.command.as_str() {
             "ls-refs" => {
-                let args = parse_ls_refs(&request.args)?;
+                let args = match parse_ls_refs(&request.args) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        return reject_protocol_request(writer, error, cancellation).await;
+                    }
+                };
                 write_ls_refs(
                     writer,
                     &repository,
@@ -139,7 +148,12 @@ where
             }
             "fetch" => {
                 negotiation_rounds = negotiation_rounds.saturating_add(1);
-                let fetch = parse_fetch(&request.args)?;
+                let fetch = match parse_fetch(&request.args) {
+                    Ok(fetch) => fetch,
+                    Err(error) => {
+                        return reject_protocol_request(writer, error, cancellation).await;
+                    }
+                };
                 if !fetch.done {
                     let common_haves = common_haves(&fetch, &visibility, &visible_ref_names);
                     if common_haves.is_empty() {
@@ -174,9 +188,9 @@ where
                 .await?;
             }
             other => {
-                return Err(CrabError::Protocol(format!(
-                    "unsupported protocol-v2 command: {other}"
-                )));
+                let error =
+                    CrabError::Protocol(format!("unsupported protocol-v2 command: {other}"));
+                return reject_protocol_request(writer, error, cancellation).await;
             }
         }
     }
@@ -612,12 +626,8 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
                 },
                 "protocol-v2 upload-pack request rejected"
             );
-            write_packet(writer, error.to_string().as_bytes(), Some(3), cancellation).await?;
-            write_flush(writer, cancellation).await?;
-            write_response_end(writer, cancellation).await?;
-            return Err(CrabError::Protocol(format!(
-                "upload-pack request rejected: {error}"
-            )));
+            let error = CrabError::Protocol(format!("upload-pack request rejected: {error}"));
+            return reject_protocol_request(writer, error, cancellation).await;
         }
     };
 
@@ -775,6 +785,54 @@ async fn write_data<W: AsyncWrite + Unpin>(
     write_packet(writer, data, None, cancellation).await
 }
 
+fn protocol_error_payload(message: &str) -> Vec<u8> {
+    const PREFIX: &[u8] = b"ERR ";
+    const NEWLINE_BYTES: usize = 1;
+    let maximum = MAX_PACKET_BYTES - 4;
+    let mut payload = Vec::with_capacity(message.len().min(maximum));
+    payload.extend_from_slice(PREFIX);
+    for character in message.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        let mut encoded = [0; 4];
+        let encoded = character.encode_utf8(&mut encoded).as_bytes();
+        if payload
+            .len()
+            .saturating_add(encoded.len())
+            .saturating_add(NEWLINE_BYTES)
+            > maximum
+        {
+            break;
+        }
+        payload.extend_from_slice(encoded);
+    }
+    payload.push(b'\n');
+    payload
+}
+
+async fn write_protocol_error<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    message: &str,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    write_data(writer, &protocol_error_payload(message), cancellation).await?;
+    flush_cancellable(writer, cancellation).await
+}
+
+async fn reject_protocol_request<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    error: CrabError,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    if let Err(write_error) = write_protocol_error(writer, &error.to_string(), cancellation).await {
+        tracing::warn!(error = %write_error, "failed to write protocol-v2 ERR packet");
+    }
+    Err(error)
+}
+
 async fn write_packet<W: AsyncWrite + Unpin>(
     writer: &mut W,
     data: &[u8],
@@ -900,6 +958,37 @@ mod tests {
                 .expect("a terminal line feed should be accepted"),
             "want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
+    }
+
+    #[test]
+    fn protocol_error_payload_uses_err_framing_and_sanitizes_controls() {
+        assert_eq!(
+            protocol_error_payload("request\nfailed\tcleanly"),
+            b"ERR request failed cleanly\n"
+        );
+    }
+
+    #[test]
+    fn protocol_error_payload_respects_the_packet_line_bound() {
+        let payload = protocol_error_payload(&"x".repeat(MAX_PACKET_BYTES));
+
+        assert_eq!(payload.len() + 4, MAX_PACKET_BYTES);
+        assert!(payload.starts_with(b"ERR "));
+        assert!(payload.ends_with(b"\n"));
+    }
+
+    #[tokio::test]
+    async fn rejected_request_writes_one_terminal_err_packet() {
+        let mut writer = Vec::new();
+        let cancellation = CancellationToken::new();
+        let error = protocol("request rejected");
+        let expected = packet(&protocol_error_payload(&error.to_string()));
+
+        reject_protocol_request(&mut writer, error, &cancellation)
+            .await
+            .expect_err("the semantic request error must remain terminal");
+
+        assert_eq!(writer, expected);
     }
 
     #[test]
