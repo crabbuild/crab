@@ -19,14 +19,22 @@ flowchart LR
 1. Reads the pack list manifest from the remote store.
 2. Downloads all existing pack files.
 3. Merges contents into a single new pack with a fresh index.
-4. Merges pack metadata (ref tips) from sidecar files and inline entries.
-5. Uploads the merged pack to the remote.
-6. Atomically updates the pack list manifest using compare-and-swap (CAS).
-7. Cleans up old pack files after the manifest update succeeds.
+4. Validates the replacement pack against every manifest ref.
+5. Uploads the merged pack, index, and reverse index to the remote.
+6. Atomically updates the manifest using compare-and-swap (CAS).
+7. Rebinds the existing Git visibility proof to the replacement pack inventory.
+
+Old pack files remain unreachable after the manifest update and are reclaimed
+by a later repo-scoped `crab gc` run.
 
 ### Atomicity and Safety
 
-The manifest update uses CAS to prevent concurrent repacks from corrupting state. If another process modifies the manifest between read and write, the repack retries automatically. This means repacking is safe to run alongside normal push operations.
+The manifest update uses CAS to prevent concurrent maintenance or push activity
+from corrupting state. If the manifest changes between read and write, repack
+fails without replacing the newer manifest; rerun the command against the new
+generation. The existing visibility proof is reused because repack changes the
+physical pack layout, not refs or reachable objects. Repack does not create a
+missing proof; `crab fsck` reports that pre-existing condition.
 
 ## Usage
 
