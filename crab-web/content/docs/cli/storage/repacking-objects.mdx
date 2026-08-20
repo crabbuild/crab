@@ -26,8 +26,9 @@ flowchart LR
 
 Old pack files leave the active manifest after the update, but immutable
 recovery history continues to reference them. Repack therefore reduces the
-pack count used by clone and fetch; it does not currently reclaim the old pack
-bytes through repo-scoped `crab gc`.
+pack count used by clone and fetch. To reclaim old pack bytes, preview and apply
+an explicit history-retention boundary with `crab recover history prune
+--keep-last N`, then run repo-scoped `crab gc`.
 
 ### Atomicity and Safety
 

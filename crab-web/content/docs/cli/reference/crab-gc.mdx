@@ -21,8 +21,14 @@ immutable recovery root. It respects a grace period to avoid deleting objects
 that may be in use by concurrent operations.
 
 Historical roots used by `crab recover history` are retained without a time or
-count limit. Objects referenced by those roots are therefore not GC candidates,
-even when they are absent from current branches and tags.
+count limit by default. Objects referenced by those roots are therefore not GC
+candidates, even when they are absent from current branches and tags. Use
+`crab recover history prune --keep-last N` to preview an explicit retention
+boundary, apply it with `--apply`, and then rerun GC.
+
+Destructive repository GC takes a renewable repository-maintenance lease. A
+destructive bucket GC takes that lease for every registered repository. Neither
+can run concurrently with history pruning or history restoration.
 
 For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-collection).
 

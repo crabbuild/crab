@@ -13,7 +13,19 @@ storage space and reducing cloud costs.
 Crab retains immutable manifest history for `crab recover history`. A deleted
 branch, force-push, or repack does not make its old objects collectible while a
 historical root still references them. Crab currently retains those roots
-without a time or count limit.
+without a time or count limit by default. To trade older recovery points for
+storage reclamation, preview and apply an explicit generation boundary:
+
+```bash
+crab recover history prune --keep-last 20
+crab recover history prune --keep-last 20 --apply
+crab gc --scope repo --dry-run
+crab gc --scope repo
+```
+
+Retention counts distinct generations and preserves every alternate root in a
+kept generation. Pruning removes only root manifests. GC separately proves
+which dependent objects became unreachable and still applies its grace period.
 
 ## What Becomes Garbage?
 
@@ -94,6 +106,7 @@ Crab's GC is designed to be safe by default:
 3. **Minimum grace** — Even with `--force`, the minimum grace period is 1 hour.
 4. **Confirmation required** — `--force` prompts for confirmation unless `--yes` is also passed.
 5. **Atomic ref reads** — The reachability scan uses a consistent snapshot of refs.
+6. **Maintenance serialization** — Destructive repo GC takes one repository lease; destructive bucket GC takes a lease for every registered repository. Neither can race history pruning or restoration.
 
 ## When to Run GC
 

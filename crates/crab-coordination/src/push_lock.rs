@@ -25,6 +25,8 @@ pub const REPACK_RESOURCE: &str = "repack";
 pub const BATCH_RESOURCE: &str = "batch";
 /// Internal resource serializing history recovery without existing refs.
 pub const HISTORY_RECOVERY_RESOURCE: &str = "history-recovery";
+/// Internal resource serializing destructive repository maintenance.
+pub const REPOSITORY_MAINTENANCE_RESOURCE: &str = "repository-maintenance";
 
 /// JSON payload stored in a push-lock object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -762,6 +764,10 @@ mod tests {
         assert_eq!(
             internal_lock_path("org/repo", GIT_MANIFEST_RESOURCE).unwrap(),
             "org/repo/locks/internal/git-manifest/lock"
+        );
+        assert_eq!(
+            internal_lock_path("org/repo", REPOSITORY_MAINTENANCE_RESOURCE).unwrap(),
+            "org/repo/locks/internal/repository-maintenance/lock"
         );
         assert_eq!(push_locks_prefix("org/repo").unwrap(), "org/repo/locks");
     }

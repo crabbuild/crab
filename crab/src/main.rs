@@ -3174,10 +3174,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let _span = tracing::info_span!("recover").entered();
             if let crab::cmd::recover::RecoverCmd::History { command } = &sub {
                 let config = Config::resolve_local()?;
-                if command.applies_restore() {
+                if command.applies_restore() || command.applies_prune() {
                     crab::replication::ensure_active_active_maintenance_admitted(
                         &config,
-                        "historical manifest recovery",
+                        "historical manifest maintenance",
                     )?;
                 }
                 let remote_url =
@@ -3190,10 +3190,16 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 .to_owned(),
                         })?;
                 let parsed = crab::git::url::CrabUrl::parse(remote_url)?;
-                let store =
-                    create_cli_store(&parsed.bucket, &config, "recover-history", &cancel).await?;
-                crab::cmd::history_recovery::run(command, &store, &parsed.repo_path, &cancel)
+                let selection = crab::replication::StoreResolver::new(&config, parsed, &cancel)
+                    .write_store("recover-history")
                     .await?;
+                crab::cmd::history_recovery::run(
+                    command,
+                    &selection.store,
+                    selection.router.repo_prefix(),
+                    &cancel,
+                )
+                .await?;
             } else {
                 crab::cmd::recover::run(&sub, &cancel).await?;
             }
@@ -3684,6 +3690,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         &store,
                         &protection.protected_keys,
                         &protection.protected_repos,
+                        &cancel,
                     )
                     .await?;
                     let summary = outcome.to_summary();
@@ -6478,7 +6485,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_history_parses_list_verify_and_explicit_restore() {
+    fn recover_history_parses_list_prune_verify_and_explicit_restore() {
         parse_cli_on_large_stack(|| {
             let list =
                 Cli::try_parse_from(["crab", "recover", "history", "list", "--json"]).unwrap();
@@ -6488,6 +6495,28 @@ mod tests {
                     command: crab::cmd::history_recovery::HistoryCmd::List(_)
                 }))
             ));
+
+            let prune = Cli::try_parse_from([
+                "crab",
+                "recover",
+                "history",
+                "prune",
+                "--keep-last",
+                "10",
+                "--apply",
+                "--json",
+            ])
+            .unwrap();
+            assert!(matches!(
+                prune.cmd,
+                Some(Cmd::Recover(crab::cmd::recover::RecoverCmd::History {
+                    command: crab::cmd::history_recovery::HistoryCmd::Prune(args)
+                })) if args.keep_last == 10 && args.apply && args.json
+            ));
+            assert!(
+                Cli::try_parse_from(["crab", "recover", "history", "prune", "--keep-last", "0",])
+                    .is_err()
+            );
 
             let verify = Cli::try_parse_from([
                 "crab",

@@ -1025,6 +1025,52 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
+    if args.dry_run {
+        return run_repo_remote_gc_under_maintenance(
+            args,
+            store,
+            router,
+            coordinator_protected_keys,
+            cancel,
+            grace_period,
+            jsonl_stream,
+        )
+        .await;
+    }
+
+    let operation_cancel = cancel.child_token();
+    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        store,
+        router.repo_prefix(),
+        &operation_cancel,
+    )
+    .await?;
+    let operation = run_repo_remote_gc_under_maintenance(
+        args,
+        store,
+        router,
+        coordinator_protected_keys,
+        &operation_cancel,
+        grace_period,
+        jsonl_stream,
+    )
+    .await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn run_repo_remote_gc_under_maintenance(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+) -> Result<GcOutcome> {
     let reachability_started = Instant::now();
     let reachability =
         reachable_repo_objects_from_manifest_with_concurrency(store, router, args.list_concurrency)
@@ -2075,6 +2121,64 @@ mod tests {
             store.head(&ObjectPath::from(free_key)).await,
             Err(CrabError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn maintenance_lease_blocks_destructive_repo_gc_but_not_preview() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use crab_coordination::PushLock;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let lock = PushLock::acquire_internal_default(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
+        )
+        .await
+        .unwrap();
+
+        let error = run_repo_remote_gc(
+            &GcArgs::default(),
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CrabError::PushLockHeld { .. }));
+
+        let preview = run_repo_remote_gc(
+            &GcArgs {
+                dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(preview.dry_run);
+        lock.release().await.unwrap();
     }
 
     // --- GC compaction (Task 8.5) ---

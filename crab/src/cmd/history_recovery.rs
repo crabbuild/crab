@@ -34,16 +34,20 @@ use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 
 pub const HISTORY_LIST_SCHEMA: &str = "recover.history.list";
+pub const HISTORY_PRUNE_SCHEMA: &str = "recover.history.prune";
 pub const HISTORY_VERIFY_SCHEMA: &str = "recover.history.verify";
 pub const HISTORY_RESTORE_SCHEMA: &str = "recover.history.restore";
 pub const HISTORY_SCHEMA_VERSION: &str = "1.0";
 
 const RECOVERY_LOCK_TTL: Duration = Duration::from_mins(5);
+const HISTORY_PRUNE_DELETE_CONCURRENCY: usize = 64;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum HistoryCmd {
     /// List immutable historical repository roots.
     List(HistoryListArgs),
+    /// Preview or apply retention of the newest historical generations.
+    Prune(HistoryPruneArgs),
     /// Verify one historical root and its complete dependency closure.
     Verify(HistoryVerifyArgs),
     /// Preview or apply restoration of one verified historical root.
@@ -55,6 +59,29 @@ pub struct HistoryListArgs {
     /// Structured JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HistoryPruneArgs {
+    /// Number of newest distinct generations to retain.
+    #[arg(long, value_name = "N", value_parser = parse_positive_usize)]
+    pub keep_last: usize,
+    /// Delete the planned historical roots. Without this flag, show a preview.
+    #[arg(long)]
+    pub apply: bool,
+    /// Structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid positive integer: {error}"))?;
+    if parsed == 0 {
+        return Err("value must be at least 1".to_owned());
+    }
+    Ok(parsed)
 }
 
 #[derive(Debug, Clone, Args)]
@@ -94,6 +121,7 @@ impl HistoryCmd {
     pub fn schema_name(&self) -> &'static str {
         match self {
             Self::List(_) => HISTORY_LIST_SCHEMA,
+            Self::Prune(_) => HISTORY_PRUNE_SCHEMA,
             Self::Verify(_) => HISTORY_VERIFY_SCHEMA,
             Self::Restore(_) => HISTORY_RESTORE_SCHEMA,
         }
@@ -104,9 +132,15 @@ impl HistoryCmd {
         matches!(self, Self::Restore(args) if args.apply)
     }
 
+    #[must_use]
+    pub fn applies_prune(&self) -> bool {
+        matches!(self, Self::Prune(args) if args.apply)
+    }
+
     fn json(&self) -> bool {
         match self {
             Self::List(args) => args.json,
+            Self::Prune(args) => args.json,
             Self::Verify(args) => args.json,
             Self::Restore(args) => args.json,
         }
@@ -127,6 +161,18 @@ pub struct HistoryEntryPayload {
 pub struct HistoryListPayload {
     pub current_generation: u64,
     pub entries: Vec<HistoryEntryPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct HistoryPrunePayload {
+    pub applied: bool,
+    #[schemars(range(min = 1))]
+    pub keep_last: u64,
+    pub roots_before: u64,
+    pub roots_kept: u64,
+    pub roots_pruned: u64,
+    pub manifest_bytes_pruned: u64,
+    pub pruned: Vec<HistoryEntryPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -184,6 +230,16 @@ pub async fn run(
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
     match command {
         HistoryCmd::List(_) => run_list(store, &router, command.output_mode()).await,
+        HistoryCmd::Prune(args) => {
+            let payload = prune_history(store, &router, args, cancel).await?;
+            if payload.applied
+                && let Err(error) = record_prune_audit(prefix, &payload)
+            {
+                warn!(%error, "failed to append historical prune audit event");
+            }
+            emit_prune(&payload, command.output_mode());
+            Ok(())
+        }
         HistoryCmd::Verify(args) => {
             let verified = verify_history(
                 store,
@@ -207,6 +263,27 @@ pub async fn run(
             Ok(())
         }
     }
+}
+
+fn record_prune_audit(prefix: &str, payload: &HistoryPrunePayload) -> Result<()> {
+    let event = AuditEvent::new(NewAuditEvent {
+        operation: "recover.history.prune".to_owned(),
+        outcome: AuditOutcome::Success,
+        actor: None,
+        repository: Some(prefix.to_owned()),
+        details: serde_json::json!({
+            "keep_last": payload.keep_last,
+            "roots_before": payload.roots_before,
+            "roots_kept": payload.roots_kept,
+            "roots_pruned": payload.roots_pruned,
+            "manifest_bytes_pruned": payload.manifest_bytes_pruned,
+            "pruned": payload.pruned.iter().map(|entry| serde_json::json!({
+                "generation": entry.generation,
+                "digest": entry.digest,
+            })).collect::<Vec<_>>(),
+        }),
+    });
+    append_event(&default_log_path(), &event)
 }
 
 fn record_restore_audit(prefix: &str, payload: &HistoryRestorePayload) -> Result<()> {
@@ -236,14 +313,7 @@ async fn run_list(store: &Store, router: &StoreLayout, mode: OutputMode) -> Resu
     let entries = list_manifest_history(store, router)
         .await?
         .into_iter()
-        .map(|entry| HistoryEntryPayload {
-            generation: entry.generation,
-            digest: entry.digest,
-            created_at: entry.manifest.created_at,
-            session_id: entry.manifest.session_id,
-            refs: entry.manifest.refs.len() as u64,
-            manifest_bytes: entry.size,
-        })
+        .map(|entry| history_entry_payload(&entry))
         .collect::<Vec<_>>();
     let payload = HistoryListPayload {
         current_generation: current.generation,
@@ -274,7 +344,119 @@ async fn run_list(store: &Store, router: &StoreLayout, mode: OutputMode) -> Resu
     Ok(())
 }
 
+fn history_entry_payload(entry: &ManifestHistoryEntry) -> HistoryEntryPayload {
+    HistoryEntryPayload {
+        generation: entry.generation,
+        digest: entry.digest.clone(),
+        created_at: entry.manifest.created_at.clone(),
+        session_id: entry.manifest.session_id.clone(),
+        refs: entry.manifest.refs.len() as u64,
+        manifest_bytes: entry.size,
+    }
+}
+
+fn plan_history_prune(
+    entries: &[ManifestHistoryEntry],
+    keep_last: usize,
+) -> Vec<&ManifestHistoryEntry> {
+    let generations = entries
+        .iter()
+        .map(|entry| entry.generation)
+        .collect::<BTreeSet<_>>();
+    let Some(oldest_retained) = generations.iter().rev().nth(keep_last.saturating_sub(1)) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.generation < *oldest_retained)
+        .collect()
+}
+
+fn prune_payload(
+    entries: &[ManifestHistoryEntry],
+    keep_last: usize,
+    applied: bool,
+) -> HistoryPrunePayload {
+    let pruned = plan_history_prune(entries, keep_last);
+    HistoryPrunePayload {
+        applied,
+        keep_last: keep_last as u64,
+        roots_before: entries.len() as u64,
+        roots_kept: entries.len().saturating_sub(pruned.len()) as u64,
+        roots_pruned: pruned.len() as u64,
+        manifest_bytes_pruned: pruned.iter().map(|entry| entry.size).sum(),
+        pruned: pruned.into_iter().map(history_entry_payload).collect(),
+    }
+}
+
+async fn prune_history(
+    store: &Store,
+    router: &StoreLayout,
+    args: &HistoryPruneArgs,
+    cancel: &CancellationToken,
+) -> Result<HistoryPrunePayload> {
+    if !args.apply {
+        let entries = list_manifest_history(store, router).await?;
+        return Ok(prune_payload(&entries, args.keep_last, false));
+    }
+
+    let operation_cancel = cancel.child_token();
+    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        store,
+        router.repo_prefix(),
+        &operation_cancel,
+    )
+    .await?;
+    let operation = async {
+        let entries = list_manifest_history(store, router).await?;
+        let paths = plan_history_prune(&entries, args.keep_last)
+            .into_iter()
+            .map(|entry| object_store::path::Path::from(entry.path.clone()))
+            .collect::<Vec<_>>();
+        for paths in paths.chunks(HISTORY_PRUNE_DELETE_CONCURRENCY) {
+            check_cancelled(&operation_cancel)?;
+            for result in
+                futures_util::future::join_all(paths.iter().map(|path| store.delete(path))).await
+            {
+                result?;
+            }
+        }
+        Ok(prune_payload(&entries, args.keep_last, true))
+    }
+    .await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(payload), Ok(())) => Ok(payload),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 async fn restore_history(
+    store: &Store,
+    router: &StoreLayout,
+    args: &HistoryRestoreArgs,
+    cancel: &CancellationToken,
+) -> Result<HistoryRestorePayload> {
+    if !args.apply {
+        return restore_history_under_maintenance(store, router, args, cancel).await;
+    }
+
+    let operation_cancel = cancel.child_token();
+    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        store,
+        router.repo_prefix(),
+        &operation_cancel,
+    )
+    .await?;
+    let operation = restore_history_under_maintenance(store, router, args, &operation_cancel).await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(payload), Ok(())) => Ok(payload),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn restore_history_under_maintenance(
     store: &Store,
     router: &StoreLayout,
     args: &HistoryRestoreArgs,
@@ -1016,6 +1198,28 @@ fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) {
     }
 }
 
+fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) {
+    match mode {
+        OutputMode::Json | OutputMode::Jsonl => {
+            emit_json(HISTORY_PRUNE_SCHEMA, HISTORY_SCHEMA_VERSION, payload);
+        }
+        OutputMode::Text => {
+            let action = if payload.applied { "pruned" } else { "preview" };
+            println!(
+                "history prune {action}: before={} kept={} pruned={} manifest_bytes={} keep_last={}",
+                payload.roots_before,
+                payload.roots_kept,
+                payload.roots_pruned,
+                payload.manifest_bytes_pruned,
+                payload.keep_last,
+            );
+            for entry in &payload.pruned {
+                println!("{} {}", entry.generation, entry.digest);
+            }
+        }
+    }
+}
+
 fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
@@ -1055,7 +1259,10 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
-    use crate::metadata::manifest::{create_manifest, read_manifest, write_manifest_cas};
+    use crate::metadata::manifest::{
+        BulkData, PackManifestEntry, compact_pack_index, create_manifest, read_manifest,
+        upload_segmented_bulk, write_manifest_cas,
+    };
 
     fn memory_store() -> Store {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
@@ -1166,6 +1373,207 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selected.entry.digest, digest);
+    }
+
+    #[tokio::test]
+    async fn history_prune_keeps_every_root_in_newest_generations_and_is_idempotent() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        for generation in 1..=4 {
+            let mut manifest = Manifest::default_for_repo("refs/heads/main");
+            manifest.generation = generation;
+            manifest.session_id = format!("generation-{generation}");
+            manifest.seal_git_validation();
+            put_history(&store, &router, &manifest).await;
+            if generation == 3 {
+                manifest.session_id = "generation-3-alternate".to_owned();
+                manifest.seal_git_validation();
+                put_history(&store, &router, &manifest).await;
+            }
+        }
+        let args = HistoryPruneArgs {
+            keep_last: 2,
+            apply: false,
+            json: false,
+        };
+
+        let preview = prune_history(&store, &router, &args, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!preview.applied);
+        assert_eq!(preview.roots_before, 5);
+        assert_eq!(preview.roots_pruned, 2);
+        assert_eq!(preview.roots_kept, 3);
+        assert_eq!(
+            preview
+                .pruned
+                .iter()
+                .map(|entry| entry.generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            list_manifest_history(&store, &router).await.unwrap().len(),
+            5
+        );
+
+        let applied = prune_history(
+            &store,
+            &router,
+            &HistoryPruneArgs {
+                apply: true,
+                ..args.clone()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(applied.applied);
+        assert_eq!(applied.roots_pruned, 2);
+        assert_eq!(
+            list_manifest_history(&store, &router)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.generation)
+                .collect::<Vec<_>>(),
+            vec![3, 3, 4]
+        );
+
+        let repeated = prune_history(
+            &store,
+            &router,
+            &HistoryPruneArgs {
+                apply: true,
+                ..args
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated.roots_pruned, 0);
+    }
+
+    #[tokio::test]
+    async fn pruning_old_root_makes_its_unique_pack_collectible() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let old_pack_id = "c".repeat(64);
+        let (old_pack_hash, _, pack_write) = compact_pack_index(
+            1,
+            &[PackManifestEntry {
+                pack_id: old_pack_id.clone(),
+                size: 1024,
+                content_hash: old_pack_id.clone(),
+                ref_tips: Vec::new(),
+                object_count: 1,
+            }],
+        )
+        .unwrap();
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index: pack_write,
+            },
+        )
+        .await
+        .unwrap();
+        let mut old = Manifest::default_for_repo("refs/heads/main");
+        old.generation = 1;
+        old.pack_index_hash = old_pack_hash;
+        old.seal_git_validation();
+        create_manifest(&store, &router, &old).await.unwrap();
+
+        let (_, etag) = read_manifest(&store, &router).await.unwrap();
+        let mut middle = old.clone();
+        middle.generation = 2;
+        middle.pack_index_hash.clear();
+        middle.session_id = "middle".to_owned();
+        middle.seal_git_validation();
+        write_manifest_cas(&store, &router, &middle, &etag)
+            .await
+            .unwrap();
+        let (_, etag) = read_manifest(&store, &router).await.unwrap();
+        let mut current = middle;
+        current.generation = 3;
+        current.session_id = "current".to_owned();
+        current.seal_git_validation();
+        write_manifest_cas(&store, &router, &current, &etag)
+            .await
+            .unwrap();
+
+        let pack_key = format!("org/repo/packs/pack-{old_pack_id}.pack");
+        let (_, before) = crate::cmd::gc::reachable_repo_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+        assert!(before.contains(&pack_key));
+
+        prune_history(
+            &store,
+            &router,
+            &HistoryPruneArgs {
+                keep_last: 1,
+                apply: true,
+                json: false,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let (_, after) = crate::cmd::gc::reachable_repo_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+        assert!(!after.contains(&pack_key));
+    }
+
+    #[tokio::test]
+    async fn maintenance_lease_blocks_history_prune_and_restore_apply() {
+        let (store, router, _) = repository_with_history().await;
+        let lock = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
+            RECOVERY_LOCK_TTL,
+        )
+        .await
+        .unwrap();
+
+        let prune_error = prune_history(
+            &store,
+            &router,
+            &HistoryPruneArgs {
+                keep_last: 1,
+                apply: true,
+                json: false,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(prune_error, CrabError::PushLockHeld { .. }));
+
+        let restore_error = restore_history(
+            &store,
+            &router,
+            &HistoryRestoreArgs {
+                generation: 0,
+                digest: None,
+                apply: true,
+                json: false,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(restore_error, CrabError::PushLockHeld { .. }));
+        assert_eq!(
+            read_manifest(&store, &router).await.unwrap().0.generation,
+            1
+        );
+        lock.release().await.unwrap();
     }
 
     #[tokio::test]

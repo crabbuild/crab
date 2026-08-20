@@ -44,7 +44,7 @@ use crab::cmd::fetch::FetchSummary;
 use crab::cmd::fsck::FsckSummary;
 use crab::cmd::gc::GcSummary;
 use crab::cmd::history_recovery::{
-    HistoryListPayload, HistoryRestorePayload, HistoryVerificationPayload,
+    HistoryListPayload, HistoryPrunePayload, HistoryRestorePayload, HistoryVerificationPayload,
 };
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
@@ -178,6 +178,7 @@ fn regenerate_schemas() {
     write_schema("release.verify", &schema_for!(ReleaseVerifyPayload));
     write_schema("recover.apply", &schema_for!(RecoverApplyPayload));
     write_schema("recover.history.list", &schema_for!(HistoryListPayload));
+    write_schema("recover.history.prune", &schema_for!(HistoryPrunePayload));
     write_schema(
         "recover.history.restore",
         &schema_for!(HistoryRestorePayload),

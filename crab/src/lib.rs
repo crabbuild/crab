@@ -39,6 +39,7 @@ pub mod git;
 pub mod hydrate;
 pub mod import;
 pub mod lfs;
+pub(crate) mod maintenance;
 pub mod metadata;
 pub mod read;
 pub mod release;

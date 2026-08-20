@@ -22,7 +22,7 @@ crab recover <SUBCOMMAND> [OPTIONS]
 | `plan` | Build a repair plan from an expected release inventory and available sources |
 | `show` | Inspect a saved plan |
 | `apply` | Materialize verified files and optionally repair durable objects or a remote |
-| `history` | List, verify, and restore immutable historical repository roots |
+| `history` | List, retain, verify, and restore immutable historical repository roots |
 
 ## Plan and apply
 
@@ -48,6 +48,8 @@ restore one explicitly:
 
 ```bash
 crab recover history list
+crab recover history prune --keep-last 20
+crab recover history prune --keep-last 20 --apply
 crab recover history verify 41
 crab recover history restore 41
 crab recover history restore 41 --apply
@@ -55,3 +57,9 @@ crab recover history restore 41 --apply
 
 Verification is required before restoration. If a generation has multiple
 valid roots, provide `--digest` to select one.
+
+History is retained indefinitely unless explicitly pruned. `history prune`
+previews by default; `--apply` removes roots older than the newest
+`--keep-last N` distinct generations while preserving every alternate root in
+those retained generations. Run repository GC afterward to preview and reclaim
+objects no longer reachable from current state or retained roots.

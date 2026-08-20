@@ -39,7 +39,7 @@ use crab::cmd::fetch::FetchSummary;
 use crab::cmd::fsck::FsckSummary;
 use crab::cmd::gc::GcSummary;
 use crab::cmd::history_recovery::{
-    HistoryListPayload, HistoryRestorePayload, HistoryVerificationPayload,
+    HistoryListPayload, HistoryPrunePayload, HistoryRestorePayload, HistoryVerificationPayload,
 };
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
@@ -156,6 +156,10 @@ fn schemas_up_to_date() {
         ("release.verify", schema_value::<ReleaseVerifyPayload>()),
         ("recover.apply", schema_value::<RecoverApplyPayload>()),
         ("recover.history.list", schema_value::<HistoryListPayload>()),
+        (
+            "recover.history.prune",
+            schema_value::<HistoryPrunePayload>(),
+        ),
         (
             "recover.history.restore",
             schema_value::<HistoryRestorePayload>(),

@@ -23,10 +23,11 @@ use std::time::{Duration, SystemTime};
 use futures_util::TryStreamExt;
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::coordination::cas::cas_update_default;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_metadata::ref_registry::RefRegistry;
@@ -107,7 +108,52 @@ pub async fn run_bucket_gc(
     store: &Store,
     coordinator_protected_keys: &HashSet<String>,
     coordinator_protected_repos: &HashSet<String>,
+    cancel: &CancellationToken,
 ) -> Result<BucketGcOutcome> {
+    let registry = load_ref_registry(store, args.force).await?;
+    if args.dry_run {
+        return run_bucket_gc_under_maintenance(
+            args,
+            store,
+            coordinator_protected_keys,
+            &registry,
+            cancel,
+        )
+        .await;
+    }
+    ensure_registry_complete_for_destructive_gc(&registry)?;
+    ensure_active_active_bucket_gc_proof(&registry, coordinator_protected_repos)?;
+
+    let operation_cancel = cancel.child_token();
+    let leases = crate::maintenance::RepositoryMaintenanceLeases::acquire(
+        store,
+        registry.repos.keys().cloned(),
+        &operation_cancel,
+    )
+    .await?;
+    let operation = run_bucket_gc_under_maintenance(
+        args,
+        store,
+        coordinator_protected_keys,
+        &registry,
+        &operation_cancel,
+    )
+    .await;
+    let release = leases.release().await;
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn run_bucket_gc_under_maintenance(
+    args: &BucketGcArgs,
+    store: &Store,
+    coordinator_protected_keys: &HashSet<String>,
+    registry: &RefRegistry,
+    cancel: &CancellationToken,
+) -> Result<BucketGcOutcome> {
+    check_cancelled(cancel)?;
     let mut outcome = BucketGcOutcome {
         dry_run: args.dry_run,
         ..BucketGcOutcome::default()
@@ -117,14 +163,8 @@ pub async fn run_bucket_gc(
     let now = SystemTime::now();
     let cutoff = now - effective_grace;
 
-    // Step 1: Load ref-registry.
-    let registry = load_ref_registry(store, args.force).await?;
-    if !args.dry_run {
-        ensure_registry_complete_for_destructive_gc(&registry)?;
-        ensure_active_active_bucket_gc_proof(&registry, coordinator_protected_repos)?;
-    }
     let mut referenced_shards = registry.all_referenced_shards();
-    referenced_shards.extend(historical_referenced_shards(store, &registry).await?);
+    referenced_shards.extend(historical_referenced_shards(store, registry).await?);
     info!(
         repos = registry.repos.len(),
         referenced_shards = referenced_shards.len(),
@@ -133,6 +173,7 @@ pub async fn run_bucket_gc(
 
     // Step 2: List shards, find unreferenced candidates.
     let shard_objects = list_global_objects(store, "shards").await?;
+    check_cancelled(cancel)?;
     let listed_shards = shard_objects
         .iter()
         .map(|object| extract_hash_from_key(&object.location))
@@ -174,6 +215,7 @@ pub async fn run_bucket_gc(
         xorb_hashes: referenced_xorbs,
         file_hashes: referenced_file_hashes,
     } = extract_hashes_from_shards(store, &referenced_shard_objects).await?;
+    check_cancelled(cancel)?;
     info!(
         referenced_xorbs = referenced_xorbs.len(),
         referenced_file_hashes = referenced_file_hashes.len(),
@@ -182,6 +224,7 @@ pub async fn run_bucket_gc(
 
     // Step 4: List xorbs, find unreferenced candidates.
     let xorb_objects = list_global_objects(store, "xorbs").await?;
+    check_cancelled(cancel)?;
     let xorb_partition =
         partition_xorbs_for_gc(xorb_objects, &referenced_xorbs, coordinator_protected_keys);
     let protected_xorbs = xorb_partition.protected_count;
@@ -203,6 +246,7 @@ pub async fn run_bucket_gc(
     let _ = &referenced_file_hashes;
 
     // Step 6: Delete or report.
+    check_cancelled(cancel)?;
     delete_or_report(
         store,
         "shards",
@@ -871,9 +915,15 @@ mod tests {
 
         let protected = HashSet::new();
         let protected_repos = HashSet::new();
-        let outcome = run_bucket_gc(&args, &store, &protected, &protected_repos)
-            .await
-            .unwrap();
+        let outcome = run_bucket_gc(
+            &args,
+            &store,
+            &protected,
+            &protected_repos,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(outcome.dry_run);
         assert_eq!(outcome.shards_deleted, 0);
         assert_eq!(outcome.xorbs_deleted, 0);
@@ -909,6 +959,7 @@ mod tests {
             &store,
             &HashSet::new(),
             &HashSet::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -944,6 +995,7 @@ mod tests {
             &store,
             &HashSet::new(),
             &HashSet::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -962,6 +1014,61 @@ mod tests {
         assert!(!summary.dry_run);
         assert!(!summary.cancelled);
         assert!(!summary.partial_enumeration);
+    }
+
+    #[tokio::test]
+    async fn maintenance_lease_blocks_destructive_bucket_gc_but_not_preview() {
+        let store = memory_store();
+        let mut registry = RefRegistry::default();
+        registry.register("org/models", Vec::new());
+        registry.mark_coverage_complete();
+        store
+            .put(
+                &ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry")),
+                Bytes::from(serde_json::to_vec(&registry).unwrap()),
+            )
+            .await
+            .unwrap();
+        let held = crab_coordination::PushLock::acquire_internal_default(
+            store.inner(),
+            "org/models",
+            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
+        )
+        .await
+        .unwrap();
+
+        let destructive = run_bucket_gc(
+            &BucketGcArgs {
+                bucket: "test-bucket".to_owned(),
+                dry_run: false,
+                grace_period: Duration::from_secs(3600),
+                force: false,
+            },
+            &store,
+            &HashSet::new(),
+            &HashSet::new(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(destructive, Err(CrabError::PushLockHeld { .. })));
+
+        let preview = run_bucket_gc(
+            &BucketGcArgs {
+                bucket: "test-bucket".to_owned(),
+                dry_run: true,
+                grace_period: Duration::from_secs(3600),
+                force: false,
+            },
+            &store,
+            &HashSet::new(),
+            &HashSet::new(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(preview.dry_run);
+
+        held.release().await.unwrap();
     }
 
     #[tokio::test]
@@ -998,6 +1105,7 @@ mod tests {
             &store,
             &HashSet::new(),
             &HashSet::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1029,6 +1137,7 @@ mod tests {
             &store,
             &HashSet::new(),
             &HashSet::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1062,9 +1171,15 @@ mod tests {
         let protected = HashSet::new();
         let protected_repos = HashSet::new();
 
-        let err = run_bucket_gc(&args, &store, &protected, &protected_repos)
-            .await
-            .unwrap_err();
+        let err = run_bucket_gc(
+            &args,
+            &store,
+            &protected,
+            &protected_repos,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, CrabError::Configuration { .. }));
         assert!(err.to_string().contains("org/models"));
@@ -1096,9 +1211,15 @@ mod tests {
         let protected = HashSet::new();
         let protected_repos = ["org/models".to_owned()].into_iter().collect();
 
-        let outcome = run_bucket_gc(&args, &store, &protected, &protected_repos)
-            .await
-            .unwrap();
+        let outcome = run_bucket_gc(
+            &args,
+            &store,
+            &protected,
+            &protected_repos,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.shards_deleted, 0);
         assert_eq!(outcome.xorbs_deleted, 0);
@@ -1120,9 +1241,15 @@ mod tests {
             force: true,
         };
 
-        let err = run_bucket_gc(&args, &store, &HashSet::new(), &HashSet::new())
-            .await
-            .unwrap_err();
+        let err = run_bucket_gc(
+            &args,
+            &store,
+            &HashSet::new(),
+            &HashSet::new(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(err, CrabError::Configuration { .. }));
         assert!(err.to_string().contains("ref-registry"));
@@ -1242,9 +1369,15 @@ mod tests {
         };
         let protected = HashSet::new();
         let protected_repos = HashSet::new();
-        let outcome = run_bucket_gc(&args, &store, &protected, &protected_repos)
-            .await
-            .unwrap();
+        let outcome = run_bucket_gc(
+            &args,
+            &store,
+            &protected,
+            &protected_repos,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(outcome.dry_run);
         assert_eq!(
             outcome.shards_deleted, 0,
