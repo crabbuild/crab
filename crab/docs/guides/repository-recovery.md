@@ -9,11 +9,26 @@ Every successful manifest replacement now preserves the displaced committed
 manifest as an immutable object under
 `<repository>/manifests/history/<generation>-<blake3>.json`. The current
 `<repository>/manifest` remains the only visible repository state. History is
-kept indefinitely, and repository, bucket, and managed-service GC retain every
-pack, pack index, reverse index, metadata segment, shard, and xorb reachable
-from every validated historical root. This favors recoverability over storage
-reclamation; operators should account for old pack and large-file data that
-remains reachable through history.
+kept indefinitely by default, and repository, bucket, and managed-service GC
+retain every pack, pack index, reverse index, metadata segment, shard, and xorb
+reachable from every validated historical root.
+
+Operators can preview an explicit retention boundary and then apply it:
+
+```bash
+crab recover history prune --keep-last 20
+crab recover history prune --keep-last 20 --apply
+crab gc --scope repo --dry-run
+crab gc --scope repo
+```
+
+`--keep-last` counts distinct generations and retains every root in each kept
+generation. Prune never removes the current manifest or dependent data; a
+later GC run re-evaluates reachability and grace periods before reclaiming
+objects that were unique to removed roots. Prune apply, restore apply, and
+destructive repository GC share a renewable maintenance lease, so recovery
+cannot race object deletion. Destructive bucket GC acquires the same lease for
+every registered repository before deleting shared objects.
 
 Writers create history only when they replace a manifest. Repositories pushed
 only by older Crab versions therefore have no retroactive history for those
@@ -25,6 +40,8 @@ then apply it explicitly:
 
 ```bash
 crab recover history list
+crab recover history prune --keep-last 20
+crab recover history prune --keep-last 20 --apply
 crab recover history verify 41
 crab recover history verify 41 --digest <64-character-blake3>
 crab recover history restore 41

@@ -282,6 +282,7 @@ impl RecoverCmd {
             Self::Show(_) => "recover.show",
             Self::History { command } => match command {
                 crate::cmd::history_recovery::HistoryCmd::List(_) => "recover.history.list",
+                crate::cmd::history_recovery::HistoryCmd::Prune(_) => "recover.history.prune",
                 crate::cmd::history_recovery::HistoryCmd::Verify(_) => "recover.history.verify",
                 crate::cmd::history_recovery::HistoryCmd::Restore(_) => "recover.history.restore",
             },
@@ -299,6 +300,10 @@ impl RecoverCmd {
                 | crate::cmd::history_recovery::HistoryCmd::Verify(_) => {
                     PlanApplyOperation::Inspect
                 }
+                crate::cmd::history_recovery::HistoryCmd::Prune(args) if args.apply => {
+                    PlanApplyOperation::Apply
+                }
+                crate::cmd::history_recovery::HistoryCmd::Prune(_) => PlanApplyOperation::Preview,
                 crate::cmd::history_recovery::HistoryCmd::Restore(args) if args.apply => {
                     PlanApplyOperation::Apply
                 }
@@ -309,7 +314,15 @@ impl RecoverCmd {
 
     #[cfg(test)]
     fn idempotent_apply(&self) -> bool {
-        matches!(self, Self::Apply(_))
+        matches!(
+            self,
+            Self::Apply(_)
+                | Self::History {
+                    command: crate::cmd::history_recovery::HistoryCmd::Prune(
+                        crate::cmd::history_recovery::HistoryPruneArgs { apply: true, .. }
+                    )
+                }
+        )
     }
 
     fn json(&self) -> bool {

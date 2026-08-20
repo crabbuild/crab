@@ -17,7 +17,6 @@ use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::push::{
     CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
-    publish_git_visibility_index_from_git_dir,
 };
 use crate::metadata::manifest::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, read_bulk_pack_list, read_manifest,
@@ -169,6 +168,7 @@ async fn run_repack_locked(
     if config.dry_run {
         return Ok(outcome(packs_before, 1, bytes_before, bytes_before, start));
     }
+    let visibility = read_current_visibility(store, router, &manifest).await?;
 
     let temp = tempfile::tempdir()?;
     let git_dir = temp.path().join("source.git");
@@ -223,13 +223,29 @@ async fn run_repack_locked(
 
     let committed = repack_manifest(manifest, new_generation, pack_index_hash);
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
-    if let Err(error) =
-        publish_git_visibility_index_from_git_dir(&git_dir, &committed, store, router).await
-    {
-        warn!(
-            error = %error,
+    if let Some(visibility) = visibility {
+        let visibility = rebind_visibility(visibility, &committed);
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        if let Err(error) = crab_metadata::git_visibility::upload_if_absent(
+            store.as_storage(),
+            &storage_router,
+            &visibility,
+        )
+        .await
+        {
+            warn!(
+                error = %error,
+                generation = committed.generation,
+                "repack committed; Git visibility proof requires repair"
+            );
+        }
+    } else {
+        debug!(
             generation = committed.generation,
-            "repack committed; Git visibility proof requires repair"
+            "repack preserved repository without a Git visibility proof"
         );
     }
     let anchor = CommittedManifestAnchor {
@@ -295,6 +311,71 @@ fn repack_manifest(mut manifest: Manifest, generation: u64, pack_index_hash: Str
     // before this helper commits its single-pack inventory.
     manifest.seal_git_validation();
     manifest
+}
+
+async fn read_current_visibility(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<Option<crab_metadata::git_visibility::GitVisibilityIndex>> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(None);
+    }
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    match crab_metadata::git_visibility::read(
+        store.as_storage(),
+        &storage_router,
+        manifest.generation,
+        &manifest.pack_index_hash,
+    )
+    .await
+    {
+        Ok(index) => {
+            if visibility_matches_manifest(&index, manifest) {
+                Ok(Some(index))
+            } else {
+                Err(CrabError::CorruptObject {
+                    path: storage_router
+                        .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+                        .as_ref()
+                        .to_owned(),
+                    reason: "Git visibility proof does not match manifest refs".to_owned(),
+                })
+            }
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn visibility_matches_manifest(
+    visibility: &crab_metadata::git_visibility::GitVisibilityIndex,
+    manifest: &Manifest,
+) -> bool {
+    visibility.refs.len() == manifest.refs.len()
+        && manifest.refs.iter().all(|(name, tip)| {
+            visibility.refs.get(name).is_some_and(|objects| {
+                objects.binary_search(tip).is_ok()
+                    && manifest
+                        .peeled_refs
+                        .get(name)
+                        .is_none_or(|peeled| objects.binary_search(peeled).is_ok())
+            })
+        })
+}
+
+fn rebind_visibility(
+    mut visibility: crab_metadata::git_visibility::GitVisibilityIndex,
+    manifest: &Manifest,
+) -> crab_metadata::git_visibility::GitVisibilityIndex {
+    visibility.generation = manifest.generation;
+    visibility
+        .pack_index_hash
+        .clone_from(&manifest.pack_index_hash);
+    visibility
 }
 
 fn manifest_hash_or_default(value: &str) -> Result<MerkleHash> {
@@ -660,6 +741,43 @@ mod tests {
         assert_eq!(updated.ref_registry_hash, manifest.ref_registry_hash);
     }
 
+    #[test]
+    fn rebind_visibility_changes_only_generation_anchor() {
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_owned(), vec!["a".repeat(40)]);
+        let visibility =
+            crab_metadata::git_visibility::GitVisibilityIndex::new(3, "b".repeat(64), refs.clone());
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 4;
+        manifest.pack_index_hash = "c".repeat(64);
+
+        let rebound = rebind_visibility(visibility, &manifest);
+
+        assert_eq!(rebound.generation, 4);
+        assert_eq!(rebound.pack_index_hash, "c".repeat(64));
+        assert_eq!(rebound.refs, refs);
+    }
+
+    #[tokio::test]
+    async fn missing_visibility_remains_optional() -> Result<()> {
+        let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(backend);
+        let router = StoreLayout::new(store.clone(), "org/repack-test".to_owned());
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "b".repeat(40));
+
+        assert!(
+            read_current_visibility(&store, &router, &manifest)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn repack_commits_one_verified_pack_and_locator_generation() -> Result<()> {
         let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -712,6 +830,13 @@ mod tests {
         manifest.pack_index_hash = pack_index_hash;
         manifest.seal_git_validation();
         crate::metadata::manifest::create_manifest(&store, &router, &manifest).await?;
+        crate::git::push::publish_git_visibility_index_from_git_dir(
+            &repository.join(".git"),
+            &manifest,
+            &store,
+            &router,
+        )
+        .await?;
 
         let outcome = run_repack(
             &store,
@@ -754,6 +879,23 @@ mod tests {
             })
         );
         session.close().await?;
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let visibility = crab_metadata::git_visibility::read(
+            store.as_storage(),
+            &storage_router,
+            committed.generation,
+            &committed.pack_index_hash,
+        )
+        .await?;
+        assert_eq!(visibility.refs.len(), 1);
+        assert!(
+            visibility.refs["refs/heads/main"]
+                .binary_search(&tip)
+                .is_ok()
+        );
         Ok(())
     }
 

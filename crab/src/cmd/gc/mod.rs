@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -43,7 +43,8 @@ const REPO_GC_PREFIXES: &[&str] = &[
     "workflow/artifacts/",
     "refs/crab/artifacts/",
 ];
-const DEFAULT_DELETE_CONCURRENCY: usize = 16;
+const DEFAULT_DELETE_CONCURRENCY: usize = 64;
+const DEFAULT_LIST_CONCURRENCY: usize = 32;
 
 // ---------------------------------------------------------------------------
 // GC arguments
@@ -67,6 +68,10 @@ pub struct GcArgs {
     /// Confirm destructive operations that bypass safety guards
     /// (`--force-early-delete`).
     pub yes_really: bool,
+    /// Maximum concurrent object-store DELETE requests.
+    pub delete_concurrency: usize,
+    /// Maximum concurrent object-store LIST and history-closure reads.
+    pub list_concurrency: usize,
 }
 
 impl Default for GcArgs {
@@ -78,6 +83,8 @@ impl Default for GcArgs {
             mode: OutputMode::Text,
             force_early_delete: false,
             yes_really: false,
+            delete_concurrency: DEFAULT_DELETE_CONCURRENCY,
+            list_concurrency: DEFAULT_LIST_CONCURRENCY,
         }
     }
 }
@@ -469,31 +476,46 @@ pub async fn list_repo_gc_candidates(
     store: &Store,
     router: &StoreLayout,
 ) -> Result<(Vec<ObjectMeta>, ListOutcome)> {
-    let started = Instant::now();
-    let mut candidates = Vec::new();
+    list_repo_gc_candidates_with_concurrency(store, router, DEFAULT_LIST_CONCURRENCY).await
+}
 
-    for prefix in REPO_GC_PREFIXES {
-        let object_prefix = router.repo_path(prefix);
-        let objects: Vec<_> = store
-            .inner()
-            .list(Some(&object_prefix))
-            .try_collect()
-            .await
-            .map_err(CrabError::Storage)?;
-        candidates.extend(objects.into_iter().map(|meta| ObjectMeta {
+async fn list_repo_gc_candidates_with_concurrency(
+    store: &Store,
+    router: &StoreLayout,
+    concurrency: usize,
+) -> Result<(Vec<ObjectMeta>, ListOutcome)> {
+    let started = Instant::now();
+    let parallelism = concurrency.max(1).min(REPO_GC_PREFIXES.len());
+    let batches =
+        futures_util::stream::iter(REPO_GC_PREFIXES.iter().copied().map(|prefix| async move {
+            let object_prefix = router.repo_path(prefix);
+            store
+                .inner()
+                .list(Some(&object_prefix))
+                .try_collect()
+                .await
+                .map_err(CrabError::Storage)
+        }))
+        .buffer_unordered(parallelism)
+        .try_collect::<Vec<Vec<object_store::ObjectMeta>>>()
+        .await?;
+    let candidates = batches
+        .into_iter()
+        .flatten()
+        .map(|meta| ObjectMeta {
             key: meta.location.to_string(),
             size: meta.size,
             last_modified: meta.last_modified.into(),
             storage_class: None,
             transitioned_at: None,
-        }));
-    }
+        })
+        .collect();
 
     Ok((
         candidates,
         ListOutcome {
             requests: REPO_GC_PREFIXES.len() as u64,
-            parallelism: 1,
+            parallelism,
             wall_seconds: started.elapsed().as_secs_f64(),
             failed_prefixes: Vec::new(),
         },
@@ -890,11 +912,32 @@ pub async fn reachable_repo_objects_from_manifest(
     store: &Store,
     router: &StoreLayout,
 ) -> Result<(crate::metadata::manifest::Manifest, HashSet<String>)> {
-    let (manifest, mut reachable) = reachable_bulk_objects_from_manifest(store, router).await?;
+    let snapshot = reachable_repo_objects_from_manifest_with_concurrency(
+        store,
+        router,
+        DEFAULT_LIST_CONCURRENCY,
+    )
+    .await?;
+    Ok((snapshot.manifest, snapshot.reachable_keys))
+}
+
+struct RepoGcReachability {
+    manifest: crate::metadata::manifest::Manifest,
+    reachable_keys: HashSet<String>,
+    shard_snapshot: ShardListSnapshot,
+}
+
+async fn reachable_repo_objects_from_manifest_with_concurrency(
+    store: &Store,
+    router: &StoreLayout,
+    concurrency: usize,
+) -> Result<RepoGcReachability> {
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let manifest = snapshot.manifest;
+    let mut reachable = HashSet::new();
+    extend_reachable_bulk_objects(store, router, &manifest, &mut reachable).await?;
     reachable.insert(router.manifest_path().as_ref().to_string());
 
-    extend_reachable_pack_objects(store, router, &manifest, &mut reachable).await?;
-    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
     for pack in &snapshot.journal.packs {
         insert_pack_objects(router, &pack.pack_id, &mut reachable);
     }
@@ -907,16 +950,41 @@ pub async fn reachable_repo_objects_from_manifest(
 
     let storage_router =
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    let history =
-        crab_metadata::manifest_store::list_manifest_history(store.as_storage(), &storage_router)
-            .await?;
-    for entry in history {
-        reachable.insert(entry.path);
-        extend_reachable_bulk_objects(store, router, &entry.manifest, &mut reachable).await?;
-        extend_reachable_pack_objects(store, router, &entry.manifest, &mut reachable).await?;
+    let history = crab_metadata::manifest_store::list_manifest_history_with_concurrency(
+        store.as_storage(),
+        &storage_router,
+        concurrency,
+    )
+    .await?;
+    let historical_reachable =
+        futures_util::stream::iter(history.into_iter().map(|entry| async move {
+            let mut keys = HashSet::new();
+            keys.insert(entry.path);
+            extend_reachable_bulk_objects(store, router, &entry.manifest, &mut keys).await?;
+            extend_reachable_pack_objects(store, router, &entry.manifest, &mut keys).await?;
+            Ok::<_, CrabError>(keys)
+        }))
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+    for keys in historical_reachable {
+        reachable.extend(keys);
     }
 
-    Ok((manifest, reachable))
+    let shard_snapshot = ShardListSnapshot {
+        generation: manifest.generation,
+        shard_keys: snapshot
+            .journal
+            .shards
+            .iter()
+            .map(|hash| format!("shards/{}/{hash}", &hash[..2.min(hash.len())]))
+            .collect(),
+    };
+    Ok(RepoGcReachability {
+        manifest,
+        reachable_keys: reachable,
+        shard_snapshot,
+    })
 }
 
 async fn extend_reachable_pack_objects(
@@ -957,16 +1025,70 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    let (manifest, mut reachable_keys) =
-        reachable_repo_objects_from_manifest(store, router).await?;
+    if args.dry_run {
+        return run_repo_remote_gc_under_maintenance(
+            args,
+            store,
+            router,
+            coordinator_protected_keys,
+            cancel,
+            grace_period,
+            jsonl_stream,
+        )
+        .await;
+    }
+
+    let operation_cancel = cancel.child_token();
+    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        store,
+        router.repo_prefix(),
+        &operation_cancel,
+    )
+    .await?;
+    let operation = run_repo_remote_gc_under_maintenance(
+        args,
+        store,
+        router,
+        coordinator_protected_keys,
+        &operation_cancel,
+        grace_period,
+        jsonl_stream,
+    )
+    .await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn run_repo_remote_gc_under_maintenance(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+) -> Result<GcOutcome> {
+    let reachability_started = Instant::now();
+    let reachability =
+        reachable_repo_objects_from_manifest_with_concurrency(store, router, args.list_concurrency)
+            .await?;
+    let mut reachable_keys = reachability.reachable_keys;
     let workflow_store = crab_workflow::WorkflowStore::from_storage(store.clone().into());
     reachable_keys.extend(
         crab_workflow::reachable_remote_artifact_objects(&workflow_store, router.repo_prefix())
             .await?
             .into_iter(),
     );
-    let shard_snapshot = shard_snapshot_from_repository(store, router, &manifest).await?;
-    let (listed_objects, list_outcome) = list_repo_gc_candidates(store, router).await?;
+    debug!(
+        reachable_objects = reachable_keys.len(),
+        wall_seconds = reachability_started.elapsed().as_secs_f64(),
+        "repo GC reachability scan complete"
+    );
+    let (listed_objects, list_outcome) =
+        list_repo_gc_candidates_with_concurrency(store, router, args.list_concurrency).await?;
     let deleter = StoreObjectDeleter::new(store.clone());
 
     run_gc(
@@ -974,33 +1096,15 @@ pub async fn run_repo_remote_gc(
         listed_objects,
         &reachable_keys,
         coordinator_protected_keys,
-        &shard_snapshot,
+        &reachability.shard_snapshot,
         cancel,
-        DEFAULT_DELETE_CONCURRENCY,
+        args.delete_concurrency,
         grace_period,
         list_outcome,
         &deleter,
         jsonl_stream,
     )
     .await
-}
-
-async fn shard_snapshot_from_repository(
-    store: &Store,
-    router: &StoreLayout,
-    manifest: &crate::metadata::manifest::Manifest,
-) -> Result<ShardListSnapshot> {
-    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
-    let shard_keys = snapshot
-        .journal
-        .shards
-        .iter()
-        .map(|hash| format!("shards/{}/{hash}", &hash[..2.min(hash.len())]))
-        .collect();
-    Ok(ShardListSnapshot {
-        generation: manifest.generation,
-        shard_keys,
-    })
 }
 
 /// Build a shard-list snapshot from the manifest for GC T0 safety.
@@ -1626,6 +1730,7 @@ mod tests {
         let keys: HashSet<_> = candidates.into_iter().map(|object| object.key).collect();
 
         assert_eq!(outcome.requests, 5);
+        assert_eq!(outcome.parallelism, 5);
         assert!(keys.contains("org/repo/packs/pack-old.pack"));
         assert!(keys.contains("org/repo/metadata/pack/indexes/old.json"));
         assert!(keys.contains("org/repo/manifests/pack-list-old"));
@@ -1633,6 +1738,28 @@ mod tests {
         assert!(!keys.contains("org/repo/locks/refs/heads/main/lock"));
         assert!(!keys.contains("org/repo/locks/internal/repack/lock"));
         assert!(!keys.contains(".crab/xorbs/abc"));
+    }
+
+    #[tokio::test]
+    async fn repo_gc_candidate_listing_honors_concurrency_limit() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+
+        let (_, serial) = list_repo_gc_candidates_with_concurrency(&store, &router, 1)
+            .await
+            .unwrap();
+        let (_, bounded) = list_repo_gc_candidates_with_concurrency(&store, &router, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(serial.parallelism, 1);
+        assert_eq!(bounded.parallelism, 2);
     }
 
     #[tokio::test]
@@ -1994,6 +2121,64 @@ mod tests {
             store.head(&ObjectPath::from(free_key)).await,
             Err(CrabError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn maintenance_lease_blocks_destructive_repo_gc_but_not_preview() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use crab_coordination::PushLock;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let lock = PushLock::acquire_internal_default(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
+        )
+        .await
+        .unwrap();
+
+        let error = run_repo_remote_gc(
+            &GcArgs::default(),
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CrabError::PushLockHeld { .. }));
+
+        let preview = run_repo_remote_gc(
+            &GcArgs {
+                dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(preview.dry_run);
+        lock.release().await.unwrap();
     }
 
     // --- GC compaction (Task 8.5) ---

@@ -430,18 +430,18 @@ fn walk_tree(
     let mut visitor = ObjectCollector::new(result, maximum);
     let mut state = gix_traverse::tree::breadthfirst::State::default();
 
-    gix_traverse::tree::breadthfirst(tree_iter, &mut state, odb, &mut visitor).map_err(
-        |source| WalkError::Git {
-            operation: format!("tree walk error at {tree_id}"),
-            source: Box::new(source),
-        },
-    )?;
+    let traversal = gix_traverse::tree::breadthfirst(tree_iter, &mut state, odb, &mut visitor);
 
     if visitor.overflowed
         && let Some(maximum) = maximum
     {
         return Err(limit_error(visitor.result, maximum));
     }
+
+    traversal.map_err(|source| WalkError::Git {
+        operation: format!("tree walk error at {tree_id}"),
+        source: Box::new(source),
+    })?;
 
     // Now read each newly discovered blob to check for pointers.
     for blob_oid in &visitor.pending_blobs {
@@ -714,6 +714,20 @@ mod tests {
             WalkError::LimitExceeded {
                 actual: 2,
                 maximum: 1
+            }
+        ));
+
+        let tree_bounded = walk_reachable_bounded(
+            &git_dir_path,
+            &[("refs/heads/main".to_owned(), head_sha.clone())],
+            2,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            tree_bounded,
+            WalkError::LimitExceeded {
+                actual: 3,
+                maximum: 2
             }
         ));
 

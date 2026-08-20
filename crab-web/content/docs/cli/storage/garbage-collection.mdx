@@ -5,7 +5,27 @@ description: "How Crab identifies and removes unreachable objects from cloud sto
 
 # Garbage Collection
 
-Over time, your cloud bucket accumulates objects that are no longer referenced by any branch or tag — leftover chunks from deleted files, abandoned experiments, or force-pushed branches. Garbage collection identifies these unreachable objects and removes them, reclaiming storage space and reducing cloud costs.
+Over time, your cloud bucket accumulates objects that are no longer referenced
+by current repository state, recovery roots, or workflow artifacts. Garbage
+collection identifies these unreachable objects and removes them, reclaiming
+storage space and reducing cloud costs.
+
+Crab retains immutable manifest history for `crab recover history`. A deleted
+branch, force-push, or repack does not make its old objects collectible while a
+historical root still references them. Crab currently retains those roots
+without a time or count limit by default. To trade older recovery points for
+storage reclamation, preview and apply an explicit generation boundary:
+
+```bash
+crab recover history prune --keep-last 20
+crab recover history prune --keep-last 20 --apply
+crab gc --scope repo --dry-run
+crab gc --scope repo
+```
+
+Retention counts distinct generations and preserves every alternate root in a
+kept generation. Pruning removes only root manifests. GC separately proves
+which dependent objects became unreachable and still applies its grace period.
 
 ## What Becomes Garbage?
 
@@ -81,11 +101,12 @@ This reduces the grace period to 1 hour (the minimum). Use only when you're cert
 
 Crab's GC is designed to be safe by default:
 
-1. **Never deletes referenced objects** — Only objects unreachable from any ref are candidates.
+1. **Never deletes referenced objects** — Current state, journal transactions, workflow artifacts, and every immutable recovery root are protected.
 2. **Grace period** — Recently created objects are protected even if currently unreachable.
 3. **Minimum grace** — Even with `--force`, the minimum grace period is 1 hour.
 4. **Confirmation required** — `--force` prompts for confirmation unless `--yes` is also passed.
 5. **Atomic ref reads** — The reachability scan uses a consistent snapshot of refs.
+6. **Maintenance serialization** — Destructive repo GC takes one repository lease; destructive bucket GC takes a lease for every registered repository. Neither can race history pruning or restoration.
 
 ## When to Run GC
 

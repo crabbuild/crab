@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "HistoryEntryPayload": {
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "manifest_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "refs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "created_at",
+        "digest",
+        "generation",
+        "manifest_bytes",
+        "refs",
+        "session_id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "applied": {
+      "type": "boolean"
+    },
+    "keep_last": {
+      "format": "uint64",
+      "minimum": 1.0,
+      "type": "integer"
+    },
+    "manifest_bytes_pruned": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "pruned": {
+      "items": {
+        "$ref": "#/definitions/HistoryEntryPayload"
+      },
+      "type": "array"
+    },
+    "roots_before": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "roots_kept": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "roots_pruned": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "applied",
+    "keep_last",
+    "manifest_bytes_pruned",
+    "pruned",
+    "roots_before",
+    "roots_kept",
+    "roots_pruned"
+  ],
+  "title": "HistoryPrunePayload",
+  "type": "object"
+}
