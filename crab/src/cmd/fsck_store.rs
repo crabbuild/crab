@@ -17,7 +17,7 @@ use crate::core::error::{CrabError, Result};
 #[cfg(test)]
 use crate::metadata::manifest::PackManifestEntry;
 use crate::metadata::manifest::{
-    Manifest, read_bulk_pack_list, read_bulk_shard_list, read_manifest,
+    Manifest, read_bulk_pack_list, read_manifest, read_repository_snapshot,
 };
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
@@ -46,47 +46,36 @@ impl StoreChecker {
         }
     }
 
-    /// Load the current manifest-backed pack list from storage.
+    /// Load the current pack list from the compacted manifest and journal.
     async fn load_pack_list(&self) -> Result<PackList> {
-        let manifest = match read_manifest(&self.store, &self.router).await {
-            Ok((manifest, _etag)) => manifest,
+        let snapshot = match read_repository_snapshot(&self.store, &self.router).await {
+            Ok(snapshot) => snapshot,
             Err(CrabError::NotFound { .. }) => return Ok(PackList::default()),
             Err(e) => return Err(e),
         };
 
-        let entries = if manifest.pack_index_hash.is_empty() {
-            Vec::new()
-        } else {
-            read_bulk_pack_list(&self.store, &self.router, &manifest.pack_index_hash)
-                .await?
+        Ok(PackList {
+            generation: snapshot.manifest.generation,
+            entries: snapshot
+                .journal
+                .packs
                 .into_iter()
                 .map(|entry| PackEntry::with_ref_tips(entry.pack_id, entry.size, entry.ref_tips))
-                .collect()
-        };
-
-        Ok(PackList {
-            generation: manifest.generation,
-            entries,
+                .collect(),
         })
     }
 
-    /// Load the current manifest-backed shard list from storage.
+    /// Load the current shard list from the compacted manifest and journal.
     async fn load_shard_list(&self) -> Result<ShardList> {
-        let manifest = match read_manifest(&self.store, &self.router).await {
-            Ok((manifest, _etag)) => manifest,
+        let snapshot = match read_repository_snapshot(&self.store, &self.router).await {
+            Ok(snapshot) => snapshot,
             Err(CrabError::NotFound { .. }) => return Ok(ShardList::default()),
             Err(e) => return Err(e),
         };
 
-        let entries = if manifest.shard_index_hash.is_empty() {
-            Vec::new()
-        } else {
-            read_bulk_shard_list(&self.store, &self.router, &manifest.shard_index_hash).await?
-        };
-
         Ok(ShardList {
-            generation: manifest.generation,
-            entries,
+            generation: snapshot.manifest.generation,
+            entries: snapshot.journal.shards,
         })
     }
 
@@ -713,7 +702,13 @@ impl FsckRepairer for StoreRepairer {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::metadata::manifest::{
+        RefJournalEdit, RefJournalTransaction, commit_ref_journal_transaction,
+        read_ref_journal_head,
+    };
     use bytes::Bytes;
     use crab_xet::shard::{
         FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo,
@@ -963,6 +958,42 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn checker_reads_uncompacted_journal_lists() {
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        write_manifest(&store, &prefix, &[], &[]).await;
+        let pack_id = hash_from_seed(30).hex();
+        let shard_hash = hash_from_seed(31).hex();
+        let ref_name = "refs/heads/main";
+        let head = read_ref_journal_head(&store, &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            vec![pack_entry(&pack_id, 4)],
+            vec![shard_hash.clone()],
+        )
+        .unwrap();
+        commit_ref_journal_transaction(&store, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let checker = StoreChecker::new(store, prefix);
+        let packs = checker.load_pack_list().await.unwrap();
+        let shards = checker.load_shard_list().await.unwrap();
+
+        assert_eq!(packs.entries[0].pack_id, pack_id);
+        assert_eq!(shards.entries, vec![shard_hash]);
     }
 
     #[tokio::test]

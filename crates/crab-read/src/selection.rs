@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use crab_metadata::ref_journal::list_active_transactions;
 use crab_metadata::{error::MetadataError, manifest_store, manifests::Manifest};
 use crab_storage::{StorageError, Store, StoreLayout};
 use crab_types::replication::ReplicaConfig;
@@ -251,6 +252,9 @@ pub async fn check_read_replica_readiness(
     options: ReadinessCheckOptions,
 ) -> Result<ReadReplicaReadiness> {
     let mut stats = ReadinessProbeStats::default();
+    // Capture journal visibility before the manifest, matching repository
+    // snapshot ordering without loading the primary's pack and shard indexes.
+    let primary_active = list_active_transactions(primary_store, primary_router).await?;
     let (primary_manifest, _) =
         manifest_store::read_manifest(primary_store, primary_router).await?;
     let primary_generation = primary_manifest.generation;
@@ -267,6 +271,15 @@ pub async fn check_read_replica_readiness(
             ));
         }
     };
+
+    if !primary_active.is_empty() {
+        return Ok(ReadReplicaReadiness::not_ready(
+            primary_generation,
+            Some(replica_manifest.generation),
+            "primary has uncompacted ref transactions",
+            stats,
+        ));
+    }
 
     if replica_manifest.generation < primary_generation {
         return Ok(ReadReplicaReadiness::not_ready(
@@ -647,12 +660,16 @@ impl<Store, Router> ReadStoreSelection<Store, Router> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use bytes::Bytes;
     use crab_metadata::{
         manifest_store::create_manifest,
         manifests::{Manifest, PackManifestEntry, compact_pack_index},
+        ref_journal::{
+            RefJournalEdit, RefJournalTransaction, commit_ref_transaction, read_ref_head,
+        },
         segmented_store,
     };
     use object_store::memory::InMemory;
@@ -930,6 +947,54 @@ mod tests {
         );
         assert_eq!(readiness.stats.object_read_count, 1);
         assert_eq!(readiness.stats.object_probe_count, 1);
+    }
+
+    #[tokio::test]
+    async fn readiness_check_rejects_replica_while_primary_journal_is_uncompacted() {
+        let (primary_store, primary_router) = memory_store_with_layout("org/repo");
+        let (replica_store, replica_router) = memory_store_with_layout("org/repo");
+        let manifest = test_manifest(9);
+        write_test_manifest(&primary_store, &primary_router, &manifest).await;
+        write_test_manifest(&replica_store, &replica_router, &manifest).await;
+
+        let ref_name = "refs/heads/main";
+        let head = read_ref_head(&primary_store, &primary_router, ref_name)
+            .await
+            .expect("read ref head");
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("c".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build transaction");
+        commit_ref_transaction(&primary_store, &primary_router, &transaction, &[head])
+            .await
+            .expect("commit transaction");
+
+        let readiness = check_read_replica_readiness(
+            &primary_store,
+            &primary_router,
+            &replica_store,
+            &replica_router,
+            ReadinessCheckOptions::deep(),
+        )
+        .await
+        .expect("readiness check");
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.primary_generation, 9);
+        assert_eq!(readiness.replica_generation, Some(9));
+        assert_eq!(
+            readiness.reason.as_deref(),
+            Some("primary has uncompacted ref transactions")
+        );
     }
 
     #[test]

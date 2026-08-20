@@ -272,12 +272,53 @@ async fn execute_push(
                 if emit_terminal || mode == OutputMode::Text {
                     emit_push_failure(&failure, mode);
                 }
-                return Err(CrabError::Internal(
-                    "push failed for one or more refs".into(),
-                ));
+                let source = push_failure_source(&failure.specs, &failure.result);
+                return Err(CrabError::PushPartialOutcome {
+                    outcomes: Box::new(failure.result),
+                    source: Box::new(source),
+                });
             }
         }
     }
+}
+
+fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
+    for spec in specs {
+        let Some(outcome) = result.outcomes.get(&spec.dst) else {
+            continue;
+        };
+        #[expect(
+            deprecated,
+            reason = "preserves the deprecated outcome until its callers are migrated"
+        )]
+        match outcome {
+            RefPushOutcome::Ok => {}
+            RefPushOutcome::Error(message) => return CrabError::Internal(message.clone()),
+            RefPushOutcome::Rejected(PushRejectReason::NonFastForward { have, want }) => {
+                return CrabError::NonFastForward {
+                    ref_name: spec.dst.clone(),
+                    have: have.clone(),
+                    want: want.clone(),
+                };
+            }
+            RefPushOutcome::Rejected(PushRejectReason::StaleInfo) => {
+                return CrabError::CasConflict {
+                    path: spec.dst.clone(),
+                    expected_etag: None,
+                };
+            }
+            RefPushOutcome::Rejected(PushRejectReason::IntegrationFailed { command, message }) => {
+                return CrabError::PushIntegrationFailed {
+                    command: command.clone(),
+                    message: message.clone(),
+                };
+            }
+            RefPushOutcome::Rejected(reason) => {
+                return CrabError::Internal(reason.to_string());
+            }
+        }
+    }
+    CrabError::Internal("push failed without a per-ref failure outcome".to_owned())
 }
 
 /// Push explicit refspecs without emitting command output.
@@ -1516,6 +1557,33 @@ mod tests {
         let result = PushResult::new(outcomes);
 
         assert_eq!(rebase_retry_branch(&[spec], &result), Some("main"));
+    }
+
+    #[test]
+    fn push_failure_source_preserves_non_fast_forward_classification() {
+        use std::collections::HashMap;
+
+        let spec = PushSpec {
+            force: false,
+            src: "HEAD".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        let result = PushResult::new(HashMap::from([(
+            spec.dst.clone(),
+            RefPushOutcome::Rejected(PushRejectReason::NonFastForward {
+                have: "old".to_owned(),
+                want: "new".to_owned(),
+            }),
+        )]));
+
+        assert!(matches!(
+            push_failure_source(&[spec], &result),
+            CrabError::NonFastForward {
+                ref_name,
+                have,
+                want,
+            } if ref_name == "refs/heads/main" && have == "old" && want == "new"
+        ));
     }
 
     #[test]

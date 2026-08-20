@@ -164,40 +164,42 @@ impl FileIndexLookupSession {
         use_acceleration: bool,
     ) -> Result<Self> {
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-        let anchor =
-            match crate::manifest_store::read_manifest(&storage, &router).await {
-                Ok((manifest, _)) if !manifest.shard_index_hash.is_empty() => {
-                    let shard_index_hash = MerkleHash::from_hex(&manifest.shard_index_hash)
-                        .map_err(|error| MetadataError::CorruptObject {
+        let anchor = match crate::manifest_store::read_repository_snapshot(&storage, &router).await
+        {
+            Ok(snapshot) if !snapshot.journal.shards.is_empty() => {
+                let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
+                    MerkleHash::default()
+                } else {
+                    MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(|error| {
+                        MetadataError::CorruptObject {
                             path: router.manifest_path().to_string(),
                             reason: format!("invalid shard-index hash: {error}"),
-                        })?;
-                    let shards = crate::manifest_store::read_bulk_shard_list(
-                        &storage,
-                        &router,
-                        &manifest.shard_index_hash,
-                    )
-                    .await?
+                        }
+                    })?
+                };
+                let shards = snapshot
+                    .journal
+                    .shards
                     .into_iter()
                     .map(|hash| {
                         MerkleHash::from_hex(&hash).map_err(|error| MetadataError::CorruptObject {
-                            path: "manifest shard index".to_owned(),
+                            path: "repository shard inventory".to_owned(),
                             reason: format!("invalid shard hash: {error}"),
                         })
                     })
                     .collect::<Result<HashSet<_>>>()?;
-                    Some(CommittedShardAnchor {
-                        generation: manifest.generation,
-                        shard_index_hash,
-                        shards,
-                    })
-                }
-                Ok(_) => None,
-                Err(MetadataError::Storage {
-                    source: crab_storage::StorageError::NotFound { .. },
-                }) => None,
-                Err(error) => return Err(error),
-            };
+                Some(CommittedShardAnchor {
+                    generation: snapshot.manifest.generation,
+                    shard_index_hash,
+                    shards,
+                })
+            }
+            Ok(_) => None,
+            Err(MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => None,
+            Err(error) => return Err(error),
+        };
         let reader = if use_acceleration {
             let path = file_index_path(repo_prefix);
             match slatedb::DbReader::builder(
@@ -554,12 +556,38 @@ pub async fn resolve_file_hash_to_shard(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use bytes::Bytes;
     use object_store::memory::InMemory;
 
     fn hash_from_seed(seed: u64) -> MerkleHash {
         MerkleHash::from([seed, seed.wrapping_mul(31), seed.wrapping_mul(97), seed])
+    }
+
+    fn shard_with_file(file_hash: MerkleHash) -> (Vec<u8>, MerkleHash) {
+        use crab_xet::shard::{
+            FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
+            XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+        };
+
+        let chunk_hash = hash_from_seed(43);
+        let xorb_hash = hash_from_seed(44);
+        let xorb = Arc::new(MDBXorbInfo {
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, 16),
+            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 16, 0)],
+        });
+        let file = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(file_hash, 1, false, false),
+            segments: vec![FileDataSequenceEntry::new(xorb_hash, 16, 0, 1)],
+            verification: Vec::new(),
+            metadata_ext: None,
+        };
+        let mut writer = ShardWriter::new();
+        writer.add_xorb(xorb).unwrap();
+        writer.add_file(file).unwrap();
+        writer.finalize().unwrap()
     }
 
     async fn seed_file_index(
@@ -712,31 +740,11 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_shard_search_recovers_missing_file_index_entry() {
-        use crab_xet::shard::{
-            FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
-            XorbChunkSequenceEntry, XorbChunkSequenceHeader,
-        };
-
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let storage = crab_storage::Store::new(Arc::clone(&store));
         let router = crab_storage::StoreLayout::new(storage.clone(), "org/recovery".to_owned());
         let file_hash = hash_from_seed(42);
-        let chunk_hash = hash_from_seed(43);
-        let xorb_hash = hash_from_seed(44);
-        let xorb = Arc::new(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, 16),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 16, 0)],
-        });
-        let file = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, 1, false, false),
-            segments: vec![FileDataSequenceEntry::new(xorb_hash, 16, 0, 1)],
-            verification: Vec::new(),
-            metadata_ext: None,
-        };
-        let mut writer = ShardWriter::new();
-        writer.add_xorb(xorb).unwrap();
-        writer.add_file(file).unwrap();
-        let (shard_bytes, shard_hash) = writer.finalize().unwrap();
+        let (shard_bytes, shard_hash) = shard_with_file(file_hash);
         storage
             .put(&router.shard_path(&shard_hash), Bytes::from(shard_bytes))
             .await
@@ -766,6 +774,49 @@ mod tests {
             .unwrap();
 
         let session = FileIndexLookupSession::open(store, "org/recovery")
+            .await
+            .unwrap();
+        assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn journal_shard_search_recovers_before_compaction() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let router = crab_storage::StoreLayout::new(storage.clone(), "org/journal".to_owned());
+        let file_hash = hash_from_seed(52);
+        let (shard_bytes, shard_hash) = shard_with_file(file_hash);
+        storage
+            .put(&router.shard_path(&shard_hash), Bytes::from(shard_bytes))
+            .await
+            .unwrap();
+        let manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
+        crate::manifest_store::create_manifest(&storage, &router, &manifest)
+            .await
+            .unwrap();
+        let ref_name = "refs/heads/main";
+        let head = crate::ref_journal::read_ref_head(&storage, &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = crate::ref_journal::RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![crate::ref_journal::RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            vec![shard_hash.hex()],
+        )
+        .unwrap();
+        crate::ref_journal::commit_ref_transaction(&storage, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let session = FileIndexLookupSession::open(store, "org/journal")
             .await
             .unwrap();
         assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));

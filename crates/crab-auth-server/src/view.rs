@@ -45,6 +45,15 @@ async fn read_manifest(store: &Store, router: &StoreLayout) -> Result<(Manifest,
         .map_err(AuthServerError::from)
 }
 
+async fn read_repository_snapshot(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<manifest_store::RepositorySnapshot> {
+    manifest_store::read_repository_snapshot(store, router)
+        .await
+        .map_err(AuthServerError::from)
+}
+
 #[cfg(test)]
 async fn read_bulk_pack_list(
     store: &Store,
@@ -200,10 +209,9 @@ pub async fn materialize_view_with_store_and_credentials(
 
     let parsed = CrabUrl::parse(repo_url).map_err(AuthServerError::from)?;
     let source_router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    let (manifest, _) = read_manifest(&store, &source_router).await?;
-    let manifest_bytes = serde_json::to_vec(&manifest)
-        .map_err(|e| AuthServerError::Internal(format!("manifest serialize: {e}")))?;
-    let source_manifest_hash = blake3::hash(&manifest_bytes).to_hex().to_string();
+    let snapshot = read_repository_snapshot(&store, &source_router).await?;
+    let manifest = snapshot.manifest;
+    let source_manifest_hash = snapshot.journal.state_digest;
     let repo_prefix = view_prefix(
         &parsed.repo_path,
         scope_hash,

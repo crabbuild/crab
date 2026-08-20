@@ -1744,6 +1744,10 @@ fn manifest_connectivity_frontier(manifest: Option<&Manifest>, objects_dir: &Pat
     .collect()
 }
 
+fn should_probe_git_object_locator(candidate_count: usize) -> bool {
+    candidate_count >= GIT_LOCATOR_MIN_CANDIDATES
+}
+
 fn ref_tip_pack_basis_if_local(
     packs: &[PackManifestEntry],
     objects_dir: &Path,
@@ -2399,20 +2403,12 @@ const DEFAULT_BATCH_READ_SIZE: usize = 256;
 /// Default maximum CAS retry attempts for the unified manifest pointer.
 const DEFAULT_MAX_CAS_RETRIES: u32 = 64;
 
-/// Base delay for jittered unified-manifest CAS retries.
-const MANIFEST_CAS_BACKOFF_BASE: Duration = Duration::from_millis(50);
-
-/// Cap for jittered unified-manifest CAS retries.
-const MANIFEST_CAS_BACKOFF_CAP: Duration = Duration::from_millis(750);
-
 /// Base delay for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
-const MANIFEST_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(50);
-const MANIFEST_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_millis(500);
 const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_QUEUED_TTL: Duration = Duration::from_secs(120);
@@ -2420,6 +2416,7 @@ const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PUSH_ADMISSION_WAIT_PER_WAVE: Duration = Duration::from_millis(250);
 const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
+const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
 
 /// Multipart threshold: xorbs larger than this use multipart upload.
 const XORB_MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
@@ -2942,34 +2939,10 @@ pub fn lock_ttl_remaining(expires_at_unix: Option<u64>) -> u64 {
     expires_at.saturating_sub(now)
 }
 
-fn manifest_cas_backoff(attempt: u32) -> Duration {
-    let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
-    let exp = MANIFEST_CAS_BACKOFF_BASE.saturating_mul(shift);
-    let bound = exp.min(MANIFEST_CAS_BACKOFF_CAP);
-    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
-    if bound_nanos == 0 {
-        return Duration::ZERO;
-    }
-    let pick = rand::rng().random_range(0..=bound_nanos);
-    Duration::from_nanos(pick)
-}
-
 fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let exp = PUSH_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
     let bound = exp.min(PUSH_LOCK_WAIT_BACKOFF_CAP).min(remaining);
-    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
-    if bound_nanos == 0 {
-        return Duration::ZERO;
-    }
-    let pick = rand::rng().random_range(1..=bound_nanos);
-    Duration::from_nanos(pick)
-}
-
-fn manifest_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
-    let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
-    let exp = MANIFEST_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
-    let bound = exp.min(MANIFEST_LOCK_WAIT_BACKOFF_CAP).min(remaining);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
     if bound_nanos == 0 {
         return Duration::ZERO;
@@ -4680,47 +4653,6 @@ pub(crate) async fn acquire_push_lock_leases(
     }
 }
 
-async fn acquire_internal_push_lock_with_wait(
-    store: &Store,
-    prefix: &str,
-    resource: &str,
-    ttl: Duration,
-    wait: Duration,
-    cancel: &CancellationToken,
-) -> Result<PushLock> {
-    let deadline = Instant::now() + wait;
-    let mut attempt = 0;
-    loop {
-        check_cancelled(cancel)?;
-        match PushLock::acquire_internal(store.inner(), prefix, resource, ttl)
-            .await
-            .map_err(CrabError::from)
-        {
-            Ok(lock) => return Ok(lock),
-            Err(error @ CrabError::PushLockHeld { .. }) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                let delay =
-                    manifest_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
-                attempt = attempt.saturating_add(1);
-                debug!(
-                    resource,
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    "internal push lock held, waiting before retry"
-                );
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 async fn acquire_push_admission_lock(
     store: &Store,
     prefix: &str,
@@ -5394,15 +5326,19 @@ impl PushPipeline {
             return Ok(());
         };
 
-        match read_manifest(store, &self.router).await {
-            Ok((manifest, etag)) => {
+        match crate::metadata::manifest::read_repository_snapshot(store, &self.router).await {
+            Ok(snapshot) => {
+                let mut manifest = snapshot.manifest;
+                manifest.refs = snapshot.journal.refs;
+                manifest.peeled_refs = snapshot.journal.peeled_refs;
+                manifest.head = snapshot.journal.head;
                 debug!(
                     generation = manifest.generation,
                     refs = manifest.refs.len(),
                     "read base manifest"
                 );
                 *self.base_manifest.lock().await = Some(manifest);
-                *self.manifest_etag.lock().await = Some(etag);
+                *self.manifest_etag.lock().await = Some(snapshot.manifest_etag);
             }
             Err(CrabError::NotFound { .. }) => {
                 debug!("read_base_manifest: no manifest found, first push");
@@ -6677,18 +6613,10 @@ impl PushPipeline {
         )))
     }
 
-    /// Step 12 (new): Unified manifest CAS — uploads bulk data objects,
-    /// then CAS-writes the manifest pointer.
-    ///
-    /// Replaces the old two-phase commit (`manifest_cas` + `ref_cas`) with
-    /// a single atomic CAS on `{repo}/manifest`. On CAS conflict, re-reads
-    /// the current manifest, checks for ref conflicts, and retries with a
-    /// merged manifest if non-conflicting.
-    ///
-    /// Max retries: `config.max_cas_retries` (default 64).
+    /// Commit independently locked refs through one atomic journal transaction.
     #[tracing::instrument(
         level = "info",
-        name = "push.unified_manifest_cas",
+        name = "push.commit_ref_journal",
         skip_all,
         fields(
             generation = tracing::field::Empty,
@@ -6698,346 +6626,234 @@ impl PushPipeline {
             duration_ms = tracing::field::Empty,
         )
     )]
-    async fn unified_manifest_cas(
+    async fn commit_ref_journal(
         &self,
-        manifest: Manifest,
-        bulk: BulkData,
+        mut manifest: Manifest,
+        _bulk: BulkData,
         sha_map: &HashMap<String, String>,
-        decisions: HashMap<String, RefUpdateDecision>,
+        mut decisions: HashMap<String, RefUpdateDecision>,
         admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<HashMap<String, RefUpdateDecision>> {
         let t0 = Instant::now();
-        let store = self.store.as_ref().ok_or_else(|| {
-            CrabError::Internal("unified_manifest_cas requires a store".to_owned())
-        })?;
-
-        // Upload immutable metadata segments and indexes before the
-        // manifest pointer exposes them.
-        upload_segmented_bulk(store, &self.router, &bulk).await?;
-
-        // Pack/chunk uploads remain concurrent, while the single manifest
-        // pointer has one repository-wide writer. Queue this short commit
-        // phase to avoid O(writers²) CAS retries under branch fanout.
-        let manifest_lock = acquire_internal_push_lock_with_wait(
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("commit_ref_journal requires a store".to_owned()))?;
+        self.validate_push_commit_receipt(&manifest).await?;
+        let base = self.base_manifest.lock().await.clone();
+        let current_snapshot =
+            match crate::metadata::manifest::read_repository_snapshot(store, &self.router).await {
+                Ok(snapshot) => snapshot,
+                Err(CrabError::NotFound { path })
+                    if path == self.router.manifest_path().as_ref() =>
+                {
+                    let initial = Manifest::default_for_repo(&manifest.head);
+                    match create_manifest_with_etag(store, &self.router, &initial).await {
+                        Ok(_) | Err(CrabError::CasConflict { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
+                    crate::metadata::manifest::read_repository_snapshot(store, &self.router).await?
+                }
+                Err(error) => return Err(error),
+            };
+        let mut current = current_snapshot.manifest;
+        current.refs = current_snapshot.journal.refs;
+        current.peeled_refs = current_snapshot.journal.peeled_refs;
+        current.head = current_snapshot.journal.head;
+        let conflicts = ref_base_conflicts(&self.specs, &decisions, base.as_ref(), &current);
+        if self.config.atomic
+            && let Some(conflict) = conflicts.first()
+        {
+            let desired = self
+                .specs
+                .iter()
+                .find(|spec| spec.dst == conflict.dst)
+                .and_then(|spec| sha_map.get(&spec.src))
+                .cloned()
+                .unwrap_or_else(|| conflict.want.clone());
+            let reason = if conflict.is_delete {
+                PushRejectReason::StaleInfo
+            } else {
+                PushRejectReason::NonFastForward {
+                    have: conflict.have.clone(),
+                    want: desired,
+                }
+            };
+            return Err(self.partial_outcome_singling_out(
+                &conflict.dst,
+                reason,
+                CrabError::CasConflict {
+                    path: self.router.manifest_path().to_string(),
+                    expected_etag: None,
+                },
+            ));
+        }
+        let had_conflicts = !conflicts.is_empty();
+        for conflict in conflicts {
+            let reason = if conflict.is_delete {
+                PushRejectReason::StaleInfo
+            } else {
+                let desired = self
+                    .specs
+                    .iter()
+                    .find(|spec| spec.dst == conflict.dst)
+                    .and_then(|spec| sha_map.get(&spec.src))
+                    .cloned()
+                    .unwrap_or(conflict.want);
+                PushRejectReason::NonFastForward {
+                    have: conflict.have,
+                    want: desired,
+                }
+            };
+            decisions.insert(conflict.dst, RefUpdateDecision::Reject(reason));
+        }
+        if had_conflicts {
+            self.replan_base_bound_dependencies_after_cas_conflict()
+                .await?;
+            (manifest, _) = self
+                .apply_decisions_with_sha_map(&decisions, false, sha_map)
+                .await?;
+        }
+        let mut edits = Vec::new();
+        for spec in &self.specs {
+            if !matches!(
+                decisions.get(&spec.dst),
+                Some(RefUpdateDecision::Proceed { .. })
+            ) {
+                continue;
+            }
+            edits.push(crate::metadata::manifest::RefJournalEdit {
+                ref_name: spec.dst.clone(),
+                old_oid: base
+                    .as_ref()
+                    .and_then(|value| value.refs.get(&spec.dst).cloned()),
+                new_oid: if spec.src.is_empty() {
+                    None
+                } else {
+                    Some(sha_map.get(&spec.src).cloned().ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "journal commit is missing source ref {}",
+                            spec.src
+                        ))
+                    })?)
+                },
+                peeled_oid: manifest.peeled_refs.get(&spec.dst).cloned(),
+            });
+        }
+        edits.sort_unstable_by(|left, right| left.ref_name.cmp(&right.ref_name));
+        if edits.is_empty() {
+            return Err(CrabError::PushPartialOutcome {
+                outcomes: Box::new(PushResult::new(decisions_to_outcomes(&decisions))),
+                source: Box::new(CrabError::CasConflict {
+                    path: self.router.manifest_path().to_string(),
+                    expected_etag: None,
+                }),
+            });
+        }
+        let mut expected_heads = Vec::with_capacity(edits.len());
+        let mut parents = BTreeMap::new();
+        for edit in &edits {
+            let head = crate::metadata::manifest::read_ref_journal_head(
+                store,
+                &self.router,
+                &edit.ref_name,
+            )
+            .await?;
+            parents.insert(edit.ref_name.clone(), head.visible_transaction.clone());
+            expected_heads.push(head);
+        }
+        let packs = self
+            .uploaded_packs
+            .lock()
+            .await
+            .iter()
+            .map(|pack| pack.entry.clone())
+            .collect();
+        let shards = self
+            .uploaded_shard_hashes
+            .lock()
+            .await
+            .iter()
+            .map(MerkleHash::hex)
+            .collect();
+        let head = base
+            .as_ref()
+            .is_none_or(|value| value.head != manifest.head)
+            .then(|| manifest.head.clone());
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            parents, edits, head, packs, shards,
+        )?;
+        let committed = crate::metadata::manifest::commit_ref_journal_transaction(
             store,
+            &self.router,
+            &transaction,
+            &expected_heads,
+        )
+        .await?;
+        info!(
+            transaction_id = %committed.transaction_id,
+            refs_count = committed.edited_refs,
+            duration_ms = t0.elapsed().as_millis() as u64,
+            "ref journal transaction committed"
+        );
+        if let Some(signal) = admission_commit.take() {
+            let _ = signal.send(());
+        }
+        // Ref locks protect publication through the active marker. Derived
+        // manifest/index repair must not serialize later writers to that ref.
+        self.stop_heartbeat_and_release_lock().await;
+        self.git_visibility_published
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Compaction is derived state. It runs after ref visibility and after
+        // scarce push admission is released, while one repository writer
+        // folds every transaction currently visible at its snapshot.
+        let manifest_lock = match PushLock::acquire_internal(
+            store.inner(),
             self.router.repo_prefix(),
             crab_coordination::GIT_MANIFEST_RESOURCE,
             self.config.lock_ttl,
-            self.config.lock_ttl,
-            &self.cancel,
         )
-        .await?;
-        let result = while_renewing_internal_lock(
+        .await
+        .map_err(CrabError::from)
+        {
+            Ok(lock) => lock,
+            Err(CrabError::PushLockHeld { .. }) => {
+                debug!("ref journal committed; another writer owns derived compaction");
+                return Ok(decisions);
+            }
+            Err(error) => {
+                warn!(%error, "ref journal committed; compaction lock requires repair");
+                return Ok(decisions);
+            }
+        };
+        let compacted = while_renewing_internal_lock(
             &manifest_lock,
-            self.unified_manifest_cas_under_lock(t0, manifest, sha_map, decisions, store),
+            crate::metadata::manifest::compact_ref_journal(
+                store,
+                &self.router,
+                now_iso8601(),
+                manifest.pusher.clone(),
+                uuid::Uuid::now_v7().to_string(),
+            ),
         )
         .await;
-        let release = manifest_lock.release().await.map_err(CrabError::from);
-        match result {
+        if let Err(error) = manifest_lock.release().await {
+            warn!(%error, "ref journal committed; compaction lock release requires repair");
+        }
+        match compacted {
+            Ok(Some(compacted_manifest)) => match committed_manifest_anchor(&compacted_manifest) {
+                Ok(anchor) => *self.committed_manifest_anchor.lock().await = anchor,
+                Err(error) => {
+                    warn!(%error, "ref journal committed; compacted anchor requires repair")
+                }
+            },
+            Ok(None) => {}
             Err(error) => {
-                if let Err(release_error) = release {
-                    warn!(
-                        error = %release_error,
-                        "manifest publication failed and its lock release also failed"
-                    );
-                }
-                Err(error)
-            }
-            Ok((value, committed_manifest)) => {
-                release?;
-                if let Some(committed) = admission_commit.take() {
-                    let _ = committed.send(());
-                }
-                match self
-                    .publish_git_visibility_index(&committed_manifest, store)
-                    .await
-                {
-                    Ok(()) => self
-                        .git_visibility_published
-                        .store(true, std::sync::atomic::Ordering::Relaxed),
-                    Err(error) => {
-                        self.git_visibility_published
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        warn!(
-                            error = %error,
-                            generation = committed_manifest.generation,
-                            "Git visibility proof publication failed; v2 remains gated"
-                        );
-                    }
-                }
-                Ok(value)
+                warn!(%error, "ref journal committed; manifest compaction requires repair")
             }
         }
-    }
-
-    async fn unified_manifest_cas_under_lock(
-        &self,
-        t0: Instant,
-        mut manifest: Manifest,
-        sha_map: &HashMap<String, String>,
-        mut decisions: HashMap<String, RefUpdateDecision>,
-        store: &Store,
-    ) -> Result<(HashMap<String, RefUpdateDecision>, Manifest)> {
-        let max_retries = self.config.max_cas_retries;
-        // A retry may only shrink the planned ref set. Promoting a ref that
-        // preflight rejected would commit it without the dependency walk,
-        // staging snapshot, uploads, or connectivity proof built above.
-        let mut sticky_rejections: HashMap<String, PushRejectReason> = decisions
-            .iter()
-            .filter_map(|(dst, decision)| match decision {
-                RefUpdateDecision::Reject(reason) => Some((dst.clone(), reason.clone())),
-                RefUpdateDecision::Proceed { .. } => None,
-            })
-            .collect();
-
-        for attempt in 0..max_retries {
-            check_cancelled(&self.cancel)?;
-            self.validate_push_commit_receipt(&manifest).await?;
-
-            let etag_guard = self.manifest_etag.lock().await;
-            let current_etag = etag_guard.clone();
-            drop(etag_guard);
-
-            let pointer_bytes = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}")))?;
-            let pointer_len = pointer_bytes.len();
-
-            let cas_result = match &current_etag {
-                Some(etag) => write_manifest_cas(store, &self.router, &manifest, etag).await,
-                None => {
-                    // First push — no existing manifest, use create (If-None-Match: *).
-                    create_manifest_with_etag(store, &self.router, &manifest).await
-                }
-            };
-
-            match cas_result {
-                Ok(new_etag) => {
-                    // Success — update the stored ETag.
-                    *self.manifest_etag.lock().await =
-                        Some(self.manifest_etag_or_read_current(store, new_etag).await);
-
-                    let span = tracing::Span::current();
-                    span.record("generation", manifest.generation);
-                    span.record("refs_count", manifest.refs.len());
-                    span.record("pointer_bytes", pointer_len);
-                    span.record("retries", attempt);
-                    span.record("duration_ms", t0.elapsed().as_millis() as u64);
-
-                    info!(
-                        generation = manifest.generation,
-                        refs_count = manifest.refs.len(),
-                        pointer_bytes = pointer_len,
-                        attempt = attempt + 1,
-                        "manifest committed"
-                    );
-                    let anchor = committed_manifest_anchor(&manifest)?;
-                    *self.committed_manifest_anchor.lock().await = anchor;
-                    return Ok((decisions, manifest));
-                }
-                Err(CrabError::CasConflict { .. }) => {
-                    // Bump the CAS conflict counter.
-                    if let Some(metrics) = &self.metrics {
-                        metrics.inc_manifest_cas_conflicts_total();
-                    }
-
-                    // Re-read the current manifest pointer.
-                    let (current, new_etag) = read_manifest(store, &self.router).await?;
-
-                    // The old receipt and plan are base-bound. Discard them
-                    // before any retry decision or dependency proof is reused.
-                    *self.push_commit_receipt.lock().await = None;
-                    *self.dependency_plan.lock().await = None;
-
-                    // Check every proceeding ref against the exact value from
-                    // which this attempt planned. Deletes participate in the
-                    // same comparison as creates and updates.
-                    let base = self.base_manifest.lock().await;
-                    let conflicts =
-                        ref_base_conflicts(&self.specs, &decisions, base.as_ref(), &current);
-                    drop(base);
-                    if self.config.atomic
-                        && let Some(conflict) = conflicts.first()
-                    {
-                        if let Some(metrics) = &self.metrics {
-                            metrics.inc_manifest_cas_failures_total();
-                        }
-
-                        let span = tracing::Span::current();
-                        span.record("generation", manifest.generation);
-                        span.record("refs_count", manifest.refs.len());
-                        span.record("retries", attempt + 1);
-                        span.record("duration_ms", t0.elapsed().as_millis() as u64);
-
-                        let desired = self
-                            .specs
-                            .iter()
-                            .find(|spec| spec.dst == conflict.dst)
-                            .and_then(|spec| sha_map.get(&spec.src))
-                            .cloned()
-                            .unwrap_or_else(|| conflict.want.clone());
-                        let (reason, source) = if conflict.is_delete {
-                            (
-                                PushRejectReason::StaleInfo,
-                                CrabError::CasConflict {
-                                    path: self.router.manifest_path().to_string(),
-                                    expected_etag: current_etag.clone(),
-                                },
-                            )
-                        } else {
-                            (
-                                PushRejectReason::NonFastForward {
-                                    have: conflict.have.clone(),
-                                    want: desired.clone(),
-                                },
-                                CrabError::NonFastForward {
-                                    ref_name: conflict.dst.clone(),
-                                    have: conflict.have.clone(),
-                                    want: desired,
-                                },
-                            )
-                        };
-                        return Err(self.partial_outcome_singling_out(
-                            &conflict.dst,
-                            reason,
-                            source,
-                        ));
-                    }
-
-                    // Refresh canonical base state before rerunning ref and
-                    // dependency planning. Non-atomic conflicts become sticky
-                    // per-ref rejections while unaffected siblings may commit.
-                    *self.base_manifest.lock().await = Some(current);
-                    *self.manifest_etag.lock().await = Some(new_etag);
-                    *self.base_commit_graph.lock().await = None;
-                    *self.base_commit_graph_loaded.lock().await = false;
-
-                    // Re-evaluate decisions against the refreshed
-                    // base manifest. Concurrent ref updates or future
-                    // policy changes during the push window land
-                    // here, so pass 1 reruns before pass 2 rebuilds
-                    // the new manifest body.
-                    for conflict in conflicts {
-                        let reason = if conflict.is_delete {
-                            PushRejectReason::StaleInfo
-                        } else {
-                            let desired = self
-                                .specs
-                                .iter()
-                                .find(|spec| spec.dst == conflict.dst)
-                                .and_then(|spec| sha_map.get(&spec.src))
-                                .cloned()
-                                .unwrap_or(conflict.want);
-                            PushRejectReason::NonFastForward {
-                                have: conflict.have,
-                                want: desired,
-                            }
-                        };
-                        sticky_rejections.insert(conflict.dst, reason);
-                    }
-                    let mut retry_decisions = self.evaluate_decisions_with_sha_map(sha_map).await?;
-                    for (dst, reason) in &sticky_rejections {
-                        retry_decisions
-                            .insert(dst.clone(), RefUpdateDecision::Reject(reason.clone()));
-                    }
-                    sticky_rejections.extend(retry_decisions.iter().filter_map(
-                        |(dst, decision)| match decision {
-                            RefUpdateDecision::Reject(reason) => {
-                                Some((dst.clone(), reason.clone()))
-                            }
-                            RefUpdateDecision::Proceed { .. } => None,
-                        },
-                    ));
-                    if self.config.atomic
-                        && retry_decisions
-                            .values()
-                            .any(|decision| matches!(decision, RefUpdateDecision::Reject(_)))
-                    {
-                        return Err(CrabError::PushPartialOutcome {
-                            outcomes: Box::new(PushResult::new(aborted_batch_outcomes(
-                                &retry_decisions,
-                            ))),
-                            source: Box::new(CrabError::CasConflict {
-                                path: self.router.manifest_path().to_string(),
-                                expected_etag: current_etag,
-                            }),
-                        });
-                    }
-                    if !retry_decisions
-                        .values()
-                        .any(|decision| matches!(decision, RefUpdateDecision::Proceed { .. }))
-                    {
-                        return Err(CrabError::PushPartialOutcome {
-                            outcomes: Box::new(PushResult::new(decisions_to_outcomes(
-                                &retry_decisions,
-                            ))),
-                            source: Box::new(CrabError::CasConflict {
-                                path: self.router.manifest_path().to_string(),
-                                expected_etag: current_etag,
-                            }),
-                        });
-                    }
-                    *self.planned_ref_decisions.lock().await = Some(retry_decisions.clone());
-                    if retry_decisions != decisions {
-                        // A changed proceeding set invalidates ref-scoped
-                        // packs, shards, and connectivity. An unrelated ref
-                        // advance keeps those immutable proofs valid; the
-                        // candidate builder below rebinds their receipt to the
-                        // refreshed manifest without repeating preparation.
-                        self.replan_base_bound_dependencies_after_cas_conflict()
-                            .await?;
-                    } else {
-                        info!(
-                            "manifest advanced only on unrelated refs; reusing prepared immutable dependencies"
-                        );
-                    }
-                    let (merged, merged_bulk) = self
-                        .apply_decisions_with_sha_map(&retry_decisions, self.config.atomic, sha_map)
-                        .await?;
-
-                    // Upload any new segmented metadata from the rebuild.
-                    upload_segmented_bulk(store, &self.router, &merged_bulk).await?;
-
-                    manifest = merged;
-                    decisions = retry_decisions;
-
-                    if attempt + 1 < max_retries {
-                        let delay = manifest_cas_backoff(attempt);
-                        warn!(
-                            attempt = attempt + 1,
-                            delay_ms = delay.as_millis(),
-                            "manifest CAS conflict, merged and retrying"
-                        );
-                        tokio::select! {
-                            () = tokio::time::sleep(delay) => {}
-                            () = self.cancel.cancelled() => return Err(CrabError::Cancelled),
-                        }
-                    } else {
-                        warn!(
-                            attempt = attempt + 1,
-                            "manifest CAS conflict, retry budget exhausted"
-                        );
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Max retries exceeded — permanent failure.
-        if let Some(metrics) = &self.metrics {
-            metrics.inc_manifest_cas_failures_total();
-        }
-
-        let span = tracing::Span::current();
-        span.record("generation", manifest.generation);
-        span.record("refs_count", manifest.refs.len());
-        span.record("retries", max_retries);
-        span.record("duration_ms", t0.elapsed().as_millis() as u64);
-
-        let expected_etag = self.manifest_etag.lock().await.clone();
-        Err(CrabError::CasConflict {
-            path: self.router.manifest_path().to_string(),
-            expected_etag,
-        })
+        Ok(decisions)
     }
 
     async fn publish_git_visibility_index(
@@ -10511,14 +10327,20 @@ impl PushPipeline {
         *self.git_object_candidates.lock().await = receipt_candidates;
 
         let indexed_basis = match candidate_objects.as_deref() {
-            Some(candidates) => match self.compute_git_object_locator_basis(candidates).await {
-                Ok(basis) => basis,
-                Err(error @ CrabError::CorruptObject { .. }) => return Err(error),
-                Err(error) => {
-                    warn!(error = %error, "Git object locator lookup failed; using committed ref-tip fallback");
-                    None
+            Some(candidates) if should_probe_git_object_locator(candidates.len()) => {
+                match self.compute_git_object_locator_basis(candidates).await {
+                    Ok(basis) => basis,
+                    Err(error @ CrabError::CorruptObject { .. }) => return Err(error),
+                    Err(error) => {
+                        warn!(error = %error, "Git object locator lookup failed; using committed ref-tip fallback");
+                        None
+                    }
                 }
-            },
+            }
+            // Candidate enumeration is bounded by committed connectivity
+            // tips. Sending this small superset is correct and avoids a
+            // fixed locator startup cost that dominates branch-only pushes.
+            Some(_) => Some(RemotePackBasis::ExactObjects(HashSet::new())),
             None => None,
         };
         let mut remote_pack_basis = match indexed_basis {
@@ -13339,7 +13161,7 @@ impl PushPipeline {
     ///
     /// Used by pipeline steps that fail the whole batch on one ref's
     /// behalf — `verify_connectivity` (a single missing object) and
-    /// `unified_manifest_cas` (a single non-fast-forward on CAS retry).
+    /// `commit_ref_journal` (a single concurrent ref conflict).
     /// Siblings report `AtomicAbort`: they passed their own checks but
     /// did not commit, so reporting `Ok` would be an optimistic lie.
     fn partial_outcome_singling_out(
@@ -13442,7 +13264,7 @@ impl PushPipeline {
                 outcomes
             }
             // `PushPartialOutcome` carries per-ref outcomes from the
-            // upstream step that failed (e.g. `unified_manifest_cas`
+            // upstream step that failed (e.g. `commit_ref_journal`
             // rejected one ref for NFF but the rest of the batch would
             // have committed). Preserve that map instead of overwriting
             // every ref with the aggregate error — otherwise a user
@@ -13723,7 +13545,7 @@ impl PushPipeline {
             let manifest_bytes = serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}")))?
                 .len() as u64;
-            let manifest_phase = PhaseTimer::start("push", "manifest_cas");
+            let manifest_phase = PhaseTimer::start("push", "ref_journal_commit");
             let manifest_item_count = manifest.refs.len() as u64;
             let manifest_bytes_out = manifest_bytes + bulk_data_bytes(&bulk);
             let committed_decisions = if let Some(outcome) = self
@@ -13737,14 +13559,8 @@ impl PushPipeline {
                 active_active_commit = self.protected_push_finalize(manifest, bulk).await?;
                 decisions
             } else {
-                self.unified_manifest_cas(
-                    manifest,
-                    bulk,
-                    &sha_map,
-                    decisions,
-                    &mut admission_commit,
-                )
-                .await?
+                self.commit_ref_journal(manifest, bulk, &sha_map, decisions, &mut admission_commit)
+                    .await?
             };
             self.emit_perf_phase(manifest_phase.finish(0, manifest_bytes_out, manifest_item_count));
             Some(committed_decisions)
@@ -16236,6 +16052,15 @@ mod tests {
     }
 
     #[test]
+    fn locator_probe_is_reserved_for_candidate_sets_that_amortize_startup() {
+        assert!(!should_probe_git_object_locator(0));
+        assert!(!should_probe_git_object_locator(
+            GIT_LOCATOR_MIN_CANDIDATES - 1
+        ));
+        assert!(should_probe_git_object_locator(GIT_LOCATOR_MIN_CANDIDATES));
+    }
+
+    #[test]
     fn exact_locator_basis_packs_every_unproven_object_individually() {
         let commit = gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111")
             .expect("commit oid");
@@ -16668,13 +16493,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_cas_backoff_stays_within_cap() {
-        for attempt in 0..16 {
-            assert!(manifest_cas_backoff(attempt) <= MANIFEST_CAS_BACKOFF_CAP);
-        }
-    }
-
-    #[test]
     fn push_admission_backoff_scales_with_fifo_distance() {
         let front = push_admission_wait_delay(0, PUSH_ADMISSION_SLOTS, Duration::from_secs(60));
         let tail = push_admission_wait_delay(0, 95, Duration::from_secs(60));
@@ -17062,7 +16880,7 @@ mod tests {
 
         let mut admission_commit = None;
         let committed_decisions = pipeline
-            .unified_manifest_cas(candidate, bulk, &sha_map, decisions, &mut admission_commit)
+            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
             .await
             .expect("retry should commit unconflicted dev ref");
         assert!(matches!(
@@ -17146,7 +16964,7 @@ mod tests {
 
         let mut admission_commit = None;
         let committed_decisions = pipeline
-            .unified_manifest_cas(candidate, bulk, &sha_map, decisions, &mut admission_commit)
+            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
             .await
             .expect("retry should merge the unrelated ref update");
 
@@ -17174,6 +16992,74 @@ mod tests {
             0,
             "an unrelated ref advance must reuse immutable dependencies"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_commit_does_not_wait_for_busy_compactor() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("journal-busy-compactor");
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.expect("read base");
+        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .expect("evaluate refs");
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .expect("build candidate");
+        let blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("hold compaction lock");
+
+        let mut admission_commit = None;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pipeline.commit_ref_journal(
+                candidate,
+                bulk,
+                &sha_map,
+                decisions,
+                &mut admission_commit,
+            ),
+        )
+        .await
+        .expect("journal publication must not queue behind compaction")
+        .expect("journal publication succeeds");
+        blocker.release().await.unwrap();
+
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read journal state");
+        assert_eq!(
+            snapshot.journal.refs.get("refs/heads/main"),
+            sha_map.get("refs/heads/main")
+        );
+        assert_eq!(snapshot.journal.transactions.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -17368,41 +17254,6 @@ mod tests {
         .expect("partial acquisition must be released after later contention");
         lock.release().await.unwrap();
         blocker.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn manifest_publication_waits_for_current_writer() {
-        let inner: Arc<dyn object_store::ObjectStore> =
-            Arc::new(object_store::memory::InMemory::new());
-        let store = Store::new(inner);
-        let blocker = PushLock::acquire_internal(
-            store.inner(),
-            "repo",
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            blocker.release().await.unwrap();
-        });
-
-        let started = Instant::now();
-        let lock = acquire_internal_push_lock_with_wait(
-            &store,
-            "repo",
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            Duration::from_secs(60),
-            Duration::from_secs(1),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("queued manifest writer should acquire the released lease");
-
-        assert!(started.elapsed() >= Duration::from_millis(50));
-        lock.release().await.unwrap();
-        release.await.unwrap();
     }
 
     #[tokio::test]
@@ -26282,85 +26133,6 @@ mod tests {
         );
         assert!(pipeline.base_commit_graph.lock().await.is_none());
         assert!(!*pipeline.base_commit_graph_loaded.lock().await);
-    }
-
-    #[tokio::test]
-    async fn unified_manifest_first_create_uses_put_etag_without_manifest_reread() {
-        let inner = Arc::new(object_store::memory::InMemory::new());
-        let reads = Arc::new(Mutex::new(Vec::new()));
-        let recording_store: Arc<dyn object_store::ObjectStore> = Arc::new(RecordingReadStore {
-            inner: Arc::clone(&inner),
-            reads: Arc::clone(&reads),
-        });
-        let store = crate::storage::store::Store::new(recording_store);
-        let router = StoreLayout::new(store.clone(), "org/repo".to_string());
-
-        let (shard_hash, _shard_index, shard_write) =
-            crate::metadata::manifest::compact_shard_index(1, &[]).unwrap();
-        let (pack_hash, _pack_index, pack_write) =
-            crate::metadata::manifest::compact_pack_index(1, &[]).unwrap();
-        let bulk = BulkData {
-            shard_index: shard_write,
-            pack_index: pack_write,
-        };
-        let mut manifest = Manifest {
-            version: 2,
-            generation: 1,
-            created_at: "2026-06-20T00:00:00Z".to_owned(),
-            pusher: None,
-            session_id: "session-1".to_owned(),
-            refs: std::collections::BTreeMap::new(),
-            peeled_refs: std::collections::BTreeMap::new(),
-            head: "refs/heads/main".to_owned(),
-            shard_index_hash: shard_hash,
-            pack_index_hash: pack_hash,
-            git_validation_digest: String::new(),
-            commit_graph_hash: None,
-            ref_registry_hash: None,
-        };
-        manifest.seal_git_validation();
-        let pipeline = PushPipeline::new(
-            PushConfig::default(),
-            vec![],
-            Some(store.clone()),
-            None,
-            None,
-            "org/repo".to_string(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
-        );
-
-        pipeline
-            .rebuild_push_commit_receipt(&manifest, &HashMap::new(), &HashMap::new(), 1, &[])
-            .await
-            .unwrap();
-        let mut admission_commit = None;
-        pipeline
-            .unified_manifest_cas(
-                manifest.clone(),
-                bulk,
-                &HashMap::new(),
-                HashMap::new(),
-                &mut admission_commit,
-            )
-            .await
-            .unwrap();
-
-        let recorded = reads
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            recorded.iter().all(|path| path != "org/repo/manifest"),
-            "first manifest create should cache the returned ETag without re-reading: {recorded:?}"
-        );
-        drop(recorded);
-        let cached_etag = pipeline.manifest_etag.lock().await.clone().unwrap();
-        assert!(!cached_etag.is_empty());
-
-        let (stored, _) = read_manifest(&store, &router).await.unwrap();
-        assert_eq!(stored, manifest);
     }
 
     #[tokio::test]

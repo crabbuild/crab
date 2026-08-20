@@ -412,15 +412,21 @@ impl Inner {
     }
 
     async fn remote_snapshot_git_dir(&self, rev: &str) -> Result<(String, PathBuf)> {
-        let manifest = self.read_remote_manifest().await?;
+        let snapshot = self.read_remote_snapshot().await?;
+        let mut manifest = snapshot.manifest;
+        manifest.refs = snapshot.journal.refs;
+        manifest.peeled_refs = snapshot.journal.peeled_refs;
+        manifest.head = snapshot.journal.head;
         let resolved = resolve_manifest_rev(&manifest, rev).ok_or_else(|| CrabError::NotFound {
             path: format!("revision:{rev}"),
         })?;
-        let git_dir = self.remote_git_dir_for_manifest(&manifest).await?;
+        let git_dir = self
+            .remote_git_dir_for_packs(&snapshot.journal.packs)
+            .await?;
         Ok((resolved, git_dir))
     }
 
-    async fn remote_git_dir_for_manifest(&self, manifest: &Manifest) -> Result<PathBuf> {
+    async fn remote_git_dir_for_packs(&self, packs: &[PackManifestEntry]) -> Result<PathBuf> {
         let git_dir = self
             .remote_git_dir
             .get_or_try_init(|| async {
@@ -432,27 +438,18 @@ impl Inner {
             .await?;
 
         let remote = self.remote().await?;
-        if !manifest.pack_index_hash.is_empty() {
-            let origin = crate::storage::Store::from_storage(remote.caching_store.origin().clone());
-            let packs = crate::metadata::manifest::read_bulk_pack_list(
-                &origin,
-                &remote.router,
-                &manifest.pack_index_hash,
-            )
-            .await?;
+        if !packs.is_empty() {
             let pack_dir = git_dir.join("objects").join("pack");
-            install_remote_git_packs(&remote, &pack_dir, &packs).await?;
+            install_remote_git_packs(&remote, &pack_dir, packs).await?;
         }
 
         Ok((**git_dir).clone())
     }
 
-    async fn read_remote_manifest(&self) -> Result<Manifest> {
+    async fn read_remote_snapshot(&self) -> Result<crate::metadata::manifest::RepositorySnapshot> {
         let remote = self.remote().await?;
         let origin = crate::storage::Store::from_storage(remote.caching_store.origin().clone());
-        let (manifest, _etag) =
-            crate::metadata::manifest::read_manifest(&origin, &remote.router).await?;
-        Ok(manifest)
+        crate::metadata::manifest::read_repository_snapshot(&origin, &remote.router).await
     }
 }
 

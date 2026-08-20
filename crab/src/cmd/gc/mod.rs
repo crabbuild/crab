@@ -894,6 +894,16 @@ pub async fn reachable_repo_objects_from_manifest(
     reachable.insert(router.manifest_path().as_ref().to_string());
 
     extend_reachable_pack_objects(store, router, &manifest, &mut reachable).await?;
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    for pack in &snapshot.journal.packs {
+        insert_pack_objects(router, &pack.pack_id, &mut reachable);
+    }
+    // Journal metadata is the recovery root when publication succeeded but
+    // derived manifest compaction did not. GC may compact it only with the
+    // same frontier protocol as writers.
+    for object in store.list_prefix(&router.repo_path("refs/journal")).await? {
+        reachable.insert(object.location.as_ref().to_owned());
+    }
 
     let storage_router =
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
@@ -923,24 +933,18 @@ async fn extend_reachable_pack_objects(
         )
         .await?;
         for pack in packs {
-            reachable.insert(router.pack_path(&pack.pack_id).as_ref().to_string());
-            reachable.insert(router.pack_index_path(&pack.pack_id).as_ref().to_string());
-            reachable.insert(
-                router
-                    .pack_reverse_index_path(&pack.pack_id)
-                    .as_ref()
-                    .to_string(),
-            );
-            reachable.insert(
-                router
-                    .pack_metadata_path(&pack.pack_id)
-                    .as_ref()
-                    .to_string(),
-            );
+            insert_pack_objects(router, &pack.pack_id, reachable);
         }
     }
 
     Ok(())
+}
+
+fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut HashSet<String>) {
+    reachable.insert(router.pack_path(pack_id).as_ref().to_owned());
+    reachable.insert(router.pack_index_path(pack_id).as_ref().to_owned());
+    reachable.insert(router.pack_reverse_index_path(pack_id).as_ref().to_owned());
+    reachable.insert(router.pack_metadata_path(pack_id).as_ref().to_owned());
 }
 
 /// Run remote repo-scope GC against the primary/write store.
@@ -961,7 +965,7 @@ pub async fn run_repo_remote_gc(
             .await?
             .into_iter(),
     );
-    let shard_snapshot = shard_snapshot_from_manifest(store, router, &manifest).await?;
+    let shard_snapshot = shard_snapshot_from_repository(store, router, &manifest).await?;
     let (listed_objects, list_outcome) = list_repo_gc_candidates(store, router).await?;
     let deleter = StoreObjectDeleter::new(store.clone());
 
@@ -979,6 +983,24 @@ pub async fn run_repo_remote_gc(
         jsonl_stream,
     )
     .await
+}
+
+async fn shard_snapshot_from_repository(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+) -> Result<ShardListSnapshot> {
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let shard_keys = snapshot
+        .journal
+        .shards
+        .iter()
+        .map(|hash| format!("shards/{}/{hash}", &hash[..2.min(hash.len())]))
+        .collect();
+    Ok(ShardListSnapshot {
+        generation: manifest.generation,
+        shard_keys,
+    })
 }
 
 /// Build a shard-list snapshot from the manifest for GC T0 safety.
@@ -1744,6 +1766,63 @@ mod tests {
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.idx")));
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.rev")));
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.meta")));
+    }
+
+    #[tokio::test]
+    async fn reachable_repo_objects_include_uncompacted_journal_pack_objects() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use object_store::memory::InMemory;
+
+        use crate::metadata::manifest::{
+            Manifest, PackManifestEntry, RefJournalEdit, RefJournalTransaction,
+            commit_ref_journal_transaction, create_manifest, read_ref_journal_head,
+        };
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
+        manifest.seal_git_validation();
+        create_manifest(&store, &router, &manifest).await.unwrap();
+        let head = read_ref_journal_head(&store, &router, "refs/heads/side")
+            .await
+            .unwrap();
+        let pack_id = "c".repeat(64);
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/side".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/side".to_owned(),
+                old_oid: None,
+                new_oid: Some("b".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            vec![PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: 1024,
+                content_hash: pack_id.clone(),
+                ref_tips: vec!["b".repeat(40)],
+                object_count: 1,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        commit_ref_journal_transaction(&store, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let (_, reachable) = reachable_repo_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+
+        assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.pack")));
     }
 
     #[tokio::test]
