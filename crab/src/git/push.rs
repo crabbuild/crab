@@ -2409,8 +2409,6 @@ const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
-const MANIFEST_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(50);
-const MANIFEST_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_millis(500);
 const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_QUEUED_TTL: Duration = Duration::from_secs(120);
@@ -2945,18 +2943,6 @@ fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let exp = PUSH_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
     let bound = exp.min(PUSH_LOCK_WAIT_BACKOFF_CAP).min(remaining);
-    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
-    if bound_nanos == 0 {
-        return Duration::ZERO;
-    }
-    let pick = rand::rng().random_range(1..=bound_nanos);
-    Duration::from_nanos(pick)
-}
-
-fn manifest_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
-    let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
-    let exp = MANIFEST_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
-    let bound = exp.min(MANIFEST_LOCK_WAIT_BACKOFF_CAP).min(remaining);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
     if bound_nanos == 0 {
         return Duration::ZERO;
@@ -4663,47 +4649,6 @@ pub(crate) async fn acquire_push_lock_leases(
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        }
-    }
-}
-
-async fn acquire_internal_push_lock_with_wait(
-    store: &Store,
-    prefix: &str,
-    resource: &str,
-    ttl: Duration,
-    wait: Duration,
-    cancel: &CancellationToken,
-) -> Result<PushLock> {
-    let deadline = Instant::now() + wait;
-    let mut attempt = 0;
-    loop {
-        check_cancelled(cancel)?;
-        match PushLock::acquire_internal(store.inner(), prefix, resource, ttl)
-            .await
-            .map_err(CrabError::from)
-        {
-            Ok(lock) => return Ok(lock),
-            Err(error @ CrabError::PushLockHeld { .. }) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                let delay =
-                    manifest_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
-                attempt = attempt.saturating_add(1);
-                debug!(
-                    resource,
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    "internal push lock held, waiting before retry"
-                );
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                }
-            }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -6863,17 +6808,20 @@ impl PushPipeline {
         // Compaction is derived state. It runs after ref visibility and after
         // scarce push admission is released, while one repository writer
         // folds every transaction currently visible at its snapshot.
-        let manifest_lock = match acquire_internal_push_lock_with_wait(
-            store,
+        let manifest_lock = match PushLock::acquire_internal(
+            store.inner(),
             self.router.repo_prefix(),
             crab_coordination::GIT_MANIFEST_RESOURCE,
             self.config.lock_ttl,
-            self.config.lock_ttl,
-            &self.cancel,
         )
         .await
+        .map_err(CrabError::from)
         {
             Ok(lock) => lock,
+            Err(CrabError::PushLockHeld { .. }) => {
+                debug!("ref journal committed; another writer owns derived compaction");
+                return Ok(decisions);
+            }
             Err(error) => {
                 warn!(%error, "ref journal committed; compaction lock requires repair");
                 return Ok(decisions);
@@ -17047,6 +16995,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn journal_commit_does_not_wait_for_busy_compactor() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("journal-busy-compactor");
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.expect("read base");
+        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .expect("evaluate refs");
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .expect("build candidate");
+        let blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("hold compaction lock");
+
+        let mut admission_commit = None;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pipeline.commit_ref_journal(
+                candidate,
+                bulk,
+                &sha_map,
+                decisions,
+                &mut admission_commit,
+            ),
+        )
+        .await
+        .expect("journal publication must not queue behind compaction")
+        .expect("journal publication succeeds");
+        blocker.release().await.unwrap();
+
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read journal state");
+        assert_eq!(
+            snapshot.journal.refs.get("refs/heads/main"),
+            sha_map.get("refs/heads/main")
+        );
+        assert_eq!(snapshot.journal.transactions.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_after_manifest_cas_reports_committed_success() {
         let _guard = GitDirGuard::new();
         let cancel = CancellationToken::new();
@@ -17238,41 +17254,6 @@ mod tests {
         .expect("partial acquisition must be released after later contention");
         lock.release().await.unwrap();
         blocker.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn manifest_publication_waits_for_current_writer() {
-        let inner: Arc<dyn object_store::ObjectStore> =
-            Arc::new(object_store::memory::InMemory::new());
-        let store = Store::new(inner);
-        let blocker = PushLock::acquire_internal(
-            store.inner(),
-            "repo",
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            blocker.release().await.unwrap();
-        });
-
-        let started = Instant::now();
-        let lock = acquire_internal_push_lock_with_wait(
-            &store,
-            "repo",
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            Duration::from_secs(60),
-            Duration::from_secs(1),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("queued manifest writer should acquire the released lease");
-
-        assert!(started.elapsed() >= Duration::from_millis(50));
-        lock.release().await.unwrap();
-        release.await.unwrap();
     }
 
     #[tokio::test]
@@ -26152,85 +26133,6 @@ mod tests {
         );
         assert!(pipeline.base_commit_graph.lock().await.is_none());
         assert!(!*pipeline.base_commit_graph_loaded.lock().await);
-    }
-
-    #[tokio::test]
-    async fn unified_manifest_first_create_uses_put_etag_without_manifest_reread() {
-        let inner = Arc::new(object_store::memory::InMemory::new());
-        let reads = Arc::new(Mutex::new(Vec::new()));
-        let recording_store: Arc<dyn object_store::ObjectStore> = Arc::new(RecordingReadStore {
-            inner: Arc::clone(&inner),
-            reads: Arc::clone(&reads),
-        });
-        let store = crate::storage::store::Store::new(recording_store);
-        let router = StoreLayout::new(store.clone(), "org/repo".to_string());
-
-        let (shard_hash, _shard_index, shard_write) =
-            crate::metadata::manifest::compact_shard_index(1, &[]).unwrap();
-        let (pack_hash, _pack_index, pack_write) =
-            crate::metadata::manifest::compact_pack_index(1, &[]).unwrap();
-        let bulk = BulkData {
-            shard_index: shard_write,
-            pack_index: pack_write,
-        };
-        let mut manifest = Manifest {
-            version: 2,
-            generation: 1,
-            created_at: "2026-06-20T00:00:00Z".to_owned(),
-            pusher: None,
-            session_id: "session-1".to_owned(),
-            refs: std::collections::BTreeMap::new(),
-            peeled_refs: std::collections::BTreeMap::new(),
-            head: "refs/heads/main".to_owned(),
-            shard_index_hash: shard_hash,
-            pack_index_hash: pack_hash,
-            git_validation_digest: String::new(),
-            commit_graph_hash: None,
-            ref_registry_hash: None,
-        };
-        manifest.seal_git_validation();
-        let pipeline = PushPipeline::new(
-            PushConfig::default(),
-            vec![],
-            Some(store.clone()),
-            None,
-            None,
-            "org/repo".to_string(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
-        );
-
-        pipeline
-            .rebuild_push_commit_receipt(&manifest, &HashMap::new(), &HashMap::new(), 1, &[])
-            .await
-            .unwrap();
-        let mut admission_commit = None;
-        pipeline
-            .commit_ref_journal(
-                manifest.clone(),
-                bulk,
-                &HashMap::new(),
-                HashMap::new(),
-                &mut admission_commit,
-            )
-            .await
-            .unwrap();
-
-        let recorded = reads
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            recorded.iter().all(|path| path != "org/repo/manifest"),
-            "first manifest create should cache the returned ETag without re-reading: {recorded:?}"
-        );
-        drop(recorded);
-        let cached_etag = pipeline.manifest_etag.lock().await.clone().unwrap();
-        assert!(!cached_etag.is_empty());
-
-        let (stored, _) = read_manifest(&store, &router).await.unwrap();
-        assert_eq!(stored, manifest);
     }
 
     #[tokio::test]

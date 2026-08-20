@@ -534,7 +534,7 @@ pub async fn materialize_ref_journal(
     })
 }
 
-async fn read_ref_journal_frontier(
+pub(crate) async fn read_ref_journal_frontier(
     store: &Store,
     router: &StoreLayout<Store>,
     manifest: &Manifest,
@@ -1147,5 +1147,32 @@ mod tests {
 
         assert!(after.transactions.is_empty());
         assert_eq!(after.refs["refs/heads/main"], "a".repeat(40));
+    }
+
+    #[tokio::test]
+    async fn old_manifest_reader_survives_active_marker_cleanup() {
+        let (store, layout) = fixture();
+        let base = Manifest::default_for_repo("refs/heads/main");
+        let (transaction, heads) =
+            transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
+        let transaction_id = transaction.id().unwrap();
+        commit_ref_transaction(&store, &layout, &transaction, &heads)
+            .await
+            .unwrap();
+
+        // Repository reads capture the active set before the manifest. A
+        // compactor may remove its marker after publishing a newer manifest,
+        // but this old-manifest reader must retain the captured transaction.
+        let captured_active = list_active_transactions(&store, &layout).await.unwrap();
+        store
+            .delete(&layout.ref_journal_active_path(&transaction_id))
+            .await
+            .unwrap();
+
+        let snapshot = materialize_ref_journal(&store, &layout, &base, &[], &[], &captured_active)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.refs["refs/heads/main"], "a".repeat(40));
     }
 }

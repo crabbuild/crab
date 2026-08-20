@@ -10,7 +10,7 @@ use crate::manifests::{
 };
 use crate::ref_journal::{
     RefJournalSnapshot, cleanup_compacted_transactions, list_active_transactions,
-    materialize_ref_journal, write_ref_journal_frontier,
+    materialize_ref_journal, read_ref_journal_frontier, write_ref_journal_frontier,
 };
 use crate::segmented::{self, SegmentKind, ShardSegmentEntry};
 use crate::segmented_store;
@@ -393,6 +393,7 @@ pub async fn write_manifest_cas(
             expected_etag: Some(etag.to_owned()),
         });
     }
+    carry_ref_journal_frontier(store, router, &current, manifest).await?;
     archive_manifest(store, router, &current).await?;
     let path = router.manifest_path();
     let body = serialize_manifest(manifest)?;
@@ -404,6 +405,24 @@ pub async fn write_manifest_cas(
         .update(&path, Bytes::from(body), update_version)
         .await?;
     Ok(new_etag.e_tag.unwrap_or_default())
+}
+
+async fn carry_ref_journal_frontier(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    current: &Manifest,
+    next: &Manifest,
+) -> Result<()> {
+    if read_ref_journal_frontier(store, router, next)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(frontier) = read_ref_journal_frontier(store, router, current).await? else {
+        return Ok(());
+    };
+    write_ref_journal_frontier(store, router, next, &frontier.heads).await
 }
 
 /// PUT the manifest pointer with `If-None-Match: *` for first-time creation.
@@ -866,6 +885,45 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+
+        let (_, etag) = read_manifest(&store, &router).await.unwrap();
+        let rewritten = next_manifest(&compacted);
+        write_manifest_cas(&store, &router, &rewritten, &etag)
+            .await
+            .unwrap();
+        let head = read_ref_head(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let second = RefJournalTransaction::new(
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                head.visible_transaction.clone(),
+            )]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some("b".repeat(40)),
+                new_oid: Some("c".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        commit_ref_transaction(&store, &router, &second, &[head])
+            .await
+            .unwrap();
+
+        let after_rewrite = read_repository_snapshot(&store, &router).await.unwrap();
+
+        assert_eq!(
+            after_rewrite.journal.refs["refs/heads/main"],
+            "c".repeat(40)
+        );
+        assert_eq!(
+            after_rewrite.journal.transactions,
+            vec![second.id().unwrap()]
         );
     }
 }

@@ -346,11 +346,12 @@ async fn protected_push_ref_updates_from_store(
 ) -> Result<Vec<PushRefUpdate>> {
     crate::core::error::check_cancelled(cancel)?;
     let router = StoreLayout::new(read_store.clone(), repository_prefix.to_owned());
-    let remote_refs = match crate::metadata::manifest::read_manifest(&read_store, &router).await {
-        Ok((manifest, _)) => manifest.refs,
-        Err(CrabError::NotFound { .. }) => BTreeMap::default(),
-        Err(e) => return Err(e),
-    };
+    let remote_refs =
+        match crate::metadata::manifest::read_repository_snapshot(&read_store, &router).await {
+            Ok(snapshot) => snapshot.journal.refs,
+            Err(CrabError::NotFound { .. }) => BTreeMap::default(),
+            Err(e) => return Err(e),
+        };
 
     let mut seen = BTreeSet::new();
     let mut updates = Vec::with_capacity(specs.len());

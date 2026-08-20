@@ -2527,7 +2527,7 @@ fn linked_worktree_root_from_git_dir(git_dir: &std::path::Path) -> Option<std::p
 }
 
 ///
-/// Reads the pack count from the manifest's bulk pack-list. Uses the
+/// Reads the current pack count from the repository snapshot. Uses the
 /// session cache for config resolution. Falls back silently on errors.
 async fn check_repack_threshold(
     store: &crate::storage::store::Store,
@@ -2539,43 +2539,27 @@ async fn check_repack_threshold(
     let pack_count = if let Some(ref pl) = cache.pack_list {
         pl.entries.len()
     } else {
-        // Read the manifest to get the pack list hash, then read the bulk pack-list.
-        let Ok((manifest, _etag)) = crate::metadata::manifest::read_manifest(store, router).await
+        let Ok(snapshot) = crate::metadata::manifest::read_repository_snapshot(store, router).await
         else {
             return;
         };
-
-        if manifest.pack_index_hash.is_empty() {
-            return;
-        }
-
-        match crate::metadata::manifest::read_bulk_pack_list(
-            store,
-            router,
-            &manifest.pack_index_hash,
-        )
-        .await
-        {
-            Ok(entries) => {
-                let count = entries.len();
-                // Cache as a PackList for compatibility with the session cache.
-                cache.pack_list = Some(crab_metadata::manifests::PackList {
-                    generation: manifest.generation,
-                    entries: entries
-                        .iter()
-                        .map(|e| {
-                            crab_metadata::manifests::PackEntry::with_ref_tips(
-                                &e.pack_id,
-                                e.size,
-                                e.ref_tips.clone(),
-                            )
-                        })
-                        .collect(),
-                });
-                count
-            }
-            Err(_) => return,
-        }
+        let count = snapshot.journal.packs.len();
+        cache.pack_list = Some(crab_metadata::manifests::PackList {
+            generation: snapshot.manifest.generation,
+            entries: snapshot
+                .journal
+                .packs
+                .iter()
+                .map(|entry| {
+                    crab_metadata::manifests::PackEntry::with_ref_tips(
+                        &entry.pack_id,
+                        entry.size,
+                        entry.ref_tips.clone(),
+                    )
+                })
+                .collect(),
+        });
+        count
     };
 
     if pack_count > threshold {

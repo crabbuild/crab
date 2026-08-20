@@ -1036,7 +1036,7 @@ fn install_chunk_index_shard(
 /// Run a post-fetch shard sync to warm the local chunk-index cache.
 ///
 /// Invoked by clone, pull, and fetch after packs are on disk: reads
-/// the remote manifest's `shard_index_hash`, computes the delta against
+/// the current repository snapshot, computes the shard delta against
 /// locally installed shards via
 /// [`PersistentChunkIndex::installed_shards`], downloads the missing
 /// shards in parallel, and installs them into both local cache tiers.
@@ -1061,11 +1061,11 @@ pub async fn run_post_fetch_shard_sync(
     metrics: Option<Arc<Metrics>>,
     emit_progress: bool,
 ) -> Result<SyncStats> {
-    let (manifest, _etag) =
-        crate::metadata::manifest::read_manifest(router.store(), &router).await?;
+    let snapshot =
+        crate::metadata::manifest::read_repository_snapshot(router.store(), &router).await?;
 
-    if manifest.shard_index_hash.is_empty() {
-        debug!("post-fetch shard sync: manifest has empty shard_index_hash, nothing to sync");
+    if snapshot.journal.shards.is_empty() {
+        debug!("post-fetch shard sync: repository has no shards, nothing to sync");
         return Ok(SyncStats::default());
     }
 
@@ -1125,14 +1125,22 @@ pub async fn run_post_fetch_shard_sync(
 
     let mut synchronizer = ShardSynchronizer::new(router, local_cache, metrics)
         .with_persistent_index(Arc::clone(&persistent))
-        .with_repo_cache_dir(cache_dir, repo_hash)
         .with_shard_cache_dir(shard_cache_dir);
 
+    // The compacted manifest generation does not change until journal
+    // compaction. Do not cache an active journal shard set under that stale
+    // generation or a later fetch could incorrectly skip newly added shards.
+    if snapshot.journal.transactions.is_empty() {
+        synchronizer = synchronizer.with_repo_cache_dir(cache_dir, repo_hash);
+    }
+
     let stats = synchronizer
-        .sync_from_manifest(
+        .sync(
             &mut chunk_index,
-            &manifest.shard_index_hash,
-            manifest.generation,
+            &ShardList {
+                generation: snapshot.manifest.generation,
+                entries: snapshot.journal.shards,
+            },
         )
         .await?;
 
@@ -1160,7 +1168,13 @@ pub async fn run_post_fetch_shard_sync(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::metadata::manifest::{
+        Manifest, RefJournalEdit, RefJournalTransaction, commit_ref_journal_transaction,
+        create_manifest, read_ref_journal_head,
+    };
     use crate::storage::StoreLayout;
     use crate::storage::store::Store;
     use crab_metadata::manifests::ShardList;
@@ -1259,6 +1273,66 @@ mod tests {
         assert_eq!(stats.shards_downloaded, 1);
         assert!(idx.has_shard(&hash));
         assert!(cache.contains(&CacheKey::Shard(hash)).await);
+    }
+
+    #[tokio::test]
+    async fn post_fetch_sync_does_not_hide_journal_shards_behind_manifest_generation_cache() {
+        let (router, _cache, dir) = setup();
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(router.store(), &router, &manifest)
+            .await
+            .unwrap();
+
+        let shard_data = b"journal shard";
+        let shard_hash = compute_data_hash(shard_data);
+        router
+            .store()
+            .put(
+                &router.shard_path(&shard_hash),
+                Bytes::from_static(shard_data),
+            )
+            .await
+            .unwrap();
+
+        let ref_name = "refs/heads/main";
+        let head = read_ref_journal_head(router.store(), &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            vec![shard_hash.hex()],
+        )
+        .unwrap();
+        commit_ref_journal_transaction(router.store(), &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let generation_path = dir
+            .path()
+            .join("repos")
+            .join("repo-hash")
+            .join("shard-list-gen.json");
+        save_cached_generation(
+            &generation_path,
+            &CachedShardListGen {
+                generation: manifest.generation,
+                shard_hashes: Vec::new(),
+            },
+        );
+
+        let stats = run_post_fetch_shard_sync(router, "repo-hash", dir.path(), None, false)
+            .await
+            .unwrap();
+
+        assert_eq!(stats.shards_downloaded, 1);
     }
 
     #[tokio::test]
