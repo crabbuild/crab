@@ -13,11 +13,11 @@ use crate::error::{MetadataError, Result};
 use crate::segmented::{self, SegmentKind, SegmentWrite, ShardSegmentEntry};
 use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
 
-/// The unified manifest pointer for mutable repository state.
+/// A compacted repository snapshot.
 ///
-/// Stored at `{repo}/manifest`. The CAS target for every push. Contains refs
-/// inline and content hashes pointing to immutable segmented indexes for large
-/// shard and pack lists.
+/// Stored at `{repo}/manifest`. Contains refs inline and content hashes
+/// pointing to immutable segmented indexes. Committed journal transactions
+/// newer than this snapshot are materialized on reads until compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     /// Format version. Always 2 for segmented metadata.

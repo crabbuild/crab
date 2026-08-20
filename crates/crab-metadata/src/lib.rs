@@ -27,6 +27,8 @@ pub mod pack_origin;
 #[cfg(feature = "local-index")]
 pub mod persistent_chunk_index;
 pub mod receipts;
+#[cfg(feature = "storage")]
+pub mod ref_journal;
 pub mod ref_registry;
 #[cfg(feature = "remote-index")]
 pub mod remote_index;

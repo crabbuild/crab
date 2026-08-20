@@ -111,9 +111,7 @@ impl<S> StoreLayout<S> {
         self.global_path("shards", &hash.to_string())
     }
 
-    /// Path to the unified manifest pointer: `{repo}/manifest`.
-    ///
-    /// This is the single CAS target for every push.
+    /// Path to the compacted repository snapshot: `{repo}/manifest`.
     #[must_use]
     pub fn manifest_path(&self) -> ObjectPath {
         self.repo_path("manifest")
@@ -129,6 +127,44 @@ impl<S> StoreLayout<S> {
     #[must_use]
     pub fn manifest_history_path(&self, generation: u64, digest: &str) -> ObjectPath {
         self.repo_path(&format!("manifests/history/{generation:020}-{digest}.json"))
+    }
+
+    /// Prefix containing independently mutable ref-journal heads.
+    #[must_use]
+    pub fn ref_journal_heads_prefix(&self) -> ObjectPath {
+        self.repo_path("refs/journal/heads")
+    }
+
+    /// Path to one independently mutable ref-journal head.
+    #[must_use]
+    pub fn ref_journal_head_path(&self, ref_name_hash: &str) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/heads/{ref_name_hash}.json"))
+    }
+
+    /// Path to one immutable ref-journal transaction body.
+    #[must_use]
+    pub fn ref_journal_transaction_path(&self, transaction_id: &str) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/transactions/{transaction_id}.json"))
+    }
+
+    /// Prefix containing committed transactions not yet cleaned by compaction.
+    #[must_use]
+    pub fn ref_journal_active_prefix(&self) -> ObjectPath {
+        self.repo_path("refs/journal/active")
+    }
+
+    /// Path to one atomic ref-journal visibility marker.
+    #[must_use]
+    pub fn ref_journal_active_path(&self, transaction_id: &str) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/active/{transaction_id}.json"))
+    }
+
+    /// Path to the immutable compaction frontier for one manifest Git state.
+    #[must_use]
+    pub fn ref_journal_frontier_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "refs/journal/frontiers/{git_validation_digest}.json"
+        ))
     }
 
     /// Path to a bulk manifest object: `{repo}/manifests/{prefix}-{hash}`.

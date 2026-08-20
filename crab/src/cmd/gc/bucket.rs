@@ -618,17 +618,8 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
     let mut shard_count = 0usize;
     for repo_prefix in &repo_prefixes {
         let router = StoreLayout::new(store.clone(), repo_prefix.clone());
-        let (manifest, _) = crate::metadata::manifest::read_manifest(store, &router).await?;
-        let shards = if manifest.shard_index_hash.is_empty() {
-            Vec::new()
-        } else {
-            crate::metadata::manifest::read_bulk_shard_list(
-                store,
-                &router,
-                &manifest.shard_index_hash,
-            )
-            .await?
-        };
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(store, &router).await?;
+        let shards = snapshot.journal.shards;
         shard_count = shard_count.checked_add(shards.len()).ok_or_else(|| {
             CrabError::Internal("ref-registry repair shard count overflow".to_owned())
         })?;

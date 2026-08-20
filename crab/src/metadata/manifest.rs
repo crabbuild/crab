@@ -1,7 +1,10 @@
 //! Compatibility Adapter for repository manifest helpers.
 
-pub use crab_metadata::manifest_store::ManifestHistoryEntry;
+pub use crab_metadata::manifest_store::{ManifestHistoryEntry, RepositorySnapshot};
 pub use crab_metadata::manifests::{BulkData, Manifest, PackManifestEntry};
+pub use crab_metadata::ref_journal::{
+    RefJournalCommitResult, RefJournalEdit, RefJournalHeadSnapshot, RefJournalTransaction,
+};
 
 use crate::core::error::{CrabError, Result};
 use crate::storage::StoreLayout;
@@ -23,6 +26,63 @@ pub async fn read_manifest(store: &Store, router: &StoreLayout) -> Result<(Manif
     crab_metadata::manifest_store::read_manifest(store.as_storage(), &router)
         .await
         .map_err(CrabError::from)
+}
+
+pub async fn read_repository_snapshot(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<RepositorySnapshot> {
+    let router = storage_layout(store, router);
+    crab_metadata::manifest_store::read_repository_snapshot(store.as_storage(), &router)
+        .await
+        .map_err(CrabError::from)
+}
+
+pub async fn read_ref_journal_head(
+    store: &Store,
+    router: &StoreLayout,
+    ref_name: &str,
+) -> Result<RefJournalHeadSnapshot> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::read_ref_head(store.as_storage(), &router, ref_name)
+        .await
+        .map_err(CrabError::from)
+}
+
+pub async fn commit_ref_journal_transaction(
+    store: &Store,
+    router: &StoreLayout,
+    transaction: &RefJournalTransaction,
+    expected_heads: &[RefJournalHeadSnapshot],
+) -> Result<RefJournalCommitResult> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::commit_ref_transaction(
+        store.as_storage(),
+        &router,
+        transaction,
+        expected_heads,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
+pub async fn compact_ref_journal(
+    store: &Store,
+    router: &StoreLayout,
+    created_at: String,
+    pusher: Option<String>,
+    session_id: String,
+) -> Result<Option<Manifest>> {
+    let router = storage_layout(store, router);
+    crab_metadata::manifest_store::compact_ref_journal(
+        store.as_storage(),
+        &router,
+        created_at,
+        pusher,
+        session_id,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 pub async fn list_manifest_history(

@@ -25,7 +25,6 @@ use crate::git::push::{
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::PushSpec;
 use crate::git::walk::PointerBlob;
-use crate::metadata::manifest::read_manifest;
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_staging::StagingAreaReadOnly;
@@ -301,8 +300,8 @@ pub async fn run_native_push(
         // client; the protected upload store is not a canonical read handle.
         Some(prepared_ref_frontier(&session.ref_updates))
     } else {
-        match read_manifest(&store, &router).await {
-            Ok((manifest, _)) => Some(manifest.refs),
+        match crate::metadata::manifest::read_repository_snapshot(&store, &router).await {
+            Ok(snapshot) => Some(snapshot.journal.refs),
             Err(CrabError::NotFound { path })
                 if config.followtags && path == router.manifest_path().as_ref() =>
             {

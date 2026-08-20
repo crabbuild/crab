@@ -5,7 +5,12 @@ use crab_storage::{ETag, StorageError, Store, StoreLayout};
 
 use crate::error::{MetadataError, Result};
 use crate::manifests::{
-    BulkData, Manifest, PackManifestEntry, validate_manifest_payload, validate_pack_manifest_entry,
+    BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
+    validate_manifest_payload, validate_pack_manifest_entry,
+};
+use crate::ref_journal::{
+    RefJournalSnapshot, cleanup_compacted_transactions, list_active_transactions,
+    materialize_ref_journal, write_ref_journal_frontier,
 };
 use crate::segmented::{self, SegmentKind, ShardSegmentEntry};
 use crate::segmented_store;
@@ -23,6 +28,17 @@ pub struct ManifestHistoryEntry {
     pub manifest: Manifest,
     /// Stored JSON body size.
     pub size: u64,
+}
+
+/// Coherent repository state materialized from the compacted manifest and ref journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySnapshot {
+    /// Stored compacted manifest before journal overlay.
+    pub manifest: Manifest,
+    /// Backend CAS token for the compacted manifest.
+    pub manifest_etag: String,
+    /// Current refs, packs, and shards after committed journal transactions.
+    pub journal: RefJournalSnapshot,
 }
 
 fn serialize_manifest(manifest: &Manifest) -> Result<Vec<u8>> {
@@ -200,6 +216,95 @@ pub async fn read_manifest(
         })?;
     validate_manifest_payload(&manifest)?;
     Ok((manifest, etag.e_tag.unwrap_or_default()))
+}
+
+/// Read one coherent repository view including independently committed refs.
+pub async fn read_repository_snapshot(
+    store: &Store,
+    router: &StoreLayout<Store>,
+) -> Result<RepositorySnapshot> {
+    // Markers are captured first so compaction may safely remove them after
+    // publishing a newer manifest without stranding an old-manifest reader.
+    let active_transactions = list_active_transactions(store, router).await?;
+    let (manifest, manifest_etag) = read_manifest(store, router).await?;
+    let packs = if manifest.pack_index_hash.is_empty() {
+        Vec::new()
+    } else {
+        read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?
+    };
+    let shards = if manifest.shard_index_hash.is_empty() {
+        Vec::new()
+    } else {
+        read_bulk_shard_list(store, router, &manifest.shard_index_hash).await?
+    };
+    let journal = materialize_ref_journal(
+        store,
+        router,
+        &manifest,
+        &packs,
+        &shards,
+        &active_transactions,
+    )
+    .await?;
+    Ok(RepositorySnapshot {
+        manifest,
+        manifest_etag,
+        journal,
+    })
+}
+
+/// Fold committed journal transactions into one bounded manifest snapshot.
+///
+/// Immutable indexes and the matching frontier are written before the
+/// manifest CAS. A concurrent journal commit remains above the recorded
+/// frontier and is therefore visible in the next repository snapshot.
+pub async fn compact_ref_journal(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    created_at: String,
+    pusher: Option<String>,
+    session_id: String,
+) -> Result<Option<Manifest>> {
+    let snapshot = read_repository_snapshot(store, router).await?;
+    if snapshot.journal.transactions.is_empty() {
+        return Ok(None);
+    }
+    let generation = snapshot
+        .manifest
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| MetadataError::Internal("manifest generation overflow".to_owned()))?;
+    let (shard_index_hash, _, shard_index) =
+        compact_shard_index(generation, &snapshot.journal.shards)?;
+    let (pack_index_hash, _, pack_index) = compact_pack_index(generation, &snapshot.journal.packs)?;
+    upload_segmented_bulk(
+        store,
+        router,
+        &BulkData {
+            shard_index,
+            pack_index,
+        },
+    )
+    .await?;
+
+    let compacted_transactions = snapshot.journal.transactions.clone();
+    let mut manifest = snapshot.manifest;
+    manifest.generation = generation;
+    manifest.created_at = created_at;
+    manifest.pusher = pusher;
+    manifest.session_id = session_id;
+    manifest.refs = snapshot.journal.refs;
+    manifest.peeled_refs = snapshot.journal.peeled_refs;
+    manifest.head = snapshot.journal.head;
+    manifest.shard_index_hash = shard_index_hash;
+    manifest.pack_index_hash = pack_index_hash;
+    // The old summary does not cover journal-only ref advances.
+    manifest.commit_graph_hash = None;
+    manifest.seal_git_validation();
+    write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads).await?;
+    write_manifest_cas(store, router, &manifest, &snapshot.manifest_etag).await?;
+    cleanup_compacted_transactions(store, router, &compacted_transactions).await;
+    Ok(Some(manifest))
 }
 
 /// Read the segmented shard-index object and parse it into shard hashes.
@@ -386,6 +491,9 @@ mod tests {
     use object_store::memory::InMemory;
 
     use crate::manifests::{compact_pack_index, compact_shard_index};
+    use crate::ref_journal::{
+        RefJournalEdit, RefJournalTransaction, commit_ref_transaction, read_ref_head,
+    };
 
     fn memory_store() -> Store {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -707,5 +815,57 @@ mod tests {
             .expect_err("stale proof must fail before generation comparison");
 
         assert!(matches!(error, MetadataError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn journal_compaction_publishes_bounded_repository_snapshot() {
+        let store = memory_store();
+        let router = test_layout(store.clone());
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
+        base.seal_git_validation();
+        create_manifest(&store, &router, &base).await.unwrap();
+        let head = read_ref_head(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some("a".repeat(40)),
+                new_oid: Some("b".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        commit_ref_transaction(&store, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let compacted = compact_ref_journal(
+            &store,
+            &router,
+            "2026-08-20T00:00:00Z".to_owned(),
+            Some("test".to_owned()),
+            "compact-1".to_owned(),
+        )
+        .await
+        .unwrap()
+        .expect("one journal transaction should compact");
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+
+        assert_eq!(compacted.refs["refs/heads/main"], "b".repeat(40));
+        assert!(snapshot.journal.transactions.is_empty());
+        assert_eq!(snapshot.journal.refs["refs/heads/main"], "b".repeat(40));
+        assert!(
+            crate::ref_journal::list_active_transactions(&store, &router)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

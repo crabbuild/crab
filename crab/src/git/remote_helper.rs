@@ -26,7 +26,7 @@ use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_pus
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphSummary;
-use crab_metadata::manifests::{Manifest, PackEntry, PackList};
+use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
 use crab_metadata::pack_metadata::PackMetadata;
 
 pub(crate) const AGENT_REBASE_FETCH_REF_FILTERING_ENV: &str =
@@ -1798,16 +1798,17 @@ pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> St
     caps
 }
 
-/// Read refs from the unified manifest pointer.
-///
-/// Reads `{repo}/manifest` in one small GET, then delegates hidden-ref and
-/// HEAD fallback policy to the read-domain manifest advertisement helper.
+/// Read refs from the compacted manifest plus committed journal overlay.
 async fn read_remote_refs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    let (manifest, _etag) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let mut manifest = snapshot.manifest;
+    manifest.refs = snapshot.journal.refs;
+    manifest.peeled_refs = snapshot.journal.peeled_refs;
+    manifest.head = snapshot.journal.head;
     let advertisement = crab_read::manifest_ref_advertisement(&manifest, hidden_ref_patterns);
 
     let refs = advertisement
@@ -1912,7 +1913,8 @@ fn map_fetch_admission_reject(
 struct RemoteFetchStore {
     store: crate::storage::store::Store,
     router: StoreLayout,
-    manifest: Manifest,
+    generation: u64,
+    packs: Vec<PackManifestEntry>,
     caching_store: Option<crab_cache_store::CachingStore>,
     pack_list: Arc<tokio::sync::Mutex<Option<PackList>>>,
     enrich_ref_tips: bool,
@@ -1923,7 +1925,8 @@ impl RemoteFetchStore {
     fn new(
         store: crate::storage::store::Store,
         router: StoreLayout,
-        manifest: Manifest,
+        generation: u64,
+        packs: Vec<PackManifestEntry>,
         caching_store: Option<crab_cache_store::CachingStore>,
         enrich_ref_tips: bool,
         metadata_concurrency: usize,
@@ -1931,7 +1934,8 @@ impl RemoteFetchStore {
         Self {
             store,
             router,
-            manifest,
+            generation,
+            packs,
             caching_store,
             pack_list: Arc::new(tokio::sync::Mutex::new(None)),
             enrich_ref_tips,
@@ -1948,19 +1952,12 @@ impl RemoteFetchStore {
             return Ok(cached);
         }
 
-        let entries = if self.manifest.pack_index_hash.is_empty() {
-            Vec::new()
-        } else {
-            crate::metadata::manifest::read_bulk_pack_list(
-                &self.store,
-                &self.router,
-                &self.manifest.pack_index_hash,
-            )
-            .await?
-            .into_iter()
+        let entries: Vec<PackEntry> = self
+            .packs
+            .iter()
+            .cloned()
             .map(|entry| PackEntry::with_ref_tips(entry.pack_id, entry.size, entry.ref_tips))
-            .collect()
-        };
+            .collect();
 
         let entries =
             if self.enrich_ref_tips && entries.iter().any(|entry| entry.ref_tips.is_none()) {
@@ -1970,7 +1967,7 @@ impl RemoteFetchStore {
             };
 
         let pack_list = PackList {
-            generation: self.manifest.generation,
+            generation: self.generation,
             entries,
         };
         *self.pack_list.lock().await = Some(pack_list.clone());
@@ -2120,13 +2117,17 @@ async fn fetch_packs(
     cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
-    // Read the manifest to get the pack list hash.
-    let (manifest, _etag) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let mut manifest = snapshot.manifest;
+    manifest.refs = snapshot.journal.refs;
+    manifest.peeled_refs = snapshot.journal.peeled_refs;
+    manifest.head = snapshot.journal.head;
 
     let fetch_store = Arc::new(RemoteFetchStore::new(
         store.clone(),
         router.clone(),
-        manifest.clone(),
+        manifest.generation,
+        snapshot.journal.packs,
         caching_store.cloned(),
         config.fetch_ref_filtering,
         config.download_concurrency,
@@ -3166,7 +3167,8 @@ mod tests {
         let fetch_store = RemoteFetchStore::new(
             store.clone(),
             router.clone(),
-            admitted.clone(),
+            admitted.generation,
+            Vec::new(),
             None,
             false,
             1,
@@ -3196,8 +3198,15 @@ mod tests {
         let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
             .await
             .expect("read manifest");
-        let fetch_store =
-            RemoteFetchStore::new(store.clone(), router.clone(), manifest, None, false, 1);
+        let fetch_store = RemoteFetchStore::new(
+            store.clone(),
+            router.clone(),
+            manifest.generation,
+            Vec::new(),
+            None,
+            false,
+            1,
+        );
         let pack_id = "a".repeat(64);
 
         let missing = fetch_store

@@ -6,6 +6,7 @@ use crab_metadata::git_object_locator::{
     GitLocatorCoverage, GitObjectLocatorSession, GitPackInventoryEntry,
 };
 use crab_metadata::manifest_store::{read_bulk_pack_list, read_manifest};
+use crab_metadata::ref_journal::{list_active_transactions, materialize_ref_journal};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use gix_hash::ObjectId;
@@ -286,6 +287,9 @@ impl RemoteGitRepository {
         for attempt in 0..2 {
             check_cancelled(cancellation)?;
             check_cancelled(&runtime_cancellation)?;
+            let active_transactions = list_active_transactions(&store, &layout)
+                .await
+                .map_err(Error::Metadata)?;
             let (manifest, manifest_etag) = load_manifest(
                 &store,
                 &layout,
@@ -295,6 +299,34 @@ impl RemoteGitRepository {
                 &runtime_cancellation,
             )
             .await?;
+            let base_packs = if manifest.pack_index_hash.is_empty() {
+                Vec::new()
+            } else {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+                    result = read_bulk_pack_list(&store, &layout, &manifest.pack_index_hash) => {
+                        result.map_err(|source| Error::Inventory { source })?
+                    }
+                }
+            };
+            let journal = materialize_ref_journal(
+                &store,
+                &layout,
+                &manifest,
+                &base_packs,
+                &[],
+                &active_transactions,
+            )
+            .await
+            .map_err(Error::Metadata)?;
+            if !journal.transactions.is_empty() {
+                return Err(Error::RepositoryIndexing {
+                    observed: Some(manifest.generation),
+                    required: manifest.generation.saturating_add(1),
+                });
+            }
             check_cancelled(cancellation)?;
             check_cancelled(&runtime_cancellation)?;
             let refs = parse_refs(&manifest)?;
@@ -322,17 +354,9 @@ impl RemoteGitRepository {
             let inventory = match runtime.cached_inventory(&identity, pack_index_hash).await {
                 Some(inventory) => inventory.as_ref().clone(),
                 None => {
-                    let packs = tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => return Err(Error::Cancelled),
-                        () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                        result = read_bulk_pack_list(&store, &layout, &manifest.pack_index_hash) => {
-                            result.map_err(|source| Error::Inventory { source })?
-                        }
-                    };
                     check_cancelled(cancellation)?;
                     check_cancelled(&runtime_cancellation)?;
-                    let inventory = parse_inventory(packs)?;
+                    let inventory = parse_inventory(journal.packs.clone())?;
                     runtime
                         .insert_inventory(
                             identity.clone(),
@@ -1386,9 +1410,10 @@ mod tests {
             "2222222222222222222222222222222222222222".to_owned(),
         );
         next.seal_git_validation();
-        let (_, etag) = read_manifest(&fixture.store, &fixture.layout)
-            .await
-            .expect("read current manifest");
+        let (_, etag) =
+            crab_metadata::manifest_store::read_manifest(&fixture.store, &fixture.layout)
+                .await
+                .expect("read current manifest");
         write_manifest_cas(&fixture.store, &fixture.layout, &next, &etag)
             .await
             .expect("publish changed manifest");
@@ -1519,9 +1544,10 @@ mod tests {
             "2222222222222222222222222222222222222222".to_owned(),
         );
         next.seal_git_validation();
-        let (_, etag) = read_manifest(&fixture.store, &fixture.layout)
-            .await
-            .expect("read manifest");
+        let (_, etag) =
+            crab_metadata::manifest_store::read_manifest(&fixture.store, &fixture.layout)
+                .await
+                .expect("read manifest");
         write_manifest_cas(&fixture.store, &fixture.layout, &next, &etag)
             .await
             .expect("publish manifest");
