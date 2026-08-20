@@ -17,7 +17,9 @@ crab repack [OPTIONS]
 
 `crab repack` consolidates remote Git pack files. Over time, many pushes can
 leave many small packs in the remote. Repacking merges those packs and
-atomically updates the pack list; old packs are reclaimed later by `crab gc`.
+atomically updates the active pack list. Immutable recovery history continues
+to retain old packs, so repack optimizes active reads but does not currently
+reclaim their storage bytes.
 
 For conceptual background, see [Repacking Objects](/docs/cli/storage/repacking-objects).
 

@@ -24,8 +24,10 @@ flowchart LR
 6. Atomically updates the manifest using compare-and-swap (CAS).
 7. Rebinds the existing Git visibility proof to the replacement pack inventory.
 
-Old pack files remain unreachable after the manifest update and are reclaimed
-by a later repo-scoped `crab gc` run.
+Old pack files leave the active manifest after the update, but immutable
+recovery history continues to reference them. Repack therefore reduces the
+pack count used by clone and fetch; it does not currently reclaim the old pack
+bytes through repo-scoped `crab gc`.
 
 ### Atomicity and Safety
 

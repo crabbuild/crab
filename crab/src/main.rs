@@ -3715,6 +3715,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         mode,
                         force_early_delete: false,
                         yes_really: false,
+                        delete_concurrency: config.gc_delete_concurrency,
+                        list_concurrency: config.gc_list_concurrency,
                     };
                     tracing::info!(
                         dry_run = args.dry_run,

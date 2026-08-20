@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
+use futures_util::{StreamExt, TryStreamExt};
 
 use crate::error::{MetadataError, Result};
 use crate::manifests::{
@@ -14,6 +15,8 @@ use crate::ref_journal::{
 };
 use crate::segmented::{self, SegmentKind, ShardSegmentEntry};
 use crate::segmented_store;
+
+const DEFAULT_HISTORY_READ_CONCURRENCY: usize = 32;
 
 /// One validated immutable historical manifest root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,11 +141,24 @@ pub async fn list_manifest_history(
     store: &Store,
     router: &StoreLayout<Store>,
 ) -> Result<Vec<ManifestHistoryEntry>> {
+    list_manifest_history_with_concurrency(store, router, DEFAULT_HISTORY_READ_CONCURRENCY).await
+}
+
+/// List and validate immutable historical roots with bounded read concurrency.
+pub async fn list_manifest_history_with_concurrency(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    concurrency: usize,
+) -> Result<Vec<ManifestHistoryEntry>> {
     let prefix = router.manifest_history_prefix();
-    let mut entries = Vec::new();
-    for object in store.list_prefix(&prefix).await? {
-        entries.push(read_history_entry(store, router, &object.location).await?);
-    }
+    let objects = store.list_prefix(&prefix).await?;
+    let mut entries =
+        futures_util::stream::iter(objects.into_iter().map(|object| async move {
+            read_history_entry(store, router, &object.location).await
+        }))
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
     entries.sort_unstable_by(|left, right| {
         left.generation
             .cmp(&right.generation)
@@ -504,10 +520,17 @@ pub async fn materialize_active_active_manifest_projection(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::fmt;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
-    use object_store::ObjectStore;
+    use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    };
 
     use crate::manifests::{compact_pack_index, compact_shard_index};
     use crate::ref_journal::{
@@ -517,6 +540,101 @@ mod tests {
     fn memory_store() -> Store {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         Store::new(inner)
+    }
+
+    struct DelayedGetStore {
+        inner: Arc<InMemory>,
+        active_gets: AtomicUsize,
+        max_active_gets: AtomicUsize,
+    }
+
+    impl DelayedGetStore {
+        fn new(inner: Arc<InMemory>) -> Self {
+            Self {
+                inner,
+                active_gets: AtomicUsize::new(0),
+                max_active_gets: AtomicUsize::new(0),
+            }
+        }
+
+        fn max_active_gets(&self) -> usize {
+            self.max_active_gets.load(Ordering::Acquire)
+        }
+    }
+
+    impl fmt::Debug for DelayedGetStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DelayedGetStore")
+        }
+    }
+
+    impl fmt::Display for DelayedGetStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DelayedGetStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for DelayedGetStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            let active = self.active_gets.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_active_gets.fetch_max(active, Ordering::AcqRel);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let result = self.inner.get_opts(location, options).await;
+            self.active_gets.fetch_sub(1, Ordering::AcqRel);
+            result
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<object_store::path::Path>>,
+        ) -> BoxStream<'static, object_store::Result<object_store::path::Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     fn test_layout(store: Store) -> StoreLayout<Store> {
@@ -734,6 +852,39 @@ mod tests {
             list_manifest_history(&store, &router).await.unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn manifest_history_validates_entries_concurrently_and_sorts_results() {
+        let inner = Arc::new(InMemory::new());
+        let seed_store = Store::new(inner.clone() as Arc<dyn ObjectStore>);
+        let seed_router = test_layout(seed_store.clone());
+        for generation in (0..64).rev() {
+            let mut manifest = Manifest::default_for_repo("refs/heads/main");
+            manifest.generation = generation;
+            manifest.session_id = format!("session-{generation}");
+            manifest.seal_git_validation();
+            archive_manifest(&seed_store, &seed_router, &manifest)
+                .await
+                .unwrap();
+        }
+
+        let delayed = Arc::new(DelayedGetStore::new(inner));
+        let store = Store::new(delayed.clone() as Arc<dyn ObjectStore>);
+        let router = test_layout(store.clone());
+        let entries = list_manifest_history_with_concurrency(&store, &router, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.generation)
+                .collect::<Vec<_>>(),
+            (0..64).collect::<Vec<_>>()
+        );
+        assert!(delayed.max_active_gets() > 1);
+        assert!(delayed.max_active_gets() <= 4);
     }
 
     #[tokio::test]

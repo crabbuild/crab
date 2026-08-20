@@ -15,9 +15,14 @@ crab gc [OPTIONS]
 
 ## Description
 
-`crab gc` identifies and removes xorbs that are no longer referenced by any
-ref in the repository. It respects a grace period to avoid deleting objects
+`crab gc` identifies and removes repository objects that are not referenced by
+the current repository state, ref journal, workflow artifact catalog, or any
+immutable recovery root. It respects a grace period to avoid deleting objects
 that may be in use by concurrent operations.
+
+Historical roots used by `crab recover history` are retained without a time or
+count limit. Objects referenced by those roots are therefore not GC candidates,
+even when they are absent from current branches and tags.
 
 For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-collection).
 

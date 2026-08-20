@@ -15,7 +15,7 @@ default = []
 file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
 local-index = ["dep:rusqlite"]
 remote-index = ["dep:futures-util", "dep:object_store", "dep:slatedb"]
-storage = ["dep:crab-storage", "dep:object_store"]
+storage = ["dep:crab-storage", "dep:futures-util", "dep:object_store"]
 
 [dependencies]
 blake3 = { workspace = true }
@@ -33,5 +33,6 @@ tokio = { workspace = true, features = ["sync"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
