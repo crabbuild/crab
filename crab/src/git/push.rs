@@ -6872,6 +6872,7 @@ impl PushPipeline {
                     })?)
                 },
                 peeled_oid: manifest.peeled_refs.get(&spec.dst).cloned(),
+                visibility_evidence_hash: None,
             });
         }
         edits.sort_unstable_by(|left, right| left.ref_name.cmp(&right.ref_name));
@@ -6883,6 +6884,17 @@ impl PushPipeline {
                     expected_etag: None,
                 }),
             });
+        }
+        // Evidence precedes the active marker so a sibling compactor can prove
+        // the ref. Failure retains the evidence-less repair path and withholds v2.
+        if let Err(error) = self
+            .publish_ref_visibility_edits(store, &current_snapshot.manifest, &current, &mut edits)
+            .await
+        {
+            warn!(
+                %error,
+                "Git visibility evidence could not be published; ref commit remains repairable"
+            );
         }
         let mut expected_heads = Vec::with_capacity(edits.len());
         let mut parents = BTreeMap::new();
@@ -7008,11 +7020,153 @@ impl PushPipeline {
         Ok(decisions)
     }
 
+    async fn publish_ref_visibility_edits(
+        &self,
+        store: &crate::storage::store::Store,
+        compacted: &Manifest,
+        prior: &Manifest,
+        edits: &mut [crate::metadata::manifest::RefJournalEdit],
+    ) -> Result<()> {
+        let storage = store.as_storage();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), self.router.repo_prefix().to_owned());
+        let compacted_visibility = if compacted.refs.is_empty() {
+            None
+        } else {
+            Some(
+                crab_metadata::git_visibility::read(
+                    storage,
+                    &storage_router,
+                    compacted.generation,
+                    &compacted.pack_index_hash,
+                )
+                .await
+                .map_err(CrabError::from)?,
+            )
+        };
+        let plans = edits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, edit)| {
+                edit.new_oid.as_ref().map(|new_oid| {
+                    (
+                        index,
+                        edit.ref_name.clone(),
+                        edit.old_oid.clone(),
+                        new_oid.clone(),
+                        prior.peeled_refs.get(&edit.ref_name).cloned(),
+                        edit.peeled_oid.clone(),
+                        edit.old_oid
+                            .as_ref()
+                            .filter(|old_oid| compacted.refs.get(&edit.ref_name) == Some(*old_oid))
+                            .and_then(|_| {
+                                compacted_visibility
+                                    .as_ref()
+                                    .and_then(|index| index.refs.get(&edit.ref_name).cloned())
+                            }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if plans.is_empty() {
+            return Ok(());
+        }
+
+        let git_dir = self
+            .git_dir_override()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crab_git::discover::discover_git_dir);
+        let evidence = tokio::task::spawn_blocking(move || {
+            let mut evidence = Vec::with_capacity(plans.len());
+            for (index, ref_name, old_oid, new_oid, old_peeled, new_peeled, known_old) in plans {
+                let new = visibility_closure_for_ref(
+                    &git_dir,
+                    &ref_name,
+                    &new_oid,
+                    new_peeled.as_deref(),
+                )?;
+                let old = match known_old {
+                    Some(objects) => Ok(Some(objects.into_iter().collect::<BTreeSet<_>>())),
+                    None => old_oid
+                        .as_deref()
+                        .map(|old_oid| {
+                            visibility_closure_for_ref(
+                                &git_dir,
+                                &ref_name,
+                                old_oid,
+                                old_peeled.as_deref(),
+                            )
+                        })
+                        .transpose(),
+                };
+                let (edit, old_error) = match old {
+                    Ok(Some(old)) => (
+                        crab_metadata::git_visibility::GitVisibilityEdit::delta(
+                            old_oid, new_oid, &old, &new,
+                        ),
+                        None,
+                    ),
+                    Ok(None) => (
+                        crab_metadata::git_visibility::GitVisibilityEdit::replacement(
+                            old_oid, new_oid, &new,
+                        ),
+                        None,
+                    ),
+                    Err(error) => (
+                        crab_metadata::git_visibility::GitVisibilityEdit::replacement(
+                            old_oid, new_oid, &new,
+                        ),
+                        Some(error.to_string()),
+                    ),
+                };
+                evidence.push((index, ref_name, edit, old_error));
+            }
+            Ok::<_, CrabError>(evidence)
+        })
+        .await
+        .map_err(|error| {
+            CrabError::Internal(format!("Git visibility evidence join failed: {error}"))
+        })??;
+
+        for (index, ref_name, evidence, old_error) in evidence {
+            if let Some(error) = old_error {
+                warn!(
+                    %ref_name,
+                    %error,
+                    "prior ref closure is unavailable; publishing complete replacement evidence"
+                );
+            }
+            let hash =
+                crab_metadata::git_visibility::upload_edit(storage, &storage_router, &evidence)
+                    .await
+                    .map_err(CrabError::from)?;
+            edits[index].visibility_evidence_hash = Some(hash);
+        }
+        Ok(())
+    }
+
     async fn publish_git_visibility_index(
         &self,
         manifest: &Manifest,
         store: &crate::storage::store::Store,
     ) -> Result<()> {
+        let storage = store.as_storage();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), self.router.repo_prefix().to_owned());
+        match crab_metadata::git_visibility::read(
+            storage,
+            &storage_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(CrabError::from(error)),
+        }
         let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
         let packed_objects = packs
             .iter()
@@ -14152,6 +14306,36 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     Ok(index)
 }
 
+fn visibility_closure_for_ref(
+    git_dir: &Path,
+    ref_name: &str,
+    oid: &str,
+    peeled_oid: Option<&str>,
+) -> Result<BTreeSet<String>> {
+    let refs = vec![(ref_name.to_owned(), oid.to_owned())];
+    let peeled_refs = peeled_oid
+        .map(|peeled| BTreeMap::from([(ref_name.to_owned(), peeled.to_owned())]))
+        .unwrap_or_default();
+    let mut closures = crab_git::walk::walk_reachable_by_ref_bounded(
+        git_dir,
+        &refs,
+        &peeled_refs,
+        crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize,
+    )
+    .map_err(CrabError::from)?;
+    let closure = closures.remove(ref_name).ok_or_else(|| {
+        CrabError::Internal(format!(
+            "Git visibility walk did not return requested ref {ref_name}"
+        ))
+    })?;
+    let mut objects = BTreeSet::new();
+    objects.extend(closure.commits.iter().map(sha1_hex));
+    objects.extend(closure.trees.iter().map(sha1_hex));
+    objects.extend(closure.blobs.iter().map(sha1_hex));
+    objects.extend(closure.tags.iter().map(sha1_hex));
+    Ok(objects)
+}
+
 fn sha1_hex(oid: &[u8; 20]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(40);
@@ -18261,16 +18445,32 @@ mod tests {
         let result = run_push_batch(
             &specs,
             &config,
-            Some(store),
+            Some(store.clone()),
             None,
             None,
-            router,
+            router.clone(),
             None,
             cancel,
             None,
         )
         .await;
         assert!(result.all_ok());
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read committed manifest");
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let visibility = crab_metadata::git_visibility::read(
+            store.as_storage(),
+            &storage_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        .expect("journal compaction publishes visibility evidence");
+        assert!(visibility.refs.contains_key("refs/heads/main"));
     }
 
     // --- Step 10: remote-aware pack generation ---

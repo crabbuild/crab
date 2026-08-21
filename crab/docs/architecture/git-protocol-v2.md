@@ -79,6 +79,14 @@ remote reader obtains object bytes. The proof and locator are tied to the same
 manifest generation and pack-index hash. Invalid or missing proof suppresses
 v2 advertisement; it never triggers a silent complete filtered fetch.
 
+Each direct ref update uploads content-addressed visibility evidence before its
+journal marker becomes visible. Fast-forward and ordinary updates encode only
+the object IDs added to or removed from the prior ref closure; a writer that
+cannot read the prior local closure publishes a complete replacement. The
+single journal-compaction owner applies the ordered evidence and uploads the
+generation proof before advancing the compacted manifest. Concurrent writers
+therefore do not need one another's pack bodies or local Git object databases.
+
 Git owns the local promisor lifecycle: the Git version in use records the
 remote's promisor/filter configuration and marks received promisor packs with
 `.promisor` sidecars. Crab's helper does not invent a second local repository

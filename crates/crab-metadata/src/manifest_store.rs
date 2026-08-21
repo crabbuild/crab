@@ -316,6 +316,22 @@ pub async fn compact_ref_journal(
     )
     .await?;
 
+    // Complete evidence publishes authorization before the compacted manifest;
+    // otherwise no proof is written and upload-pack withholds protocol v2.
+    if let Some(visibility) = crate::git_visibility::compact_journal_edits(
+        store,
+        router,
+        &snapshot.manifest,
+        &snapshot.journal.ordered_edits,
+        generation,
+        &pack_index_hash,
+        &snapshot.journal.refs,
+    )
+    .await?
+    {
+        crate::git_visibility::upload_if_absent(store, router, &visibility).await?;
+    }
+
     let compacted_transactions = snapshot.journal.transactions.clone();
     let mut manifest = snapshot.manifest;
     manifest.generation = generation;
@@ -1019,6 +1035,7 @@ mod tests {
                 old_oid: Some("a".repeat(40)),
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),
@@ -1069,6 +1086,7 @@ mod tests {
                 old_oid: Some("b".repeat(40)),
                 new_oid: Some("c".repeat(40)),
                 peeled_oid: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),
@@ -1110,6 +1128,7 @@ mod tests {
                 old_oid: None,
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),

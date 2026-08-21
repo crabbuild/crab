@@ -279,12 +279,15 @@ RustFS/OpenTelemetry request metrics.
   incomplete uploads.
 - Locator or visibility acceleration damage is reported rather than rebuilt by
   `fsck`; use `crab metadb rebuild` and verify again.
-- Cross-ref fan-out can commit every ref while post-commit Git locator or
-  visibility publication loses its shared writer lease or lacks another
-  writer's objects. Treat `Git locator coverage is stale` and `Git visibility
-  proof unavailable` from `crab doctor --metadb` as repair-required, then run
-  `crab metadb rebuild`. Do not use `fsck` success alone as proof that these
-  accelerators are current.
+- Cross-ref fan-out publishes immutable per-ref visibility evidence before the
+  ref journal commit. The compaction owner combines every writer's evidence and
+  publishes the generation proof before advancing the compacted manifest, so
+  it does not need sibling pack bodies in its local Git ODB. Evidence-less
+  transactions from older clients, failed evidence uploads, or a lost locator
+  writer lease remain repair cases. Treat `Git locator coverage is stale` and
+  `Git visibility proof unavailable` from `crab doctor --metadb` as
+  repair-required, then run `crab metadb rebuild`. Do not use `fsck` success
+  alone as proof that these accelerators are current.
 - Short-lived Git helper processes do not remain alive for SlateDB's periodic
   garbage collector. Track metadb object growth and schedule a supported
   cleanup workflow before high-volume production use.
