@@ -1,0 +1,469 @@
+---
+title: "External Data Sources"
+description: "Import, inspect, and safely refresh versioned files, directories, URLs, object-store objects, and SQLite snapshots with crab data."
+---
+
+# Manage external data sources with `crab data`
+
+Use `crab data` to bring an external input into the current worktree and keep
+enough provenance to refresh that input later. Each import creates two local
+artifacts:
+
+- a materialized file or directory at the output path you choose;
+- a credential-free source descriptor under `.crab/workflow/sources/`.
+
+The descriptor binds the target to its source, resolved revision or provider
+validator, verified BLAKE3 content identity, and byte count. This makes external
+inputs reviewable and repeatable alongside Crab workflows.
+
+<Callout type="note" title="Three similarly named commands do different jobs">
+  `crab data import` manages an input inside an existing worktree. The top-level
+  [`crab import`](/docs/cli/reference/crab-import) converts a raw storage prefix
+  into a Crab repository. [`crab update`](/docs/cli/reference/crab-update)
+  updates the Crab executable.
+</Callout>
+
+## Command overview
+
+```bash
+crab data <COMMAND> [OPTIONS]
+```
+
+| Command | Purpose | Reads the network? | Writes the worktree? |
+| --- | --- | --- | --- |
+| `list` | Inventory the current worktree or a committed Git revision | No | No |
+| `import` | Copy a file, directory, or committed tree from a local source | No | Yes |
+| `import-url` | Download a file or directory from a supported URL | For HTTP and object storage | Yes |
+| `import-db` | Materialize a read-only SQLite query as JSONL | No | Yes |
+| `update` | Re-read one descriptor and refresh its target transactionally | Depends on the source | Unless `--dry-run` or unchanged |
+| `status` | Compare descriptors with local workspace and Git state | No | No |
+
+Every subcommand supports `--json` and `--jsonl`. The flags are mutually
+exclusive.
+
+## Start with a versioned input
+
+<Steps>
+
+<Step>
+
+### Import the source
+
+Pin a committed file from another local Git repository:
+
+```bash
+crab data import ../datasets \
+  --path training/samples.parquet \
+  --rev main \
+  --output data/samples.parquet
+```
+
+Crab resolves `main` to a 40-character commit ID, materializes the committed
+file, verifies its content, and writes a source descriptor.
+
+</Step>
+
+<Step>
+
+### Inspect the local state
+
+```bash
+crab data status data/samples.parquet
+```
+
+An unchanged target reports `source:up-to-date`. Use `--json` when a script
+needs the individual workspace, Git, lock, cache, source, and remote states.
+
+</Step>
+
+<Step>
+
+### Preview and apply a refresh
+
+```bash
+crab data update data/samples.parquet --dry-run
+crab data update data/samples.parquet
+```
+
+The dry run reads the source and computes the candidate state but leaves the
+target and descriptor unchanged. The second command installs a verified change
+and updates the descriptor.
+
+</Step>
+
+<Step>
+
+### Commit the provenance with the input
+
+Review and commit both the target and its descriptor through your normal Git
+workflow:
+
+```bash
+git status --short
+git add data/samples.parquet .crab/workflow/sources/
+git commit -m "data: pin training samples"
+```
+
+</Step>
+
+</Steps>
+
+All commands resolve the current Git worktree root first. Running them from a
+nested directory still interprets list paths and targets relative to that
+worktree root. Local source, database, and query-file paths resolve from the
+shell's current directory when you import them.
+
+## List data paths
+
+`crab data list` inventories either the materialized worktree or a committed
+Git tree.
+
+```bash
+crab data list [PATH] [--recursive] [--rev REVISION] [--json | --jsonl]
+```
+
+| Argument or option | Default | Description |
+| --- | --- | --- |
+| `PATH` | Worktree root | Restrict results to a repository-relative file or directory. |
+| `--recursive` | Off | Descend into directories instead of returning one directory entry. |
+| `--rev REVISION` | Current filesystem | Read the committed tree at a local Git revision. |
+| `--json` | Off | Emit one `data` JSON envelope. |
+| `--jsonl` | Off | Emit one terminal `data.event` JSONL record. |
+
+List the direct children of the worktree:
+
+```bash
+crab data list
+```
+
+```text
+directory	data
+file	params.yaml
+```
+
+List every materialized file below `data/`:
+
+```bash
+crab data list data --recursive
+```
+
+Inspect the same path as it existed in a commit:
+
+```bash
+crab data list data --rev HEAD~1 --recursive --json
+```
+
+Without `--rev`, Crab reads the filesystem and omits Crab's internal `.git`,
+`.crab`, and `target` directories during normal directory traversal. With
+`--rev`, Crab resolves the selector locally and reads the committed Git tree;
+it does not fetch a missing revision or infer remote Git transport.
+
+If a listed file is the target of a source descriptor, structured output adds
+its `source_id`. Directory entries have no byte size or source ID.
+
+## Import a local file, directory, or Git revision
+
+```bash
+crab data import SOURCE --output TARGET \
+  [--path SOURCE_PATH] [--rev REVISION] [--json | --jsonl]
+```
+
+| Argument or option | Required | Description |
+| --- | --- | --- |
+| `SOURCE` | Yes | Local source repository or directory. |
+| `-o, --output TARGET` | Yes | New repository-relative target path in the current worktree. |
+| `--path SOURCE_PATH` | No | File or directory relative to `SOURCE`; defaults to the source root. |
+| `--rev REVISION` | No | Resolve and import committed content from a local Git revision. |
+| `--json` / `--jsonl` | No | Select structured output. |
+
+### Import the live filesystem
+
+```bash
+crab data import ../datasets \
+  --path exports/latest \
+  --output data/latest
+```
+
+Without `--rev`, Crab snapshots the current file or directory, including
+uncommitted content. If `SOURCE` is a Git repository, the descriptor records
+its current `HEAD` when available, but future updates continue to follow the
+live source path.
+
+### Import committed content
+
+```bash
+crab data import ../datasets \
+  --path exports/train.csv \
+  --rev v2.1.0 \
+  --output data/train.csv
+```
+
+With `--rev`, Crab records both the requested selector (`v2.1.0`) and the
+resolved commit. A later `crab data update` resolves the same selector again,
+so a moving branch or tag can advance to a new commit. A commit hash remains
+pinned to that commit.
+
+Committed imports support a regular file, a directory, or the repository root.
+They preserve executable bits. Git symlinks, submodules, and other non-regular
+tree entries are rejected before Crab installs the target.
+
+<Callout type="warning" title="The output path must be new and safe">
+  Import commands refuse an existing target. The output must stay inside the
+  current worktree, cannot be `.` or an absolute path, cannot contain `..`, and
+  cannot traverse a symlink. Choose a new path or update the existing
+  descriptor instead.
+</Callout>
+
+## Import a URL or object-store object
+
+```bash
+crab data import-url URL --output TARGET [--json | --jsonl]
+```
+
+Examples:
+
+```bash
+crab data import-url https://datasets.example.com/train.csv \
+  --output data/train.csv
+
+crab data import-url s3://ml-inputs/releases/train.parquet \
+  --output data/train.parquet
+
+crab data import-url file:///srv/exports/labels.json \
+  --output data/labels.json
+```
+
+| Source | Accepted schemes | Refresh behavior |
+| --- | --- | --- |
+| Local URL | `file://` | Re-reads and verifies the local file or directory. |
+| HTTP | `http://`, `https://` | Streams the response and records a strong ETag when supplied. Updates send `If-None-Match`. |
+| Amazon S3 | `s3://`, `s3a://` | Uses the configured provider chain and records an object version or strong ETag. |
+| Google Cloud Storage | `gs://` | Uses the configured provider chain and object validator. |
+| Azure-compatible storage | `az://`, `azure://`, `abfs://`, `abfss://`, `adl://` | Uses the configured provider chain and object validator. |
+
+HTTP responses must have a successful status. Weak ETags are not used as
+validators. Object-store downloads verify the streamed byte count against the
+provider metadata before installation.
+
+<Callout type="danger" title="Do not put credentials in source URLs">
+  Crab rejects URL user information, fragments, and secret-bearing query
+  parameters before any network request or write. Configure cloud credentials
+  through the normal provider chain instead. Persisted descriptors never
+  contain URL credentials.
+</Callout>
+
+SSH/SFTP, WebDAV, HDFS, Google Drive, OSS, and other URL schemes are not
+implemented. They fail before creating the target or descriptor.
+
+## Import a SQLite query
+
+`crab data import-db` runs a query against a local SQLite database opened in
+read-only mode and writes one JSON object per row.
+
+```bash
+crab data import-db sqlite \
+  --database warehouse/source.db \
+  --query 'select id, label from samples order by id' \
+  --output data/samples.jsonl
+```
+
+| Argument or option | Required | Description |
+| --- | --- | --- |
+| `CONNECTOR` | Yes | Connector name. Only `sqlite` is currently bundled. |
+| `--database PATH` | Yes | Existing local SQLite database opened read-only. |
+| `--query SQL_OR_FILE` | Yes | SQL text, or a path to a file containing SQL. |
+| `-o, --output TARGET` | Yes | New repository-relative JSONL target. |
+| `--json` / `--jsonl` | No | Select structured command output; the target remains JSONL. |
+
+The query must be non-empty UTF-8 text no longer than 1,024 bytes. Crab stores
+the trimmed query in the descriptor so `crab data update` can rerun it. Do not
+put passwords, tokens, or other secrets in query text.
+
+Rows preserve query order; include an explicit `ORDER BY` when deterministic
+ordering matters. Column names become JSON keys. SQLite values map as follows:
+
+| SQLite value | JSONL value |
+| --- | --- |
+| `NULL` | `null` |
+| Integer | JSON integer |
+| Real | JSON number, or `null` when it is not a finite JSON number |
+| Text | JSON string |
+| Blob | `{ "$binary_base64": "AQI=" }` |
+
+For example:
+
+```jsonl
+{"id":1,"label":"one","payload":null}
+{"id":2,"label":"two","payload":{"$binary_base64":"AQI="}}
+```
+
+Other database connectors fail before writing. Crab snapshots query results;
+it does not replace database transactions, migrations, or query planning.
+
+## Preview or apply an update
+
+```bash
+crab data update TARGET_OR_ID [--dry-run] [--json | --jsonl]
+```
+
+`TARGET_OR_ID` can be the descriptor's 64-character ID or its target path:
+
+```bash
+crab data update data/train.csv --dry-run --json
+crab data update data/train.csv
+```
+
+An update follows the source policy recorded at import time:
+
+- live local sources read the same file or directory again;
+- revision imports resolve the original requested Git selector again;
+- HTTP sources use their strong ETag for a conditional request when available;
+- object-store sources compare their version or strong ETag before downloading;
+- SQLite sources rerun the stored query against the same database.
+
+Crab considers content hash, byte count, revision, and validator when deciding
+whether a source changed. Text output is either `changed` or `up-to-date`.
+
+`--dry-run` prevents replacement, but it is not an offline operation: Crab
+still reads or downloads enough source data to compute and verify the candidate
+state. Temporary data is discarded afterward.
+
+For an applied change, Crab writes to a sibling temporary path, verifies the
+candidate, swaps it with the target, and atomically rewrites the descriptor. If
+the descriptor write fails, Crab restores the prior target. A failed fetch or
+verification therefore leaves the previous materialization intact.
+
+## Check source status
+
+```bash
+crab data status [TARGET_OR_ID] [--json | --jsonl]
+```
+
+Without a filter, the command reports every descriptor. A filter accepts the
+same descriptor ID or target path as `update`.
+
+```text
+source:up-to-date	data/train.csv	cache=not-managed,descriptor=present,git=clean,lock=locked,remote=not-checked,source=not-checked,workspace=up-to-date
+```
+
+Status intentionally performs no network I/O. It compares the descriptor with
+the local target and asks Git whether the target is clean, then reports these
+dimensions:
+
+| Dimension | Current states | Meaning |
+| --- | --- | --- |
+| `workspace` | `up-to-date`, `changed`, `missing`, `unreadable`, `unsafe` | Result of hashing the local target against the descriptor. |
+| `descriptor` | `present` | A valid descriptor was loaded. |
+| `git` | `clean`, `changed`, `unavailable` | Git worktree state for the target. |
+| `lock` | `locked`, `unlocked` | The descriptor has a revision or provider validator. |
+| `cache` | `not-managed` | Source descriptors are not promoted into workflow cache automatically. |
+| `source` | `not-checked` | Source freshness was not queried. |
+| `remote` | `not-checked` | Remote availability was not queried. |
+
+Use `crab data update TARGET --dry-run` when you need a source-aware freshness
+check. Unlike `status`, that command can perform filesystem, database, or
+network I/O.
+
+## Understand source descriptors
+
+Descriptors live at:
+
+```text
+.crab/workflow/sources/<source_id>.json
+```
+
+The stable source ID is derived from the source kind, credential-free locator,
+and target path. Updating content does not change the ID.
+
+```json
+{
+  "schema_version": 1,
+  "id": "abababababababababababababababababababababababababababababababab",
+  "kind": "repo",
+  "locator": "/srv/datasets",
+  "revision": "8b58e5155a8f5d21c4c9e6a76b28f176305f4f31",
+  "validator": null,
+  "content_hash": "b3:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "size": 4829012,
+  "target": "data/train.csv",
+  "metadata": {
+    "requested_revision": "main",
+    "source_path": "exports/train.csv"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Descriptor format version; newer unsupported schemas are rejected. |
+| `id` | Stable 64-character descriptor identifier. |
+| `kind` | `repo`, `url`, `sqlite`, or another supported connector name. |
+| `locator` | Canonical local path or credential-free URL. |
+| `revision` | Resolved Git commit or SQLite query identity when applicable. |
+| `validator` | Strong HTTP ETag or object-store version/ETag when available. |
+| `content_hash` | Verified `b3:` BLAKE3 identity of the materialized target. |
+| `size` | Total verified bytes for the target. |
+| `target` | Repository-relative materialization path. |
+| `metadata` | Non-secret source details needed for refresh. |
+
+Descriptor reads reject invalid identities, unsafe targets, newer schemas,
+credential-bearing URLs, and metadata keys or values that appear to contain
+secrets. Descriptor writes use an atomic file replacement.
+
+## Use structured output
+
+All six commands support the same output modes:
+
+| Mode | Schema | Behavior |
+| --- | --- | --- |
+| Text | None | Concise terminal output. |
+| `--json` | `data`, version `1.0` | One JSON envelope containing the operation and entries. |
+| `--jsonl` | `data.event`, version `1.0` | One terminal `result` event. These commands do not emit intermediate progress events. |
+
+Example list response:
+
+```json
+{
+  "schema": "data",
+  "version": "1.0",
+  "timestamp": "2026-08-21T06:00:00.000Z",
+  "data": {
+    "operation": "list",
+    "entries": [
+      {
+        "path": "data/train.csv",
+        "kind": "file",
+        "size": 4829012,
+        "source_id": "abababababababababababababababababababababababababababababababab"
+      }
+    ]
+  }
+}
+```
+
+Import and update responses put a descriptor plus `changed` and `dry_run`
+under `data.entries`. Status responses use the same entry fields as `list` and
+add a `dimensions` object.
+
+See [Structured Output](/docs/cli/reference/structured-output) for envelope,
+error, and exit-code conventions.
+
+## Troubleshoot common failures
+
+| Symptom | Cause | Resolution |
+| --- | --- | --- |
+| Target already exists | Imports never overwrite an existing path. | Choose a new `--output`, or run `crab data update` for an existing descriptor. |
+| Source descriptor not found | `update` received neither a known ID nor an exact target path. | Run `crab data status --json` and copy `source_id` or `path`. |
+| Revision is invalid | The selector does not resolve to a local commit. | Fetch it with Git first, then retry with a branch, tag, or commit available locally. |
+| Revision entry is unsupported | The committed path contains a symlink, submodule, or unsupported Git mode. | Materialize regular files/directories in the source repository before importing. |
+| URL credentials are unsupported | The URL contains user information, a fragment, or a secret-like query key. | Remove embedded credentials and configure the provider credential chain. |
+| Provider or connector is unsupported | The URL scheme or database connector has no runtime adapter. | Use a supported URL scheme or export the source to a local file/SQLite snapshot first. |
+| `status` says `not-checked` | Status is deliberately offline. | Use `crab data update TARGET --dry-run` to query and verify the source. |
+| Workspace is `changed` | Local content no longer matches its descriptor hash. | Review the local change before updating; an applied update replaces the target. |
+
+## Related workflow documentation
+
+- [Running Commands](/docs/cli/automation/running-commands): consume imported data as stage dependencies.
+- [Workflow Pipelines](/docs/cli/automation/workflow-pipelines): connect data inputs to multi-stage workflows.
+- [Workflow Lockfile](/docs/cli/automation/workflow-lockfile): pin reproducible workflow state.
+- [Migrating from DVC](/docs/cli/guides/migrating-from-dvc): move existing DVC projects to Crab.

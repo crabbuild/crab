@@ -2,6 +2,7 @@
   "title": "Automation & Pipelines",
   "pages": [
     "index",
+    "data-commands",
     "running-commands",
     "workflow-pipelines",
     "templating",
