@@ -16,11 +16,11 @@ path = "src/bin/crab_nfs_mount.rs"
 
 [[bin]]
 name = "dump_shard_file"
-path = "src/bin/dump_shard_file.rs"
+path = "scripts/dump_shard_file.rs"
 
 [[bin]]
 name = "generate_test_file"
-path = "src/bin/generate_test_file.rs"
+path = "scripts/generate_test_file.rs"
 
 [lib]
 name = "crab"

@@ -1,6 +1,0 @@
-{
-  "detail": {
-    "error": "forbidden",
-    "message": "fixture-user does not have clone access to crab://team-bucket/ml/models: no matching allow rule"
-  }
-}

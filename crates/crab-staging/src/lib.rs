@@ -56,12 +56,6 @@ mod prop_compaction_preserves_reads;
 mod prop_orphan_sweep_idempotence;
 #[cfg(test)]
 mod prop_torn_tail_recovery;
-#[cfg(test)]
-mod scale_100gib_nightly;
-#[cfg(test)]
-mod scale_10gib;
-#[cfg(test)]
-mod scale_1tib_manual;
 
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};

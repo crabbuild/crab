@@ -299,5 +299,4 @@ Watch for: test-only wiring, unreachable side effects, optimistic UI lies, missi
 
 - `crates/`: read `crates/AGENTS.md` before changing shared crates.
 - `crab/`, `packages/web/`, and `diagram/`: no additional tracked scoped `AGENTS.md`; inspect the nearest README, manifest, docs, tests, and neighboring implementations.
-- E2E verification: use the `crab-cli-verification` skill.
 - Repository-local agent workflows and task-specific skills live in `.agent/`, `.claude/`, and `.codex/`.
