@@ -1110,7 +1110,7 @@ rules:
     #[test]
     fn issue_registry_codes_are_unique_and_documented() {
         let docs = include_str!(
-            "../../../crab-web/content/docs/cli/cache-service/server-configuration.mdx"
+            "../../../packages/web/content/docs/cli/cache-service/server-configuration.mdx"
         );
         let mut codes = BTreeSet::new();
 

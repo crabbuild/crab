@@ -71,7 +71,7 @@ const heroStats: ReadonlyArray<{
 
 /* Feature showcase data — 6 cards covering the full product matrix.
    Descriptions are kept ≤150 chars (Requirement 3.3). Each href resolves
-   to an existing route within crab-web. */
+   to an existing route within the web app. */
 const featureCards: ReadonlyArray<{
   icon: typeof GitBranch
   title: string

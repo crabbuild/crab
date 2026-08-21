@@ -515,7 +515,7 @@ contains the detailed capability matrix and evidence boundaries.
 ├── crab/                 Rust CLI, remote helper, engine, and product wiring
 ├── crates/               Shared Rust contracts and storage/data-plane crates
 ├── crab/docs/            Architecture notes, guides, designs, and references
-├── crab-web/             Marketing site and published documentation source
+├── packages/web/         Marketing site and published documentation source
 ├── diagram/              Architecture diagrams and rendered assets
 ├── .github/workflows/    CI, release, and service evidence workflows
 ├── Cargo.toml            Rust workspace manifest

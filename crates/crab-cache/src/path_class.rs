@@ -277,7 +277,7 @@ mod tests {
     use super::*;
 
     const ARCHITECTURE_DOC: &str =
-        include_str!("../../../crab-web/content/docs/cli/cache-service/architecture.mdx");
+        include_str!("../../../packages/web/content/docs/cli/cache-service/architecture.mdx");
 
     struct RouteContractCase {
         name: &'static str,

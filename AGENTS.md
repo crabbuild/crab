@@ -23,7 +23,7 @@ Telegraph style. Root rules apply throughout the repository. Read the nearest sc
 CrabBuild/
 ├── crab/              Rust CLI, remote helper, and product/server composition
 ├── crates/            Shared Rust contracts, data plane, storage, and orchestration
-├── crab-web/          Next.js marketing site and Fumadocs documentation
+├── packages/web/      Next.js marketing site and Fumadocs documentation
 ├── diagram/           Architecture diagrams and rendered assets
 ├── .github/workflows/ CI, release, service, and evidence workflows
 ├── .agent/            Repository-local agent workflows
@@ -32,7 +32,7 @@ CrabBuild/
 ```
 
 Cargo workspace: 20 members — 19 shared crates under `crates/`, plus `crab`.
-There is no desktop application, Python package, or SDK package in this workspace; desktop material under `crab-web/` is documentation and marketing content.
+There is no desktop application, Python package, or SDK package in this workspace; desktop material under `packages/web/` is documentation and marketing content.
 
 ## Architecture
 
@@ -50,11 +50,11 @@ There is no desktop application, Python package, or SDK package in this workspac
 - Product modules under `crab/src/` cover command policy, chunking/deduplication, storage, metadata, coordination, Git integration, cache, LFS, auth/read/hydration, tiering/replication, import, and restriping. Reusable contracts and mechanics belong in `crates/`.
 - Stack: Rust 2024, tokio, `object_store`, `thiserror`, `tracing`, Blake3.
 
-### crab-web (Next.js)
+### packages/web (Next.js)
 
 - Marketing site + Fumadocs documentation. Hosted at crab.build.
 - Stack: Next.js 16 (Turbopack), React 19, Tailwind v4, Fumadocs, and shadcn/ui.
-- Docs: source content lives under `crab-web/content/docs/`; generated Fumadocs output under `crab-web/.source/` is not hand-edited.
+- Docs: source content lives under `packages/web/content/docs/`; generated Fumadocs output under `packages/web/.source/` is not hand-edited.
 - Follow `AGENTS.md` and adjacent docs/components for web guidance.
 
 ### Design Principles
@@ -133,10 +133,10 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make check    # f
 
 **Never** `cargo install` or manually copy binaries. Always `make install`.
 
-### crab-web
+### packages/web
 
 ```bash
-cd crab-web
+cd packages/web
 npm install
 npm run dev                # next dev --turbopack
 npm run build              # next build
@@ -206,7 +206,7 @@ npm run check:links        # docs/link validation
 ## Tests
 
 - **Rust**: `cd crab && CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main make test`. Property tests with `proptest`. Snapshot tests with `cargo insta`. `#[tokio::test(flavor = "multi_thread")]` for concurrency.
-- **Web**: `cd crab-web && npm run test` (Vitest); also run `npm run typecheck` and `npm run lint`, plus `npm run check:links` for docs/link changes.
+- **Web**: `cd packages/web && npm run test` (Vitest); also run `npm run typecheck` and `npm run lint`, plus `npm run check:links` for docs/link changes.
 - Name the property, not the requirement: `batch_remove_preserves_entries_for_non_deleted_xorbs`.
 - One logical assertion per test. Clean timers/env/globals/mocks.
 - Tests prove behavior/regressions, not every internal branch.
@@ -270,8 +270,8 @@ Watch for: test-only wiring, unreachable side effects, optimistic UI lies, missi
 ## Docs
 
 - Product name: **Crab**. CLI/package/path/config: `crab`.
-- Blog: `crab-web/content/blog/`; follow adjacent posts and their frontmatter.
-- SVG diagrams: `diagram/` and `crab-web/app/diagrams/`; follow nearby diagram components and existing rendering conventions.
+- Blog: `packages/web/content/blog/`; follow adjacent posts and their frontmatter.
+- SVG diagrams: `diagram/` and `packages/web/app/diagrams/`; follow nearby diagram components and existing rendering conventions.
 - Docs change with behavior/API changes.
 - Docs final answers: include relevant `https://crab.build/docs/...` URL(s) when applicable.
 
@@ -298,6 +298,6 @@ Watch for: test-only wiring, unreachable side effects, optimistic UI lies, missi
 ## Scoped Guidance
 
 - `crates/`: read `crates/AGENTS.md` before changing shared crates.
-- `crab/`, `crab-web/`, and `diagram/`: no additional tracked scoped `AGENTS.md`; inspect the nearest README, manifest, docs, tests, and neighboring implementations.
+- `crab/`, `packages/web/`, and `diagram/`: no additional tracked scoped `AGENTS.md`; inspect the nearest README, manifest, docs, tests, and neighboring implementations.
 - E2E verification: use the `crab-cli-verification` skill.
 - Repository-local agent workflows and task-specific skills live in `.agent/`, `.claude/`, and `.codex/`.

@@ -1,7 +1,7 @@
 # Cache Service Implementation
 
 This is the internal engineering reference for the Crab cache service. Public
-operator-facing docs live under `crab-web/content/docs/cli/cache-service/` and
+operator-facing docs live under `packages/web/content/docs/cli/cache-service/` and
 should avoid source paths and implementation details.
 
 ## Source Map

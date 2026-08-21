@@ -1,8 +1,8 @@
-# crab-web
+# Web
 
-`crab-web` is Crab’s public website and documentation app. It serves the marketing site at [crab.build](https://crab.build), the Crab CLI documentation, technical blog, changelog, pricing calculator, integration pages, and public CLI installer scripts.
+`packages/web` is Crab’s public website and documentation app. It serves the marketing site at [crab.build](https://crab.build), the Crab CLI documentation, technical blog, changelog, pricing calculator, integration pages, and public CLI installer scripts.
 
-This package contains the web experience and its content pipeline. The Crab CLI and Git remote helper live in [`crab/`](../crab/), while shared Rust libraries live in [`crates/`](../crates/).
+This package contains the web experience and its content pipeline. The Crab CLI and Git remote helper live in [`crab/`](../../crab/), while shared Rust libraries live in [`crates/`](../../crates/).
 
 ## What this app contains
 
@@ -71,7 +71,7 @@ The site does not currently require a `.env.local` file for normal local develop
 
 ## Start the site locally
 
-Run these commands from the `crab-web/` directory:
+Run these commands from the `packages/web/` directory:
 
 ```bash
 npm install
@@ -91,7 +91,7 @@ npm run start
 
 ## npm scripts
 
-Run these commands from `crab-web/`:
+Run these commands from `packages/web/`:
 
 | Command                  | Purpose                                                               |
 | ------------------------ | --------------------------------------------------------------------- |
@@ -250,7 +250,7 @@ Keep new UI code aligned with the existing structure:
 - **UI primitives**: Keep shadcn/ui primitives in `components/ui/`
 - **Accessibility**: Preserve keyboard access, semantic headings, visible focus states, reduced-motion behavior, and useful labels when extending interactive components
 
-To add a shadcn/ui primitive, use the project’s configured generator from `crab-web/`:
+To add a shadcn/ui primitive, use the project’s configured generator from `packages/web/`:
 
 ```bash
 npx shadcn@latest add button

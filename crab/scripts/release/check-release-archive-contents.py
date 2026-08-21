@@ -327,7 +327,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "POSIX installer targets release repo and verifies archives",
-            root / "crab-web" / "public" / "install.sh",
+            root / "packages" / "web" / "public" / "install.sh",
             contains=(
                 'REPO="crabbuild/crab-release"',
                 "verify_checksum",
@@ -342,7 +342,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "PowerShell installer targets release repo and installs helper exe",
-            root / "crab-web" / "public" / "install.ps1",
+            root / "packages" / "web" / "public" / "install.ps1",
             contains=(
                 '$Repo = "crabbuild/crab-release"',
                 "Verify-Checksum",
