@@ -42,7 +42,7 @@ has two `Db` handles per session.
 
 ## Storage Layout
 
-See [Object Storage Layout V1](object-storage-layout.md) for the normative
+See [Object Storage Layout V2](object-storage-layout.md) for the normative
 scope, key grammar, ownership, and cross-language interpretation. The tree
 below focuses on the two metadata databases.
 
@@ -298,7 +298,7 @@ would force the remote open eagerly.
 
 ## Shard Enumeration
 
-`.crab/shards/{hash}` objects remain immutable reconstruction
+`.crab/shards/{first-two-hex}/{hash}` objects remain immutable reconstruction
 recipes exactly as before. What changed is that the shards themselves
 are the authoritative source of truth for "what shards exist" — there
 is no shard-registry SlateDB.

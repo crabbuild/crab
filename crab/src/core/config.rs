@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crab_types::{replication::ReplicationConfig, storage::StorageProviderKind};
 
+use super::error::{CrabError, Result};
+
 pub use crab_auth::AuthProviderKind as AuthProvider;
 
 // ---------------------------------------------------------------------------
@@ -380,22 +382,64 @@ pub struct RestripeConfig {
 /// Default: class-aware GC is opt-in for the first release.
 const DEFAULT_GC_CLASS_AWARE: bool = false;
 
+/// Cost/latency policy for bucket-global object enumeration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GcListProfile {
+    /// Use one recursive stream for small namespaces, then switch to hash
+    /// partitions once serial pagination becomes more expensive.
+    #[default]
+    Adaptive,
+    /// Minimize provider LIST calls by using one recursive stream per kind.
+    Cost,
+    /// Minimize wall time by scanning populated hash partitions concurrently.
+    Latency,
+}
+
+impl GcListProfile {
+    /// Parse one user-facing GC list profile.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "adaptive" => Ok(Self::Adaptive),
+            "cost" => Ok(Self::Cost),
+            "latency" => Ok(Self::Latency),
+            other => Err(CrabError::Configuration {
+                key: "gc.list_profile".to_owned(),
+                origin: format!("unsupported value {other:?}; expected adaptive, cost, or latency"),
+            }),
+        }
+    }
+
+    /// Return the stable configuration spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Adaptive => "adaptive",
+            Self::Cost => "cost",
+            Self::Latency => "latency",
+        }
+    }
+}
+
 /// GC configuration from the `[gc]` TOML section.
 ///
 /// The existing GC settings (`gc_grace_period`, `gc_delete_concurrency`,
-/// `gc_list_concurrency`) remain as flat fields on [`Config`] for backward
-/// compatibility. This struct carries the new class-aware flag.
+/// `gc_list_concurrency`) remain as flat fields on [`Config`]. This struct
+/// carries bucket-global GC policy.
 #[derive(Debug, Clone)]
 pub struct GcConfig {
     /// When true, GC checks storage class and refuses early-delete for
     /// objects within their minimum retention window.
     pub class_aware: bool,
+    /// Bucket-global listing policy.
+    pub list_profile: GcListProfile,
 }
 
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
             class_aware: DEFAULT_GC_CLASS_AWARE,
+            list_profile: GcListProfile::Adaptive,
         }
     }
 }
@@ -1500,6 +1544,7 @@ pub struct RestripeOverlay {
 #[serde(deny_unknown_fields)]
 pub struct GcOverlay {
     pub class_aware: Option<bool>,
+    pub list_profile: Option<GcListProfile>,
 }
 
 /// Partial repack configuration overlay.
@@ -2552,6 +2597,9 @@ impl Config {
     fn apply_gc_overlay(&mut self, overlay: GcOverlay) {
         if let Some(v) = overlay.class_aware {
             self.gc.class_aware = v;
+        }
+        if let Some(v) = overlay.list_profile {
+            self.gc.list_profile = v;
         }
     }
 
@@ -4304,6 +4352,7 @@ target_xorb_bytes = 16777216
     fn config_default_embeds_gc_defaults() {
         let cfg = Config::default();
         assert!(!cfg.gc.class_aware);
+        assert_eq!(cfg.gc.list_profile, GcListProfile::Adaptive);
     }
 
     #[test]
@@ -4315,6 +4364,18 @@ target_xorb_bytes = 16777216
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
             .expect("should parse gc section");
         assert!(cfg.gc.class_aware);
+    }
+
+    #[test]
+    fn overlay_gc_section_parses_list_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "[gc]\nlist_profile = \"cost\"\n").unwrap();
+
+        let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
+            .expect("should parse gc list profile");
+
+        assert_eq!(cfg.gc.list_profile, GcListProfile::Cost);
     }
 
     // --- Hydrate auto_restore ---

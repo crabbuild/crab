@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -38,6 +37,7 @@ use crate::restripe::profile::Profile;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::restore::RestoreOrchestrator;
+use crab_storage::canonical_global_content_path;
 use crab_xet::xorb::builder::{FixedCompression, RunId, XorbBuilder};
 use crab_xet::xorb::format::CompressionScheme;
 use crab_xet::xorb::parser::XorbParser;
@@ -329,7 +329,7 @@ async fn process_single_xorb(
         });
     };
 
-    let xorb_path = ObjectPath::from(format!(".crab/xorbs/{src_hash}"));
+    let xorb_path = canonical_global_content_path("xorbs", src_hash);
 
     // --- Step 1: HEAD with class probe ---
     let head_meta = head_with_class(store, &xorb_path).await;
@@ -458,7 +458,7 @@ async fn process_single_xorb(
 
     for xorb_result in &dest_xorbs {
         let dest_hash = xorb_result.hash.hex();
-        let dest_path = ObjectPath::from(format!(".crab/xorbs/{dest_hash}"));
+        let dest_path = canonical_global_content_path("xorbs", &dest_hash);
         let dest_bytes = Bytes::copy_from_slice(&xorb_result.bytes);
         let written = dest_bytes.len() as u64;
 

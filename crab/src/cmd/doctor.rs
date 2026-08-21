@@ -1712,7 +1712,7 @@ async fn check_cache_service(root: &Path, active_probe: bool) -> Vec<CheckResult
     }
 
     let probe_url = format!(
-        "{base_url}/v1/.crab/xorbs/0000000000000000000000000000000000000000000000000000000000000000"
+        "{base_url}/v1/.crab/xorbs/00/0000000000000000000000000000000000000000000000000000000000000000"
     );
     let req = apply_cache_service_auth(client.get(&probe_url), &config.cache.service_auth);
     results.push(match req.send().await {

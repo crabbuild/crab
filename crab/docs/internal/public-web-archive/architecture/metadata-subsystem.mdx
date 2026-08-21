@@ -288,7 +288,7 @@ would force the remote open eagerly.
 
 ## Shard Enumeration
 
-`.crab/shards/{hash}` objects remain immutable reconstruction
+`.crab/shards/{first-two-hex}/{hash}` objects remain immutable reconstruction
 recipes exactly as before. What changed is that the shards themselves
 are the authoritative source of truth for "what shards exist" — there
 is no shard-registry SlateDB.

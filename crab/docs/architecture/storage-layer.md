@@ -31,7 +31,7 @@ The `Store` is created once per CLI invocation from the parsed
 ## Remote Bucket Layout
 
 The normative object-key contract, including cross-language construction
-rules, is [Object Storage Layout V1](object-storage-layout.md). This page
+rules, is [Object Storage Layout V2](object-storage-layout.md). This page
 describes storage mechanics and does not redefine that contract.
 
 ```

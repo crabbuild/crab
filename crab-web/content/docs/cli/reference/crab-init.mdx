@@ -39,6 +39,7 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--storage-provider <PROVIDER>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
+| `--gc-list-profile <PROFILE>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <REMOTE>` | — | Configure mirror mode using an existing Git remote |
 | `--json` | `false` | Emit structured JSON output |
 | `--jsonl` | `false` | Emit streaming JSONL output |
@@ -81,6 +82,17 @@ crab init crab://bucket/repo
 crab setup --no-auto-track
 # Install the filter driver without scanning for patterns
 ```
+
+### Choose bucket-GC cost or latency policy
+
+```bash
+crab init --gc-list-profile adaptive crab://bucket/repo
+```
+
+`adaptive` keeps small listings on one low-cost stream and switches large
+namespaces to concurrent hash partitions. `cost` always minimizes LIST
+streams; `latency` immediately uses partition parallelism. The setting is
+local operational policy and does not change shared object keys.
 
 ### Re-apply a committed project configuration
 

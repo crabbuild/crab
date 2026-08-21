@@ -7,6 +7,59 @@ use object_store::path::Path as ObjectPath;
 
 /// The default bucket-level prefix for all content-addressed objects.
 pub const GLOBAL_PREFIX: &str = ".crab";
+/// Number of leading hash characters used to partition global content.
+pub const GLOBAL_CONTENT_FANOUT_WIDTH: usize = 2;
+
+/// Build the directory containing one global content kind.
+#[must_use]
+pub fn global_content_prefix(global_prefix: &str, kind: &str) -> ObjectPath {
+    ObjectPath::from(format!("{global_prefix}/{kind}"))
+}
+
+/// Build one populated hash-partition directory below a global content kind.
+#[must_use]
+pub fn global_content_partition_prefix(
+    global_prefix: &str,
+    kind: &str,
+    partition: &str,
+) -> ObjectPath {
+    ObjectPath::from(format!("{global_prefix}/{kind}/{partition}"))
+}
+
+/// Build a two-hex-fan-out path for one global content-addressed object.
+///
+/// `hash` must be a lowercase 64-character hexadecimal content hash.
+#[must_use]
+pub fn global_content_path(global_prefix: &str, kind: &str, hash: &str) -> ObjectPath {
+    let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+    global_content_partition_prefix(global_prefix, kind, partition).join(hash)
+}
+
+/// Build a global content path under Crab's canonical bucket prefix.
+///
+/// `hash` must be a lowercase 64-character hexadecimal content hash.
+#[must_use]
+pub fn canonical_global_content_path(kind: &str, hash: &str) -> ObjectPath {
+    global_content_path(GLOBAL_PREFIX, kind, hash)
+}
+
+/// Extract and validate the hash from a canonical fan-out content path.
+#[must_use]
+pub fn content_hash_from_path<'a>(path: &'a str, kind: &str) -> Option<&'a str> {
+    let mut parts = path.rsplit('/');
+    let hash = parts.next()?;
+    let partition = parts.next()?;
+    if parts.next()? != kind
+        || hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || partition != hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH)?
+    {
+        return None;
+    }
+    Some(hash)
+}
 
 /// Provides optional scoped prefixes for path-limited repository views.
 pub trait StorageScopeProvider {
@@ -85,10 +138,10 @@ impl<S> StoreLayout<S> {
 
     /// Build the full object-store path for a content-addressed object.
     ///
-    /// Returns `.crab/{kind}/{hash}`.
+    /// Returns `.crab/{kind}/{first-two-hex}/{hash}`.
     #[must_use]
     pub fn global_path(&self, kind: &str, hash: &str) -> ObjectPath {
-        ObjectPath::from(format!("{}/{kind}/{hash}", self.global_prefix))
+        global_content_path(&self.global_prefix, kind, hash)
     }
 
     /// Build the full object-store path for a per-repo object.
@@ -99,13 +152,13 @@ impl<S> StoreLayout<S> {
         ObjectPath::from(format!("{}/{relative_path}", self.repo_prefix))
     }
 
-    /// Convenience: xorb path at `.crab/xorbs/{hash}`.
+    /// Convenience: xorb path at `.crab/xorbs/{first-two-hex}/{hash}`.
     #[must_use]
     pub fn xorb_path(&self, hash: &(impl Display + ?Sized)) -> ObjectPath {
         self.global_path("xorbs", &hash.to_string())
     }
 
-    /// Convenience: shard path at `.crab/shards/{hash}`.
+    /// Convenience: shard path at `.crab/shards/{first-two-hex}/{hash}`.
     #[must_use]
     pub fn shard_path(&self, hash: &(impl Display + ?Sized)) -> ObjectPath {
         self.global_path("shards", &hash.to_string())
@@ -314,8 +367,9 @@ mod tests {
     #[test]
     fn global_path_routes_to_crab_prefix() {
         let layout = test_layout();
-        let path = layout.global_path("xorbs", "abcd1234");
-        assert_eq!(path.as_ref(), ".crab/xorbs/abcd1234");
+        let hash = format!("ab{}", "1".repeat(62));
+        let path = layout.global_path("xorbs", &hash);
+        assert_eq!(path.as_ref(), format!(".crab/xorbs/ab/{hash}"));
     }
 
     #[test]
@@ -362,12 +416,7 @@ mod tests {
         let layout = test_layout();
         let hash = "a".repeat(64);
         let path = layout.xorb_path(&hash);
-        let path_str = path.as_ref();
-        assert!(path_str.starts_with(".crab/xorbs/"));
-        let hex_part = path_str
-            .strip_prefix(".crab/xorbs/")
-            .expect("xorb path prefix");
-        assert_eq!(hex_part.len(), 64);
+        assert_eq!(path.as_ref(), format!(".crab/xorbs/aa/{hash}"));
     }
 
     #[test]
@@ -375,7 +424,21 @@ mod tests {
         let layout = test_layout();
         let hash = "b".repeat(64);
         let path = layout.shard_path(&hash);
-        assert!(path.as_ref().starts_with(".crab/shards/"));
+        assert_eq!(path.as_ref(), format!(".crab/shards/bb/{hash}"));
+    }
+
+    #[test]
+    fn content_path_parser_requires_matching_lowercase_fanout() {
+        let hash = format!("ab{}", "3".repeat(62));
+
+        assert_eq!(
+            content_hash_from_path(&format!(".crab/xorbs/ab/{hash}"), "xorbs"),
+            Some(hash.as_str())
+        );
+        assert!(content_hash_from_path(&format!(".crab/xorbs/ac/{hash}"), "xorbs").is_none());
+        assert!(content_hash_from_path(&format!(".crab/xorbs/AB/{hash}"), "xorbs").is_none());
+        assert!(content_hash_from_path(&format!(".crab/xorbs/ab/{hash}"), "shards").is_none());
+        assert!(content_hash_from_path(&format!(".crab/xorbs/{hash}"), "xorbs").is_none());
     }
 
     #[test]
@@ -508,7 +571,7 @@ mod tests {
             layout
                 .xorb_path(&hash)
                 .as_ref()
-                .starts_with(&format!("{view_prefix}/.crab/xorbs/"))
+                .starts_with(&format!("{view_prefix}/.crab/xorbs/cc/"))
         );
         assert_eq!(
             layout.ref_registry_path().as_ref(),
@@ -532,13 +595,13 @@ mod tests {
             layout
                 .xorb_path(&hash)
                 .as_ref()
-                .starts_with(&format!("{view_prefix}/.crab/xorbs/"))
+                .starts_with(&format!("{view_prefix}/.crab/xorbs/dd/"))
         );
         assert!(
             layout
                 .shard_path(&hash)
                 .as_ref()
-                .starts_with(&format!("{view_prefix}/.crab/shards/"))
+                .starts_with(&format!("{view_prefix}/.crab/shards/dd/"))
         );
     }
 }

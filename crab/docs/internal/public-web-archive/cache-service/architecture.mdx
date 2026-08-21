@@ -72,7 +72,7 @@ flowchart TB
 A `crab clone`, `crab fetch`, or `crab hydrate` issues GETs for immutable objects. The path traversal is:
 
 1. **Local disk cache** (`~/.cache/crab`) — if present, return immediately.
-2. **Cache service** — `GET /v1/.crab/xorbs/{hash}` or another immutable object-store key.
+2. **Cache service** — `GET /v1/.crab/xorbs/{first-two-hex}/{hash}` or another immutable object-store key.
 3. **Origin object store** — only on cache miss or service unavailability.
 
 ```mermaid
@@ -127,8 +127,8 @@ If the cache service is unreachable, `CachingStore` logs a warning and falls bac
 A `crab push` does **not** route uploads through the cache service — that would add a hop to the upload critical path. Instead, the push pipeline warms the cache as a side effect of the upload it would have done anyway:
 
 1. **Step 4 — dedup query.** Before staging any chunks, push asks the cache `POST /v1/dedup/query` with up to 100,000 chunk hashes. The cache responds with `known` chunks (already deduped, with their xorb location) and `unknown` chunks. Known chunks are skipped entirely — no upload, no storage cost.
-2. **Shard warming.** After newly generated shards are uploaded to origin, they are `PUT` into the cache at `.crab/shards/{hash}`. This triggers `ChunkIndex::ingest_shard`, which adds the shard's chunk locations to the dedup index. Future pushes from any teammate can see those chunks as `known`.
-3. **Xorb warming.** After the xorb upload to origin succeeds, every uploaded xorb is `PUT` into the cache at `.crab/xorbs/{hash}` via `warm_remote_only`. Now a clone or hydrate can read the xorb from the cache instead of taking the cold origin path.
+2. **Shard warming.** After newly generated shards are uploaded to origin, they are `PUT` into the cache at `.crab/shards/{first-two-hex}/{hash}`. This triggers `ChunkIndex::ingest_shard`, which adds the shard's chunk locations to the dedup index. Future pushes from any teammate can see those chunks as `known`.
+3. **Xorb warming.** After the xorb upload to origin succeeds, every uploaded xorb is `PUT` into the cache at `.crab/xorbs/{first-two-hex}/{hash}` via `warm_remote_only`. Now a clone or hydrate can read the xorb from the cache instead of taking the cold origin path.
 
 Warming is best-effort: a failure in any of these steps logs a warning and proceeds. A push never blocks on the cache service.
 

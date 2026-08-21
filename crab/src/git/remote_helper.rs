@@ -3687,7 +3687,10 @@ mod tests {
         assert!(!manifest.shard_index_hash.is_empty());
         assert!(
             !store
-                .list_prefix(&router.global_path("xorbs", ""))
+                .list_prefix(&crab_storage::global_content_prefix(
+                    router.global_prefix(),
+                    "xorbs",
+                ))
                 .await
                 .expect("list xorbs")
                 .is_empty(),
@@ -3695,7 +3698,10 @@ mod tests {
         );
         assert!(
             !store
-                .list_prefix(&router.global_path("shards", ""))
+                .list_prefix(&crab_storage::global_content_prefix(
+                    router.global_prefix(),
+                    "shards",
+                ))
                 .await
                 .expect("list shards")
                 .is_empty(),

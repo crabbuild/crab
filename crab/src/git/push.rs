@@ -58,6 +58,9 @@ use crab_metadata::pack_metadata::PackMetadata;
 use crab_staging::StagingAreaReadOnly;
 use crab_staging::push_plan::{self, FilePushPlan, PlannedXorb};
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
+#[cfg(test)]
+use crab_storage::canonical_global_content_path;
+use crab_storage::global_content_partition_prefix;
 use crab_storage::head_batch::{HeadBatchConfig, HeadBatchStore, head_batch};
 use crab_xet::hash::{MerkleHash, compute_data_hash, xorb_hash};
 use crab_xet::shard::PushShardSession;
@@ -9986,7 +9989,8 @@ impl PushPipeline {
 
     /// Step 9: Upload shards.
     ///
-    /// Uploads each shard produced by step 8 to `.crab/shards/{shard_hash}`
+    /// Uploads each shard produced by step 8 to
+    /// `.crab/shards/{first-two-hex}/{shard_hash}`.
     /// (via `StoreLayout`) or `{prefix}/shards/{shard_hash}` as fallback.
     ///
     /// The legacy `file-index/{hash}` PUT loop has been removed; file-index
@@ -10026,7 +10030,7 @@ impl PushPipeline {
         let use_color = self.progress.as_ref().is_some_and(|p| p.use_color());
         let is_tty = crate::git::progress::is_tty();
 
-        // Upload each shard — routed to `.crab/shards/{hash}` when
+        // Upload each shard — routed to `.crab/shards/{first-two-hex}/{hash}` when
         // the router is available, falling back to `{prefix}/shards/{hash}`.
         let shard_payloads: Vec<(MerkleHash, ObjectPath, Bytes)> = {
             let shard_results = self.shard_results.lock().await;
@@ -14120,7 +14124,8 @@ impl HeadBatchStore for StoreHeadBatch {
     }
 
     async fn list_prefix(&self, prefix: &str) -> crab_storage::error::Result<Vec<String>> {
-        let list_prefix = self.router.global_path("xorbs", prefix);
+        let list_prefix =
+            global_content_partition_prefix(self.router.global_prefix(), "xorbs", prefix);
         let objects = self
             .store
             .list_prefix(&list_prefix)
@@ -14617,7 +14622,8 @@ mod tests {
                         uncompressed_size: xorb_ref.uncompressed_size,
                         origin: crab_metadata::receipts::OriginReceipt::new(
                             "canonical-origin".to_owned(),
-                            format!(".crab/xorbs/{}", xorb_ref.xorb_hash.hex()),
+                            canonical_global_content_path("xorbs", &xorb_ref.xorb_hash.hex())
+                                .to_string(),
                             xorb_ref.xorb_hash.into(),
                             [9; 32],
                             1,
@@ -17747,6 +17753,33 @@ mod tests {
     // --- Step 6: head_check_resume metrics ---
 
     #[tokio::test]
+    async fn head_batch_adapter_lists_one_canonical_hash_partition() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "head-check-partition".to_owned());
+        let included = format!("aa{}", "1".repeat(62));
+        let excluded = format!("ab{}", "2".repeat(62));
+        store
+            .put(
+                &router.xorb_path(&included),
+                Bytes::from_static(b"included"),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                &router.xorb_path(&excluded),
+                Bytes::from_static(b"excluded"),
+            )
+            .await
+            .unwrap();
+        let adapter = StoreHeadBatch { store, router };
+
+        let hashes = adapter.list_prefix("aa").await.unwrap();
+
+        assert_eq!(hashes, vec![included]);
+    }
+
+    #[tokio::test]
     async fn head_check_resume_populates_metrics_counters() {
         let _guard = GitDirGuard::new();
         let metrics = Arc::new(Metrics::new());
@@ -20832,7 +20865,7 @@ mod tests {
     #[tokio::test]
     async fn committed_origin_receipt_requires_current_object_identity() {
         let xorb_hash = MerkleHash::from([0xC01117, 0x5151, 0xA11, 0xD]);
-        let path = Path::from(format!(".crab/xorbs/{}", xorb_hash.hex()));
+        let path = canonical_global_content_path("xorbs", &xorb_hash.hex());
         let index = RemoteXorbIndex {
             hash: xorb_hash,
             payload_digest: [7; 32],
@@ -23163,7 +23196,7 @@ mod tests {
         use crate::storage::retry::RetryPolicy;
 
         let fail_hash = MerkleHash::from([1_u64, 1, 1, 1]);
-        let fail_path = Path::from(format!(".crab/xorbs/{}", fail_hash.hex()));
+        let fail_path = canonical_global_content_path("xorbs", &fail_hash.hex());
         let completed_puts = Arc::new(AtomicUsize::new(0));
         let delay = std::time::Duration::from_millis(75);
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(DelayedFailurePutStore::new(
@@ -23354,7 +23387,7 @@ mod tests {
         let fail_hash = MerkleHash::from([1_u64, 1, 1, 1]);
         let ok_hash_a = MerkleHash::from([2_u64, 2, 2, 2]);
         let ok_hash_b = MerkleHash::from([3_u64, 3, 3, 3]);
-        let fail_path = Path::from(format!(".crab/xorbs/{}", fail_hash.hex()));
+        let fail_path = canonical_global_content_path("xorbs", &fail_hash.hex());
         let completed_puts = Arc::new(AtomicUsize::new(0));
         let delay = std::time::Duration::from_millis(75);
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(DelayedFailurePutStore::new(
@@ -24613,7 +24646,11 @@ mod tests {
                 .expect("cache request capture");
         assert_eq!(
             request_line,
-            format!("PUT /v1/.crab/xorbs/{} HTTP/1.1", hash.hex())
+            format!(
+                "PUT /v1/.crab/xorbs/{}/{} HTTP/1.1",
+                &hash.hex()[..2],
+                hash.hex()
+            )
         );
         assert_eq!(body, bytes.as_ref());
         server.await.expect("cache server task");
@@ -26385,12 +26422,12 @@ mod tests {
         assert!(
             plan.request
                 .uploaded_objects
-                .contains(&format!(".crab/xorbs/{}", xorb_hash.hex()))
+                .contains(&canonical_global_content_path("xorbs", &xorb_hash.hex()).to_string())
         );
         assert!(
             plan.request
                 .uploaded_objects
-                .contains(&format!(".crab/shards/{}", shard_hash.hex()))
+                .contains(&canonical_global_content_path("shards", &shard_hash.hex()).to_string())
         );
         assert!(
             plan.request

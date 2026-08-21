@@ -118,7 +118,7 @@ pub fn extract_chunk_entries_streaming(data: &Bytes) -> Vec<(MerkleHash, XorbRef
 ///
 /// The `shard_hash` argument is the containing shard's content hash;
 /// callers typically parse it from the last segment of the shard
-/// object key (`.crab/shards/{hex}`). Each file-info entry in the
+/// object key (`.crab/shards/{first-two-hex}/{hex}`). Each file-info entry in the
 /// shard contributes one pair.
 ///
 /// On any parse failure the helper logs a `warn!` and returns an

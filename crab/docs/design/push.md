@@ -697,7 +697,7 @@ Reconstruction Terms:
 ```
 For each shard (from step 8)
     ↓ parallel, bounded by upload_concurrency
-{prefix}/.crab/shards/{shard_hash}
+{prefix}/.crab/shards/{first-two-hex}/{shard_hash}
     ↓
 MetaDB transaction:
     file_index_db: file_hash → shard_hash
@@ -923,7 +923,7 @@ non-current-branch pushes are not rewritten.
  │                                     ▼                             │
  │                               ┌──────────┐   ┌──────────────────┐ │
  │                               │ Step 8   │──►│ Step 9           │ │
- │                               │ Build    │   │ Upload shards    │─┼──► .crab/shards/{hash}
+ │                               │ Build    │   │ Upload shards    │─┼──► .crab/shards/{first-two-hex}/{hash}
  │                               │ shard    │   │ + MetaDB commit  │─┼──► file_index_db/
  │                               └──────────┘   └──────────────────┘ │
  │                                                                   │
@@ -1037,7 +1037,7 @@ Step 12 ◄── specs[] (from remote helper batch)
                     │     split at 100 MiB soft cap        │
                     │                                      │
                     │  9. Upload shards + MetaDB:          │
-                    │     PUT .crab/shards/{hash}          │──► .crab/shards/
+                    │ PUT .crab/shards/{first-two-hex}/{hash} │──► .crab/shards/
                     │     commit file_index_db             │──► file_index_db/
                     │     commit chunk_index_db            │──► .crab/chunk_index_db/
                     │     (bounded parallel shard upload)  │
@@ -1097,7 +1097,7 @@ Step 12 ◄── specs[] (from remote helper batch)
 ### Push Lock Protocol
 
 Push locks prevent concurrent pushers from racing on overlapping destination
-refs. [Object Storage Layout V1](../architecture/object-storage-layout.md#lock-namespaces)
+refs. [Object Storage Layout V2](../architecture/object-storage-layout.md#lock-namespaces)
 defines the normative key and hard-cutover protocol. Each lock is a short-TTL
 lease stored as a JSON object in the configured object store:
 

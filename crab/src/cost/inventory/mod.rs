@@ -29,7 +29,7 @@ use crate::tier::classes::StorageClass;
 /// A single object in the inventory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InventoryItem {
-    /// Full object key (e.g. `.crab/xorbs/abcd1234...`).
+    /// Full object key (e.g. `.crab/xorbs/ab/abcd1234...`).
     pub key: String,
     /// Object size in bytes.
     pub size: u64,

@@ -55,6 +55,16 @@ Provider-prefixed URLs let Crab infer the provider, so `--provider` is optional
 in those examples. Use it with a canonical `crab://` URL when the provider is
 not S3.
 
+Choose the local bucket-GC listing policy during setup when desired:
+
+```bash
+crab configure s3://team-data/models --gc-list-profile adaptive
+```
+
+The default `adaptive` profile minimizes LIST streams for smaller namespaces
+and switches larger namespaces to hash-partition parallelism. `cost` always
+prefers fewer LIST streams; `latency` immediately prefers partition scans.
+
 ## Tracking options
 
 Pass explicit patterns instead of relying only on the repository scan:

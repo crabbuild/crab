@@ -29,8 +29,8 @@ Before uploading new chunks, Crab can also ask the cache service which chunks ar
 
 | Object key pattern | Cached |
 |--------------------|--------|
-| `.crab/xorbs/{hash}` | Yes |
-| `.crab/shards/{hash}` | Yes |
+| `.crab/xorbs/{first-two-hex}/{hash}` | Yes |
+| `.crab/shards/{first-two-hex}/{hash}` | Yes |
 | `{repo}/packs/pack-{id}.pack` | Yes |
 | `{repo}/packs/pack-{id}.idx` | Yes |
 | `{repo}/file_index_db/compacted/*.sst` | Yes |

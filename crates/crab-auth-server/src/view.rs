@@ -1061,7 +1061,8 @@ mod tests {
         assert!(
             store
                 .head(&ObjectPath::from(format!(
-                    "{view_prefix}/.crab/xorbs/{}",
+                    "{view_prefix}/.crab/xorbs/{}/{}",
+                    &source_xorb_hash.hex()[..2],
                     source_xorb_hash.hex()
                 )))
                 .await

@@ -84,6 +84,9 @@ enum Cmd {
         /// Cloud storage provider.
         #[arg(long, value_name = "PROVIDER", value_parser = ["s3", "gcs", "azure"])]
         provider: Option<String>,
+        /// Bucket-GC listing policy configured locally for this operator.
+        #[arg(long, value_name = "PROFILE", value_parser = ["adaptive", "cost", "latency"])]
+        gc_list_profile: Option<String>,
         /// Track an explicit large-file pattern (can repeat).
         #[arg(long = "track", value_name = "PATTERN")]
         track: Vec<String>,
@@ -102,6 +105,9 @@ enum Cmd {
         /// Storage backend used by the Crab remote.
         #[arg(long, value_name = "PROVIDER", value_parser = ["s3", "gcs", "azure", "auto"])]
         storage_provider: Option<String>,
+        /// Bucket-GC listing policy configured locally for this operator.
+        #[arg(long, value_name = "PROFILE", value_parser = ["adaptive", "cost", "latency"])]
+        gc_list_profile: Option<String>,
         /// Enable mirror mode: sync large files to Crab transparently on push.
         /// Value is the name of the existing git remote (typically "origin").
         #[arg(long)]
@@ -362,6 +368,9 @@ enum Cmd {
         /// S3 bucket name (required for --scope=bucket).
         #[arg(long)]
         bucket: Option<String>,
+        /// Override the bucket-GC listing policy.
+        #[arg(long, value_name = "PROFILE", value_parser = ["adaptive", "cost", "latency"])]
+        list_profile: Option<String>,
         /// Minimum age before unreferenced objects are deleted (e.g. `1h`, `24h`).
         #[arg(long, default_value = "1h")]
         grace_period: String,
@@ -3014,6 +3023,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Configure {
             remote,
             provider,
+            gc_list_profile,
             track,
             no_auto_track,
             dry_run,
@@ -3022,10 +3032,15 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 .as_deref()
                 .map(crab::cmd::init::parse_storage_provider_arg)
                 .transpose()?;
+            let gc_list_profile = gc_list_profile
+                .as_deref()
+                .map(crab::core::config::GcListProfile::parse)
+                .transpose()?;
             crab::cmd::configure::run_configure(
                 crab::cmd::configure::ConfigureArgs {
                     remote,
                     storage_provider,
+                    gc_list_profile,
                     track,
                     no_auto_track,
                     dry_run,
@@ -3258,6 +3273,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Init {
             url,
             storage_provider,
+            gc_list_profile,
             mirror,
             json,
             jsonl,
@@ -3267,6 +3283,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let storage_provider = storage_provider
                 .as_deref()
                 .map(crab::cmd::init::parse_storage_provider_arg)
+                .transpose()?;
+            let gc_list_profile = gc_list_profile
+                .as_deref()
+                .map(crab::core::config::GcListProfile::parse)
                 .transpose()?;
             let resolved_url = match url {
                 Some(u) => u,
@@ -3285,6 +3305,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 &cancel,
                                 mode,
                                 storage_provider.clone(),
+                                gc_list_profile,
                             )
                             .await?;
                             // Sync .gitattributes with [track] patterns from .crab.toml
@@ -3351,6 +3372,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 &cancel,
                 mode,
                 storage_provider,
+                gc_list_profile,
             )
             .await?;
 
@@ -3599,6 +3621,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             yes,
             scope,
             bucket,
+            list_profile,
             grace_period,
             deregister,
             repair_registry,
@@ -3653,7 +3676,12 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             key: "--bucket is required for --scope=bucket".into(),
                             origin: "cli".into(),
                         })?;
-                    let config = Config::resolve_local().unwrap_or_default();
+                    let config = Config::resolve_local()?;
+                    let list_profile = list_profile
+                        .as_deref()
+                        .map(crab::core::config::GcListProfile::parse)
+                        .transpose()?
+                        .unwrap_or(config.gc.list_profile);
                     let store = create_cli_store(bucket_name, &config, "gc", &cancel).await?;
                     let registry = crab::cmd::gc::bucket::load_ref_registry(&store, force).await?;
                     let current_repo_prefix = if config
@@ -3685,6 +3713,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         grace_period: parsed_grace,
                         force,
                         list_concurrency: config.gc_list_concurrency,
+                        list_profile,
                         delete_concurrency: config.gc_delete_concurrency,
                     };
                     let outcome = crab::cmd::gc::bucket::run_bucket_gc(

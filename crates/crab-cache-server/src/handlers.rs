@@ -1311,8 +1311,8 @@ fn check_mutable_read_action(
 /// Parse a wildcard path into (bucket, repo_path, object_type, hash).
 ///
 /// Expected patterns:
-/// - `.crab/xorbs/abcdef...`  → Xorb (CLI global path)
-/// - `.crab/shards/abcdef...`  → Shard (CLI global path)
+/// - `.crab/xorbs/ab/abcdef...`  → Xorb (CLI global path)
+/// - `.crab/shards/ab/abcdef...`  → Shard (CLI global path)
 /// - `org/repo/packs/sha.pack`        → Pack
 /// - `org/repo/packs/sha.idx`         → PackIndex
 /// - versioned SlateDB metadata objects → Metadata
@@ -2013,6 +2013,10 @@ mod tests {
         byte.to_string().repeat(64)
     }
 
+    fn global_path(kind: &str, hash: &str) -> String {
+        format!(".crab/{kind}/{}/{hash}", &hash[..2])
+    }
+
     fn test_dedup_state() -> TestDedupState {
         test_dedup_state_with_origin(Arc::new(InMemory::new()))
     }
@@ -2183,7 +2187,7 @@ mod tests {
             .cache_store
             .put_unverified(&key, fixture.bytes.clone())
             .unwrap();
-        let path = format!(".crab/xorbs/{}", fixture.xorb_hash_hex);
+        let path = global_path("xorbs", &fixture.xorb_hash_hex);
         let state = Arc::new(state);
 
         let response = head_object(
@@ -2215,7 +2219,7 @@ mod tests {
     async fn head_object_reports_cache_miss_from_origin_metadata() {
         let fixture = dedup_xorb_fixture();
         let origin = Arc::new(InMemory::new());
-        let path = format!(".crab/xorbs/{}", fixture.xorb_hash_hex);
+        let path = global_path("xorbs", &fixture.xorb_hash_hex);
         origin
             .put(
                 &ObjectPath::from(path.clone()),
@@ -2419,7 +2423,7 @@ mod tests {
 
         let response = read_object(
             State(Arc::clone(&state)),
-            Path(format!(".crab/xorbs/{}", fixture.xorb_hash_hex)),
+            Path(global_path("xorbs", &fixture.xorb_hash_hex)),
             headers,
             axum::Extension(test_identity()),
         )
@@ -2452,7 +2456,7 @@ mod tests {
 
         let response = read_object(
             State(Arc::clone(&state)),
-            Path(format!(".crab/xorbs/{}", fixture.xorb_hash_hex)),
+            Path(global_path("xorbs", &fixture.xorb_hash_hex)),
             headers,
             axum::Extension(test_identity()),
         )
@@ -2479,7 +2483,7 @@ mod tests {
     async fn fetch_and_cache_data_streams_origin_fill_to_cached_file() {
         let fixture = dedup_xorb_fixture();
         let origin = Arc::new(InMemory::new());
-        let object_path = format!(".crab/xorbs/{}", fixture.xorb_hash_hex);
+        let object_path = global_path("xorbs", &fixture.xorb_hash_hex);
         origin
             .put(
                 &ObjectPath::from(object_path.clone()),
@@ -2691,7 +2695,7 @@ mod tests {
 
         let response = write_object(
             State(Arc::clone(&state)),
-            Path(format!(".crab/xorbs/{}", fixture.xorb_hash_hex)),
+            Path(global_path("xorbs", &fixture.xorb_hash_hex)),
             axum::Extension(test_identity()),
             Body::from(fixture.bytes.clone()),
         )
@@ -2721,7 +2725,7 @@ mod tests {
 
         let response = write_object(
             State(Arc::clone(&state)),
-            Path(format!(".crab/xorbs/{}", fixture.xorb_hash_hex)),
+            Path(global_path("xorbs", &fixture.xorb_hash_hex)),
             axum::Extension(test_identity()),
             Body::from(Bytes::from(corrupt)),
         )
@@ -2795,7 +2799,7 @@ mod tests {
     fn parse_global_crab_shard_path() {
         let hash_hex = hex_hash('b');
         let (bucket, repo, ot, hash) =
-            parse_object_path(&format!(".crab/shards/{hash_hex}")).unwrap();
+            parse_object_path(&global_path("shards", &hash_hex)).unwrap();
         assert_eq!(bucket, "");
         assert_eq!(repo, ".crab");
         assert_eq!(ot, ObjectType::Shard);
@@ -2805,8 +2809,7 @@ mod tests {
     #[test]
     fn parse_global_crab_xorb_path() {
         let hash_hex = hex_hash('c');
-        let (bucket, repo, ot, hash) =
-            parse_object_path(&format!(".crab/xorbs/{hash_hex}")).unwrap();
+        let (bucket, repo, ot, hash) = parse_object_path(&global_path("xorbs", &hash_hex)).unwrap();
         assert_eq!(bucket, "");
         assert_eq!(repo, ".crab");
         assert_eq!(ot, ObjectType::Xorb);

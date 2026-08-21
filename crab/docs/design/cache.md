@@ -249,8 +249,8 @@ For mutable paths (`/refs/`, `/manifests/`, `/HEAD`): direct to origin S3.
 
 `path_to_cache_key()` maps immutable S3 paths to `CacheKey` variants:
 
-- `.crab/shards/{hash}` → `CacheKey::Shard(hash)`
-- `.crab/xorbs/{hash}` → `CacheKey::Xorb(hash)`
+- `.crab/shards/{first-two-hex}/{hash}` → `CacheKey::Shard(hash)`
+- `.crab/xorbs/{first-two-hex}/{hash}` → `CacheKey::Xorb(hash)`
 - Repo packs and MetaDB objects may use the remote cache service, but they do
   not map to the global `LocalCache`.
 

@@ -81,7 +81,7 @@ The response partitions the request by input index:
 ```
 
 `xorb_hash` uses the canonical `MerkleHash::hex()` form used by
-`.crab/xorbs/{hash}` object paths. `chunk_index` is the chunk's ordinal
+`.crab/xorbs/{first-two-hex}/{hash}` object paths. `chunk_index` is the chunk's ordinal
 position inside the xorb metadata, not a byte offset. The service only returns
 a chunk in `known` after the referenced xorb is present in the local cache, the
 cached xorb parses with the expected aggregate xorb hash, and the referenced

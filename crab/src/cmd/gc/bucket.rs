@@ -22,14 +22,19 @@ use std::time::{Duration, SystemTime};
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::coordination::cas::cas_update_default;
+use crate::core::config::GcListProfile;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_metadata::ref_registry::RefRegistry;
+use crab_storage::{
+    StorageProviderKind, StoreLayout, canonical_global_content_path, content_hash_from_path,
+    global_content_partition_prefix, global_content_prefix,
+};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 
@@ -46,6 +51,8 @@ pub struct BucketGcArgs {
     pub force: bool,
     /// Maximum concurrent LIST, history, and metadata-read operations.
     pub list_concurrency: usize,
+    /// Cost/latency policy for bucket-global object enumeration.
+    pub list_profile: GcListProfile,
     /// Maximum concurrent object DELETE requests.
     pub delete_concurrency: usize,
 }
@@ -57,6 +64,8 @@ pub struct BucketGcOutcome {
     pub xorbs_deleted: u64,
     pub file_index_deleted: u64,
     pub bytes_reclaimed: u64,
+    pub list_requests: u64,
+    pub list_parallelism: usize,
     pub dry_run: bool,
 }
 
@@ -68,6 +77,8 @@ impl BucketGcOutcome {
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
                 bytes = self.bytes_reclaimed,
+                list_requests = self.list_requests,
+                list_parallelism = self.list_parallelism,
                 "bucket gc dry-run complete (no objects deleted)"
             );
         } else {
@@ -76,6 +87,8 @@ impl BucketGcOutcome {
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
                 bytes = self.bytes_reclaimed,
+                list_requests = self.list_requests,
+                list_parallelism = self.list_parallelism,
                 "bucket gc complete"
             );
         }
@@ -170,11 +183,40 @@ async fn run_bucket_gc_under_maintenance(
     let now = SystemTime::now();
     let cutoff = now - effective_grace;
 
-    let (repo_shards, shard_objects, xorb_objects) = tokio::try_join!(
+    let global_list_permits = Arc::new(Semaphore::new(args.list_concurrency.max(1)));
+    let (repo_shards, shard_listing, xorb_listing) = tokio::try_join!(
         repository_referenced_shards(store, registry, args.list_concurrency),
-        list_global_objects(store, "shards"),
-        list_global_objects(store, "xorbs"),
+        list_global_objects(
+            store,
+            "shards",
+            args.list_profile,
+            args.list_concurrency,
+            Arc::clone(&global_list_permits),
+            cancel,
+        ),
+        list_global_objects(
+            store,
+            "xorbs",
+            args.list_profile,
+            args.list_concurrency,
+            Arc::clone(&global_list_permits),
+            cancel,
+        ),
     )?;
+    outcome.list_requests = shard_listing.requests + xorb_listing.requests;
+    outcome.list_parallelism = args
+        .list_concurrency
+        .max(1)
+        .min(shard_listing.parallelism + xorb_listing.parallelism);
+    debug!(
+        profile = args.list_profile.as_str(),
+        shard_partitioned = shard_listing.partitioned,
+        xorb_partitioned = xorb_listing.partitioned,
+        logical_list_streams = outcome.list_requests,
+        "selected bucket-global listing strategy"
+    );
+    let shard_objects = shard_listing.objects;
+    let xorb_objects = xorb_listing.objects;
     let referenced_shards = repo_shards
         .values()
         .flat_map(|shards| shards.iter().cloned())
@@ -198,7 +240,7 @@ async fn run_bucket_gc_under_maintenance(
     missing_referenced_shards.sort();
     if let Some(missing) = missing_referenced_shards.first() {
         return Err(CrabError::CorruptObject {
-            path: format!("{GLOBAL_PREFIX}/shards/{missing}"),
+            path: canonical_global_content_path("shards", &missing).to_string(),
             reason: format!(
                 "ref-registry references {} missing shard object(s)",
                 missing_referenced_shards.len()
@@ -465,27 +507,212 @@ fn partition_xorbs_for_gc(
     }
 }
 
-/// List all objects under `.crab/{kind}/`.
-async fn list_global_objects(store: &Store, kind: &str) -> Result<Vec<ListedObject>> {
-    let prefix = ObjectPath::from(format!("{GLOBAL_PREFIX}/{kind}/"));
-    let objects = store
-        .inner()
-        .list(Some(&prefix))
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(CrabError::Storage)?;
-
-    Ok(objects
-        .into_iter()
-        .map(|meta| ListedObject {
-            location: meta.location.to_string(),
-            size: meta.size,
-            last_modified: meta.last_modified.into(),
-        })
-        .collect())
+struct GlobalListOutcome {
+    objects: Vec<ListedObject>,
+    /// Logical list streams. Provider pagination and retries are internal to
+    /// `object_store` and are not counted here.
+    requests: u64,
+    parallelism: usize,
+    partitioned: bool,
 }
 
-/// Extract the hash portion from a key like `.crab/shards/{hash}`.
+// object_store leaves max-keys unset, so each provider applies these service
+// page capacities. Probe by object count because object_store hides pages.
+const S3_GCS_LIST_PAGE_OBJECTS: usize = 1_000;
+const AZURE_LIST_PAGE_OBJECTS: usize = 5_000;
+const GLOBAL_HASH_PARTITIONS: usize = 256;
+
+fn adaptive_probe_limit(store: &Store) -> usize {
+    let page_objects = match store.bucket_identity().cloud {
+        StorageProviderKind::Azure => AZURE_LIST_PAGE_OBJECTS,
+        StorageProviderKind::S3 | StorageProviderKind::Gcs => S3_GCS_LIST_PAGE_OBJECTS,
+        StorageProviderKind::Local => return usize::MAX,
+    };
+    // Switch only once recursive pagination costs as many calls as the full
+    // fan-out. Replaying the bounded probe then caps crossover cost near 2x.
+    page_objects.saturating_mul(GLOBAL_HASH_PARTITIONS)
+}
+
+/// List a global namespace using the selected cost/latency policy.
+async fn list_global_objects(
+    store: &Store,
+    kind: &str,
+    profile: GcListProfile,
+    concurrency: usize,
+    permits: Arc<Semaphore>,
+    cancel: &CancellationToken,
+) -> Result<GlobalListOutcome> {
+    let prefix = global_content_prefix(GLOBAL_PREFIX, kind);
+    match profile {
+        GcListProfile::Cost => {
+            list_global_prefix(store, kind, &prefix, None, permits, cancel).await
+        }
+        GcListProfile::Latency => {
+            list_global_partitions(store, kind, concurrency, permits, cancel).await
+        }
+        GcListProfile::Adaptive if concurrency <= 1 => {
+            list_global_prefix(store, kind, &prefix, None, permits, cancel).await
+        }
+        GcListProfile::Adaptive => {
+            let probe_limit = adaptive_probe_limit(store);
+            let probe = list_global_prefix(
+                store,
+                kind,
+                &prefix,
+                Some(probe_limit),
+                Arc::clone(&permits),
+                cancel,
+            )
+            .await?;
+            if probe.objects.len() <= probe_limit {
+                return Ok(probe);
+            }
+
+            let probe_requests = probe.requests;
+            drop(probe);
+            let mut partitioned =
+                list_global_partitions(store, kind, concurrency, permits, cancel).await?;
+            partitioned.requests += probe_requests;
+            Ok(partitioned)
+        }
+    }
+}
+
+async fn list_global_prefix(
+    store: &Store,
+    kind: &str,
+    prefix: &ObjectPath,
+    max_objects: Option<usize>,
+    permits: Arc<Semaphore>,
+    cancel: &CancellationToken,
+) -> Result<GlobalListOutcome> {
+    let _permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        permit = permits.acquire() => {
+            permit.map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?
+        }
+    };
+    let mut stream = store.inner().list(Some(prefix));
+    let mut objects = Vec::new();
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            next = stream.try_next() => next.map_err(CrabError::Storage)?,
+        };
+        let Some(meta) = next else {
+            break;
+        };
+        let location = meta.location.to_string();
+        if content_hash_from_path(&location, kind).is_none() {
+            return Err(CrabError::CorruptObject {
+                path: location,
+                reason: format!("global {kind} object does not match its hash partition"),
+            });
+        }
+        objects.push(ListedObject {
+            location,
+            size: meta.size,
+            last_modified: meta.last_modified.into(),
+        });
+        if max_objects.is_some_and(|limit| objects.len() > limit) {
+            break;
+        }
+    }
+
+    Ok(GlobalListOutcome {
+        objects,
+        requests: 1,
+        parallelism: 1,
+        partitioned: false,
+    })
+}
+
+/// Discover populated hash partitions, then scan them with bounded concurrency.
+async fn list_global_partitions(
+    store: &Store,
+    kind: &str,
+    concurrency: usize,
+    permits: Arc<Semaphore>,
+    cancel: &CancellationToken,
+) -> Result<GlobalListOutcome> {
+    let prefix = global_content_prefix(GLOBAL_PREFIX, kind);
+    let discovery_permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        permit = permits.acquire() => {
+            permit.map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?
+        }
+    };
+    let discovery = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = store.inner().list_with_delimiter(Some(&prefix)) => {
+            result.map_err(CrabError::Storage)?
+        }
+    };
+    drop(discovery_permit);
+    if let Some(object) = discovery.objects.first() {
+        return Err(CrabError::CorruptObject {
+            path: object.location.to_string(),
+            reason: format!("global {kind} object is outside the required two-hex hash partition"),
+        });
+    }
+
+    let mut partitions = discovery
+        .common_prefixes
+        .into_iter()
+        .map(|partition| {
+            let value = partition
+                .as_ref()
+                .strip_prefix(prefix.as_ref())
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                .unwrap_or_default();
+            if value.len() != 2
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err(CrabError::CorruptObject {
+                    path: partition.to_string(),
+                    reason: format!(
+                        "global {kind} partition must be exactly two lowercase hex characters"
+                    ),
+                });
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    partitions.sort_unstable();
+    partitions.dedup();
+
+    let parallelism = concurrency.max(1).min(partitions.len().max(1));
+    let batches =
+        futures_util::stream::iter(partitions.iter().map(|partition| {
+            let partition_prefix = global_content_partition_prefix(GLOBAL_PREFIX, kind, partition);
+            let permits = Arc::clone(&permits);
+            async move {
+                list_global_prefix(store, kind, &partition_prefix, None, permits, cancel).await
+            }
+        }))
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+    let objects = batches
+        .into_iter()
+        .flat_map(|batch| batch.objects)
+        .collect::<Vec<_>>();
+
+    Ok(GlobalListOutcome {
+        objects,
+        requests: 1 + partitions.len() as u64,
+        parallelism,
+        partitioned: true,
+    })
+}
+
+/// Extract the hash portion from a canonical global content key.
 fn extract_hash_from_key(key: &str) -> String {
     key.rsplit('/').next().unwrap_or("").to_string()
 }
@@ -797,9 +1024,219 @@ mod tests {
 
     #[test]
     fn extract_hash_from_key_works() {
-        assert_eq!(extract_hash_from_key(".crab/shards/abc123"), "abc123");
-        assert_eq!(extract_hash_from_key(".crab/xorbs/def456"), "def456");
+        assert_eq!(
+            extract_hash_from_key(&format!(".crab/shards/ab/{}", "ab".repeat(32))),
+            "ab".repeat(32)
+        );
+        assert_eq!(
+            extract_hash_from_key(&format!(".crab/xorbs/de/{}", "de".repeat(32))),
+            "de".repeat(32)
+        );
         assert_eq!(extract_hash_from_key(""), "");
+    }
+
+    #[tokio::test]
+    async fn adaptive_global_listing_keeps_small_namespace_on_one_stream() {
+        let store = memory_store();
+        let hashes = [
+            "aa".repeat(32),
+            "ff".repeat(32),
+            format!("aa{}", "1".repeat(62)),
+        ];
+        for hash in &hashes {
+            store
+                .put(
+                    &crab_storage::canonical_global_content_path("xorbs", hash),
+                    Bytes::from(hash.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut outcome = list_global_objects(
+            &store,
+            "xorbs",
+            GcListProfile::Adaptive,
+            8,
+            Arc::new(Semaphore::new(8)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        outcome
+            .objects
+            .sort_by(|left, right| left.location.cmp(&right.location));
+
+        assert_eq!(outcome.objects.len(), 3);
+        assert_eq!(outcome.requests, 1);
+        assert_eq!(outcome.parallelism, 1);
+        assert!(
+            outcome
+                .objects
+                .iter()
+                .all(|object| { content_hash_from_path(&object.location, "xorbs").is_some() })
+        );
+    }
+
+    #[tokio::test]
+    async fn latency_global_listing_scans_only_populated_hash_partitions() {
+        let store = memory_store();
+        for hash in ["aa".repeat(32), "ff".repeat(32)] {
+            store
+                .put(
+                    &crab_storage::canonical_global_content_path("xorbs", &hash),
+                    Bytes::from(hash),
+                )
+                .await
+                .unwrap();
+        }
+
+        let outcome = list_global_objects(
+            &store,
+            "xorbs",
+            GcListProfile::Latency,
+            8,
+            Arc::new(Semaphore::new(8)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.requests, 3);
+        assert_eq!(outcome.parallelism, 2);
+    }
+
+    #[tokio::test]
+    async fn adaptive_global_listing_partitions_large_namespace_after_bounded_probe() {
+        let store = memory_store().with_bucket_identity(crab_storage::BucketIdentity::new(
+            StorageProviderKind::S3,
+            "bucket",
+            "bucket",
+        ));
+        for index in 0..=256_000_u64 {
+            let hash = format!("{:02x}{index:062x}", index % 256);
+            store
+                .put(
+                    &crab_storage::canonical_global_content_path("xorbs", &hash),
+                    Bytes::new(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let outcome = list_global_objects(
+            &store,
+            "xorbs",
+            GcListProfile::Adaptive,
+            16,
+            Arc::new(Semaphore::new(16)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.objects.len(), 256_001);
+        assert_eq!(outcome.requests, 258);
+    }
+
+    #[tokio::test]
+    async fn adaptive_global_listing_keeps_local_and_serial_stores_recursive() {
+        let local = memory_store();
+        let s3 = memory_store().with_bucket_identity(crab_storage::BucketIdentity::new(
+            StorageProviderKind::S3,
+            "bucket",
+            "bucket",
+        ));
+        for index in 0..=2_000_u64 {
+            let hash = format!("{index:064x}");
+            let path = crab_storage::canonical_global_content_path("xorbs", &hash);
+            local.put(&path, Bytes::new()).await.unwrap();
+            s3.put(&path, Bytes::new()).await.unwrap();
+        }
+
+        let local_outcome = list_global_objects(
+            &local,
+            "xorbs",
+            GcListProfile::Adaptive,
+            8,
+            Arc::new(Semaphore::new(8)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let serial_outcome = list_global_objects(
+            &s3,
+            "xorbs",
+            GcListProfile::Adaptive,
+            1,
+            Arc::new(Semaphore::new(1)),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(local_outcome.requests, 1);
+        assert_eq!(serial_outcome.requests, 1);
+    }
+
+    #[test]
+    fn adaptive_probe_uses_provider_page_capacity() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let s3 = Store::new(Arc::clone(&inner)).with_bucket_identity(
+            crab_storage::BucketIdentity::new(StorageProviderKind::S3, "bucket", "bucket"),
+        );
+        let azure = Store::new(Arc::clone(&inner)).with_bucket_identity(
+            crab_storage::BucketIdentity::new(StorageProviderKind::Azure, "account", "container"),
+        );
+        let local = Store::new(inner);
+
+        assert_eq!(adaptive_probe_limit(&s3), 256_000);
+        assert_eq!(adaptive_probe_limit(&azure), 1_280_000);
+        assert_eq!(adaptive_probe_limit(&local), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn global_listing_honors_cancellation_during_enumeration() {
+        let store = memory_store();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = list_global_objects(
+            &store,
+            "xorbs",
+            GcListProfile::Cost,
+            8,
+            Arc::new(Semaphore::new(8)),
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn global_listing_rejects_flat_legacy_objects() {
+        let store = memory_store();
+        let hash = "ab".repeat(32);
+        store
+            .put(
+                &ObjectPath::from(format!(".crab/xorbs/{hash}")),
+                Bytes::from_static(b"legacy"),
+            )
+            .await
+            .unwrap();
+
+        let result = list_global_objects(
+            &store,
+            "xorbs",
+            GcListProfile::Adaptive,
+            8,
+            Arc::new(Semaphore::new(8)),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
     }
 
     #[test]
@@ -1014,6 +1451,7 @@ mod tests {
             grace_period: Duration::from_secs(3600),
             force: false,
             list_concurrency: 16,
+            list_profile: GcListProfile::Adaptive,
             delete_concurrency: 64,
         };
 
@@ -1047,7 +1485,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let xorb_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/xorbs/{}", "a".repeat(64)));
+        let xorb_path = canonical_global_content_path("xorbs", &"a".repeat(64));
         store
             .put(&xorb_path, Bytes::from_static(b"recent orphan"))
             .await
@@ -1060,6 +1498,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: false,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1087,7 +1526,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let xorb_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/xorbs/{}", "b".repeat(64)));
+        let xorb_path = canonical_global_content_path("xorbs", &"b".repeat(64));
         let xorb = Bytes::from_static(b"recent orphan");
         store.put(&xorb_path, xorb.clone()).await.unwrap();
 
@@ -1098,6 +1537,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: true,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1223,6 +1663,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: false,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1240,6 +1681,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: false,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1261,7 +1703,7 @@ mod tests {
         let shard_hash = crab_xet::hash::compute_data_hash(&corrupt_shard).hex();
         store
             .put(
-                &ObjectPath::from(format!("{GLOBAL_PREFIX}/shards/{shard_hash}")),
+                &canonical_global_content_path("shards", &shard_hash),
                 corrupt_shard,
             )
             .await
@@ -1285,6 +1727,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: false,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1319,6 +1762,7 @@ mod tests {
                 grace_period: Duration::from_secs(3600),
                 force: false,
                 list_concurrency: 16,
+                list_profile: GcListProfile::Adaptive,
                 delete_concurrency: 64,
             },
             &store,
@@ -1355,6 +1799,7 @@ mod tests {
             grace_period: Duration::from_secs(3600),
             force: false,
             list_concurrency: 16,
+            list_profile: GcListProfile::Adaptive,
             delete_concurrency: 64,
         };
         let protected = HashSet::new();
@@ -1397,6 +1842,7 @@ mod tests {
             grace_period: Duration::from_secs(3600),
             force: false,
             list_concurrency: 16,
+            list_profile: GcListProfile::Adaptive,
             delete_concurrency: 64,
         };
         let protected = HashSet::new();
@@ -1431,6 +1877,7 @@ mod tests {
             grace_period: Duration::from_secs(3600),
             force: true,
             list_concurrency: 16,
+            list_profile: GcListProfile::Adaptive,
             delete_concurrency: 64,
         };
 
@@ -1560,6 +2007,7 @@ mod tests {
             grace_period: Duration::from_secs(3600),
             force: true,
             list_concurrency: 16,
+            list_profile: GcListProfile::Adaptive,
             delete_concurrency: 64,
         };
         let protected = HashSet::new();

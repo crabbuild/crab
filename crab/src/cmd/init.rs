@@ -12,7 +12,7 @@ use std::process::Command;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::config::StorageProvider;
+use crate::core::config::{GcListProfile, StorageProvider};
 use crate::core::credential_discovery::{CredentialSource, discover_credentials};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
@@ -51,6 +51,8 @@ pub struct InitPayload {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_list_profile: Option<String>,
     pub credential_status: CredentialStatus,
 }
 
@@ -101,7 +103,7 @@ pub async fn run_init_with_options(
     cancel: &CancellationToken,
     mode: OutputMode,
 ) -> Result<()> {
-    run_init_with_storage_provider(url, root, cancel, mode, None).await
+    run_init_with_storage_provider(url, root, cancel, mode, None, None).await
 }
 
 /// Options-driven init implementation with an explicit storage backend.
@@ -111,8 +113,18 @@ pub async fn run_init_with_storage_provider(
     cancel: &CancellationToken,
     mode: OutputMode,
     storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
 ) -> Result<()> {
-    run_init_inner(url, root, cancel, mode, storage_provider, true).await
+    run_init_inner(
+        url,
+        root,
+        cancel,
+        mode,
+        storage_provider,
+        gc_list_profile,
+        true,
+    )
+    .await
 }
 
 /// Initialize a repository as the first phase of guided configuration.
@@ -121,8 +133,18 @@ pub(crate) async fn run_init_for_configure(
     root: &Path,
     cancel: &CancellationToken,
     storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
 ) -> Result<()> {
-    run_init_inner(url, root, cancel, OutputMode::Text, storage_provider, false).await
+    run_init_inner(
+        url,
+        root,
+        cancel,
+        OutputMode::Text,
+        storage_provider,
+        gc_list_profile,
+        false,
+    )
+    .await
 }
 
 async fn run_init_inner(
@@ -131,6 +153,7 @@ async fn run_init_inner(
     cancel: &CancellationToken,
     mode: OutputMode,
     storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
     show_next_steps: bool,
 ) -> Result<()> {
     check_cancelled(cancel)?;
@@ -193,6 +216,11 @@ async fn run_init_inner(
         remote.inferred_storage_provider,
         url,
     )?;
+    let config_path = crab_dir.join("config.toml");
+    let gc_list_profile = match gc_list_profile {
+        Some(profile) => Some(profile),
+        None => existing_gc_list_profile(&config_path)?,
+    };
 
     tokio::fs::create_dir_all(&crab_dir).await?;
     ensure_crab_dir_excluded(root)?;
@@ -205,8 +233,11 @@ async fn run_init_inner(
 
     // Write .crab/config.toml with the [remote] section so the config
     // resolver can find the URL.
-    let config_path = crab_dir.join("config.toml");
-    let config_content = render_local_config(&remote_url, selected_storage_provider.as_ref());
+    let config_content = render_local_config(
+        &remote_url,
+        selected_storage_provider.as_ref(),
+        gc_list_profile,
+    );
     tokio::fs::write(&config_path, config_content.as_bytes()).await?;
     tracing::info!(path = %config_path.display(), "wrote config.toml");
 
@@ -280,6 +311,11 @@ async fn run_init_inner(
     {
         eprintln!("Storage provider → {}", provider.label());
     }
+    if let Some(profile) = gc_list_profile
+        && !mode.is_machine()
+    {
+        eprintln!("Bucket GC list profile → {}", profile.as_str());
+    }
 
     // Run credential discovery and report the result.
     let credential_url = credential_discovery_url(&parsed, selected_storage_provider.as_ref());
@@ -317,6 +353,7 @@ async fn run_init_inner(
             storage_provider: selected_storage_provider
                 .as_ref()
                 .map(|provider| provider.toml_value().to_owned()),
+            gc_list_profile: gc_list_profile.map(|profile| profile.as_str().to_owned()),
             credential_status,
         };
         emit_json(INIT_SCHEMA, INIT_VERSION, payload);
@@ -357,7 +394,11 @@ async fn run_init_inner(
     Ok(())
 }
 
-fn render_local_config(url: &str, storage_provider: Option<&StorageProvider>) -> String {
+fn render_local_config(
+    url: &str,
+    storage_provider: Option<&StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
+) -> String {
     let mut config = format!("# Crab configuration\n\n[remote]\nurl = \"{url}\"\n");
     if let Some(provider) = storage_provider {
         use std::fmt::Write as _;
@@ -367,7 +408,32 @@ fn render_local_config(url: &str, storage_provider: Option<&StorageProvider>) ->
             provider.toml_value()
         );
     }
+    if let Some(profile) = gc_list_profile {
+        use std::fmt::Write as _;
+        let _ = write!(config, "\n[gc]\nlist_profile = \"{}\"\n", profile.as_str());
+    }
     config
+}
+
+fn existing_gc_list_profile(path: &Path) -> Result<Option<GcListProfile>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CrabError::Io(error)),
+    };
+    let value =
+        toml::from_str::<toml::Value>(&content).map_err(|error| CrabError::Configuration {
+            key: "gc.list_profile".to_owned(),
+            origin: format!("failed to parse {}: {error}", path.display()),
+        })?;
+    let Some(profile) = value.get("gc").and_then(|gc| gc.get("list_profile")) else {
+        return Ok(None);
+    };
+    let profile = profile.as_str().ok_or_else(|| CrabError::Configuration {
+        key: "gc.list_profile".to_owned(),
+        origin: format!("{} must contain a string value", path.display()),
+    })?;
+    GcListProfile::parse(profile).map(Some)
 }
 
 fn project_auth_config_with_storage_provider(
@@ -1214,6 +1280,7 @@ mod tests {
             &cancel,
             OutputMode::Text,
             Some(StorageProvider::Gcs),
+            None,
         )
         .await
         .expect("init should succeed");
@@ -1322,6 +1389,60 @@ storage_provider = "azure"
     }
 
     #[tokio::test]
+    async fn init_persists_and_preserves_gc_list_profile_locally() {
+        let dir = temp_git_repo();
+        let cancel = CancellationToken::new();
+
+        run_init_with_storage_provider(
+            "crab://my-bucket/my-repo",
+            dir.path(),
+            &cancel,
+            OutputMode::Text,
+            None,
+            Some(GcListProfile::Cost),
+        )
+        .await
+        .expect("init should persist GC profile");
+        run_init_with_storage_provider(
+            "crab://my-bucket/my-repo",
+            dir.path(),
+            &cancel,
+            OutputMode::Text,
+            None,
+            None,
+        )
+        .await
+        .expect("re-init should preserve GC profile");
+
+        let local_config = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
+
+        assert!(local_config.contains("list_profile = \"cost\""));
+    }
+
+    #[tokio::test]
+    async fn init_rejects_invalid_existing_gc_list_profile_without_overwriting_it() {
+        let dir = temp_git_repo();
+        let local_dir = dir.path().join(".crab");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        let config_path = local_dir.join("config.toml");
+        let invalid = "[gc]\nlist_profile = \"fast\"\n";
+        std::fs::write(&config_path, invalid).unwrap();
+
+        let result = run_init_with_storage_provider(
+            "crab://my-bucket/my-repo",
+            dir.path(),
+            &CancellationToken::new(),
+            OutputMode::Text,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), invalid);
+    }
+
+    #[tokio::test]
     async fn init_excludes_local_crab_dir_from_add_all() {
         let dir = temp_git_repo();
         let cancel = CancellationToken::new();
@@ -1392,6 +1513,7 @@ storage_provider = "azure"
             &cancel,
             OutputMode::Text,
             Some(StorageProvider::S3),
+            None,
         )
         .await;
         assert!(
