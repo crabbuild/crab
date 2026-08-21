@@ -2634,7 +2634,7 @@ The first slice establishes the direction:
 Temporary debts from this slice:
 
 - `crab-cache` route-classifier tests still validate against the
-  `crab-web` cache-service docs through a workspace-relative `include_str!`.
+  `packages/web` cache-service docs through a workspace-relative `include_str!`.
   That is useful contract coverage, but it should move to a workspace
   integration test or to a fixture owned by `crab-cache` before treating
   `crab-cache` as independently packageable.
@@ -4137,7 +4137,7 @@ For each migration PR:
   persistence in `crab-cache-server`; do not pull those dependencies back
   through CLI Adapters.
 - `crab-cache` currently has valuable docs-contract tests, but they are not
-  self-contained because they include `crab-web` docs. Move those tests to a
+  self-contained because they include `packages/web` docs. Move those tests to a
   workspace integration crate or mirror the route matrix as an owned fixture
   before packaging `crab-cache` independently.
 - `crab-cache` has an `axum` dev-dependency for mocked cache-client protocol

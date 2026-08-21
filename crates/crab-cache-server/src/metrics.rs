@@ -905,9 +905,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     const MONITORING_DOCS: &str =
-        include_str!("../../../crab-web/content/docs/cli/cache-service/monitoring.mdx");
+        include_str!("../../../packages/web/content/docs/cli/cache-service/monitoring.mdx");
     const RUNBOOK_DOCS: &str =
-        include_str!("../../../crab-web/content/docs/cli/cache-service/runbooks.mdx");
+        include_str!("../../../packages/web/content/docs/cli/cache-service/runbooks.mdx");
     const GRAFANA_DASHBOARD: &str =
         include_str!("../../../crab/deploy/cache-service/grafana-dashboard.json");
     const KUBERNETES_SERVICE: &str =

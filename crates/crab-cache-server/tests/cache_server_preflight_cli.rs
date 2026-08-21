@@ -188,7 +188,7 @@ fn enterprise_onboarding_bundle_matches_cache_service_contract() {
 #[test]
 fn onboarding_check_stable_codes_are_documented_for_ci() {
     let readme = workflow_body("crab/deploy/cache-service/enterprise-onboarding/README.md");
-    let deployment = workflow_body("crab-web/content/docs/cli/cache-service/deployment.mdx");
+    let deployment = workflow_body("packages/web/content/docs/cli/cache-service/deployment.mdx");
 
     for body in [&readme, &deployment] {
         assert!(body.contains("--json > onboarding-check.json"));

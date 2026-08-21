@@ -29,7 +29,7 @@ on:
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
       - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
-      - "crab-web/content/docs/cli/cache-service/**"
+      - "packages/web/content/docs/cli/cache-service/**"
   pull_request:
     paths:
       - ".github/workflows/cache-service.yml"
@@ -55,7 +55,7 @@ on:
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
       - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
-      - "crab-web/content/docs/cli/cache-service/**"
+      - "packages/web/content/docs/cli/cache-service/**"
   workflow_dispatch:
 
 permissions:
