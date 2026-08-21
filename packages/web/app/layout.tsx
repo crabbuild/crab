@@ -15,10 +15,7 @@ export const metadata: Metadata = {
   },
   description: 'Git remote helper for cloud object storage. No servers, no LFS endpoints.',
   icons: {
-    icon: [
-      { url: '/icon-light.svg', type: 'image/svg+xml', media: '(prefers-color-scheme: light)' },
-      { url: '/icon-dark.svg', type: 'image/svg+xml', media: '(prefers-color-scheme: dark)' },
-    ],
+    icon: { url: '/crab.optimized.svg', type: 'image/svg+xml' },
     apple: '/apple-icon.png',
   },
   openGraph: {
