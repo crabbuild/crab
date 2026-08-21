@@ -224,7 +224,7 @@ enforces `dedup.scope`. `all` accepts any repo, `bucket-prefix:<prefix>` accepts
 that prefix and nested repos, and `repos:<repo1>,<repo2>` accepts the listed
 repo prefixes. Known responses include `xorb_hash`, `chunk_index`, `length`,
 and `cache_verified: true`; `xorb_hash` is the canonical hash used in
-`.crab/xorbs/{hash}` paths, and `chunk_index` is the chunk's ordinal position
+`.crab/xorbs/{first-two-hex}/{hash}` paths, and `chunk_index` is the chunk's ordinal position
 in xorb metadata, not a byte offset. The service returns indexed chunks as
 unknown unless the referenced xorb is locally cached and verifies against the
 requested chunk. The CLI treats `cache_verified: true` as cache-local proof,

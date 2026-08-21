@@ -29,7 +29,10 @@ use crab_metadata::{
     value_codec::CommittedFileRecord,
 };
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
-use crab_storage::{StagedWrite, StorageError, StorageProviderKind, Store, StoreLayout};
+use crab_storage::{
+    StagedWrite, StorageError, StorageProviderKind, Store, StoreLayout,
+    canonical_global_content_path, content_hash_from_path,
+};
 use crab_types::time::now_rfc3339_millis;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::MDBShardInfo;
@@ -621,7 +624,7 @@ pub fn strict_xorb_references_from_shard(
         if chunks.len() != declared_chunks {
             return Err(invalid("staged shard xorb chunk count mismatch"));
         }
-        let key = format!(".crab/xorbs/{hash}");
+        let key = canonical_global_content_path("xorbs", &hash).to_string();
         if refs.insert(key, chunks).is_some() {
             return Err(invalid("staged shard contains duplicate xorb metadata"));
         }
@@ -1678,9 +1681,7 @@ async fn build_service_pack_index(
 }
 
 fn xorb_hash_from_key(key: &str) -> Result<MerkleHash> {
-    let hash = key
-        .strip_prefix(".crab/xorbs/")
-        .or_else(|| key.rsplit_once("/.crab/xorbs/").map(|(_, hash)| hash))
+    let hash = content_hash_from_path(key, "xorbs")
         .ok_or_else(|| invalid(format!("unsupported xorb canonical key: {key}")))?;
     merkle_hash_from_hex(hash, "xorb key hash")
 }
@@ -1952,10 +1953,9 @@ fn has_unsafe_key_shape(key: &str) -> bool {
 }
 
 fn is_allowed_global_key(key: &str) -> bool {
-    [".crab/xorbs/", ".crab/shards/"].iter().any(|prefix| {
-        key.strip_prefix(prefix)
-            .is_some_and(|hash| validate_hash_component(hash, "global object hash").is_ok())
-    })
+    key.starts_with(".crab/")
+        && (content_hash_from_path(key, "xorbs").is_some()
+            || content_hash_from_path(key, "shards").is_some())
 }
 
 fn is_allowed_repo_key(relative: &str) -> bool {
@@ -2470,10 +2470,10 @@ mod tests {
     fn canonical_key_allowlist_accepts_push_immutable_objects() {
         let repo = "org/repo";
         for key in [
-            format!(".crab/xorbs/{}", hash('a')),
-            format!(".crab/shards/{}", hash('b')),
-            format!("{repo}/.crab/xorbs/{}", hash('a')),
-            format!("{repo}/.crab/shards/{}", hash('b')),
+            format!(".crab/xorbs/aa/{}", hash('a')),
+            format!(".crab/shards/bb/{}", hash('b')),
+            format!("{repo}/.crab/xorbs/aa/{}", hash('a')),
+            format!("{repo}/.crab/shards/bb/{}", hash('b')),
             format!("{repo}/packs/pack-{}.pack", hash('c')),
             format!("{repo}/packs/pack-{}.meta", hash('c')),
             format!("{repo}/metadata/pack/segments/{}.jsonl", hash('d')),
@@ -2499,6 +2499,7 @@ mod tests {
             format!("{repo}/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/object"),
             format!("{repo}/.crab/ref-registry"),
             format!("{repo}/.crab/chunk_index_db/{}", hash('a')),
+            format!("evil/.crab/xorbs/aa/{}", hash('a')),
             ".crab/ref-registry".to_owned(),
             format!(".crab/chunk_index_db/{}", hash('a')),
             format!("{repo}/packs/pack-{}.idx", hash('a')),
@@ -2576,7 +2577,7 @@ mod tests {
         }))?;
         let (shard_bytes, _) = writer.finalize()?;
 
-        let key = format!(".crab/xorbs/{}", xorb.hash.hex());
+        let key = canonical_global_content_path("xorbs", &xorb.hash.hex()).to_string();
         let refs = strict_xorb_references_from_shard(&shard_bytes)?;
         let expected_chunks = refs
             .get(&key)
@@ -2643,7 +2644,7 @@ mod tests {
         })?;
         let (shard_bytes, shard_hash) = writer.finalize()?;
 
-        let xorb_key = format!(".crab/xorbs/{}", xorb.hash.hex());
+        let xorb_key = canonical_global_content_path("xorbs", &xorb.hash.hex()).to_string();
         let refs = strict_xorb_references_from_shard(&shard_bytes)?;
         let expected_chunks = refs
             .get(&xorb_key)

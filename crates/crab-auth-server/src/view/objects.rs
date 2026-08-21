@@ -313,7 +313,8 @@ mod tests {
         assert!(
             store
                 .head(&ObjectPath::from(format!(
-                    "{repo_prefix}/.crab/xorbs/{}",
+                    "{repo_prefix}/.crab/xorbs/{}/{}",
+                    &xorb_hash.hex()[..2],
                     xorb_hash.hex()
                 )))
                 .await
@@ -322,7 +323,8 @@ mod tests {
         assert!(matches!(
             store
                 .head(&ObjectPath::from(format!(
-                    ".crab/xorbs/{}",
+                    ".crab/xorbs/{}/{}",
+                    &xorb_hash.hex()[..2],
                     xorb_hash.hex()
                 )))
                 .await,

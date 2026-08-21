@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -38,6 +37,7 @@ use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::audit_shim::{self, AuditOp};
+use crab_storage::{GLOBAL_PREFIX, content_hash_from_path, global_content_prefix};
 
 const OPTIMIZE_XORBS_AUTH_OPERATION: &str = "optimize-xorbs";
 const OPTIMIZE_XORBS_OPERATION: &str = "optimize xorbs";
@@ -325,7 +325,7 @@ async fn enumerate_sources(
         return Err(CrabError::Cancelled);
     }
 
-    let prefix = ObjectPath::from(".crab/xorbs/");
+    let prefix = global_content_prefix(GLOBAL_PREFIX, "xorbs");
     let objects = store.list_prefix(&prefix).await?;
     let mut sources = Vec::with_capacity(objects.len());
 
@@ -335,18 +335,11 @@ async fn enumerate_sources(
         }
 
         let key = object.location.to_string();
-        let hash = key
-            .strip_prefix(".crab/xorbs/")
-            .ok_or_else(|| CrabError::Configuration {
+        let hash =
+            content_hash_from_path(&key, "xorbs").ok_or_else(|| CrabError::Configuration {
                 key: format!("remote xorb key {key}"),
-                origin: "xorb listing returned an object outside .crab/xorbs/".to_string(),
+                origin: "expected a canonical two-hex-fan-out xorb key".to_string(),
             })?;
-        if hash.is_empty() || hash.contains('/') {
-            return Err(CrabError::Configuration {
-                key: format!("remote xorb key {key}"),
-                origin: "expected one content hash directly below .crab/xorbs/".to_string(),
-            });
-        }
 
         let head = head_with_class(store, &object.location).await?;
         sources.push(SourceXorbMeta {

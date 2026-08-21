@@ -2,7 +2,7 @@
 //!
 //! Downloads all shards referenced by a repo's shard-list, merges them
 //! using xet-core's `merge_shards()`, uploads the compacted shards to
-//! `.crab/shards/{new_hash}`, and CAS-updates the shard-list and
+//! `.crab/shards/{first-two-hex}/{new_hash}`, and CAS-updates the shard-list and
 //! ref-registry. Source shards are left for GC.
 //!
 //! When shards contain xorb-info entries from other repos (cross-repo
@@ -22,6 +22,7 @@ use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 use crab_metadata::manifests::ShardList;
 use crab_metadata::ref_registry::RefRegistry;
+use crab_storage::canonical_global_content_path;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::{
     MDBMinimalShard, MDBShardFile, merge_shards, new_shard_file_cache, shard_set_union,
@@ -190,11 +191,11 @@ pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOut
     .await
     .map_err(|e| CrabError::Internal(format!("filter_unreferenced_xorbs join error: {e}")))??;
 
-    // Step 4: Upload merged shards to `.crab/shards/{new_hash}`.
+    // Step 4: Upload merged shards to the canonical global shard namespace.
     let mut new_hashes: Vec<String> = Vec::with_capacity(filtered.len());
     for shard_file in &filtered {
         let hash_hex = shard_file.shard_hash.hex();
-        let shard_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/shards/{hash_hex}"));
+        let shard_path = canonical_global_content_path("shards", &hash_hex);
 
         let mut buf = Vec::new();
         shard_file
@@ -205,7 +206,7 @@ pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOut
         let computed = compute_data_hash(&buf);
         if computed != shard_file.shard_hash {
             return Err(CrabError::CorruptObject {
-                path: format!("{GLOBAL_PREFIX}/shards/{hash_hex}"),
+                path: shard_path.to_string(),
                 reason: format!(
                     "hash mismatch: expected {}, computed {}",
                     hash_hex,
@@ -291,7 +292,7 @@ async fn download_shards(
 ) -> Result<()> {
     let shard_file_cache = new_shard_file_cache();
     for hash_hex in shard_hashes {
-        let shard_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/shards/{hash_hex}"));
+        let shard_path = canonical_global_content_path("shards", hash_hex);
 
         let data = match store.get_with_etag(&shard_path).await {
             Ok((body, _)) => body,

@@ -306,7 +306,7 @@ mod tests {
 
         assert_eq!(
             context.router().xorb_path(&hash('a')).as_ref(),
-            format!("org/repo/.crab/xorbs/{}", hash('a'))
+            format!("org/repo/.crab/xorbs/aa/{}", hash('a'))
         );
     }
 

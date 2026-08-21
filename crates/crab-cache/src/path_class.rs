@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::CacheKey;
 
 /// Schema identifier for the cache-service route taxonomy.
-pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v1";
+pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v2";
 
 /// Whether a request path refers to an immutable (content-addressed) or
 /// mutable (refs, HEAD, manifests, config, locks) object.
@@ -57,8 +57,8 @@ pub fn cache_route_contract() -> CacheRouteContract {
         schema: CACHE_ROUTE_CONTRACT_SCHEMA.to_string(),
         transport_prefix: "/v1/".to_string(),
         immutable: route_patterns(&[
-            ("xorb", ".crab/xorbs/{hash}"),
-            ("shard", ".crab/shards/{hash}"),
+            ("xorb", ".crab/xorbs/{first-two-hex}/{hash}"),
+            ("shard", ".crab/shards/{first-two-hex}/{hash}"),
             ("pack", "{repo}/packs/pack-{id}.pack"),
             ("pack_index", "{repo}/packs/pack-{id}.idx"),
             ("metadata", "{repo}/file_index_db/compacted/*.sst"),
@@ -182,8 +182,17 @@ pub(crate) fn normalize_transport_path(path: &str) -> &str {
 
 fn parse_global_crab_object(path: &str) -> Option<CacheObjectPath<'_>> {
     let after_global = path.strip_prefix(".crab/")?;
-    let (type_str, hash) = after_global.split_once('/')?;
-    if !is_hash_hex(hash) {
+    let mut parts = after_global.split('/');
+    let type_str = parts.next()?;
+    let partition = parts.next()?;
+    let hash = parts.next()?;
+    if parts.next().is_some()
+        || !is_hash_hex(hash)
+        || partition != hash.get(..2)?
+        || !partition
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         return None;
     }
     let kind = match type_str {
@@ -257,7 +266,10 @@ fn has_extension(path: &str, extension: &str) -> bool {
 }
 
 fn is_hash_hex(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]
@@ -291,25 +303,25 @@ mod tests {
         vec![
             RouteContractCase {
                 name: "global xorb",
-                path: format!("/v1/.crab/xorbs/{xorb_hash}"),
+                path: format!("/v1/.crab/xorbs/aa/{xorb_hash}"),
                 class: PathClass::Immutable,
                 parsed: Some(ParsedRouteContract {
                     repo_path: ".crab",
                     kind: CacheObjectKind::Xorb,
                     identity: xorb_hash,
                 }),
-                docs_token: ".crab/xorbs/{hash}",
+                docs_token: ".crab/xorbs/{first-two-hex}/{hash}",
             },
             RouteContractCase {
                 name: "global shard",
-                path: format!("/v1/.crab/shards/{shard_hash}"),
+                path: format!("/v1/.crab/shards/bb/{shard_hash}"),
                 class: PathClass::Immutable,
                 parsed: Some(ParsedRouteContract {
                     repo_path: ".crab",
                     kind: CacheObjectKind::Shard,
                     identity: shard_hash,
                 }),
-                docs_token: ".crab/shards/{hash}",
+                docs_token: ".crab/shards/{first-two-hex}/{hash}",
             },
             RouteContractCase {
                 name: "git pack",
@@ -444,8 +456,8 @@ mod tests {
         assert_eq!(contract.schema, CACHE_ROUTE_CONTRACT_SCHEMA);
         assert_eq!(contract.transport_prefix, "/v1/");
         for pattern in [
-            ".crab/xorbs/{hash}",
-            ".crab/shards/{hash}",
+            ".crab/xorbs/{first-two-hex}/{hash}",
+            ".crab/shards/{first-two-hex}/{hash}",
             "{repo}/packs/pack-{id}.pack",
             "{repo}/packs/pack-{id}.idx",
             "{repo}/file_index_db/manifest/*.manifest",
@@ -492,12 +504,20 @@ mod tests {
         let xorb_hash = MerkleHash::from([9u64, 10, 11, 12]);
         let shard_hash = MerkleHash::from([1u64, 2, 3, 4]);
 
-        let xorb_key = cache_key_for_path(&format!(".crab/xorbs/{}", xorb_hash.hex()))
-            .expect("xorb path should map to local cache key");
+        let xorb_key = cache_key_for_path(&format!(
+            ".crab/xorbs/{}/{}",
+            &xorb_hash.hex()[..2],
+            xorb_hash.hex()
+        ))
+        .expect("xorb path should map to local cache key");
         assert!(matches!(xorb_key, CacheKey::Xorb(hash) if hash == xorb_hash));
 
-        let shard_key = cache_key_for_path(&format!("/v1/.crab/shards/{}", shard_hash.hex()))
-            .expect("shard path should map to local cache key");
+        let shard_key = cache_key_for_path(&format!(
+            "/v1/.crab/shards/{}/{}",
+            &shard_hash.hex()[..2],
+            shard_hash.hex()
+        ))
+        .expect("shard path should map to local cache key");
         assert!(matches!(shard_key, CacheKey::Shard(hash) if hash == shard_hash));
 
         assert!(cache_key_for_path("org/repo/packs/pack-abc.pack").is_none());
@@ -546,7 +566,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            parse_mutable_repo_path(&format!(".crab/xorbs/{hash}")),
+            parse_mutable_repo_path(&format!(".crab/xorbs/{}/{hash}", &hash[..2])),
             None,
         );
     }
@@ -597,7 +617,7 @@ mod tests {
     fn canonical_crab_xorb_path_is_immutable() {
         let hash = hex_hash('a');
         assert_eq!(
-            classify_path(&format!("/v1/.crab/xorbs/{hash}")),
+            classify_path(&format!("/v1/.crab/xorbs/{}/{hash}", &hash[..2])),
             PathClass::Immutable,
         );
     }
@@ -606,7 +626,7 @@ mod tests {
     fn canonical_crab_shard_path_is_immutable() {
         let hash = hex_hash('b');
         assert_eq!(
-            classify_path(&format!("/v1/.crab/shards/{hash}")),
+            classify_path(&format!("/v1/.crab/shards/{}/{hash}", &hash[..2])),
             PathClass::Immutable,
         );
     }
@@ -616,11 +636,17 @@ mod tests {
         let xorb_hash = hex_hash('c');
         let shard_hash = hex_hash('d');
         assert_eq!(
-            classify_path(&format!("/v1/bucket/.crab/xorbs/{xorb_hash}")),
+            classify_path(&format!(
+                "/v1/bucket/.crab/xorbs/{}/{xorb_hash}",
+                &xorb_hash[..2]
+            )),
             PathClass::Mutable,
         );
         assert_eq!(
-            classify_path(&format!("/v1/bucket/.crab/shards/{shard_hash}")),
+            classify_path(&format!(
+                "/v1/bucket/.crab/shards/{}/{shard_hash}",
+                &shard_hash[..2]
+            )),
             PathClass::Mutable,
         );
     }
@@ -632,6 +658,15 @@ mod tests {
             PathClass::Mutable,
         );
         assert_eq!(classify_path("/v1/.crab/shards/abc123"), PathClass::Mutable,);
+        let hash = hex_hash('a');
+        assert_eq!(
+            classify_path(&format!("/v1/.crab/xorbs/{hash}")),
+            PathClass::Mutable,
+        );
+        assert_eq!(
+            classify_path(&format!("/v1/.crab/xorbs/ff/{hash}")),
+            PathClass::Mutable,
+        );
     }
 
     #[test]
@@ -709,11 +744,11 @@ mod tests {
         let xorb_hash = hex_hash('e');
         let shard_hash = hex_hash('f');
         assert_eq!(
-            classify_path(&format!(".crab/xorbs/{xorb_hash}")),
+            classify_path(&format!(".crab/xorbs/{}/{xorb_hash}", &xorb_hash[..2])),
             PathClass::Immutable,
         );
         assert_eq!(
-            classify_path(&format!(".crab/shards/{shard_hash}")),
+            classify_path(&format!(".crab/shards/{}/{shard_hash}", &shard_hash[..2])),
             PathClass::Immutable,
         );
     }

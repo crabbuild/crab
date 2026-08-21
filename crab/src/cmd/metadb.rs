@@ -2730,10 +2730,12 @@ mod tests {
         // Seed two distinct shards at their content-addressed keys.
         let (shard_a_bytes, shard_a_hash, xorb_a_bytes, xorb_a_hash) = build_test_shard(7);
         let (shard_b_bytes, shard_b_hash, xorb_b_bytes, xorb_b_hash) = build_test_shard(77);
-        let shard_a_path = ObjectPath::from(format!(".crab/shards/{}", shard_a_hash.hex()));
-        let shard_b_path = ObjectPath::from(format!(".crab/shards/{}", shard_b_hash.hex()));
-        let xorb_a_path = ObjectPath::from(format!(".crab/xorbs/{}", xorb_a_hash.hex()));
-        let xorb_b_path = ObjectPath::from(format!(".crab/xorbs/{}", xorb_b_hash.hex()));
+        let shard_a_path =
+            crab_storage::canonical_global_content_path("shards", &shard_a_hash.hex());
+        let shard_b_path =
+            crab_storage::canonical_global_content_path("shards", &shard_b_hash.hex());
+        let xorb_a_path = crab_storage::canonical_global_content_path("xorbs", &xorb_a_hash.hex());
+        let xorb_b_path = crab_storage::canonical_global_content_path("xorbs", &xorb_b_hash.hex());
         store
             .put(&shard_a_path, shard_a_bytes.clone().into())
             .await
@@ -2873,8 +2875,8 @@ mod tests {
     async fn rebuild_is_idempotent_across_reruns() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (shard_bytes, shard_hash, xorb_bytes, xorb_hash) = build_test_shard(5);
-        let shard_path = ObjectPath::from(format!(".crab/shards/{}", shard_hash.hex()));
-        let xorb_path = ObjectPath::from(format!(".crab/xorbs/{}", xorb_hash.hex()));
+        let shard_path = crab_storage::canonical_global_content_path("shards", &shard_hash.hex());
+        let xorb_path = crab_storage::canonical_global_content_path("xorbs", &xorb_hash.hex());
         store
             .put(&shard_path, shard_bytes.clone().into())
             .await

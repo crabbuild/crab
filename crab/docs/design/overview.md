@@ -374,7 +374,7 @@ to missing data).
 - Push locks (short-TTL leases in S3) serialize concurrent pushes with
   overlapping destination refs. A full ref maps to `locks/{full_ref}/lock`, so
   `refs/heads/main` maps to `locks/refs/heads/main/lock`. See
-  [Object Storage Layout V1](../architecture/object-storage-layout.md#lock-namespaces)
+  [Object Storage Layout V2](../architecture/object-storage-layout.md#lock-namespaces)
   for the normative key and hard-cutover rules.
 - Manifest updates (pack-list, shard-list) use compare-and-swap (CAS) loops:
   read current value + ETag → mutate → conditional PUT with `If-Match`. On

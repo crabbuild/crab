@@ -22,14 +22,18 @@ use std::time::{Duration, SystemTime};
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::coordination::cas::cas_update_default;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_metadata::ref_registry::RefRegistry;
+use crab_storage::{
+    StoreLayout, canonical_global_content_path, content_hash_from_path,
+    global_content_partition_prefix, global_content_prefix,
+};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 
@@ -57,6 +61,8 @@ pub struct BucketGcOutcome {
     pub xorbs_deleted: u64,
     pub file_index_deleted: u64,
     pub bytes_reclaimed: u64,
+    pub list_requests: u64,
+    pub list_parallelism: usize,
     pub dry_run: bool,
 }
 
@@ -68,6 +74,8 @@ impl BucketGcOutcome {
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
                 bytes = self.bytes_reclaimed,
+                list_requests = self.list_requests,
+                list_parallelism = self.list_parallelism,
                 "bucket gc dry-run complete (no objects deleted)"
             );
         } else {
@@ -76,6 +84,8 @@ impl BucketGcOutcome {
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
                 bytes = self.bytes_reclaimed,
+                list_requests = self.list_requests,
+                list_parallelism = self.list_parallelism,
                 "bucket gc complete"
             );
         }
@@ -170,11 +180,29 @@ async fn run_bucket_gc_under_maintenance(
     let now = SystemTime::now();
     let cutoff = now - effective_grace;
 
-    let (repo_shards, shard_objects, xorb_objects) = tokio::try_join!(
+    let global_list_permits = Arc::new(Semaphore::new(args.list_concurrency.max(1)));
+    let (repo_shards, shard_listing, xorb_listing) = tokio::try_join!(
         repository_referenced_shards(store, registry, args.list_concurrency),
-        list_global_objects(store, "shards"),
-        list_global_objects(store, "xorbs"),
+        list_global_objects(
+            store,
+            "shards",
+            args.list_concurrency,
+            Arc::clone(&global_list_permits),
+        ),
+        list_global_objects(
+            store,
+            "xorbs",
+            args.list_concurrency,
+            Arc::clone(&global_list_permits),
+        ),
     )?;
+    outcome.list_requests = shard_listing.requests + xorb_listing.requests;
+    outcome.list_parallelism = args
+        .list_concurrency
+        .max(1)
+        .min(shard_listing.parallelism + xorb_listing.parallelism);
+    let shard_objects = shard_listing.objects;
+    let xorb_objects = xorb_listing.objects;
     let referenced_shards = repo_shards
         .values()
         .flat_map(|shards| shards.iter().cloned())
@@ -198,7 +226,7 @@ async fn run_bucket_gc_under_maintenance(
     missing_referenced_shards.sort();
     if let Some(missing) = missing_referenced_shards.first() {
         return Err(CrabError::CorruptObject {
-            path: format!("{GLOBAL_PREFIX}/shards/{missing}"),
+            path: canonical_global_content_path("shards", &missing).to_string(),
             reason: format!(
                 "ref-registry references {} missing shard object(s)",
                 missing_referenced_shards.len()
@@ -465,27 +493,111 @@ fn partition_xorbs_for_gc(
     }
 }
 
-/// List all objects under `.crab/{kind}/`.
-async fn list_global_objects(store: &Store, kind: &str) -> Result<Vec<ListedObject>> {
-    let prefix = ObjectPath::from(format!("{GLOBAL_PREFIX}/{kind}/"));
-    let objects = store
+struct GlobalListOutcome {
+    objects: Vec<ListedObject>,
+    requests: u64,
+    parallelism: usize,
+}
+
+/// Discover populated hash partitions, then scan them with bounded concurrency.
+async fn list_global_objects(
+    store: &Store,
+    kind: &str,
+    concurrency: usize,
+    permits: Arc<Semaphore>,
+) -> Result<GlobalListOutcome> {
+    let prefix = global_content_prefix(GLOBAL_PREFIX, kind);
+    let discovery_permit = permits
+        .acquire()
+        .await
+        .map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?;
+    let discovery = store
         .inner()
-        .list(Some(&prefix))
-        .try_collect::<Vec<_>>()
+        .list_with_delimiter(Some(&prefix))
         .await
         .map_err(CrabError::Storage)?;
+    drop(discovery_permit);
+    if let Some(object) = discovery.objects.first() {
+        return Err(CrabError::CorruptObject {
+            path: object.location.to_string(),
+            reason: format!("global {kind} object is outside the required two-hex hash partition"),
+        });
+    }
 
-    Ok(objects
+    let mut partitions = discovery
+        .common_prefixes
         .into_iter()
+        .map(|partition| {
+            let value = partition
+                .as_ref()
+                .strip_prefix(prefix.as_ref())
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                .unwrap_or_default();
+            if value.len() != 2
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err(CrabError::CorruptObject {
+                    path: partition.to_string(),
+                    reason: format!(
+                        "global {kind} partition must be exactly two lowercase hex characters"
+                    ),
+                });
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    partitions.sort_unstable();
+    partitions.dedup();
+
+    let parallelism = concurrency.max(1).min(partitions.len().max(1));
+    let batches = futures_util::stream::iter(partitions.iter().map(|partition| {
+        let partition_prefix = global_content_partition_prefix(GLOBAL_PREFIX, kind, partition);
+        let permits = Arc::clone(&permits);
+        async move {
+            let _permit = permits
+                .acquire()
+                .await
+                .map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?;
+            store
+                .inner()
+                .list(Some(&partition_prefix))
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(CrabError::Storage)
+        }
+    }))
+    .buffer_unordered(concurrency.max(1))
+    .try_collect::<Vec<_>>()
+    .await?;
+    let objects = batches
+        .into_iter()
+        .flatten()
         .map(|meta| ListedObject {
             location: meta.location.to_string(),
             size: meta.size,
             last_modified: meta.last_modified.into(),
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if let Some(object) = objects
+        .iter()
+        .find(|object| content_hash_from_path(&object.location, kind).is_none())
+    {
+        return Err(CrabError::CorruptObject {
+            path: object.location.clone(),
+            reason: format!("global {kind} object does not match its hash partition"),
+        });
+    }
+
+    Ok(GlobalListOutcome {
+        objects,
+        requests: 1 + partitions.len() as u64,
+        parallelism,
+    })
 }
 
-/// Extract the hash portion from a key like `.crab/shards/{hash}`.
+/// Extract the hash portion from a canonical global content key.
 fn extract_hash_from_key(key: &str) -> String {
     key.rsplit('/').next().unwrap_or("").to_string()
 }
@@ -797,9 +909,68 @@ mod tests {
 
     #[test]
     fn extract_hash_from_key_works() {
-        assert_eq!(extract_hash_from_key(".crab/shards/abc123"), "abc123");
-        assert_eq!(extract_hash_from_key(".crab/xorbs/def456"), "def456");
+        assert_eq!(
+            extract_hash_from_key(&format!(".crab/shards/ab/{}", "ab".repeat(32))),
+            "ab".repeat(32)
+        );
+        assert_eq!(
+            extract_hash_from_key(&format!(".crab/xorbs/de/{}", "de".repeat(32))),
+            "de".repeat(32)
+        );
         assert_eq!(extract_hash_from_key(""), "");
+    }
+
+    #[tokio::test]
+    async fn global_listing_scans_only_populated_hash_partitions() {
+        let store = memory_store();
+        let hashes = [
+            "aa".repeat(32),
+            "ff".repeat(32),
+            format!("aa{}", "1".repeat(62)),
+        ];
+        for hash in &hashes {
+            store
+                .put(
+                    &crab_storage::canonical_global_content_path("xorbs", hash),
+                    Bytes::from(hash.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut outcome = list_global_objects(&store, "xorbs", 8, Arc::new(Semaphore::new(8)))
+            .await
+            .unwrap();
+        outcome
+            .objects
+            .sort_by(|left, right| left.location.cmp(&right.location));
+
+        assert_eq!(outcome.objects.len(), 3);
+        assert_eq!(outcome.requests, 3);
+        assert_eq!(outcome.parallelism, 2);
+        assert!(
+            outcome
+                .objects
+                .iter()
+                .all(|object| { content_hash_from_path(&object.location, "xorbs").is_some() })
+        );
+    }
+
+    #[tokio::test]
+    async fn global_listing_rejects_flat_legacy_objects() {
+        let store = memory_store();
+        let hash = "ab".repeat(32);
+        store
+            .put(
+                &ObjectPath::from(format!(".crab/xorbs/{hash}")),
+                Bytes::from_static(b"legacy"),
+            )
+            .await
+            .unwrap();
+
+        let result = list_global_objects(&store, "xorbs", 8, Arc::new(Semaphore::new(8))).await;
+
+        assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
     }
 
     #[test]
@@ -1047,7 +1218,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let xorb_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/xorbs/{}", "a".repeat(64)));
+        let xorb_path = canonical_global_content_path("xorbs", &"a".repeat(64));
         store
             .put(&xorb_path, Bytes::from_static(b"recent orphan"))
             .await
@@ -1087,7 +1258,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let xorb_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/xorbs/{}", "b".repeat(64)));
+        let xorb_path = canonical_global_content_path("xorbs", &"b".repeat(64));
         let xorb = Bytes::from_static(b"recent orphan");
         store.put(&xorb_path, xorb.clone()).await.unwrap();
 
@@ -1261,7 +1432,7 @@ mod tests {
         let shard_hash = crab_xet::hash::compute_data_hash(&corrupt_shard).hex();
         store
             .put(
-                &ObjectPath::from(format!("{GLOBAL_PREFIX}/shards/{shard_hash}")),
+                &canonical_global_content_path("shards", &shard_hash),
                 corrupt_shard,
             )
             .await

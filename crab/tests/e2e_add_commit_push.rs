@@ -168,13 +168,19 @@ async fn push_main_to_memory(repo: &Path, scratch: &Path) -> (Store, StoreLayout
     assert!(!manifest.shard_index_hash.is_empty());
 
     let xorbs = store
-        .list_prefix(&router.global_path("xorbs", ""))
+        .list_prefix(&crab_storage::global_content_prefix(
+            router.global_prefix(),
+            "xorbs",
+        ))
         .await
         .expect("list xorbs");
     assert!(!xorbs.is_empty(), "push should upload at least one xorb");
 
     let shards = store
-        .list_prefix(&router.global_path("shards", ""))
+        .list_prefix(&crab_storage::global_content_prefix(
+            router.global_prefix(),
+            "shards",
+        ))
         .await
         .expect("list shards");
     assert!(!shards.is_empty(), "push should upload at least one shard");

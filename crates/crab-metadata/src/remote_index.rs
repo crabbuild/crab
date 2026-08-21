@@ -499,7 +499,8 @@ mod tests {
             uncompressed_size: xorb_ref.uncompressed_size,
             origin: crate::receipts::OriginReceipt::new(
                 "canonical-origin".to_owned(),
-                format!(".crab/xorbs/{}", xorb_ref.xorb_hash.hex()),
+                crab_storage::canonical_global_content_path("xorbs", &xorb_ref.xorb_hash.hex())
+                    .to_string(),
                 xorb_ref.xorb_hash.into(),
                 [9; 32],
                 32,

@@ -1857,6 +1857,10 @@ mod tests {
         (xorb.bytes, xorb.hash.hex())
     }
 
+    fn content_path(kind: &str, hash: &str) -> Path {
+        Path::from(format!(".crab/{kind}/{}/{hash}", &hash[..2]))
+    }
+
     fn test_raw_xorb(payloads: &[Bytes]) -> (Bytes, MerkleHash) {
         let policy: Arc<dyn CompressionPolicy> =
             Arc::new(FixedCompression::new(CompressionScheme::None));
@@ -2193,7 +2197,7 @@ mod tests {
     async fn get_with_etag_uses_cache_service_and_reuses_server_cache() {
         let server = start_test_cache_server().await;
         let (body, hash_hex) = test_xorb(b"crab-side cache service read path");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = Path::from(format!(".crab/xorbs/{}/{hash_hex}", &hash_hex[..2]));
         server
             .origin
             .put(&path, PutPayload::from_bytes(body.clone()))
@@ -2231,7 +2235,7 @@ mod tests {
     async fn head_cache_service_object_reports_warm_hit_without_origin_get() {
         let server = start_test_cache_server().await;
         let (body, hash_hex) = test_xorb(b"crab-side cache service head path");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = content_path("xorbs", &hash_hex);
         server
             .origin
             .put(&path, PutPayload::from_bytes(body.clone()))
@@ -2272,7 +2276,7 @@ mod tests {
     async fn object_store_head_uses_cache_service_head_without_origin_get() {
         let server = start_test_cache_server().await;
         let (body, hash_hex) = test_xorb(b"object-store head should not fetch body");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = content_path("xorbs", &hash_hex);
         server
             .origin
             .put(&path, PutPayload::from_bytes(body.clone()))
@@ -2388,7 +2392,7 @@ mod tests {
         assert_eq!(server.origin_get_count.load(Ordering::Relaxed), 0);
 
         let (immutable_body, hash_hex) = test_xorb(b"immutable route contract body");
-        let immutable_path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let immutable_path = content_path("xorbs", &hash_hex);
         server
             .origin
             .put(
@@ -2485,7 +2489,7 @@ mod tests {
         };
 
         let (body, hash_hex) = test_xorb(b"object-store suffix range should use head plus range");
-        let path = format!(".crab/xorbs/{hash_hex}");
+        let path = content_path("xorbs", &hash_hex).to_string();
         let object_path = Path::from(path.clone());
         let body = Arc::new(body);
         let head_count = Arc::new(AtomicUsize::new(0));
@@ -2661,7 +2665,7 @@ mod tests {
         };
 
         let (body, hash_hex) = test_xorb(b"object-store bounded range clamps past eof");
-        let path = format!(".crab/xorbs/{hash_hex}");
+        let path = content_path("xorbs", &hash_hex).to_string();
         let object_path = Path::from(path.clone());
         let body = Arc::new(body);
         let head_count = Arc::new(AtomicUsize::new(0));
@@ -2833,7 +2837,7 @@ mod tests {
         let server = start_malformed_object_server(b"bad shard body").await;
         let good_body = Bytes::from_static(b"correct shard body");
         let hash = crab_xet::hash::compute_data_hash(&good_body);
-        let path = Path::from(format!(".crab/shards/{}", hash.hex()));
+        let path = content_path("shards", &hash.hex());
         let origin = origin_store();
         origin.put(&path, good_body.clone()).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -2863,7 +2867,7 @@ mod tests {
         let server = start_malformed_object_server(b"bad xorb body").await;
         let (good_body, hash_hex) = test_xorb(b"correct xorb body");
         let hash = MerkleHash::from_hex(&hash_hex).unwrap();
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = content_path("xorbs", &hash_hex);
         let origin = origin_store();
         origin.put(&path, good_body.clone()).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -2892,7 +2896,7 @@ mod tests {
     async fn range_get_uses_cache_service_when_server_cache_is_warm() {
         let server = start_test_cache_server().await;
         let (body, hash_hex) = test_xorb(b"0123456789abcdefghijklmnopqrstuvwxyz");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = content_path("xorbs", &hash_hex);
         server
             .origin
             .put(&path, PutPayload::from_bytes(body.clone()))
@@ -2930,7 +2934,7 @@ mod tests {
     async fn cold_range_get_uses_cache_service_instead_of_client_origin() {
         let server = start_test_cache_server().await;
         let (body, hash_hex) = test_xorb(b"cache server owns cold range origin fetches");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = content_path("xorbs", &hash_hex);
         server
             .origin
             .put(&path, PutPayload::from_bytes(body.clone()))
@@ -3051,7 +3055,7 @@ mod tests {
             Bytes::from(vec![0x44; 32 * 1024]),
         ];
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let origin = origin_store();
         origin.put(&path, xorb).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -3088,7 +3092,7 @@ mod tests {
             .chunk_meta(0)
             .unwrap()
             .hash;
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let origin = origin_store();
         origin.put(&path, xorb).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -3130,7 +3134,7 @@ mod tests {
             .flat_map(|payload| payload.iter().copied())
             .collect::<Vec<_>>();
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let inner = Arc::new(InMemory::new());
         inner
             .put(&path, PutPayload::from_bytes(xorb))
@@ -3170,7 +3174,7 @@ mod tests {
         let (xorb, hash) = test_raw_xorb(&payloads);
         let mut corrupt = xorb.to_vec();
         corrupt[0] ^= 0xff;
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let origin = origin_store();
         origin.put(&path, Bytes::from(corrupt)).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -3202,7 +3206,7 @@ mod tests {
             Bytes::from(vec![0x44; 32 * 1024]),
         ];
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let inner = Arc::new(InMemory::new());
         inner
             .put(&path, PutPayload::from_bytes(xorb))
@@ -3246,7 +3250,7 @@ mod tests {
             .flat_map(|payload| payload.iter().copied())
             .collect::<Vec<_>>();
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let path = Path::from(format!(".crab/xorbs/{}", hash.hex()));
+        let path = content_path("xorbs", &hash.hex());
         let origin = origin_store();
         origin.put(&path, xorb).await.unwrap();
         let tempdir = tempfile::tempdir().unwrap();
@@ -3293,7 +3297,7 @@ mod tests {
         let origin_probe = origin.clone();
         let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
         let (_good_body, hash_hex) = test_xorb(b"expected xorb body");
-        let path = Path::from(format!(".crab/xorbs/{hash_hex}"));
+        let path = Path::from(format!(".crab/xorbs/{}/{hash_hex}", &hash_hex[..2]));
 
         let err = cs
             .put(&path, Bytes::from_static(b"not a serialized xorb"))
@@ -3506,7 +3510,7 @@ mod tests {
         };
         let mut cs = CachingStore::new(origin_store(), &config).unwrap();
         cs.max_push_warming_object_bytes = Some(4);
-        let path = Path::from(format!(".crab/xorbs/{}", MerkleHash::from([1u8; 32]).hex()));
+        let path = content_path("xorbs", &MerkleHash::from([1u8; 32]).hex());
 
         cs.warm_remote_only(&path, Bytes::from_static(b"12345"))
             .await

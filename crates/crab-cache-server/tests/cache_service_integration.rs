@@ -630,13 +630,13 @@ fn build_real_shard() -> RealShardFixture {
 }
 
 async fn put_real_shard_fixture(client: &CacheClient, fixture: &RealShardFixture) {
-    let xorb_path = format!(".crab/xorbs/{}", fixture.xorb_hash_hex);
+    let xorb_path = global_path("xorbs", &fixture.xorb_hash_hex);
     client
         .put(&xorb_path, fixture.xorb_bytes.clone())
         .await
         .unwrap();
 
-    let shard_path = format!(".crab/shards/{}", fixture.shard_hash_hex);
+    let shard_path = global_path("shards", &fixture.shard_hash_hex);
     client
         .put(&shard_path, fixture.shard_bytes.clone())
         .await
@@ -645,6 +645,10 @@ async fn put_real_shard_fixture(client: &CacheClient, fixture: &RealShardFixture
 
 fn hex_bytes(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn global_path(kind: &str, hash: &str) -> String {
+    format!(".crab/{kind}/{}/{hash}", &hash[..2])
 }
 
 fn pack_storage_hex(name: &str) -> String {
@@ -950,7 +954,7 @@ async fn test_cache_miss_fetches_and_caches() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"hello cache world"));
 
     // Pre-populate the origin store with the object at the expected path.
-    let origin_path = format!(".crab/xorbs/{hash_hex}");
+    let origin_path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -960,7 +964,7 @@ async fn test_cache_miss_fetches_and_caches() {
         .await
         .unwrap();
 
-    let cache_path = format!(".crab/xorbs/{hash_hex}");
+    let cache_path = global_path("xorbs", &hash_hex);
     let url = format!("http://{}/v1/{cache_path}", server.addr);
     let http = reqwest::Client::new();
 
@@ -1189,7 +1193,7 @@ async fn test_push_warming_populates_cache() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"push-warmed content"));
 
     // PUT via cache client (push warming).
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
     client.put(&path, data.clone()).await.unwrap();
 
     // GET should return the cached data without needing origin.
@@ -1218,7 +1222,7 @@ async fn test_push_warming_accepts_multimegabyte_xorb() {
             .collect::<Vec<_>>(),
     );
     let (data, hash_hex) = build_test_xorb(chunk);
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
 
     client.put(&path, data.clone()).await.unwrap();
 
@@ -1281,7 +1285,7 @@ async fn test_dedup_query_requires_cached_xorb_proof() {
 
     let fixture = build_real_shard();
 
-    let shard_path = format!(".crab/shards/{}", fixture.shard_hash_hex);
+    let shard_path = global_path("shards", &fixture.shard_hash_hex);
     client
         .put(&shard_path, fixture.shard_bytes.clone())
         .await
@@ -1305,8 +1309,8 @@ async fn test_dedup_query_after_shard_and_xorb_ingestion() {
 
     let fixture = build_real_shard();
     put_real_shard_fixture(&client, &fixture).await;
-    let xorb_path = format!(".crab/xorbs/{}", fixture.xorb_hash_hex);
-    let shard_path = format!(".crab/shards/{}", fixture.shard_hash_hex);
+    let xorb_path = global_path("xorbs", &fixture.xorb_hash_hex);
+    let shard_path = global_path("shards", &fixture.shard_hash_hex);
 
     let cached_xorb = client.get(&xorb_path).await.unwrap();
     assert_eq!(cached_xorb, fixture.xorb_bytes);
@@ -1454,7 +1458,7 @@ async fn test_bad_shard_push_warming_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let shard_path = format!(".crab/shards/{wrong_hash}");
+    let shard_path = global_path("shards", &wrong_hash);
 
     let err = client
         .put(&shard_path, fixture.shard_bytes.clone())
@@ -1480,7 +1484,7 @@ async fn test_bad_xorb_push_warming_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let xorb_path = format!(".crab/xorbs/{wrong_hash}");
+    let xorb_path = global_path("xorbs", &wrong_hash);
 
     let err = client
         .put(&xorb_path, fixture.xorb_bytes.clone())
@@ -1500,7 +1504,7 @@ async fn test_corrupt_xorb_payload_push_warming_rejects() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"payload must reconstruct"));
     let mut corrupt = data.to_vec();
     corrupt[0] ^= 0xFF;
-    let xorb_path = format!(".crab/xorbs/{hash_hex}");
+    let xorb_path = global_path("xorbs", &hash_hex);
 
     let err = client
         .put(&xorb_path, Bytes::from(corrupt))
@@ -1519,7 +1523,7 @@ async fn test_bad_origin_shard_read_miss_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let shard_path = format!(".crab/shards/{wrong_hash}");
+    let shard_path = global_path("shards", &wrong_hash);
     server
         .origin
         .put(
@@ -1551,7 +1555,7 @@ async fn test_corrupt_cached_shard_hit_refetches_from_origin() {
     let (server, origin_get_count) = start_test_server_with_counting_origin().await;
 
     let fixture = build_real_shard();
-    let shard_path = format!(".crab/shards/{}", fixture.shard_hash_hex);
+    let shard_path = global_path("shards", &fixture.shard_hash_hex);
     server
         .origin
         .put(
@@ -1607,7 +1611,7 @@ async fn test_bad_origin_xorb_read_miss_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let xorb_path = format!(".crab/xorbs/{wrong_hash}");
+    let xorb_path = global_path("xorbs", &wrong_hash);
     server
         .origin
         .put(
@@ -1635,7 +1639,7 @@ async fn test_corrupt_origin_xorb_payload_read_miss_rejects() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"origin payload must reconstruct"));
     let mut corrupt = data.to_vec();
     corrupt[0] ^= 0xFF;
-    let xorb_path = format!(".crab/xorbs/{hash_hex}");
+    let xorb_path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -1661,7 +1665,7 @@ async fn test_duplicate_shard_put_keeps_admin_stats_idempotent() {
     let client = test_client(server.addr);
 
     let fixture = build_real_shard();
-    let shard_path = format!(".crab/shards/{}", fixture.shard_hash_hex);
+    let shard_path = global_path("shards", &fixture.shard_hash_hex);
 
     client
         .put(&shard_path, fixture.shard_bytes.clone())
@@ -1843,7 +1847,7 @@ async fn test_range_get_returns_correct_slice() {
         build_test_xorb(Bytes::from_static(b"0123456789abcdefghijklmnopqrstuvwxyz"));
 
     // Pre-populate origin.
-    let origin_path = format!(".crab/xorbs/{hash_hex}");
+    let origin_path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -1854,7 +1858,7 @@ async fn test_range_get_returns_correct_slice() {
         .unwrap();
 
     // Full GET to populate the cache.
-    let cache_path = format!(".crab/xorbs/{hash_hex}");
+    let cache_path = global_path("xorbs", &hash_hex);
     let full = client.get(&cache_path).await.unwrap();
     assert_eq!(full, data);
 
@@ -1893,7 +1897,7 @@ async fn test_cold_range_get_fetches_full_object_and_caches() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(
         b"cold range requests should be cached by the service",
     ));
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -1960,7 +1964,7 @@ async fn test_cached_unsatisfiable_range_does_not_refetch_origin() {
 
     let (data, hash_hex) =
         build_test_xorb(Bytes::from_static(b"cached range miss should stay local"));
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -2027,7 +2031,7 @@ async fn test_concurrent_cold_misses_coalesce_origin_fetch() {
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(
         b"concurrent cache miss should fetch origin once",
     ));
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
     server
         .origin
         .put(
@@ -2126,7 +2130,7 @@ async fn test_metrics_returns_prometheus_format() {
 
     // Generate some traffic so metrics have data.
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"metrics-test-data"));
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
     client.put(&path, data).await.unwrap();
 
     // GET /v1/metrics (unauthenticated endpoint).
@@ -2239,7 +2243,7 @@ async fn test_eviction_triggers_on_budget_exceeded() {
     for i in 0..object_count {
         let chunk = deterministic_bytes(i as u64 + 1, object_size);
         let (data, hash_hex) = build_test_xorb(chunk);
-        let path = format!(".crab/xorbs/{hash_hex}");
+        let path = global_path("xorbs", &hash_hex);
         client.put(&path, data.clone()).await.unwrap();
         objects.push((path, data.len() as u64));
     }
@@ -2292,7 +2296,7 @@ async fn test_remaining_objects_readable_after_eviction() {
     for i in 0..object_count {
         let chunk = deterministic_bytes(i as u64 + 1, object_size);
         let (data, hash_hex) = build_test_xorb(chunk);
-        let path = format!(".crab/xorbs/{hash_hex}");
+        let path = global_path("xorbs", &hash_hex);
         client.put(&path, data.clone()).await.unwrap();
         objects.push((path, data));
     }
@@ -2445,7 +2449,11 @@ async fn test_origin_unreachable_cache_miss_returns_504() {
     // GET an object that isn't in cache — the server must fetch from origin,
     // which will fail with a connection error → 504 Gateway Timeout.
     let hash_hex = "a".repeat(64);
-    let url = format!("http://{}/v1/.crab/xorbs/{hash_hex}", server.addr);
+    let url = format!(
+        "http://{}/v1/{}",
+        server.addr,
+        global_path("xorbs", &hash_hex)
+    );
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)
@@ -2470,7 +2478,7 @@ async fn test_origin_unreachable_cache_hit_serves_normally() {
 
     // Pre-warm the cache via PUT — this bypasses origin entirely.
     let (data, hash_hex) = build_test_xorb(Bytes::from_static(b"cached-despite-origin-down"));
-    let path = format!(".crab/xorbs/{hash_hex}");
+    let path = global_path("xorbs", &hash_hex);
 
     client.put(&path, data.clone()).await.unwrap();
 
@@ -2502,7 +2510,7 @@ async fn test_origin_object_identity_path_serves_non_blake3_body_hash() {
     );
 
     // Store bytes in the origin at the path keyed by the xorb aggregate ID.
-    let origin_path = format!(".crab/xorbs/{xorb_hash_hex}");
+    let origin_path = global_path("xorbs", &xorb_hash_hex);
     server
         .origin
         .put(
@@ -2513,7 +2521,11 @@ async fn test_origin_object_identity_path_serves_non_blake3_body_hash() {
         .unwrap();
 
     // GET via cache — the server validates the xorb aggregate ID, not blake3(body).
-    let url = format!("http://{}/v1/.crab/xorbs/{xorb_hash_hex}", server.addr);
+    let url = format!(
+        "http://{}/v1/{}",
+        server.addr,
+        global_path("xorbs", &xorb_hash_hex)
+    );
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)

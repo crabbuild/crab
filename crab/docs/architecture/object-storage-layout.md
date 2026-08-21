@@ -1,4 +1,4 @@
-# Object Storage Layout V1
+# Object Storage Layout V2
 
 This document is the normative, provider-neutral contract for Crab object
 keys. It covers the core bucket-global and repository-local namespaces used by
@@ -32,8 +32,8 @@ global_prefix = org/models/acl-views/v1/<scope>/<version>/.crab
 ```
 
 The bucket or container name is not part of either prefix. Given bucket
-`team-data` and key `.crab/xorbs/abc`, provider adapters address the same key
-as `s3://team-data/.crab/xorbs/abc`, `gs://team-data/.crab/xorbs/abc`, or the
+`team-data` and key `.crab/xorbs/ab/{hash}`, provider adapters address the same key
+as `s3://team-data/.crab/xorbs/ab/{hash}`, `gs://team-data/.crab/xorbs/ab/{hash}`, or the
 equivalent Azure container object.
 
 ## Key grammar
@@ -70,12 +70,14 @@ Paths are relative to `global_prefix`.
 
 | Relative key | Owner and responsibility | Mutability |
 | --- | --- | --- |
-| `xorbs/{blake3}` | `crab-xet`: encoded chunk aggregates shared in the scope | Immutable, idempotent create |
-| `shards/{blake3}` | `crab-xet`: reconstruction metadata shared in the scope | Immutable, idempotent create |
+| `xorbs/{first-two-hex}/{blake3}` | `crab-xet`: encoded chunk aggregates shared in the scope | Immutable, idempotent create |
+| `shards/{first-two-hex}/{blake3}` | `crab-xet`: reconstruction metadata shared in the scope | Immutable, idempotent create |
 | `chunk_index_db/` | `crab-metadata`: scope-wide chunk-to-xorb SlateDB | Opaque; SlateDB owns children |
 | `ref-registry` | `crab-metadata`: repository reachability and GC roots | Mutable JSON, CAS |
 
-Xorbs and shards have no hash fan-out and no filename extension. Code outside
+Xorbs and shards use the first two lowercase hash characters as one fan-out
+segment and have no filename extension. This gives GC 256 independent,
+discoverable partitions without provider-specific range semantics. Code outside
 the metadata owner MUST NOT construct SlateDB child keys under
 `chunk_index_db/`.
 
@@ -84,13 +86,21 @@ For direct repositories, the physical tree is:
 ```text
 s3://{bucket}/
 ├── .crab/
-│   ├── xorbs/{blake3}
-│   ├── shards/{blake3}
+│   ├── xorbs/{first-two-hex}/{blake3}
+│   ├── shards/{first-two-hex}/{blake3}
 │   ├── chunk_index_db/...
 │   └── ref-registry
 ├── {repo-a}/...
 └── {repo-b}/...
 ```
+
+### V2 hard cutover
+
+V2 readers and writers accept only the fan-out xorb and shard keys above.
+Flat V1 keys such as `.crab/xorbs/{hash}` and `.crab/shards/{hash}` are not
+read, rewritten, or collected. Operators must stop V1 writers and re-upload
+repositories with a V2 client; there is no dual-read or in-place migration
+path.
 
 ## Repository-local core
 
@@ -185,14 +195,14 @@ Implementations in every language must produce these exact UTF-8 strings:
 | Input | Result |
 | --- | --- |
 | `repo_prefix=org/models`, manifest | `org/models/manifest` |
-| `global_prefix=.crab`, xorb hash `a` × 64 | `.crab/xorbs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
-| `global_prefix=.crab`, shard hash `b` × 64 | `.crab/shards/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` |
+| `global_prefix=.crab`, xorb hash `a` × 64 | `.crab/xorbs/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
+| `global_prefix=.crab`, shard hash `b` × 64 | `.crab/shards/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` |
 | `repo_prefix=org/models`, ref `refs/heads/main` | `org/models/locks/refs/heads/main/lock` |
 | `repo_prefix=org/models`, internal `git-object-locator` | `org/models/locks/internal/git-object-locator/lock` |
 | `repo_prefix=org/models`, pack ID `b` × 64 | `org/models/packs/pack-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pack` |
 | LFS SHA-256 beginning `a1b2` | `org/models/lfs/objects/a1/b2/{full-sha256}` |
 | scoped `repo_prefix=org/models/acl-views/v1/scope/7-deadbeef`, manifest | `org/models/acl-views/v1/scope/7-deadbeef/manifest` |
-| scoped `global_prefix=org/models/acl-views/v1/scope/7-deadbeef/.crab`, xorb hash `a` × 64 | `org/models/acl-views/v1/scope/7-deadbeef/.crab/xorbs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
+| scoped `global_prefix=org/models/acl-views/v1/scope/7-deadbeef/.crab`, xorb hash `a` × 64 | `org/models/acl-views/v1/scope/7-deadbeef/.crab/xorbs/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
 
 For any other scoped placement, replace only the applicable root. Relative
 keys do not change.
