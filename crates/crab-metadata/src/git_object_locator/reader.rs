@@ -53,8 +53,12 @@ pub struct GitObjectLocatorSession {
 
 impl GitObjectLocatorSession {
     /// Open the compact locator, treating an absent database as an empty index.
+    ///
+    /// A published locator checkpoint is opened explicitly so a read-only
+    /// session does not create or refresh durable reader state. A legacy
+    /// database with no checkpoint uses SlateDB's compatibility path.
     pub async fn open(store: Arc<dyn ObjectStore>, repo_prefix: &str) -> Result<Self> {
-        Self::open_with_options(store, repo_prefix, locator_reader_options()).await
+        Self::open_with_published_checkpoint(store, repo_prefix, locator_reader_options()).await
     }
 
     /// Open a locator whose SlateDB checkpoint cannot refresh before `minimum`.
@@ -80,11 +84,20 @@ impl GitObjectLocatorSession {
             checkpoint_lifetime,
             ..locator_reader_options()
         };
+        Self::open_with_published_checkpoint(store, repo_prefix, options).await
+    }
+
+    async fn open_with_published_checkpoint(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+        options: DbReaderOptions,
+    ) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
         let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path).await?;
         Self::open_with_checkpoint(store, repo_prefix, options, checkpoint).await
     }
 
+    #[cfg(test)]
     async fn open_with_options(
         store: Arc<dyn ObjectStore>,
         repo_prefix: &str,
@@ -691,6 +704,30 @@ mod tests {
         .await
         .expect("open operation reader");
         session.close().await.expect("close operation reader");
+
+        let after = store
+            .list(Some(&prefix))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list after reader");
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn published_locator_open_is_storage_read_only() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        publish(Arc::clone(&store), pack(1), [32; 20], None).await;
+        let prefix = ObjectPath::from("org/repo/git_locator_db");
+        let before = store
+            .list(Some(&prefix))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list before reader");
+
+        let session = GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open reader");
+        session.close().await.expect("close reader");
 
         let after = store
             .list(Some(&prefix))
