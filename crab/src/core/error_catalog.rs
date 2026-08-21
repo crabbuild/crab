@@ -1365,6 +1365,16 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
   Add at least one value to the empty variable list in the `matrix:` block.\n\
   If the variable is intentionally unused, remove it from the matrix.",
         }),
+        "CRAB-E0322" => Some(ErrorExplanation {
+            code: "CRAB-E0322",
+            summary: "Garbage collection completed only part of its cleanup",
+            causes: "\
+  - One or more object-store DELETE requests failed\n\
+  - Post-delete metadata reconciliation failed",
+            remediation: "\
+  Review the structured failure counts and source error, resolve the storage\n\
+  failure, then rerun `crab gc`. Successful deletions are idempotent.",
+        }),
         _ => None,
     }
 }
@@ -1496,6 +1506,7 @@ pub fn error_code(err: &CrabError) -> &'static str {
         CrabError::RestoreTierUnsupported { .. } => "CRAB-E0312",
         CrabError::GcEarlyDeleteBlocked { .. } => "CRAB-E0320",
         CrabError::ObjectLockedRetention { .. } => "CRAB-E0321",
+        CrabError::GcPartialFailure { .. } => "CRAB-E0322",
         CrabError::RestripeProfileOutOfRange { .. } => "CRAB-E0330",
         CrabError::RestripeCorruptSource { .. } => "CRAB-E0331",
         CrabError::RestripeAlreadyInProgress { .. } => "CRAB-E0332",

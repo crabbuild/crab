@@ -794,6 +794,17 @@ pub enum CrabError {
     ObjectLockedRetention { path: String, until: String },
 
     #[error(
+        "garbage collection completed partially [CRAB-E0322]: deleted {objects_deleted} object(s), {delete_failures} deletion(s) failed, reconciliation_failed={reconciliation_failed}: {source}"
+    )]
+    GcPartialFailure {
+        objects_deleted: u64,
+        delete_failures: u64,
+        reconciliation_failed: bool,
+        #[source]
+        source: Box<CrabError>,
+    },
+
+    #[error(
         "xorb optimization profile '{name}' out of range [CRAB-E0330]: target_xorb_bytes={bytes} (allowed 4 MiB..2 GiB)"
     )]
     RestripeProfileOutOfRange { name: String, bytes: u64 },
@@ -2182,6 +2193,7 @@ impl CrabError {
             | Self::RestoreTierUnsupported { .. }
             | Self::GcEarlyDeleteBlocked { .. }
             | Self::ObjectLockedRetention { .. }
+            | Self::GcPartialFailure { .. }
             | Self::RestripeProfileOutOfRange { .. }
             | Self::CostPricingMissing { .. }
             | Self::CostInventoryReportStale { .. }
@@ -2331,6 +2343,7 @@ impl CrabError {
             Self::RestoreTierUnsupported { .. } => "CRAB-E0312",
             Self::GcEarlyDeleteBlocked { .. } => "CRAB-E0320",
             Self::ObjectLockedRetention { .. } => "CRAB-E0321",
+            Self::GcPartialFailure { .. } => "CRAB-E0322",
             Self::RestripeProfileOutOfRange { .. } => "CRAB-E0330",
             Self::RestripeCorruptSource { .. } => "CRAB-E0331",
             Self::RestripeAlreadyInProgress { .. } => "CRAB-E0332",
@@ -2535,6 +2548,7 @@ impl CrabError {
             | Self::ArchiveRestoreRequired { .. }
             | Self::GcEarlyDeleteBlocked { .. }
             | Self::ObjectLockedRetention { .. }
+            | Self::GcPartialFailure { .. }
             | Self::CostInventoryReportStale { .. }
             | Self::PrefetchProfileNotFound { .. }
             | Self::UnadoptChunksMissing { .. }
@@ -2733,6 +2747,7 @@ impl CrabError {
             | Self::RestoreTierUnsupported { .. }
             | Self::GcEarlyDeleteBlocked { .. }
             | Self::ObjectLockedRetention { .. }
+            | Self::GcPartialFailure { .. }
             | Self::RestripeProfileOutOfRange { .. }
             | Self::RestripeCorruptSource { .. }
             | Self::RestripeAlreadyInProgress { .. }
@@ -3397,6 +3412,20 @@ impl CrabError {
                 serde_json::json!({
                     "path": path,
                     "until": until,
+                })
+            }
+            Self::GcPartialFailure {
+                objects_deleted,
+                delete_failures,
+                reconciliation_failed,
+                source,
+            } => {
+                serde_json::json!({
+                    "objects_deleted": objects_deleted,
+                    "delete_failures": delete_failures,
+                    "reconciliation_failed": reconciliation_failed,
+                    "source_code": source.code(),
+                    "source": source.to_string(),
                 })
             }
             Self::RestripeProfileOutOfRange { name, bytes } => {
@@ -4627,6 +4656,12 @@ mod tests {
             CrabError::ObjectLockedRetention {
                 path: ".crab/xorbs/abc123".into(),
                 until: "2026-12-31T00:00:00Z".into(),
+            },
+            CrabError::GcPartialFailure {
+                objects_deleted: 3,
+                delete_failures: 1,
+                reconciliation_failed: false,
+                source: Box::new(CrabError::Internal("delete failed".into())),
             },
             CrabError::RestripeProfileOutOfRange {
                 name: "custom".into(),

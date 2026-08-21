@@ -472,10 +472,13 @@ fn validate_gc() {
             packs_deleted: 2,
             xorbs_deleted: 5,
             shards_deleted: 1,
+            file_index_entries_deleted: 3,
             bytes_reclaimed: 50000,
             dry_run: false,
             cancelled: false,
             partial_enumeration: false,
+            delete_failures: 0,
+            reconciliation_failed: false,
         },
     );
 }

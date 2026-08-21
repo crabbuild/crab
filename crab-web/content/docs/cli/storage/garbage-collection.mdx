@@ -107,6 +107,13 @@ Crab's GC is designed to be safe by default:
 4. **Confirmation required** — `--force` prompts for confirmation unless `--yes` is also passed.
 5. **Atomic ref reads** — The reachability scan uses a consistent snapshot of refs.
 6. **Maintenance serialization** — Destructive repo GC takes one repository lease; destructive bucket GC takes a lease for every registered repository. Neither can race history pruning or restoration.
+7. **Explicit partial failure** — Failed repository deletions or metadata reconciliation return `CRAB-E0322` with structured counters and a non-zero exit status.
+
+Bucket scope scans every registered repository's current and retained history
+with bounded concurrency. It lists global shard and xorb namespaces
+concurrently, downloads referenced shards in parallel, and tombstones stale
+generation-pinned file-index rows using each repository's own retained shard
+closure.
 
 ## When to Run GC
 

@@ -1,8 +1,64 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "GcSummary",
   "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
-  "type": "object",
+  "properties": {
+    "bytes_reclaimed": {
+      "description": "Total bytes reclaimed.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "cancelled": {
+      "description": "Whether the run was cancelled mid-sweep.",
+      "type": "boolean"
+    },
+    "delete_failures": {
+      "default": 0,
+      "description": "Number of object deletions that failed.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "dry_run": {
+      "description": "Whether this was a dry-run (no mutations).",
+      "type": "boolean"
+    },
+    "file_index_entries_deleted": {
+      "default": 0,
+      "description": "Number of stale per-repository file-index rows tombstoned.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "packs_deleted": {
+      "description": "Number of pack objects deleted (or would-be-deleted in dry-run).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "partial_enumeration": {
+      "default": false,
+      "description": "Whether enumeration was partial (some LIST requests failed). When `true`, GC may not have considered all objects for collection; re-running GC after transient S3 issues clear is recommended. See finding S1-P5-1.",
+      "type": "boolean"
+    },
+    "reconciliation_failed": {
+      "default": false,
+      "description": "Whether post-delete metadata reconciliation failed.",
+      "type": "boolean"
+    },
+    "shards_deleted": {
+      "description": "Number of shard objects deleted.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "xorbs_deleted": {
+      "description": "Number of xorb objects deleted.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
   "required": [
     "bytes_reclaimed",
     "cancelled",
@@ -11,43 +67,6 @@
     "shards_deleted",
     "xorbs_deleted"
   ],
-  "properties": {
-    "bytes_reclaimed": {
-      "description": "Total bytes reclaimed.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "cancelled": {
-      "description": "Whether the run was cancelled mid-sweep.",
-      "type": "boolean"
-    },
-    "dry_run": {
-      "description": "Whether this was a dry-run (no mutations).",
-      "type": "boolean"
-    },
-    "packs_deleted": {
-      "description": "Number of pack objects deleted (or would-be-deleted in dry-run).",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "partial_enumeration": {
-      "description": "Whether enumeration was partial (some LIST requests failed). When `true`, GC may not have considered all objects for collection; re-running GC after transient S3 issues clear is recommended. See finding S1-P5-1.",
-      "default": false,
-      "type": "boolean"
-    },
-    "shards_deleted": {
-      "description": "Number of shard objects deleted.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "xorbs_deleted": {
-      "description": "Number of xorb objects deleted.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    }
-  }
+  "title": "GcSummary",
+  "type": "object"
 }
