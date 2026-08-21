@@ -62,6 +62,7 @@ const config = {
       { source: '/docs/cli/workflow/migration-from-dvc', destination: '/docs/cli/guides/migrating-from-dvc', permanent: true },
       { source: '/docs/cli/workflow/templating', destination: '/docs/cli/automation/templating', permanent: true },
       { source: '/docs/cli/workflow/foreach-matrix', destination: '/docs/cli/automation/foreach-matrix', permanent: true },
+      { source: '/docs/cli/data/data-commands', destination: '/docs/cli/automation/data-commands', permanent: true },
       // Getting started
       { source: '/docs/cli/commands/gitiox-import', destination: '/docs/cli/getting-started/importing-buckets', permanent: true },
       { source: '/docs/cli/getting-started/gitiox-install', destination: '/docs/cli/getting-started/installation', permanent: true },
