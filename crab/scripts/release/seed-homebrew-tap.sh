@@ -4,14 +4,14 @@
 # the repo and publishing the matching crabbuild/crab-release tag.
 #
 # Usage:
-#   ./scripts/seed-homebrew-tap.sh
+#   ./scripts/release/seed-homebrew-tap.sh
 
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 
 TAP_REPO="crabbuild/homebrew-tap"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CRAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERSION="$(grep -m1 '^version' "$CRAB_DIR/Cargo.toml" | sed 's/.*"\(.*\)"/\1/')"
 TAG="v${VERSION}"
 

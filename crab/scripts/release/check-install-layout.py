@@ -30,11 +30,11 @@ REMOTE_HELPER_LINK = "git-remote-crab"
 
 
 def crab_dir() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def workspace_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -288,7 +288,7 @@ def main() -> int:
         existing_crab.chmod(0o755)
         existing_stat = existing_crab.stat()
         existing_identity = (existing_stat.st_dev, existing_stat.st_ino)
-        installer = cwd / "scripts" / "install-binaries.py"
+        installer = cwd / "scripts" / "release" / "install-binaries.py"
         command = [
             sys.executable,
             str(installer),

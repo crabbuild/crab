@@ -1,4 +1,4 @@
-# Build crab for aarch64-unknown-linux-gnu.
+# Build Crab release binaries for aarch64-unknown-linux-gnu.
 # Runs on linux/arm64. Docker Desktop can emulate this platform on Intel hosts.
 FROM --platform=linux/arm64 rust:1.93-bookworm
 

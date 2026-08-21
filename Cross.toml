@@ -1,7 +1,7 @@
 # Cross-compilation configuration for `cross`
 # https://github.com/cross-rs/cross
 #
-# Used by `crab/scripts/release.sh` to build Linux targets from macOS.
+# Used by `crab/scripts/release/release.sh` to build Linux targets from macOS.
 # Cross auto-detects the workspace root (CrabBuild/) and mounts it.
 # Xet and Gitoxide crates resolve from crates.io.
 

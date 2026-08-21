@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install Crab binaries and the Git remote-helper symlink."""
+"""Install Crab release binaries and the Git remote-helper symlink."""
 
 from __future__ import annotations
 

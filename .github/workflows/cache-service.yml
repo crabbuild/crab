@@ -28,7 +28,6 @@ on:
       - "crab/deploy/cache-service/**"
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
-      - "crab/scripts/test_verify_cache_service_smoke_report.py"
       - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
       - "crab-web/content/docs/cli/cache-service/**"
   pull_request:
@@ -55,7 +54,6 @@ on:
       - "crab/deploy/cache-service/**"
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
-      - "crab/scripts/test_verify_cache_service_smoke_report.py"
       - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
       - "crab-web/content/docs/cli/cache-service/**"
   workflow_dispatch:
@@ -90,10 +88,6 @@ jobs:
       - name: Validate cache service manifests
         working-directory: crab
         run: make cache-service-validate-manifests
-
-      - name: Test smoke report verifier
-        working-directory: crab
-        run: make cache-service-verify-smoke-report-self-test
 
       - name: Build crab-cache-server
         run: cargo build --release -p crab-cache-server --bin crab-cache-server

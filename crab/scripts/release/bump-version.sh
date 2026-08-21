@@ -2,17 +2,17 @@
 # bump-version.sh — Bump the crab version in Cargo.toml
 #
 # Usage:
-#   ./scripts/bump-version.sh patch   # 0.1.0 → 0.1.1
-#   ./scripts/bump-version.sh minor   # 0.1.0 → 0.2.0
-#   ./scripts/bump-version.sh major   # 0.1.0 → 1.0.0
-#   ./scripts/bump-version.sh set 2.3.4  # explicit version
+#   ./scripts/release/bump-version.sh patch   # 0.1.0 → 0.1.1
+#   ./scripts/release/bump-version.sh minor   # 0.1.0 → 0.2.0
+#   ./scripts/release/bump-version.sh major   # 0.1.0 → 1.0.0
+#   ./scripts/release/bump-version.sh set 2.3.4  # explicit version
 #
 # After bumping, the next `make install` picks up the new version
 # automatically via CARGO_PKG_VERSION → CRAB_BUILD_VERSION.
 
 set -euo pipefail
 
-CARGO_TOML="$(dirname "$0")/../Cargo.toml"
+CARGO_TOML="$(dirname "$0")/../../Cargo.toml"
 
 if [[ ! -f "$CARGO_TOML" ]]; then
     echo "error: Cargo.toml not found at $CARGO_TOML" >&2
