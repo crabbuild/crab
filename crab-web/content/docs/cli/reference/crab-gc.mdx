@@ -32,7 +32,11 @@ can run concurrently with history pruning or history restoration.
 
 Bucket GC reads current and retained historical shard roots for registered
 repositories in parallel, downloads referenced shards with bounded concurrency,
-and lists the complete global shard and xorb namespaces concurrently. It also
+and adaptively lists the complete global shard and xorb namespaces. Small
+namespaces use one recursive stream per kind; larger namespaces switch to
+concurrent populated hash partitions after a bounded provider-aware probe. The
+crossover waits until recursive pagination reaches the cost of the complete
+256-way fan-out, bounding restart overhead to about 2x at the threshold. It also
 tombstones generation-pinned `file_index_db` rows that are outside each
 repository's retained shard closure.
 
@@ -50,6 +54,7 @@ For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-co
 | `--dry-run` | `false` | Show what would be deleted without removing |
 | `--scope` | `repo` | Collect repository objects, or use `bucket` for global deduplicated objects |
 | `--bucket` | — | Physical bucket name required by bucket scope and registry maintenance |
+| `--list-profile` | configured value | Override bucket listing with `adaptive`, `cost`, or `latency` |
 | `--grace-period` | `1h` | Don't delete objects newer than this |
 | `--force` | `false` | Bypass age checks without bypassing registry or coordinator safety proof |
 | `--yes` | `false` | Skip repository force-mode confirmation |

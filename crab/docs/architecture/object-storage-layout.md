@@ -77,9 +77,13 @@ Paths are relative to `global_prefix`.
 
 Xorbs and shards use the first two lowercase hash characters as one fan-out
 segment and have no filename extension. This gives GC 256 independent,
-discoverable partitions without provider-specific range semantics. Code outside
-the metadata owner MUST NOT construct SlateDB child keys under
-`chunk_index_db/`.
+discoverable partitions without provider-specific range semantics. Bucket GC
+MAY recursively scan the kind prefix as one low-cost stream or scan populated
+hash partitions concurrently. The adaptive policy starts with the recursive
+stream and switches to partition scans only after a provider-aware bounded
+probe shows that serial pagination is more expensive. Listing policy never
+changes object keys. Code outside the metadata owner MUST NOT construct
+SlateDB child keys under `chunk_index_db/`.
 
 For direct repositories, the physical tree is:
 

@@ -25,12 +25,23 @@ Garbage collection operates on the remote store, not the local cache. Use
 | `--dry-run` | `false` | List unreachable objects without deleting anything |
 | `--force` | `false` | Bypass the grace period — delete all unreachable objects immediately |
 | `--yes` | `false` | Skip interactive confirmation when `--force` is used |
+| `--list-profile <profile>` | configured value | Override bucket listing with `adaptive`, `cost`, or `latency` |
 
 Bucket administrators can rebuild the shared GC root registry with
 `crab gc --repair-registry --bucket <bucket>`. The repair enumerates repository
 manifests, validates each current shard index, CAS-replaces the discovered
 entries, and only then marks bucket coverage complete. Destructive bucket GC
 fails closed while the registry schema or coverage marker is incomplete.
+
+Bucket-global xorb and shard listing defaults to `adaptive`. Small namespaces
+complete through one recursive stream per kind. Large namespaces cross a
+bounded provider-aware probe threshold and restart as concurrent scans of only
+the populated two-hex hash partitions. The crossover waits until recursive
+pagination costs as many calls as the complete 256-way fan-out, bounding the
+restart overhead to about 2x at the threshold. Use `cost` to minimize LIST
+calls or `latency` to prefer parallel wall time. The logged `list_requests`
+value counts logical streams; provider pagination and retries can issue
+additional API requests.
 
 ## How It Works
 

@@ -32,6 +32,7 @@ the matching `.gitattributes` rules.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--storage-provider <provider>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
+| `--gc-list-profile <profile>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <remote>` | — | Configure mirror mode with an existing Git remote |
 | `--log-level` | — | Set log verbosity |
 
@@ -68,6 +69,20 @@ crab init --storage-provider s3    crab://my-s3-bucket/my-repo
 crab init --storage-provider gcs   crab://my-gcs-bucket/my-repo
 crab init --storage-provider azure crab://my-container/my-repo
 ```
+
+Bucket administrators can also choose the local GC listing policy during
+initial setup:
+
+```bash
+crab init --gc-list-profile adaptive crab://my-bucket/my-repo
+```
+
+`adaptive` uses one low-cost recursive stream for smaller namespaces and
+switches to parallel hash partitions after a bounded provider-aware probe.
+`cost` always minimizes LIST streams. `latency` immediately scans populated
+partitions concurrently. This preference is stored only in
+`.crab/config.toml`; it does not alter the bucket-global object layout and can
+safely differ between operators.
 
 For Azure, the URL host is the Blob container; the storage account comes from
 Azure credentials, user config, or environment variables.

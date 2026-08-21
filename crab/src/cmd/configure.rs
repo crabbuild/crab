@@ -7,7 +7,7 @@ use console::Term;
 use tokio_util::sync::CancellationToken;
 
 use crate::cmd::setup::SetupArgs;
-use crate::core::config::StorageProvider;
+use crate::core::config::{GcListProfile, StorageProvider};
 use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
 use crate::core::project_config::ProjectConfig;
@@ -17,6 +17,7 @@ use crate::core::style::CliStyle;
 pub struct ConfigureArgs {
     pub remote: Option<String>,
     pub storage_provider: Option<StorageProvider>,
+    pub gc_list_profile: Option<GcListProfile>,
     pub track: Vec<String>,
     pub no_auto_track: bool,
     pub dry_run: bool,
@@ -25,6 +26,7 @@ pub struct ConfigureArgs {
 struct ConfigurePlan {
     remote: String,
     storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
 }
 
 /// Configure cloud storage, Git integration, and large-file tracking.
@@ -55,6 +57,13 @@ pub async fn run_configure_at(
             "  Large files  {}",
             tracking_summary(&args.track, args.no_auto_track)
         );
+        eprintln!(
+            "  GC listing   {}",
+            plan.gc_list_profile.map_or(
+                "adaptive (preserves an existing choice)",
+                GcListProfile::as_str
+            )
+        );
         eprintln!("\nRun again without --dry-run to apply this plan.");
         return Ok(());
     }
@@ -62,14 +71,27 @@ pub async fn run_configure_at(
     eprintln!("{}", style.bold("Configure Crab"));
     eprintln!("  Remote   {}", plan.remote);
     eprintln!(
-        "  Provider {}\n",
+        "  Provider {}",
         plan.storage_provider
             .as_ref()
             .map_or("infer from remote", StorageProvider::label)
     );
+    eprintln!(
+        "  GC listing {}\n",
+        plan.gc_list_profile.map_or(
+            "adaptive (preserves an existing choice)",
+            GcListProfile::as_str
+        )
+    );
 
-    crate::cmd::init::run_init_for_configure(&plan.remote, root, cancel, plan.storage_provider)
-        .await?;
+    crate::cmd::init::run_init_for_configure(
+        &plan.remote,
+        root,
+        cancel,
+        plan.storage_provider,
+        plan.gc_list_profile,
+    )
+    .await?;
 
     crate::cmd::setup::run_setup_at(
         root,
@@ -91,7 +113,11 @@ pub async fn run_configure_at(
 
 fn resolve_plan(root: &Path, args: &ConfigureArgs) -> Result<ConfigurePlan> {
     if let Some(remote) = args.remote.as_ref() {
-        return configure_plan(remote.clone(), args.storage_provider.clone());
+        return configure_plan(
+            remote.clone(),
+            args.storage_provider.clone(),
+            args.gc_list_profile,
+        );
     }
 
     if let Some(config) = ProjectConfig::discover(root) {
@@ -101,7 +127,7 @@ fn resolve_plan(root: &Path, args: &ConfigureArgs) -> Result<ConfigurePlan> {
                 .as_ref()
                 .and_then(|auth| auth.storage_provider.clone())
         });
-        return configure_plan(config.remote.url, storage_provider);
+        return configure_plan(config.remote.url, storage_provider, args.gc_list_profile);
     }
 
     if !std::io::stdin().is_terminal() {
@@ -121,12 +147,14 @@ fn resolve_plan(root: &Path, args: &ConfigureArgs) -> Result<ConfigurePlan> {
     Ok(ConfigurePlan {
         remote,
         storage_provider: Some(provider),
+        gc_list_profile: args.gc_list_profile,
     })
 }
 
 fn configure_plan(
     remote: String,
     storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
 ) -> Result<ConfigurePlan> {
     if !crate::cmd::init::is_valid_init_url(&remote) {
         return Err(CrabError::Configuration {
@@ -137,6 +165,7 @@ fn configure_plan(
     Ok(ConfigurePlan {
         remote,
         storage_provider,
+        gc_list_profile,
     })
 }
 
@@ -270,7 +299,7 @@ mod tests {
 
     #[test]
     fn explicit_plan_rejects_invalid_remote() {
-        let result = configure_plan("team/models".to_owned(), Some(StorageProvider::S3));
+        let result = configure_plan("team/models".to_owned(), Some(StorageProvider::S3), None);
         assert!(matches!(result, Err(CrabError::Configuration { .. })));
     }
 
@@ -280,6 +309,7 @@ mod tests {
         let args = ConfigureArgs {
             remote: Some("s3://team-data/models".to_owned()),
             storage_provider: Some(StorageProvider::S3),
+            gc_list_profile: None,
             track: vec!["*.safetensors".to_owned()],
             no_auto_track: false,
             dry_run: true,
