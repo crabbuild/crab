@@ -45,7 +45,7 @@ const cliCategories = [
   },
   {
     icon: CloudCog,
-    name: "Managed Service (Coming Soon)",
+    name: "Managed Service",
     description: "Hosted repositories, access management, migration, and service APIs.",
     href: "/docs/cli/managed-service",
   },
