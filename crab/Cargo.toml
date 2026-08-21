@@ -415,30 +415,5 @@ axum = { version = "0.8", features = ["json", "matched-path"] }
 crab-cache-server = { workspace = true }
 crab-workflow = { workspace = true, features = ["testing"] }
 proptest = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
 insta = "1"
 jsonschema = "0.18"
-
-[[bench]]
-name = "staging"
-harness = false
-
-[[bench]]
-name = "staging_recovery"
-harness = false
-
-[[bench]]
-name = "staging_sweep"
-harness = false
-
-[[bench]]
-name = "dehydrate_bench"
-harness = false
-
-[[bench]]
-name = "repo_pipeline_bench"
-harness = false
-
-[[bench]]
-name = "nfs_read_path_bench"
-harness = false
