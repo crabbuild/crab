@@ -1223,7 +1223,7 @@ async fn lcs_matches(
             let (mut row, mut column) = (rows - 1, columns - 1);
             let mut backtrace_steps = 0usize;
             while row > 0 && column > 0 {
-                if backtrace_steps % CPU_CANCELLATION_INTERVAL == 0 {
+                if backtrace_steps.is_multiple_of(CPU_CANCELLATION_INTERVAL) {
                     check_cpu_cancellation(&cancellation)?;
                 }
                 if parent[parent_lines[equal_prefix + row - 1].clone()]
@@ -1746,9 +1746,9 @@ mod tests {
         let error = lcs_matches(
             &runtime,
             bytes::Bytes::from_static(b"parent\n"),
-            vec![0..7],
+            std::iter::once(0..7).collect(),
             bytes::Bytes::from_static(b"current\n"),
-            vec![0..8],
+            std::iter::once(0..8).collect(),
             0,
             0,
             cancellation,

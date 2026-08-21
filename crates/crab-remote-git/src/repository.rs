@@ -1077,11 +1077,10 @@ mod tests {
                 }
             }
             let mut result = self.inner.get_opts(location, options).await?;
-            if location.as_ref() == self.manifest_path {
-                if self.short_manifest.load(Ordering::SeqCst) {
-                    result.meta.size = result.meta.size.saturating_add(1);
-                    result.range.end = result.range.end.saturating_add(1);
-                }
+            if location.as_ref() == self.manifest_path && self.short_manifest.load(Ordering::SeqCst)
+            {
+                result.meta.size = result.meta.size.saturating_add(1);
+                result.range.end = result.range.end.saturating_add(1);
             }
             Ok(result)
         }

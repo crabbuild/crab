@@ -2286,7 +2286,7 @@ async fn repository_semantics_match_native_git_ground_truth() {
         (line.starts_with(b"+") && !line.starts_with(b"+++"))
             || (line.starts_with(b"-") && !line.starts_with(b"---"))
     })
-    .flat_map(|line| line.iter().copied().chain([b'\n']))
+    .flat_map(|line| line.iter().copied().chain(*b"\n"))
     .collect::<Vec<_>>();
     let native_blame_output = git(
         &[
