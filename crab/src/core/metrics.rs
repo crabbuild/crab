@@ -8,9 +8,14 @@
 //! [`Metrics::snapshot`] to read a consistent-ish point-in-time view.
 
 use std::fmt;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
+use fs4::fs_std::FileExt as LockFileExt;
 use serde::{Deserialize, Serialize};
+
+use super::error::{CrabError, Result};
 
 /// Plain-data snapshot of all perf counters at a point in time.
 ///
@@ -136,7 +141,9 @@ pub struct MetricsSnapshot {
     // --- operation-level counters ---
     /// Total push wall-clock time in milliseconds.
     pub push_duration_ms: u64,
-    /// Total bytes uploaded during push operations.
+    /// Total xorb payload bytes uploaded during push operations.
+    ///
+    /// Excludes Git packs, indexes, manifests, refs, locks, and metadb objects.
     pub bytes_uploaded: u64,
     /// Total fetch wall-clock time in milliseconds.
     pub fetch_duration_ms: u64,
@@ -275,6 +282,12 @@ pub struct MetricsSnapshot {
     pub metadb_batch_get_count: u64,
     /// Total `Db::write` calls across both SlateDB instances.
     pub metadb_batch_write_count: u64,
+    /// Repairable metadata batches buffered before an explicit flush.
+    pub metadb_buffered_batch_write_count: u64,
+    /// Explicit WAL durability flushes issued after durable metadata writes.
+    pub metadb_wal_flush_count: u64,
+    /// Explicit memtable flushes that amortize repairable metadata batches.
+    pub metadb_memtable_flush_count: u64,
     /// Total bytes written through `Db::write` across both SlateDB
     /// instances.
     pub metadb_write_bytes: u64,
@@ -459,6 +472,9 @@ pub struct Metrics {
     metadb_get_hits: AtomicU64,
     metadb_batch_get_count: AtomicU64,
     metadb_batch_write_count: AtomicU64,
+    metadb_buffered_batch_write_count: AtomicU64,
+    metadb_wal_flush_count: AtomicU64,
+    metadb_memtable_flush_count: AtomicU64,
     metadb_write_bytes: AtomicU64,
     metadb_open_count: AtomicU64,
     metadb_close_count: AtomicU64,
@@ -1095,6 +1111,21 @@ impl Metrics {
         self.metadb_batch_write_count.fetch_add(1, Relaxed);
     }
 
+    /// Record a repairable batch buffered until an explicit flush boundary.
+    pub fn inc_metadb_buffered_batch_write_count(&self) {
+        self.metadb_buffered_batch_write_count.fetch_add(1, Relaxed);
+    }
+
+    /// Record one explicit SlateDB WAL flush.
+    pub fn inc_metadb_wal_flush_count(&self) {
+        self.metadb_wal_flush_count.fetch_add(1, Relaxed);
+    }
+
+    /// Record one explicit SlateDB memtable flush.
+    pub fn inc_metadb_memtable_flush_count(&self) {
+        self.metadb_memtable_flush_count.fetch_add(1, Relaxed);
+    }
+
     /// Record bytes written through a `Db::write` call.
     pub fn add_metadb_write_bytes(&self, n: u64) {
         self.metadb_write_bytes.fetch_add(n, Relaxed);
@@ -1281,6 +1312,9 @@ impl Metrics {
             metadb_get_hits: self.metadb_get_hits.load(Relaxed),
             metadb_batch_get_count: self.metadb_batch_get_count.load(Relaxed),
             metadb_batch_write_count: self.metadb_batch_write_count.load(Relaxed),
+            metadb_buffered_batch_write_count: self.metadb_buffered_batch_write_count.load(Relaxed),
+            metadb_wal_flush_count: self.metadb_wal_flush_count.load(Relaxed),
+            metadb_memtable_flush_count: self.metadb_memtable_flush_count.load(Relaxed),
             metadb_write_bytes: self.metadb_write_bytes.load(Relaxed),
             metadb_open_count: self.metadb_open_count.load(Relaxed),
             metadb_close_count: self.metadb_close_count.load(Relaxed),
@@ -1366,6 +1400,7 @@ impl crab_staging::StagingMetrics for Metrics {
 /// Groups counters by subsystem so callers can render or serialize
 /// without knowing the flat field layout of [`MetricsSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MetricsSummary {
     pub push_duration_ms: u64,
     pub bytes_uploaded: u64,
@@ -1384,6 +1419,16 @@ pub struct MetricsSummary {
     pub xorb_fetch_requests_coalesced: u64,
     pub xorb_fetch_bytes_saved: u64,
     pub multipart_resumed_uploads: u64,
+    #[serde(default)]
+    pub head_list_requests: u64,
+    #[serde(default)]
+    pub head_point_requests: u64,
+    #[serde(default)]
+    pub metadb_buffered_batch_write_count: u64,
+    #[serde(default)]
+    pub metadb_wal_flush_count: u64,
+    #[serde(default)]
+    pub metadb_memtable_flush_count: u64,
     // --- workflow counters ---
     #[serde(default)]
     pub workflow_runs_total: u64,
@@ -1420,6 +1465,11 @@ impl MetricsSnapshot {
             xorb_fetch_requests_coalesced: self.xorb_fetch_requests_coalesced,
             xorb_fetch_bytes_saved: self.xorb_fetch_bytes_saved,
             multipart_resumed_uploads: self.multipart_resumed_uploads,
+            head_list_requests: self.head_list_requests,
+            head_point_requests: self.head_point_requests,
+            metadb_buffered_batch_write_count: self.metadb_buffered_batch_write_count,
+            metadb_wal_flush_count: self.metadb_wal_flush_count,
+            metadb_memtable_flush_count: self.metadb_memtable_flush_count,
             workflow_runs_total: self.workflow_runs_total,
             workflow_stages_total: self.workflow_stages_total,
             workflow_retry_attempts_total: self.workflow_retry_attempts_total,
@@ -1451,6 +1501,11 @@ impl MetricsSummary {
             xorb_fetch_requests_coalesced: 0,
             xorb_fetch_bytes_saved: 0,
             multipart_resumed_uploads: 0,
+            head_list_requests: 0,
+            head_point_requests: 0,
+            metadb_buffered_batch_write_count: 0,
+            metadb_wal_flush_count: 0,
+            metadb_memtable_flush_count: 0,
             workflow_runs_total: 0,
             workflow_stages_total: 0,
             workflow_retry_attempts_total: 0,
@@ -1458,6 +1513,151 @@ impl MetricsSummary {
             workflow_cache_pull_bytes_total: 0,
         }
     }
+
+    /// Adds another process-local delta to this cumulative summary.
+    pub fn merge(&mut self, delta: &Self) {
+        macro_rules! add_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(self.$field = self.$field.saturating_add(delta.$field);)+
+            };
+        }
+        add_fields!(
+            push_duration_ms,
+            bytes_uploaded,
+            fetch_duration_ms,
+            bytes_downloaded,
+            gc_duration_ms,
+            gc_objects_deleted,
+            chunk_index_lookups,
+            chunk_index_hits,
+            shard_bloom_queries,
+            shard_bloom_false_positives,
+            staging_bytes_written,
+            staging_bytes_read,
+            xorbs_skipped,
+            clean_fastpath_taken,
+            xorb_fetch_requests_coalesced,
+            xorb_fetch_bytes_saved,
+            multipart_resumed_uploads,
+            head_list_requests,
+            head_point_requests,
+            metadb_buffered_batch_write_count,
+            metadb_wal_flush_count,
+            metadb_memtable_flush_count,
+            workflow_runs_total,
+            workflow_stages_total,
+            workflow_retry_attempts_total,
+            workflow_cache_push_bytes_total,
+            workflow_cache_pull_bytes_total,
+        );
+    }
+
+    /// Returns the monotonic delta since an earlier process-local snapshot.
+    #[must_use]
+    pub fn delta_since(&self, earlier: &Self) -> Self {
+        let mut delta = Self::zeroed();
+        macro_rules! subtract_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(delta.$field = self.$field.saturating_sub(earlier.$field);)+
+            };
+        }
+        subtract_fields!(
+            push_duration_ms,
+            bytes_uploaded,
+            fetch_duration_ms,
+            bytes_downloaded,
+            gc_duration_ms,
+            gc_objects_deleted,
+            chunk_index_lookups,
+            chunk_index_hits,
+            shard_bloom_queries,
+            shard_bloom_false_positives,
+            staging_bytes_written,
+            staging_bytes_read,
+            xorbs_skipped,
+            clean_fastpath_taken,
+            xorb_fetch_requests_coalesced,
+            xorb_fetch_bytes_saved,
+            multipart_resumed_uploads,
+            head_list_requests,
+            head_point_requests,
+            metadb_buffered_batch_write_count,
+            metadb_wal_flush_count,
+            metadb_memtable_flush_count,
+            workflow_runs_total,
+            workflow_stages_total,
+            workflow_retry_attempts_total,
+            workflow_cache_push_bytes_total,
+            workflow_cache_pull_bytes_total,
+        );
+        delta
+    }
+}
+
+impl Default for MetricsSummary {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
+/// Loads persisted cumulative counters, accepting older partial schemas.
+///
+/// Missing and malformed files produce a zeroed summary so diagnostics remain
+/// usable after an interrupted local write.
+pub fn load_metrics_summary(path: &Path) -> Result<MetricsSummary> {
+    match std::fs::read_to_string(path) {
+        Ok(data) => Ok(serde_json::from_str(&data).unwrap_or_default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(MetricsSummary::zeroed()),
+        Err(error) => Err(CrabError::Io(error)),
+    }
+}
+
+/// Atomically merges one process-local counter delta into persistent state.
+///
+/// A sibling advisory lock serializes concurrent helper processes. Unknown
+/// JSON fields are retained because adaptive tuning state shares this file.
+pub fn persist_metrics_delta(path: &Path, delta: &MetricsSummary) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let lock_path = path.with_extension("json.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+
+    let existing_value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let mut cumulative =
+        serde_json::from_value::<MetricsSummary>(existing_value.clone()).unwrap_or_default();
+    cumulative.merge(delta);
+
+    let mut output = match existing_value {
+        serde_json::Value::Object(fields) => fields,
+        _ => serde_json::Map::new(),
+    };
+    let serialized = serde_json::to_value(cumulative)
+        .map_err(|error| CrabError::Internal(format!("serialize perf counters: {error}")))?;
+    if let serde_json::Value::Object(fields) = serialized {
+        output.extend(fields);
+    }
+    let json = serde_json::to_vec_pretty(&output)
+        .map_err(|error| CrabError::Internal(format!("serialize perf counters: {error}")))?;
+    let temp_parent = parent.unwrap_or_else(|| Path::new("."));
+    let temp = tempfile::NamedTempFile::new_in(temp_parent)?;
+    std::fs::write(temp.path(), json)?;
+    temp.persist(path)
+        .map_err(|error| CrabError::Internal(format!("persist perf counters: {error}")))?;
+    Ok(())
 }
 
 impl fmt::Display for MetricsSummary {
@@ -1494,6 +1694,20 @@ impl fmt::Display for MetricsSummary {
         writeln!(f, "  coalesced_bytes:   {}", self.xorb_fetch_bytes_saved)?;
         writeln!(f, "Resume:")?;
         writeln!(f, "  multipart_resumed: {}", self.multipart_resumed_uploads)?;
+        writeln!(f, "Cost signals:")?;
+        writeln!(f, "  resume_list_reqs:  {}", self.head_list_requests)?;
+        writeln!(f, "  resume_head_reqs:  {}", self.head_point_requests)?;
+        writeln!(
+            f,
+            "  metadb_batches:    {}",
+            self.metadb_buffered_batch_write_count
+        )?;
+        writeln!(f, "  metadb_wal_flush:  {}", self.metadb_wal_flush_count)?;
+        writeln!(
+            f,
+            "  metadb_l0_flush:   {}",
+            self.metadb_memtable_flush_count
+        )?;
         writeln!(f, "Workflow:")?;
         writeln!(f, "  runs_total:        {}", self.workflow_runs_total)?;
         writeln!(f, "  stages_total:      {}", self.workflow_stages_total)?;
@@ -1634,6 +1848,9 @@ mod tests {
                 metadb_get_hits: 0,
                 metadb_batch_get_count: 0,
                 metadb_batch_write_count: 0,
+                metadb_buffered_batch_write_count: 0,
+                metadb_wal_flush_count: 0,
+                metadb_memtable_flush_count: 0,
                 metadb_write_bytes: 0,
                 metadb_open_count: 0,
                 metadb_close_count: 0,
@@ -2024,5 +2241,41 @@ mod tests {
         assert_eq!(snap.speculation_hydrates_total, 2);
         assert_eq!(snap.speculation_hits_total, 1);
         assert_eq!(snap.speculation_evictions_total, 3);
+    }
+
+    #[test]
+    fn persisted_deltas_accumulate_and_preserve_tuning_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("perf-state.json");
+        std::fs::write(&path, r#"{"samples":[0.25]}"#).expect("seed state");
+
+        let mut first = MetricsSummary::zeroed();
+        first.bytes_uploaded = 12;
+        first.metadb_wal_flush_count = 1;
+        persist_metrics_delta(&path, &first).expect("persist first delta");
+
+        let mut second = MetricsSummary::zeroed();
+        second.bytes_uploaded = 30;
+        second.head_point_requests = 4;
+        persist_metrics_delta(&path, &second).expect("persist second delta");
+
+        let loaded = load_metrics_summary(&path).expect("load counters");
+        assert_eq!(loaded.bytes_uploaded, 42);
+        assert_eq!(loaded.metadb_wal_flush_count, 1);
+        assert_eq!(loaded.head_point_requests, 4);
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read state")).expect("parse state");
+        assert_eq!(value["samples"], serde_json::json!([0.25]));
+    }
+
+    #[test]
+    fn partial_older_summary_defaults_missing_counters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("perf-state.json");
+        std::fs::write(&path, r#"{"bytes_uploaded":9}"#).expect("seed state");
+
+        let loaded = load_metrics_summary(&path).expect("load counters");
+        assert_eq!(loaded.bytes_uploaded, 9);
+        assert_eq!(loaded.metadb_memtable_flush_count, 0);
     }
 }

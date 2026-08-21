@@ -110,9 +110,9 @@ shard-hint <optional-metadata-hash>
 
 | Backend | Repository URL | Credential examples |
 | --- | --- | --- |
-| Amazon S3 or an S3-compatible service | `crab://bucket/repository` | AWS SDK default chain, `AWS_PROFILE`, or access-key environment variables |
+| Amazon S3 or an S3-compatible service | `crab://bucket/repository` | Web identity, ECS/EC2 role, or access-key environment variables; shared AWS profiles are not read |
 | Google Cloud Storage | `crab://bucket/repository` | Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS` |
-| Azure Blob Storage | `crab://container/repository` | `az login`, connection string, account key, or SAS credentials |
+| Azure Blob Storage | `crab://container/repository` | Workload/managed identity, connection string, account key, or SAS credentials |
 
 The `crab://` scheme is used for Git remotes regardless of the backing
 provider. During initialization, provider-prefixed URLs such as `s3://`,

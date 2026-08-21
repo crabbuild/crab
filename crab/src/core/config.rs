@@ -1916,6 +1916,12 @@ impl Config {
     }
 
     fn validate_push(&self) -> super::error::Result<()> {
+        if self.push_lock_ttl_secs <= 20 {
+            return Err(super::error::CrabError::Configuration {
+                key: "lock_ttl_secs must be > 20".into(),
+                origin: "push".into(),
+            });
+        }
         if self.push_head_check_concurrency == 0 {
             return Err(super::error::CrabError::Configuration {
                 key: "head_check_concurrency must be > 0".into(),
@@ -3344,6 +3350,22 @@ mod tests {
         // TTL = 20s → no valid range
         assert!(cfg.clamped_heartbeat_interval(20).is_none());
         assert!(cfg.clamped_heartbeat_interval(15).is_none());
+    }
+
+    #[test]
+    fn push_lock_ttl_without_safe_heartbeat_window_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[push]\nlock_ttl_secs = 20\n").unwrap();
+
+        let error = Config::resolve_local_from(Some(path), PathBuf::from("/nonexistent"))
+            .expect_err("an unsafe lock TTL must fail config resolution");
+
+        assert!(matches!(
+            error,
+            crate::core::error::CrabError::Configuration { key, .. }
+                if key == "lock_ttl_secs must be > 20"
+        ));
     }
 
     #[test]

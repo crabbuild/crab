@@ -675,7 +675,7 @@ impl FsckRepairer for StoreRepairer {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         let key = key.to_string();
         Box::pin(async move {
-            PushLock::repair_expired(self.store.inner(), &key, SystemTime::now())
+            PushLock::repair_expired(self.store.inner(), &key)
                 .await
                 .map_err(Into::into)
         })
@@ -1266,7 +1266,7 @@ mod tests {
     async fn checker_detects_expired_push_lock() {
         let (store, prefix) = test_store();
 
-        let payload = PushLockPayload::new("test-holder", 1000);
+        let payload = PushLockPayload::new("test-holder", 1000, 300);
         let lock_path = Path::from(push_lock_path(&prefix, "refs/heads/main").unwrap());
         store
             .put(
@@ -1309,7 +1309,7 @@ mod tests {
 
         let lock_path = push_lock_path(&prefix, "refs/heads/main").unwrap();
         let obj_path = Path::from(lock_path.as_str());
-        let payload = PushLockPayload::new("test-holder", 1);
+        let payload = PushLockPayload::new("test-holder", 1, 1);
         store
             .put(
                 &obj_path,
@@ -1317,6 +1317,7 @@ mod tests {
             )
             .await
             .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
 
         let repairer = StoreRepairer::new(store.clone(), prefix);
         let result = repairer.repair_push_lock(&lock_path).await.unwrap();

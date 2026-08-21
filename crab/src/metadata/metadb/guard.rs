@@ -98,6 +98,11 @@ impl MetaDbGuard {
         Box::pin(self.metadb()?.commit(txn)).await
     }
 
+    /// Buffer repairable metadata until the push's explicit flush boundary.
+    pub(crate) async fn commit_buffered(&self, txn: Transaction) -> Result<PushWriteReceipt> {
+        Box::pin(self.metadb()?.commit_buffered(txn)).await
+    }
+
     /// Flush every opened writer memtable without closing the session.
     pub async fn flush_memtables(&self) -> Result<()> {
         self.metadb()?.flush_memtables().await

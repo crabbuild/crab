@@ -1,45 +1,40 @@
-//! Fair object-store admission for repository push pipelines.
+//! Bounded object-store admission for repository push pipelines.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use futures_util::StreamExt;
+use object_store::ObjectStore;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
 use tracing::warn;
 
 use crate::error::{CoordinationError, Result};
 use crate::push_lock::{
-    create_strict, generate_holder_id, get_with_version, push_locks_prefix, store_error, unix_now,
-    update,
+    PushLockPayload, backend_unix_time, create_strict, deserialize_payload,
+    get_with_version_and_modified, push_locks_prefix, release_if_holder, serialize_payload,
+    store_error, unix_now, update,
 };
 
-const MAX_TICKET_CREATE_ATTEMPTS: usize = 8;
-const MAX_ADMISSION_RETRIES: usize = 16;
-const MAX_EXPIRED_CLEANUP_PER_OBSERVATION: usize = 2;
-
-/// Durable FIFO ticket that becomes a bounded push-admission permit.
+/// Contender that becomes one of a fixed number of push-admission leases.
 pub struct PushAdmissionTicket {
     store: Arc<dyn ObjectStore>,
     prefix: String,
-    path: String,
     holder: String,
     capacity: usize,
     lease_ttl: Duration,
-    writers_ahead: usize,
-    admitted: bool,
+    attempt: usize,
+    occupied_slots: usize,
+    backend_clock: Option<(i64, Instant)>,
+    path: Option<String>,
     released: bool,
 }
 
 impl PushAdmissionTicket {
-    /// Creates one independently writable ticket in the repository queue.
-    pub async fn enqueue(
+    /// Creates a contender for one repository's bounded admission slots.
+    pub fn new(
         store: &Arc<dyn ObjectStore>,
         prefix: &str,
         capacity: usize,
-        active_ttl: Duration,
-        queued_ttl: Duration,
+        lease_ttl: Duration,
     ) -> Result<Self> {
         if capacity == 0 {
             return Err(CoordinationError::Configuration {
@@ -47,142 +42,122 @@ impl PushAdmissionTicket {
                 origin: "push admission capacity must be positive".to_owned(),
             });
         }
-        validate_ttl(active_ttl, "active")?;
-        validate_ttl(queued_ttl, "queued")?;
+        validate_ttl(lease_ttl)?;
 
-        let prefix = push_admission_prefix(prefix)?;
-        let lease_ttl = active_ttl.min(queued_ttl);
-        for _ in 0..MAX_TICKET_CREATE_ATTEMPTS {
-            let holder = generate_holder_id();
-            let path = format!("{prefix}/{}", uuid::Uuid::now_v7());
-            match create_strict(
-                store,
-                &Path::from(path.as_str()),
-                Bytes::from(holder.clone()),
-            )
-            .await
-            {
-                Ok(_) => {
-                    return Ok(Self {
-                        store: Arc::clone(store),
-                        prefix,
-                        path,
-                        holder,
-                        capacity,
-                        lease_ttl,
-                        writers_ahead: usize::MAX,
-                        admitted: false,
-                        released: false,
-                    });
-                }
-                Err(error) if is_cas_conflict(&error) => {}
-                Err(source) => return Err(store_error(&path, source)),
-            }
-        }
-        Err(CoordinationError::CasConflict {
-            path: prefix,
-            expected_etag: None,
+        Ok(Self {
+            store: Arc::clone(store),
+            prefix: push_admission_prefix(prefix)?,
+            holder: crate::push_lock::generate_holder_id(),
+            capacity,
+            lease_ttl,
+            attempt: 0,
+            occupied_slots: 0,
+            backend_clock: None,
+            path: None,
+            released: false,
         })
     }
 
-    /// Attempts to convert this FIFO ticket into an active bounded permit.
+    /// Attempts to acquire one slot without listing repository objects.
     pub async fn try_admit(&mut self) -> Result<bool> {
-        if self.admitted {
+        if self.path.is_some() {
             return Ok(true);
         }
-        for _ in 0..MAX_ADMISSION_RETRIES {
-            let now = unix_now();
-            let mut live = Vec::new();
-            let mut expired = Vec::new();
-            let mut stream = self.store.list(Some(&Path::from(self.prefix.as_str())));
-            while let Some(item) = stream.next().await {
-                let meta = item.map_err(|source| store_error(&self.prefix, source))?;
-                let modified = u64::try_from(meta.last_modified.timestamp()).unwrap_or(0);
-                if modified.saturating_add(self.lease_ttl.as_secs().max(1)) <= now {
-                    expired.push(meta);
-                } else {
-                    live.push(meta);
-                }
-            }
-            // Renewal changes object metadata, so queue order must live in the
-            // immutable UUIDv7 key rather than the mutable last-modified time.
-            live.sort_unstable_by(|left, right| left.location.cmp(&right.location));
-            self.cleanup_expired(expired).await;
 
-            let Some(position) = live
-                .iter()
-                .position(|meta| meta.location.as_ref() == self.path)
-            else {
-                return Err(expired_ticket(&self.path));
-            };
-            self.writers_ahead = position;
-            let admitted = position < self.capacity;
-            let own = &live[position];
-            let modified = u64::try_from(own.last_modified.timestamp()).unwrap_or(0);
-            let refresh_margin = self.lease_ttl.as_secs().max(1).div_ceil(4).min(30);
-            let needs_refresh = admitted
-                || modified.saturating_add(self.lease_ttl.as_secs().max(1))
-                    <= now.saturating_add(refresh_margin);
-            if !needs_refresh {
-                return Ok(false);
-            }
-            let (body, version) = get_with_version(&self.store, &own.location)
-                .await
-                .map_err(|source| store_error(&self.path, source))?;
-            if body.as_ref() != self.holder.as_bytes() {
-                return Err(expired_ticket(&self.path));
-            }
-            match update(
-                &self.store,
-                &own.location,
-                Bytes::from(self.holder.clone()),
-                version,
-            )
-            .await
-            {
-                Ok(_) => {
-                    self.admitted = admitted;
-                    return Ok(admitted);
+        let body = serialize_payload(
+            &self.prefix,
+            &PushLockPayload::new(
+                &self.holder,
+                unix_now().saturating_add(self.lease_ttl.as_secs()),
+                self.lease_ttl.as_secs(),
+            ),
+        )?;
+        let offset = slot_offset(&self.holder, self.attempt, self.capacity);
+        self.attempt = self.attempt.saturating_add(1);
+        let mut live = Vec::with_capacity(self.capacity);
+
+        for step in 0..self.capacity {
+            let path = Path::from(push_admission_slot_path(
+                &self.prefix,
+                (offset + step) % self.capacity,
+            ));
+            let (existing_body, version, last_modified) =
+                match get_with_version_and_modified(&self.store, &path).await {
+                    Ok(existing) => existing,
+                    Err(object_store::Error::NotFound { .. }) => {
+                        match create_strict(&self.store, &path, body.clone()).await {
+                            Ok(_) => return Ok(self.admit(path)),
+                            Err(error) if is_cas_conflict(&error) => continue,
+                            Err(source) => return Err(store_error(path.as_ref(), source)),
+                        }
+                    }
+                    Err(source) => return Err(store_error(path.as_ref(), source)),
+                };
+            let payload = deserialize_payload(path.as_ref(), &existing_body)?;
+            if payload.is_released() {
+                match update(&self.store, &path, body.clone(), version).await {
+                    Ok(_) => return Ok(self.admit(path)),
+                    Err(error) if is_cas_conflict(&error) => continue,
+                    Err(source) => return Err(store_error(path.as_ref(), source)),
                 }
-                Err(error) if is_cas_conflict(&error) => continue,
-                Err(source) => return Err(store_error(&self.path, source)),
+            }
+            live.push((path, payload, version, last_modified));
+        }
+
+        self.occupied_slots = live.len();
+        if live.is_empty() {
+            return Ok(false);
+        }
+        let now = self.backend_now().await?;
+        for (path, payload, version, last_modified) in live {
+            if !lease_expired(&payload, last_modified, now) {
+                continue;
+            }
+            match update(&self.store, &path, body.clone(), version).await {
+                Ok(_) => return Ok(self.admit(path)),
+                Err(error) if is_cas_conflict(&error) => {}
+                Err(source) => return Err(store_error(path.as_ref(), source)),
             }
         }
-        Err(CoordinationError::CasConflict {
-            path: self.path.clone(),
-            expected_etag: None,
-        })
+        Ok(false)
     }
 
     /// Extends an active permit's lease.
     pub async fn renew(&self) -> Result<()> {
-        if !self.admitted {
+        let Some(path) = self.path.as_deref() else {
             return Err(CoordinationError::Configuration {
-                key: self.path.clone(),
-                origin: "cannot renew a queued push admission ticket".to_owned(),
+                key: self.prefix.clone(),
+                origin: "cannot renew an unadmitted push contender".to_owned(),
             });
-        }
-        let path = Path::from(self.path.as_str());
-        let (body, version) = get_with_version(&self.store, &path)
+        };
+        let object_path = Path::from(path);
+        let (body, version, _) = get_with_version_and_modified(&self.store, &object_path)
             .await
-            .map_err(|source| store_error(&self.path, source))?;
-        if body.as_ref() != self.holder.as_bytes() {
-            return Err(expired_ticket(&self.path));
+            .map_err(|source| store_error(path, source))?;
+        let payload = deserialize_payload(path, &body)?;
+        if payload.holder != self.holder || payload.is_released() {
+            return Err(expired_ticket(path));
         }
-        update(
-            &self.store,
-            &path,
-            Bytes::from(self.holder.clone()),
-            version,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|source| store_error(&self.path, source))
+        let body = serialize_payload(
+            path,
+            &PushLockPayload::new(
+                &self.holder,
+                unix_now().saturating_add(self.lease_ttl.as_secs()),
+                self.lease_ttl.as_secs(),
+            ),
+        )?;
+        update(&self.store, &object_path, body, version)
+            .await
+            .map(|_| ())
+            .map_err(|source| store_error(path, source))
     }
 
-    /// Removes this writer from the queue and hands capacity to its successor.
+    /// Releases this writer's slot for another push.
     pub async fn release(mut self) -> Result<()> {
-        let result = delete_ticket(&self.store, &self.path).await;
+        let result = match self.path.as_deref() {
+            Some(path) => release_if_holder(&self.store, path, &self.holder).await,
+            None => Ok(()),
+        };
         self.released = true;
         result
     }
@@ -193,41 +168,27 @@ impl PushAdmissionTicket {
         self.lease_ttl
     }
 
-    /// Returns the last observed number of live writers ahead in FIFO order.
+    /// Returns the number of live slots observed in the last attempt.
     #[must_use]
-    pub fn writers_ahead(&self) -> usize {
-        self.writers_ahead
+    pub fn occupied_slots(&self) -> usize {
+        self.occupied_slots
     }
 
-    async fn cleanup_expired(&self, expired: Vec<object_store::ObjectMeta>) {
-        for meta in expired
-            .into_iter()
-            .filter(|meta| meta.location.as_ref() != self.path)
-            .take(MAX_EXPIRED_CLEANUP_PER_OBSERVATION)
-        {
-            let version = object_store::UpdateVersion {
-                e_tag: meta.e_tag,
-                version: meta.version,
-            };
-            match update(
-                &self.store,
-                &meta.location,
-                Bytes::from_static(b"expired"),
-                version,
-            )
-            .await
-            {
-                Ok(_) => {
-                    if let Err(error) = self.store.delete(&meta.location).await {
-                        warn!(path = %meta.location, %error, "failed to delete expired push admission ticket");
-                    }
-                }
-                Err(error) if is_cas_conflict(&error) => {}
-                Err(error) => {
-                    warn!(path = %meta.location, %error, "failed to claim expired push admission ticket");
-                }
-            }
+    fn admit(&mut self, path: Path) -> bool {
+        self.path = Some(path.as_ref().to_owned());
+        self.occupied_slots = self.capacity;
+        true
+    }
+
+    async fn backend_now(&mut self) -> Result<i64> {
+        if let Some((sample, sampled_at)) = self.backend_clock {
+            return Ok(sample.saturating_add(
+                i64::try_from(sampled_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+            ));
         }
+        let sample = backend_unix_time(&self.store, &Path::from(self.prefix.as_str())).await?;
+        self.backend_clock = Some((sample, Instant::now()));
+        Ok(sample)
     }
 }
 
@@ -236,40 +197,57 @@ impl Drop for PushAdmissionTicket {
         if self.released {
             return;
         }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
         let store = Arc::clone(&self.store);
-        let path = self.path.clone();
+        let holder = self.holder.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = delete_ticket(&store, &path).await {
-                    warn!(path, %error, "failed to release push admission ticket on drop");
+                if let Err(error) = release_if_holder(&store, &path, &holder).await {
+                    warn!(path, %error, "failed to release push admission slot on drop");
                 }
             });
         }
     }
 }
 
-/// Canonical object-key prefix for one repository's FIFO admission tickets.
+/// Canonical object-key prefix for one repository's fixed admission slots.
 pub fn push_admission_prefix(prefix: &str) -> Result<String> {
     Ok(format!(
-        "{}/internal/push-admission/tickets",
+        "{}/internal/push-admission/slots",
         push_locks_prefix(prefix)?
     ))
 }
 
-async fn delete_ticket(store: &Arc<dyn ObjectStore>, path: &str) -> Result<()> {
-    match store.delete(&Path::from(path)).await {
-        Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-        Err(source) => Err(store_error(path, source)),
-    }
+fn push_admission_slot_path(prefix: &str, slot: usize) -> String {
+    format!("{prefix}/{slot}")
 }
 
-fn validate_ttl(ttl: Duration, kind: &str) -> Result<()> {
-    if !ttl.is_zero() {
+fn slot_offset(holder: &str, attempt: usize, capacity: usize) -> usize {
+    let digest = blake3::hash(holder.as_bytes());
+    let mut bytes = [0_u8; std::mem::size_of::<u64>()];
+    bytes.copy_from_slice(&digest.as_bytes()[..std::mem::size_of::<u64>()]);
+    (usize::try_from(u64::from_le_bytes(bytes)).unwrap_or(0) + attempt) % capacity
+}
+
+fn lease_expired(payload: &PushLockPayload, last_modified: i64, backend_now: i64) -> bool {
+    if payload.lease_secs == 0 {
+        return false;
+    }
+    let Ok(lease_secs) = i64::try_from(payload.lease_secs) else {
+        return false;
+    };
+    last_modified.saturating_add(lease_secs) <= backend_now
+}
+
+fn validate_ttl(ttl: Duration) -> Result<()> {
+    if ttl.as_secs() > 0 {
         return Ok(());
     }
     Err(CoordinationError::Configuration {
         key: ttl.as_secs().to_string(),
-        origin: format!("push admission {kind} TTL must be positive"),
+        origin: "push admission TTL must be at least one second".to_owned(),
     })
 }
 
@@ -289,192 +267,173 @@ fn is_cas_conflict(error: &object_store::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn memory_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
     }
 
-    #[tokio::test]
-    async fn one_hundred_tickets_complete_in_fifo_capacity_windows() {
-        let store = memory_store();
-        let mut tickets = Vec::new();
-        for _ in 0..100 {
-            tickets.push(
-                PushAdmissionTicket::enqueue(
-                    &store,
-                    "org/repo",
-                    5,
-                    Duration::from_secs(60),
-                    Duration::from_secs(60),
-                )
-                .await
-                .unwrap(),
-            );
-        }
-        let expected = tickets
-            .iter()
-            .map(|ticket| ticket.path.clone())
-            .collect::<Vec<_>>();
-        let (admitted_tx, mut admitted_rx) = tokio::sync::mpsc::channel(100);
-        let workers = tickets
-            .into_iter()
-            .map(|mut ticket| {
-                let admitted_tx = admitted_tx.clone();
-                tokio::spawn(async move {
-                    loop {
-                        if ticket.try_admit().await.unwrap() {
-                            admitted_tx.send(ticket).await.unwrap();
-                            return;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        drop(admitted_tx);
+    fn contender(
+        store: &Arc<dyn ObjectStore>,
+        capacity: usize,
+        ttl: Duration,
+    ) -> PushAdmissionTicket {
+        PushAdmissionTicket::new(store, "org/repo", capacity, ttl).unwrap()
+    }
 
-        for window in 0..20 {
-            let mut admitted = Vec::new();
-            for _ in 0..5 {
-                admitted.push(admitted_rx.recv().await.unwrap());
-            }
-            tokio::task::yield_now().await;
-            assert!(
-                admitted_rx.try_recv().is_err(),
-                "more than five tickets entered in window {window}"
-            );
-            admitted.sort_by(|left, right| left.path.cmp(&right.path));
-            assert_eq!(
-                admitted
-                    .iter()
-                    .map(|ticket| ticket.path.clone())
-                    .collect::<Vec<_>>(),
-                expected[(window * 5)..(window * 5 + 5)]
-            );
-            for ticket in admitted {
-                ticket.release().await.unwrap();
-            }
+    #[tokio::test]
+    async fn capacity_is_bounded_without_per_writer_objects() {
+        let store = memory_store();
+        let mut admitted = Vec::new();
+        for _ in 0..5 {
+            let mut ticket = contender(&store, 5, Duration::from_secs(60));
+            assert!(ticket.try_admit().await.unwrap());
+            admitted.push(ticket);
         }
-        for worker in workers {
-            worker.await.unwrap();
+        let mut blocked = contender(&store, 5, Duration::from_secs(60));
+
+        assert!(!blocked.try_admit().await.unwrap());
+        assert_eq!(blocked.occupied_slots(), 5);
+        assert_eq!(
+            store
+                .list(Some(&Path::from(
+                    push_admission_prefix("org/repo").unwrap()
+                )))
+                .count()
+                .await,
+            6
+        );
+
+        admitted.pop().unwrap().release().await.unwrap();
+        assert!(blocked.try_admit().await.unwrap());
+        blocked.release().await.unwrap();
+        for ticket in admitted {
+            ticket.release().await.unwrap();
         }
     }
 
     #[tokio::test]
-    async fn expired_front_ticket_does_not_block_its_successor() {
+    async fn blocked_contender_samples_backend_clock_once() {
         let store = memory_store();
-        let abandoned = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        )
+        let mut active = contender(&store, 1, Duration::from_secs(60));
+        assert!(active.try_admit().await.unwrap());
+        let mut blocked = contender(&store, 1, Duration::from_secs(60));
+        assert!(!blocked.try_admit().await.unwrap());
+        let clock = Path::from(format!(
+            "{}/clock",
+            push_admission_prefix("org/repo").unwrap()
+        ));
+        store.delete(&clock).await.unwrap();
+
+        assert!(!blocked.try_admit().await.unwrap());
+        assert!(matches!(
+            store.head(&clock).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+
+        active.release().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_contenders_never_exceed_capacity() {
+        const CAPACITY: usize = 5;
+        let store = memory_store();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let workers = (0..40)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                tokio::spawn(async move {
+                    let mut ticket = contender(&store, CAPACITY, Duration::from_secs(60));
+                    while !ticket.try_admit().await.unwrap() {
+                        tokio::task::yield_now().await;
+                    }
+                    let admitted = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(admitted, Ordering::SeqCst);
+                    assert!(admitted <= CAPACITY);
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    ticket.release().await.unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for worker in workers {
+                worker.await.unwrap();
+            }
+        })
         .await
-        .unwrap();
+        .expect("all contenders should eventually acquire a slot");
+
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn expired_slot_does_not_reduce_capacity() {
+        let store = memory_store();
+        let mut abandoned = contender(&store, 1, Duration::from_secs(1));
+        assert!(abandoned.try_admit().await.unwrap());
         std::mem::forget(abandoned);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        let mut successor = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
+        let mut successor = contender(&store, 1, Duration::from_secs(1));
 
         assert!(successor.try_admit().await.unwrap());
         successor.release().await.unwrap();
     }
 
     #[tokio::test]
-    async fn release_removes_ticket_object() {
+    async fn release_leaves_reusable_tombstone() {
         let store = memory_store();
-        let ticket = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        let path = Path::from(ticket.path.as_str());
+        let mut ticket = contender(&store, 1, Duration::from_secs(60));
+        assert!(ticket.try_admit().await.unwrap());
+        let path = Path::from(push_admission_slot_path(
+            &push_admission_prefix("org/repo").unwrap(),
+            0,
+        ));
 
         ticket.release().await.unwrap();
 
-        assert!(matches!(
-            store.head(&path).await,
-            Err(object_store::Error::NotFound { .. })
-        ));
+        let body = store.get(&path).await.unwrap().bytes().await.unwrap();
+        assert!(
+            deserialize_payload(path.as_ref(), &body)
+                .unwrap()
+                .is_released()
+        );
     }
 
     #[tokio::test]
-    async fn stale_cleanup_does_not_delete_a_renewed_ticket() {
+    async fn previous_holder_cannot_renew_reacquired_slot() {
         let store = memory_store();
-        let mut active = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        assert!(active.try_admit().await.unwrap());
-        let cleaner = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        let path = Path::from(active.path.as_str());
-        let stale = store.head(&path).await.unwrap();
-
-        active.renew().await.unwrap();
-        cleaner.cleanup_expired(vec![stale]).await;
-
-        store.head(&path).await.unwrap();
-        active.release().await.unwrap();
-        cleaner.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn claimed_expired_ticket_cannot_be_renewed() {
-        let store = memory_store();
-        let mut ticket = PushAdmissionTicket::enqueue(
-            &store,
-            "org/repo",
-            1,
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-        assert!(ticket.try_admit().await.unwrap());
-        let path = Path::from(ticket.path.as_str());
-        let (_, version) = get_with_version(&store, &path).await.unwrap();
-        update(&store, &path, Bytes::from_static(b"expired"), version)
+        let mut previous = contender(&store, 1, Duration::from_secs(60));
+        assert!(previous.try_admit().await.unwrap());
+        let path = previous.path.clone().unwrap();
+        release_if_holder(&store, &path, &previous.holder)
             .await
             .unwrap();
+        let mut current = contender(&store, 1, Duration::from_secs(60));
+        assert!(current.try_admit().await.unwrap());
 
         assert!(matches!(
-            ticket.renew().await,
+            previous.renew().await,
             Err(CoordinationError::NotFound { .. })
         ));
-        ticket.release().await.unwrap();
+
+        previous.released = true;
+        current.release().await.unwrap();
     }
 
     #[test]
-    fn queue_prefix_is_repository_scoped() {
+    fn slot_prefix_is_repository_scoped() {
         assert_eq!(
             push_admission_prefix("org/repo").unwrap(),
-            "org/repo/locks/internal/push-admission/tickets"
+            "org/repo/locks/internal/push-admission/slots"
         );
     }
 }

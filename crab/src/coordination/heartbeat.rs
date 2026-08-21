@@ -262,6 +262,7 @@ async fn try_extend(
     let new_payload = LockPayload {
         holder: holder.to_owned(),
         expires_at: unix_now() + ttl.as_secs(),
+        lease_secs: ttl.as_secs(),
     };
     let new_body = serde_json::to_vec(&new_payload).map_err(|e| {
         HeartbeatFailure::Fatal(CrabError::Internal(format!(
@@ -300,6 +301,7 @@ mod tests {
         let payload = LockPayload {
             holder: holder.to_owned(),
             expires_at: unix_now() + ttl_secs,
+            lease_secs: ttl_secs,
         };
         let body = serde_json::to_vec(&payload).unwrap();
         store
@@ -383,6 +385,7 @@ mod tests {
         let thief_payload = LockPayload {
             holder: "thief".to_owned(),
             expires_at: unix_now() + 300,
+            lease_secs: 300,
         };
         let body = serde_json::to_vec(&thief_payload).unwrap();
         store

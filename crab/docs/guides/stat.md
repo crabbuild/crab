@@ -51,7 +51,7 @@ Performance counters track cumulative metrics across all crab operations:
 | Counter | Description |
 |---------|-------------|
 | `push_duration_ms` | Total time spent pushing |
-| `bytes_uploaded` | Total bytes uploaded to remote |
+| `bytes_uploaded` | Total xorb payload bytes uploaded; excludes Git packs, indexes, manifests, refs, locks, and metadb objects |
 | `fetch_duration_ms` | Total time spent fetching |
 | `bytes_downloaded` | Total bytes downloaded from remote |
 | `gc_duration_ms` | Total time spent in garbage collection |
@@ -67,8 +67,19 @@ Performance counters track cumulative metrics across all crab operations:
 | `xorb_fetch_requests_coalesced` | Number of coalesced xorb fetch requests |
 | `xorb_fetch_bytes_saved` | Bytes saved by request coalescing |
 | `multipart_resumed_uploads` | Number of resumed multipart uploads |
+| `head_list_requests` | LIST requests issued by batched xorb resume checks |
+| `head_point_requests` | Individual HEAD requests issued by xorb resume checks |
+| `metadb_buffered_batch_write_count` | Buffered metadb batches submitted during pushes |
+| `metadb_wal_flush_count` | Explicit metadb WAL flushes |
+| `metadb_memtable_flush_count` | Explicit metadb memory-table-to-L0 flushes |
 
-If the perf-state file doesn't exist or is corrupt, zeroed counters are shown.
+Pushes update the file cumulatively under an advisory file lock. If the
+perf-state file doesn't exist or is corrupt, zeroed counters are shown.
+
+These counters cover selected Crab operations. They do not count every object
+store `GET`, `HEAD`, `PUT`, `LIST`, retry, pack byte, or metadata byte, so do
+not use them as a billing ledger. Correlate them with provider or RustFS server
+metrics for request and transfer cost.
 
 ### crab stat push-plan
 

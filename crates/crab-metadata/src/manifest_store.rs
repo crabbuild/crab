@@ -44,6 +44,19 @@ pub struct RepositorySnapshot {
     pub journal: RefJournalSnapshot,
 }
 
+impl RepositorySnapshot {
+    /// Return the current journal-projected manifest with a matching validation digest.
+    #[must_use]
+    pub fn materialized_manifest(&self) -> Manifest {
+        let mut manifest = self.manifest.clone();
+        manifest.refs.clone_from(&self.journal.refs);
+        manifest.peeled_refs.clone_from(&self.journal.peeled_refs);
+        manifest.head.clone_from(&self.journal.head);
+        manifest.seal_git_validation();
+        manifest
+    }
+}
+
 fn serialize_manifest(manifest: &Manifest) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(manifest)
         .map_err(|e| MetadataError::Internal(format!("manifest serialize: {e}")))
@@ -1076,5 +1089,41 @@ mod tests {
             after_rewrite.journal.transactions,
             vec![second.id().unwrap()]
         );
+    }
+
+    #[tokio::test]
+    async fn materialized_manifest_reseals_journal_projected_refs() {
+        let store = memory_store();
+        let router = test_layout(store.clone());
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
+        base.seal_git_validation();
+        create_manifest(&store, &router, &base).await.unwrap();
+        let head = read_ref_head(&store, &router, "refs/heads/feature")
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/feature".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/feature".to_owned(),
+                old_oid: None,
+                new_oid: Some("b".repeat(40)),
+                peeled_oid: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        commit_ref_transaction(&store, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+        let materialized = snapshot.materialized_manifest();
+
+        assert_eq!(materialized.refs["refs/heads/feature"], "b".repeat(40));
+        validate_manifest_payload(&materialized).unwrap();
     }
 }

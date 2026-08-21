@@ -33,17 +33,21 @@ pub const REPOSITORY_MAINTENANCE_RESOURCE: &str = "repository-maintenance";
 pub struct PushLockPayload {
     /// Unique holder identity for one push attempt.
     pub holder: String,
-    /// Unix timestamp in seconds when the lock expires; zero means released.
+    /// Client-estimated Unix expiry used for diagnostics; zero means released.
     pub expires_at: u64,
+    /// Lease duration measured from the backend-authored object modification time.
+    #[serde(default)]
+    pub lease_secs: u64,
 }
 
 impl PushLockPayload {
     /// Creates a live push-lock payload for `holder`.
     #[must_use]
-    pub fn new(holder: impl Into<String>, expires_at: u64) -> Self {
+    pub fn new(holder: impl Into<String>, expires_at: u64, lease_secs: u64) -> Self {
         Self {
             holder: holder.into(),
             expires_at,
+            lease_secs,
         }
     }
 
@@ -53,6 +57,7 @@ impl PushLockPayload {
         Self {
             holder: holder.into(),
             expires_at: 0,
+            lease_secs: 0,
         }
     }
 
@@ -258,7 +263,7 @@ impl PushLock {
             .into_iter()
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|source| store_error(locks_prefix.as_ref(), source))?;
-        let now = unix_now();
+        let now = backend_unix_time(store, &locks_prefix).await?;
         let mut reclaimed = 0;
         for meta in objects {
             let key = meta.location.as_ref();
@@ -283,15 +288,9 @@ impl PushLock {
     }
 
     /// Repairs one expired lease by writing a released tombstone.
-    pub async fn repair_expired(
-        store: &Arc<dyn ObjectStore>,
-        key: &str,
-        now: SystemTime,
-    ) -> Result<bool> {
-        let now = now
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
+    pub async fn repair_expired(store: &Arc<dyn ObjectStore>, key: &str) -> Result<bool> {
+        let object_path = Path::from(key);
+        let now = backend_unix_time(store, &object_path).await?;
         expire_stale_lock_at(store, &Path::from(key), key, now).await
     }
 }
@@ -323,7 +322,10 @@ async fn acquire_one(
     ttl: Duration,
 ) -> Result<UpdateVersion> {
     let object_path = Path::from(path);
-    let body = serialize_payload(path, &PushLockPayload::new(holder, expires_at))?;
+    let body = serialize_payload(
+        path,
+        &PushLockPayload::new(holder, expires_at, ttl.as_secs()),
+    )?;
     let etag = match create_strict(store, &object_path, body.clone()).await {
         Ok(etag) => etag,
         Err(object_store::Error::AlreadyExists { .. })
@@ -368,7 +370,7 @@ async fn renew_one(
     }
     let body = serialize_payload(
         path,
-        &PushLockPayload::new(holder, unix_now() + ttl.as_secs()),
+        &PushLockPayload::new(holder, unix_now() + ttl.as_secs(), ttl.as_secs()),
     )?;
     update(store, &object_path, body, etag)
         .await
@@ -384,30 +386,68 @@ enum ContendedAcquire {
     },
 }
 
+fn authoritative_expiry(payload: &PushLockPayload, last_modified: i64) -> Option<u64> {
+    if payload.is_released() {
+        return None;
+    }
+    // Locks written before backend-authored leases shipped have no
+    // `lease_secs`. Their client expiry remains the migration boundary;
+    // otherwise a crashed legacy writer would hold the ref forever.
+    if payload.lease_secs == 0 {
+        return Some(payload.expires_at);
+    }
+    u64::try_from(last_modified)
+        .ok()
+        .map(|modified| modified.saturating_add(payload.lease_secs))
+}
+
+fn lease_expired(payload: &PushLockPayload, last_modified: i64, backend_now: i64) -> bool {
+    authoritative_expiry(payload, last_modified)
+        .and_then(|expires| i64::try_from(expires).ok())
+        .is_some_and(|expires| expires <= backend_now)
+}
+
+pub(crate) async fn backend_unix_time(store: &Arc<dyn ObjectStore>, anchor: &Path) -> Result<i64> {
+    // One reusable clock object supplies backend time without leaking a key
+    // for every blocked contender when cleanup fails.
+    let probe = Path::from(format!("{}/clock", anchor.as_ref()));
+    store
+        .put(&probe, Bytes::new().into())
+        .await
+        .map_err(|source| store_error(probe.as_ref(), source))?;
+    store
+        .head(&probe)
+        .await
+        .map(|metadata| metadata.last_modified.timestamp())
+        .map_err(|source| store_error(probe.as_ref(), source))
+}
+
 async fn acquire_contended(
     store: &Arc<dyn ObjectStore>,
     object_path: &Path,
     ref_name: &str,
     body: Bytes,
 ) -> Result<ContendedAcquire> {
-    let (existing_body, reclaim_etag) = match get_with_version(store, object_path).await {
-        Ok(existing) => existing,
-        Err(object_store::Error::NotFound { .. }) => {
-            return match create_strict(store, object_path, body).await {
-                Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
-                Err(object_store::Error::AlreadyExists { .. })
-                | Err(object_store::Error::Precondition { .. }) => {
-                    let (holder, expires_at_unix) = lock_holder_snapshot(store, object_path).await;
-                    Ok(ContendedAcquire::Held {
-                        holder,
-                        expires_at_unix,
-                    })
-                }
-                Err(source) => Err(store_error(object_path.as_ref(), source)),
-            };
-        }
-        Err(source) => return Err(store_error(object_path.as_ref(), source)),
-    };
+    let (existing_body, reclaim_etag, last_modified) =
+        match get_with_version_and_modified(store, object_path).await {
+            Ok(existing) => existing,
+            Err(object_store::Error::NotFound { .. }) => {
+                return match create_strict(store, object_path, body).await {
+                    Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
+                    Err(object_store::Error::AlreadyExists { .. })
+                    | Err(object_store::Error::Precondition { .. }) => {
+                        let (holder, expires_at_unix) =
+                            lock_holder_snapshot(store, object_path).await;
+                        Ok(ContendedAcquire::Held {
+                            holder,
+                            expires_at_unix,
+                        })
+                    }
+                    Err(source) => Err(store_error(object_path.as_ref(), source)),
+                };
+            }
+            Err(source) => return Err(store_error(object_path.as_ref(), source)),
+        };
 
     let existing = match serde_json::from_slice::<PushLockPayload>(&existing_body) {
         Ok(existing) => existing,
@@ -418,10 +458,12 @@ async fn acquire_contended(
             });
         }
     };
-    if existing.expires_at > unix_now() {
+    let now = backend_unix_time(store, object_path).await?;
+    if !existing.is_released() && !lease_expired(&existing, last_modified, now) {
+        let expires_at_unix = authoritative_expiry(&existing, last_modified);
         return Ok(ContendedAcquire::Held {
             holder: existing.holder,
-            expires_at_unix: Some(existing.expires_at),
+            expires_at_unix,
         });
     }
 
@@ -448,9 +490,12 @@ async fn lock_holder_snapshot(
     store: &Arc<dyn ObjectStore>,
     object_path: &Path,
 ) -> (String, Option<u64>) {
-    match get_with_version(store, object_path).await {
-        Ok((body, _)) => match serde_json::from_slice::<PushLockPayload>(&body) {
-            Ok(payload) => (payload.holder, Some(payload.expires_at)),
+    match get_with_version_and_modified(store, object_path).await {
+        Ok((body, _, last_modified)) => match serde_json::from_slice::<PushLockPayload>(&body) {
+            Ok(payload) => {
+                let expires_at_unix = authoritative_expiry(&payload, last_modified);
+                (payload.holder, expires_at_unix)
+            }
             Err(_) => (String::new(), None),
         },
         Err(_) => (String::new(), None),
@@ -481,7 +526,11 @@ async fn release_with_known_etag(
     release_if_holder(store, path, holder).await
 }
 
-async fn release_if_holder(store: &Arc<dyn ObjectStore>, path: &str, holder: &str) -> Result<()> {
+pub(crate) async fn release_if_holder(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+) -> Result<()> {
     let object_path = Path::from(path);
     let (body, etag) = match get_with_version(store, &object_path).await {
         Ok(lock) => lock,
@@ -506,15 +555,16 @@ async fn expire_stale_lock_at(
     store: &Arc<dyn ObjectStore>,
     object_path: &Path,
     path: &str,
-    now: u64,
+    now: i64,
 ) -> Result<bool> {
-    let (body, etag) = match get_with_version(store, object_path).await {
+    let (body, etag, last_modified) = match get_with_version_and_modified(store, object_path).await
+    {
         Ok(lock) => lock,
         Err(object_store::Error::NotFound { .. }) => return Ok(true),
         Err(source) => return Err(store_error(path, source)),
     };
     let payload = deserialize_payload(path, &body)?;
-    if payload.expires_at == 0 || payload.expires_at > now {
+    if !lease_expired(&payload, last_modified, now) {
         return Ok(false);
     }
     let body = serialize_payload(path, &PushLockPayload::released(&payload.holder))?;
@@ -541,12 +591,22 @@ pub(crate) async fn get_with_version(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
 ) -> object_store::Result<(Bytes, UpdateVersion)> {
+    get_with_version_and_modified(store, path)
+        .await
+        .map(|(body, version, _)| (body, version))
+}
+
+pub(crate) async fn get_with_version_and_modified(
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+) -> object_store::Result<(Bytes, UpdateVersion, i64)> {
     let result = store.get(path).await?;
     let version = UpdateVersion {
         e_tag: result.meta.e_tag.clone(),
         version: result.meta.version.clone(),
     };
-    Ok((result.bytes().await?, version))
+    let last_modified = result.meta.last_modified.timestamp();
+    Ok((result.bytes().await?, version, last_modified))
 }
 
 pub(crate) async fn update(
@@ -572,7 +632,7 @@ pub(crate) fn store_error(path: &str, source: object_store::Error) -> Coordinati
     }
 }
 
-fn serialize_payload(path: &str, payload: &PushLockPayload) -> Result<Bytes> {
+pub(crate) fn serialize_payload(path: &str, payload: &PushLockPayload) -> Result<Bytes> {
     serde_json::to_vec(payload)
         .map(Bytes::from)
         .map_err(|source| CoordinationError::Serialize {
@@ -582,7 +642,7 @@ fn serialize_payload(path: &str, payload: &PushLockPayload) -> Result<Bytes> {
         })
 }
 
-fn deserialize_payload(path: &str, body: &[u8]) -> Result<PushLockPayload> {
+pub(crate) fn deserialize_payload(path: &str, body: &[u8]) -> Result<PushLockPayload> {
     serde_json::from_slice(body).map_err(|source| CoordinationError::MalformedPushLock {
         path: path.to_owned(),
         source,
@@ -612,6 +672,7 @@ pub fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use object_store::memory::InMemory;
     use std::sync::Arc;
     use std::time::Duration;
@@ -683,39 +744,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_lock_can_be_reacquired_and_repaired() {
+    async fn backend_age_prevents_fast_client_from_reclaiming_live_lock() {
         let store = memory_store();
         let path = push_lock_path("org/repo", "refs/heads/main").unwrap();
-        let body = serde_json::to_vec(&PushLockPayload::new("dead-holder", 1)).unwrap();
+        let body = serde_json::to_vec(&PushLockPayload::new("live-holder", 1, 60)).unwrap();
         create_strict(&store, &Path::from(path.as_str()), Bytes::from(body))
             .await
             .unwrap();
+
+        let contender = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main").await;
+
+        assert!(matches!(
+            contender,
+            Err(CoordinationError::PushLockHeld { holder, .. }) if holder == "live-holder"
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_lock_can_be_reacquired_and_repaired() {
+        let store = memory_store();
+        let path = push_lock_path("org/repo", "refs/heads/main").unwrap();
+        let body = serde_json::to_vec(&PushLockPayload::new("dead-holder", 1, 1)).unwrap();
+        create_strict(&store, &Path::from(path.as_str()), Bytes::from(body))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
 
         let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
         lock.release().await.unwrap();
 
-        let repaired = PushLock::repair_expired(&store, &path, SystemTime::now())
+        let repaired = PushLock::repair_expired(&store, &path).await.unwrap();
+        assert!(!repaired, "released tombstones are not expired live leases");
+    }
+
+    #[tokio::test]
+    async fn expired_legacy_payload_does_not_hold_ref_forever() {
+        let store = memory_store();
+        let path = push_lock_path("org/repo", "refs/heads/main").unwrap();
+        create_strict(
+            &store,
+            &Path::from(path.as_str()),
+            Bytes::from_static(br#"{"holder":"legacy-holder","expires_at":1}"#),
+        )
+        .await
+        .unwrap();
+
+        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
-        assert!(!repaired, "released tombstones are not expired live leases");
+
+        lock.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn backend_clock_uses_one_reusable_object() {
+        let store = memory_store();
+        let anchor = Path::from("org/repo/locks/internal/push-admission/slots");
+
+        backend_unix_time(&store, &anchor).await.unwrap();
+        backend_unix_time(&store, &anchor).await.unwrap();
+
+        let objects = store
+            .list(Some(&anchor))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<object_store::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].location.as_ref(), format!("{anchor}/clock"));
     }
 
     #[tokio::test]
     async fn repair_marks_expired_live_lock_released() {
         let store = memory_store();
         let path = push_lock_path("org/repo", "refs/heads/main").unwrap();
-        let body = serde_json::to_vec(&PushLockPayload::new("dead-holder", 1)).unwrap();
+        let body = serde_json::to_vec(&PushLockPayload::new("dead-holder", 1, 1)).unwrap();
         create_strict(&store, &Path::from(path.as_str()), Bytes::from(body))
             .await
             .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
 
-        assert!(
-            PushLock::repair_expired(&store, &path, SystemTime::now())
-                .await
-                .unwrap()
-        );
+        assert!(PushLock::repair_expired(&store, &path).await.unwrap());
         let (body, _) = get_with_version(&store, &Path::from(path.as_str()))
             .await
             .unwrap();
@@ -725,7 +837,7 @@ mod tests {
 
     #[test]
     fn payload_round_trips_json() {
-        let payload = PushLockPayload::new("holder-a", 42);
+        let payload = PushLockPayload::new("holder-a", 42, 30);
 
         let bytes = serde_json::to_vec(&payload).unwrap();
         let parsed: PushLockPayload = serde_json::from_slice(&bytes).unwrap();
@@ -744,7 +856,7 @@ mod tests {
 
     #[test]
     fn expiry_ignores_released_tombstones() {
-        let payload = PushLockPayload::new("holder-a", 99);
+        let payload = PushLockPayload::new("holder-a", 99, 30);
 
         assert!(!payload.is_expired_at(98));
         assert!(payload.is_expired_at(99));

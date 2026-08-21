@@ -409,6 +409,15 @@ impl MetaDb {
     /// opening either database if the session was configured with
     /// `read_only = true`.
     pub async fn commit(&self, txn: Transaction) -> Result<PushWriteReceipt> {
+        self.commit_inner(txn, true).await
+    }
+
+    /// Buffer repairable metadata until the caller explicitly flushes the session.
+    pub(crate) async fn commit_buffered(&self, txn: Transaction) -> Result<PushWriteReceipt> {
+        self.commit_inner(txn, false).await
+    }
+
+    async fn commit_inner(&self, txn: Transaction, durable: bool) -> Result<PushWriteReceipt> {
         if self.config.read_only {
             return Err(crate::core::error::MetaDbError::ReadOnly {
                 db: String::from("metadb"),
@@ -445,14 +454,22 @@ impl MetaDb {
                 return Ok::<(), crate::core::error::CrabError>(());
             }
             let db = self.open_file_index_db().await?;
-            db.write(fi_batch).await
+            if durable {
+                db.write(fi_batch).await
+            } else {
+                db.write_buffered(fi_batch).await
+            }
         };
         let chunk_future = async {
             if chunk_ops == 0 {
                 return Ok::<(), crate::core::error::CrabError>(());
             }
             let db = self.open_chunk_index_db().await?;
-            db.write(ci_batch).await
+            if durable {
+                db.write(ci_batch).await
+            } else {
+                db.write_buffered(ci_batch).await
+            }
         };
 
         tokio::try_join!(file_future, chunk_future)?;

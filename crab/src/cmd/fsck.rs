@@ -1,15 +1,8 @@
 //! `crab fsck` — repository integrity checker.
 //!
-//! Detection categories:
-//! - Git-object-level: dangling refs, missing trees/blobs (via `gix-fsck::Connectivity`)
-//! - Crab-specific: missing file-index entries, missing xorbs, orphan shards,
-//!   pack-list/storage divergence, expired push locks, abandoned multipart uploads,
-//!   PersistentChunkIndex/shard-list divergence
-//! - Informational: orphan file-index entries (not errors)
-//!
-//! `--repair` performs safe reversible operations: re-add manifest entries when
-//! the object exists in storage, repair expired push locks, abort abandoned
-//! multipart uploads.
+//! Checks Crab manifests, pack/index presence, data-chain metadata, and
+//! coordination state. The production object-store checker does not yet run
+//! full Git connectivity or enumerate provider-side multipart uploads.
 
 use std::io::Stdout;
 use std::time::{Duration, SystemTime};

@@ -16,6 +16,7 @@ use tracing::{Instrument, warn};
 
 use crate::audit::default_log_path;
 use crate::core::error::{CrabError, Result};
+use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
 use crate::git::fetch::{CommitGraphProvider, FetchConfig, PackInfo, PackStore, run_fetch_batch};
 use crate::git::push::{
@@ -517,6 +518,8 @@ struct SessionCache {
     pack_list: Option<crab_metadata::manifests::PackList>,
     /// Cached result of the `has_commit_graph_summary` probe.
     has_commit_graph: Option<bool>,
+    metrics: Arc<Metrics>,
+    persisted_metrics: MetricsSummary,
 }
 
 impl SessionCache {
@@ -525,6 +528,8 @@ impl SessionCache {
             config,
             pack_list: None,
             has_commit_graph: None,
+            metrics: Arc::new(Metrics::new()),
+            persisted_metrics: MetricsSummary::zeroed(),
         }
     }
 
@@ -536,6 +541,17 @@ impl SessionCache {
     /// the store. Called after a push that creates or updates the summary.
     fn invalidate_commit_graph(&mut self) {
         self.has_commit_graph = None;
+    }
+
+    fn persist_pending_metrics(&mut self) -> Result<()> {
+        if !self.config.perf_persist {
+            return Ok(());
+        }
+        let current = self.metrics.snapshot().summary();
+        let delta = current.delta_since(&self.persisted_metrics);
+        persist_metrics_delta(std::path::Path::new(&self.config.perf_path), &delta)?;
+        self.persisted_metrics = current;
+        Ok(())
     }
 }
 
@@ -746,6 +762,7 @@ async fn run_remote_helper_with_context(
         };
         if let Batch::StatelessConnect { service } = &batch {
             let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
+            let fetch_policy = fetch_admission_policy(cache.config());
             let result = if service == "git-upload-pack" {
                 crate::git::upload_pack_wire::serve(
                     &mut reader,
@@ -753,6 +770,7 @@ async fn run_remote_helper_with_context(
                     store.as_storage(),
                     &prefix,
                     &hidden_ref_patterns,
+                    &fetch_policy,
                     options.progress,
                     &cancel,
                 )
@@ -1374,7 +1392,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             push_state,
                             remote_name,
                             push_state_remote_url,
-                            None,
+                            Some(Arc::clone(&cache.metrics)),
                             cancel.clone(),
                         ),
                     )
@@ -1429,6 +1447,9 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     .any(|o| matches!(o, RefPushOutcome::Ok));
                 if any_ref_succeeded {
                     cache.invalidate_commit_graph();
+                }
+                if let Err(error) = cache.persist_pending_metrics() {
+                    warn!(%error, "failed to persist performance counters");
                 }
 
                 let response = format_push_response(&result, &ordered_specs);
@@ -1805,10 +1826,7 @@ async fn read_remote_refs(
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
     let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
-    let mut manifest = snapshot.manifest;
-    manifest.refs = snapshot.journal.refs;
-    manifest.peeled_refs = snapshot.journal.peeled_refs;
-    manifest.head = snapshot.journal.head;
+    let manifest = snapshot.materialized_manifest();
     let advertisement = crab_read::manifest_ref_advertisement(&manifest, hidden_ref_patterns);
 
     let refs = advertisement
@@ -2118,10 +2136,7 @@ async fn fetch_packs(
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
-    let mut manifest = snapshot.manifest;
-    manifest.refs = snapshot.journal.refs;
-    manifest.peeled_refs = snapshot.journal.peeled_refs;
-    manifest.head = snapshot.journal.head;
+    let manifest = snapshot.materialized_manifest();
 
     let fetch_store = Arc::new(RemoteFetchStore::new(
         store.clone(),
@@ -2143,8 +2158,6 @@ async fn fetch_packs(
                 "raw object fetches cannot be mixed with ref fetches".to_owned(),
             ));
         }
-        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
-        return Ok(None);
     }
 
     // Upload-pack policy gate. Raw-SHA `fetch <sha> <ref>` lines
@@ -2201,6 +2214,11 @@ async fn fetch_packs(
             writer.flush().await?;
             return Ok(None);
         }
+    }
+
+    if raw_object_count > 0 {
+        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
+        return Ok(None);
     }
 
     let git_dir = super::discover::discover_git_dir()?;

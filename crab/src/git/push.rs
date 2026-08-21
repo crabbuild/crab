@@ -1467,6 +1467,15 @@ pub(crate) struct CommittedPackIndex<'a> {
     pub(crate) git_sha1: &'a str,
 }
 
+#[derive(Debug)]
+struct LocatorPackEvidence {
+    pack_id: MerkleHash,
+    idx_path: PathBuf,
+    rev_path: PathBuf,
+    git_sha1: String,
+    _temp: Option<tempfile::TempDir>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GitObjectSetProof {
     count: u64,
@@ -2412,12 +2421,12 @@ const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
+// Operational cap, not a correctness constant. With the product's default
+// eight upload workers, five pushes bound one repository to 40 upload tasks.
 const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
-const PUSH_ADMISSION_QUEUED_TTL: Duration = Duration::from_secs(120);
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
-const PUSH_ADMISSION_WAIT_PER_WAVE: Duration = Duration::from_millis(250);
 const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
 
@@ -2954,23 +2963,15 @@ fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     Duration::from_nanos(pick)
 }
 
-fn push_admission_wait_delay(attempt: u32, writers_ahead: usize, remaining: Duration) -> Duration {
+fn push_admission_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let exp = PUSH_ADMISSION_WAIT_BACKOFF_BASE.saturating_mul(shift);
-    let waves_ahead = writers_ahead / PUSH_ADMISSION_SLOTS;
-    let rank_floor = PUSH_ADMISSION_WAIT_PER_WAVE
-        .saturating_mul(u32::try_from(waves_ahead).unwrap_or(u32::MAX))
-        .min(PUSH_ADMISSION_WAIT_BACKOFF_CAP.saturating_sub(PUSH_ADMISSION_WAIT_BACKOFF_BASE));
-    let bound = exp
-        .max(rank_floor.saturating_add(PUSH_ADMISSION_WAIT_BACKOFF_BASE))
-        .min(PUSH_ADMISSION_WAIT_BACKOFF_CAP)
-        .min(remaining);
+    let bound = exp.min(PUSH_ADMISSION_WAIT_BACKOFF_CAP).min(remaining);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
     if bound_nanos == 0 {
         return Duration::ZERO;
     }
-    let floor_nanos = u64::try_from(rank_floor.min(bound).as_nanos()).unwrap_or(bound_nanos);
-    let pick = rand::rng().random_range(floor_nanos.max(1)..=bound_nanos);
+    let pick = rand::rng().random_range(1..=bound_nanos);
     Duration::from_nanos(pick)
 }
 
@@ -4662,18 +4663,15 @@ async fn acquire_push_admission_lock(
     ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<crab_coordination::PushAdmissionTicket> {
-    // Admission is a capacity queue, not a correctness lease. Give queued
-    // writers more than one lease lifetime so a healthy long push cannot
-    // make an unrelated branch fail only because all slots remained busy.
+    // Admission bounds expensive repository-wide work, while per-ref locks
+    // provide correctness. Waiting contenders own no object-store state.
     let deadline = Instant::now() + ttl.saturating_mul(PUSH_ADMISSION_WAIT_TTL_MULTIPLIER);
-    let mut ticket = crab_coordination::PushAdmissionTicket::enqueue(
+    let mut ticket = crab_coordination::PushAdmissionTicket::new(
         store.inner(),
         prefix,
         PUSH_ADMISSION_SLOTS,
         ttl,
-        PUSH_ADMISSION_QUEUED_TTL,
     )
-    .await
     .map_err(CrabError::from)?;
     let mut attempt = 0;
     loop {
@@ -4693,16 +4691,14 @@ async fn acquire_push_admission_lock(
                     }
                     return Err(CrabError::Throttled { retry_after: None });
                 }
-                let delay = push_admission_wait_delay(
-                    attempt,
-                    ticket.writers_ahead(),
-                    deadline.saturating_duration_since(now),
-                );
+                let delay =
+                    push_admission_wait_delay(attempt, deadline.saturating_duration_since(now));
                 attempt = attempt.saturating_add(1);
                 debug!(
                     attempt,
                     delay_ms = delay.as_millis(),
-                    "push admission ticket is queued"
+                    occupied_slots = ticket.occupied_slots(),
+                    "push admission capacity is occupied"
                 );
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
@@ -4805,6 +4801,119 @@ async fn while_admitted_until_commit<T>(
     }
 }
 
+fn validate_locator_pack_evidence(
+    pack: &PackManifestEntry,
+    idx_path: &Path,
+    rev_path: &Path,
+    expected_git_sha1: &str,
+    error_path: &str,
+) -> Result<()> {
+    let locations = crab_git::pack_locator::PackLocationIter::open(idx_path, rev_path, pack.size)
+        .map_err(crab_git::pack::PackError::from)?;
+    if locations.object_count() != pack.object_count {
+        return Err(CrabError::CorruptObject {
+            path: error_path.to_owned(),
+            reason: format!(
+                "manifest records {} objects but verified index contains {}",
+                pack.object_count,
+                locations.object_count()
+            ),
+        });
+    }
+    if locations.pack_checksum().to_string() != expected_git_sha1 {
+        return Err(CrabError::CorruptObject {
+            path: error_path.to_owned(),
+            reason: "pack index checksum disagrees with verified pack trailer".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+async fn download_locator_pack_evidence(
+    store: &Store,
+    router: &StoreLayout,
+    pack: &PackManifestEntry,
+) -> Result<LocatorPackEvidence> {
+    if pack.size < 20 {
+        return Err(CrabError::CorruptObject {
+            path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
+            reason: "canonical Git pack is too short for its trailer".to_owned(),
+        });
+    }
+    let trailer = store
+        .range_get(&router.pack_path(&pack.pack_id), pack.size - 20..pack.size)
+        .await?;
+    let expected_git_sha1 =
+        gix_hash::ObjectId::from(<[u8; 20]>::try_from(trailer.as_ref()).map_err(|_| {
+            CrabError::CorruptObject {
+                path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
+                reason: "canonical Git pack trailer is not 20 bytes".to_owned(),
+            }
+        })?)
+        .to_string();
+    let temp = tempfile::tempdir().map_err(CrabError::Io)?;
+    let idx_path = temp.path().join("pack.idx");
+    let rev_path = temp.path().join("pack.rev");
+    store
+        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .await?;
+    match store
+        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .await
+    {
+        Ok(_) => {}
+        // v1.0.14 and earlier direct pushes published `.idx` without `.rev`.
+        // Rebuilding that deterministic evidence is the tagged-data migration.
+        Err(CrabError::NotFound { .. }) => {
+            let index = idx_path.clone();
+            let reverse = rev_path.clone();
+            let (reverse_hash, reverse_size) = tokio::task::spawn_blocking(move || {
+                crab_git::pack_locator::write_pack_reverse_index(&index, &reverse)
+                    .map_err(crab_git::pack::PackError::from)
+                    .map_err(CrabError::from)?;
+                hash_file_blake3(&reverse)
+            })
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!(
+                    "legacy reverse-index generation worker failed: {error}"
+                ))
+            })??;
+            store
+                .put_multipart_file_retry(
+                    &router.pack_reverse_index_path(&pack.pack_id),
+                    &rev_path,
+                    reverse_size,
+                    reverse_hash,
+                    8 * 1024 * 1024,
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await?;
+        }
+        Err(error) => return Err(error),
+    }
+    validate_locator_pack_evidence(
+        pack,
+        &idx_path,
+        &rev_path,
+        &expected_git_sha1,
+        router.pack_index_path(&pack.pack_id).as_ref(),
+    )?;
+    let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+        CrabError::Internal(format!(
+            "committed pack id is invalid for locator publication: {error}"
+        ))
+    })?;
+    Ok(LocatorPackEvidence {
+        pack_id,
+        idx_path,
+        rev_path,
+        git_sha1: expected_git_sha1,
+        _temp: Some(temp),
+    })
+}
+
 pub(crate) async fn publish_committed_pack_locators(
     store: &Store,
     router: &StoreLayout,
@@ -4812,48 +4921,38 @@ pub(crate) async fn publish_committed_pack_locators(
     anchor: CommittedManifestAnchor,
     lock_ttl: Duration,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
-    let mut records = Vec::with_capacity(packs.len());
+    let mut local_evidence = HashMap::with_capacity(packs.len());
     for published in packs {
         let pack = published.pack;
-        let locations = crab_git::pack_locator::PackLocationIter::open(
+        validate_locator_pack_evidence(
+            pack,
             published.idx_path,
             published.rev_path,
-            pack.size,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
-        if locations.object_count() != pack.object_count {
-            return Err(CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
-                reason: format!(
-                    "manifest records {} objects but verified index contains {}",
-                    pack.object_count,
-                    locations.object_count()
-                ),
-            });
-        }
-        if locations.pack_checksum().to_string() != published.git_sha1 {
-            return Err(CrabError::CorruptObject {
-                path: published.idx_path.display().to_string(),
-                reason: "pack index checksum disagrees with verified pack trailer".to_owned(),
-            });
-        }
-        drop(locations);
+            published.git_sha1,
+            &published.idx_path.display().to_string(),
+        )?;
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
             CrabError::Internal(format!(
                 "committed pack id is invalid for locator publication: {error}"
             ))
         })?;
-        records.push((
-            crab_metadata::git_object_locator::GitPackLocatorRecord {
+        if local_evidence
+            .insert(
                 pack_id,
-                committed_generation: anchor.generation,
-                pack_index_hash: anchor.pack_index_hash,
-                object_count: pack.object_count,
-                pack_size: pack.size,
-            },
-            published.idx_path,
-            published.rev_path,
-        ));
+                LocatorPackEvidence {
+                    pack_id,
+                    idx_path: published.idx_path.to_owned(),
+                    rev_path: published.rev_path.to_owned(),
+                    git_sha1: published.git_sha1.to_owned(),
+                    _temp: None,
+                },
+            )
+            .is_some()
+        {
+            return Err(CrabError::Internal(
+                "locator publication received duplicate pack evidence".to_owned(),
+            ));
+        }
     }
 
     // Most fanout writers are stale by the time they reach derived indexing.
@@ -4882,10 +4981,6 @@ pub(crate) async fn publish_committed_pack_locators(
             return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
         }
         let current_packs = read_bulk_pack_list(store, router, &current.pack_index_hash).await?;
-        let published_ids = records
-            .iter()
-            .map(|(record, _, _)| record.pack_id)
-            .collect::<HashSet<_>>();
 
         let mut writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
             Arc::clone(store.inner()),
@@ -4894,18 +4989,85 @@ pub(crate) async fn publish_committed_pack_locators(
         .await?;
         let operation = async {
             let prior_coverage = writer.coverage();
-            let pack_records = records
+            let covered_packs = if let Some(coverage) = prior_coverage {
+                read_bulk_pack_list(store, router, &coverage.pack_index_hash.hex()).await?
+            } else {
+                Vec::new()
+            };
+            let covered = covered_packs
                 .iter()
-                .map(|(record, _, _)| *record)
-                .collect::<Vec<_>>();
+                .map(|pack| (pack.pack_id.as_str(), (pack.object_count, pack.size)))
+                .collect::<HashMap<_, _>>();
+            let mut pack_records = Vec::with_capacity(current_packs.len());
+            for pack in &current_packs {
+                let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+                    CrabError::Internal(format!(
+                        "committed pack id is invalid for locator publication: {error}"
+                    ))
+                })?;
+                pack_records.push(crab_metadata::git_object_locator::GitPackLocatorRecord {
+                    pack_id,
+                    committed_generation: anchor.generation,
+                    pack_index_hash: anchor.pack_index_hash,
+                    object_count: pack.object_count,
+                    pack_size: pack.size,
+                });
+            }
             let bindings = writer.bind_packs(&pack_records).await?;
-            for (binding, (_, idx_path, rev_path)) in bindings.into_iter().zip(&records) {
+            let retained_slots = bindings
+                .iter()
+                .map(|binding| binding.pack_slot)
+                .collect::<HashSet<_>>();
+            let sweep = writer.sweep_unreferenced(&retained_slots).await?;
+            let rebuild_all = sweep.pack_rows_deleted != 0;
+            let mut evidence = Vec::new();
+            for pack in &current_packs {
+                if !rebuild_all
+                    && covered.get(pack.pack_id.as_str()) == Some(&(pack.object_count, pack.size))
+                {
+                    continue;
+                }
+                let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+                    CrabError::Internal(format!(
+                        "committed pack id is invalid for locator publication: {error}"
+                    ))
+                })?;
+                let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
+                    validate_locator_pack_evidence(
+                        pack,
+                        &local.idx_path,
+                        &local.rev_path,
+                        &local.git_sha1,
+                        &local.idx_path.display().to_string(),
+                    )?;
+                    local
+                } else {
+                    download_locator_pack_evidence(store, router, pack).await?
+                };
+                evidence.push(pack_evidence);
+            }
+            let bindings = bindings
+                .into_iter()
+                .map(|binding| (binding.record.pack_id, binding))
+                .collect::<HashMap<_, _>>();
+            for pack_evidence in &evidence {
+                let binding = *bindings.get(&pack_evidence.pack_id).ok_or_else(|| {
+                    CrabError::Internal(
+                        "locator evidence has no current manifest pack binding".to_owned(),
+                    )
+                })?;
                 let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                    idx_path,
-                    rev_path,
+                    &pack_evidence.idx_path,
+                    &pack_evidence.rev_path,
                     binding.record.pack_size,
                 )
                 .map_err(crab_git::pack::PackError::from)?;
+                if locations.pack_checksum().to_string() != pack_evidence.git_sha1 {
+                    return Err(CrabError::CorruptObject {
+                        path: pack_evidence.idx_path.display().to_string(),
+                        reason: "pack index checksum changed during locator publication".to_owned(),
+                    });
+                }
                 let mut entries = Vec::with_capacity(25_000);
                 for location in &mut locations {
                     let location = location.map_err(crab_git::pack::PackError::from)?;
@@ -4939,37 +5101,12 @@ pub(crate) async fn publish_committed_pack_locators(
             {
                 return Ok(());
             }
-            let all_current_published = current_packs.iter().all(|pack| {
-                MerkleHash::from_hex(&pack.pack_id)
-                    .ok()
-                    .is_some_and(|pack_id| published_ids.contains(&pack_id))
-            });
-            let prior_covers_remainder = if all_current_published {
-                true
-            } else if let Some(coverage) = prior_coverage {
-                let covered_packs =
-                    read_bulk_pack_list(store, router, &coverage.pack_index_hash.hex()).await?;
-                current_packs.iter().all(|current| {
-                    MerkleHash::from_hex(&current.pack_id)
-                        .ok()
-                        .is_some_and(|pack_id| published_ids.contains(&pack_id))
-                        || covered_packs.iter().any(|covered| {
-                            covered.pack_id == current.pack_id
-                                && covered.object_count == current.object_count
-                                && covered.size == current.size
-                        })
+            writer
+                .set_coverage(crab_metadata::git_object_locator::GitLocatorCoverage {
+                    generation: anchor.generation,
+                    pack_index_hash: anchor.pack_index_hash,
                 })
-            } else {
-                false
-            };
-            if prior_covers_remainder {
-                writer
-                    .set_coverage(crab_metadata::git_object_locator::GitLocatorCoverage {
-                        generation: anchor.generation,
-                        pack_index_hash: anchor.pack_index_hash,
-                    })
-                    .await?;
-            }
+                .await?;
             Ok(())
         }
         .await;
@@ -5331,10 +5468,7 @@ impl PushPipeline {
 
         match crate::metadata::manifest::read_repository_snapshot(store, &self.router).await {
             Ok(snapshot) => {
-                let mut manifest = snapshot.manifest;
-                manifest.refs = snapshot.journal.refs;
-                manifest.peeled_refs = snapshot.journal.peeled_refs;
-                manifest.head = snapshot.journal.head;
+                let manifest = snapshot.materialized_manifest();
                 debug!(
                     generation = manifest.generation,
                     refs = manifest.refs.len(),
@@ -6659,10 +6793,7 @@ impl PushPipeline {
                 }
                 Err(error) => return Err(error),
             };
-        let mut current = current_snapshot.manifest;
-        current.refs = current_snapshot.journal.refs;
-        current.peeled_refs = current_snapshot.journal.peeled_refs;
-        current.head = current_snapshot.journal.head;
+        let current = current_snapshot.materialized_manifest();
         let conflicts = ref_base_conflicts(&self.specs, &decisions, base.as_ref(), &current);
         if self.config.atomic
             && let Some(conflict) = conflicts.first()
@@ -6845,12 +6976,30 @@ impl PushPipeline {
             warn!(%error, "ref journal committed; compaction lock release requires repair");
         }
         match compacted {
-            Ok(Some(compacted_manifest)) => match committed_manifest_anchor(&compacted_manifest) {
-                Ok(anchor) => *self.committed_manifest_anchor.lock().await = anchor,
-                Err(error) => {
-                    warn!(%error, "ref journal committed; compacted anchor requires repair")
+            Ok(Some(compacted_manifest)) => {
+                match committed_manifest_anchor(&compacted_manifest) {
+                    Ok(anchor) => *self.committed_manifest_anchor.lock().await = anchor,
+                    Err(error) => {
+                        warn!(%error, "ref journal committed; compacted anchor requires repair")
+                    }
                 }
-            },
+                let visibility_published = match self
+                    .publish_git_visibility_index(&compacted_manifest, store)
+                    .await
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            generation = compacted_manifest.generation,
+                            "ref journal committed; Git visibility proof requires repair"
+                        );
+                        false
+                    }
+                };
+                self.git_visibility_published
+                    .store(visibility_published, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok(None) => {}
             Err(error) => {
                 warn!(%error, "ref journal committed; manifest compaction requires repair")
@@ -10514,14 +10663,20 @@ impl PushPipeline {
                 // the staged pack; `.idx` is not an accepted wire object.
                 if store.staging_write_prefix().is_none() {
                     let idx_path = installed.idx_path.clone();
-                    let (idx_hash, idx_size) =
-                        tokio::task::spawn_blocking(move || hash_file_blake3(&idx_path))
-                            .await
-                            .map_err(|error| {
-                                CrabError::Internal(format!(
-                                    "pack index hashing join failed: {error}"
-                                ))
-                            })??;
+                    let rev_path = installed.rev_path.clone();
+                    let ((idx_hash, idx_size), (rev_hash, rev_size)) =
+                        tokio::task::spawn_blocking(move || {
+                            Ok::<_, CrabError>((
+                                hash_file_blake3(&idx_path)?,
+                                hash_file_blake3(&rev_path)?,
+                            ))
+                        })
+                        .await
+                        .map_err(|error| {
+                            CrabError::Internal(format!(
+                                "pack evidence hashing join failed: {error}"
+                            ))
+                        })??;
                     let remote_idx_path = self.router.pack_index_path(&pack_sha);
                     store
                         .put_multipart_file_retry(
@@ -10529,6 +10684,18 @@ impl PushPipeline {
                             &installed.idx_path,
                             idx_size,
                             idx_hash,
+                            8 * 1024 * 1024,
+                            &self.cancel,
+                            None,
+                        )
+                        .await?;
+                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
+                    store
+                        .put_multipart_file_retry(
+                            &remote_rev_path,
+                            &installed.rev_path,
+                            rev_size,
+                            rev_hash,
                             8 * 1024 * 1024,
                             &self.cancel,
                             None,
@@ -10564,7 +10731,7 @@ impl PushPipeline {
                     pack_bytes = packed.pack_size,
                     object_count = packed.object_count,
                     git_sha1 = %installed.git_sha1,
-                    "step 10: bounded pack and canonical index uploaded"
+                    "step 10: bounded pack and immutable locator evidence uploaded"
                 );
                 uploaded.push(UploadedGitPack {
                     entry,
@@ -12237,7 +12404,10 @@ impl PushPipeline {
         if txn.is_empty() {
             return Ok(());
         }
-        let receipt = Box::pin(guard.commit(txn)).await?;
+        // These indexes are post-commit acceleration. Buffering several
+        // batches avoids one object-store WAL PUT per 2,048 rows; the
+        // explicit memtable boundaries below make the group durable.
+        let receipt = Box::pin(guard.commit_buffered(txn)).await?;
         aggregate.file_ops_written += receipt.file_ops_written;
         aggregate.chunk_ops_written += receipt.chunk_ops_written;
         aggregate.bytes_written += receipt.bytes_written;
@@ -13625,9 +13795,13 @@ impl PushPipeline {
             let visibility_published = self
                 .git_visibility_published
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if visibility_published
-                && let (Some(anchor), Some(store)) = (anchor, self.store.as_ref())
-            {
+            if !visibility_published {
+                git_indexed = false;
+                info!(
+                    "Git visibility proof requires repair; publishing exact locators independently"
+                );
+            }
+            if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
                 match publish_uploaded_pack_locators(
                     store,
                     &self.router,
@@ -13665,11 +13839,6 @@ impl PushPipeline {
                         );
                     }
                 }
-            } else if anchor.is_some() && self.store.is_some() {
-                git_indexed = false;
-                info!(
-                    "skipping synchronous Git locator publication until the visibility proof is repairable"
-                );
             }
             if file_indexed
                 && git_indexed
@@ -14391,8 +14560,11 @@ mod tests {
         (store, router)
     }
 
-    fn locator_pack_fixture() -> (
+    fn locator_pack_fixture_for(
+        content: &[u8],
+    ) -> (
         tempfile::TempDir,
+        PathBuf,
         PathBuf,
         PathBuf,
         String,
@@ -14442,7 +14614,7 @@ mod tests {
                 "-w",
                 "--stdin",
             ],
-            Some(b"locator fixture object\n"),
+            Some(content),
         ))
         .expect("object ID UTF-8");
         let base = temp.path().join("fixture");
@@ -14477,9 +14649,24 @@ mod tests {
             gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1).expect("open fixture index");
         let git_sha1 = index.pack_checksum().to_string();
         let oid = gix_hash::ObjectId::from_hex(oid_text.trim().as_bytes()).expect("fixture oid");
-        let pack_size = std::fs::metadata(pack_path)
+        let pack_size = std::fs::metadata(&pack_path)
             .expect("fixture pack metadata")
             .len();
+        (
+            temp, pack_path, idx_path, rev_path, git_sha1, oid, pack_size,
+        )
+    }
+
+    fn locator_pack_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        String,
+        gix_hash::ObjectId,
+        u64,
+    ) {
+        let (temp, _pack_path, idx_path, rev_path, git_sha1, oid, pack_size) =
+            locator_pack_fixture_for(b"locator fixture object\n");
         (temp, idx_path, rev_path, git_sha1, oid, pack_size)
     }
 
@@ -16499,15 +16686,11 @@ mod tests {
     }
 
     #[test]
-    fn push_admission_backoff_scales_with_fifo_distance() {
-        let front = push_admission_wait_delay(0, PUSH_ADMISSION_SLOTS, Duration::from_secs(60));
-        let tail = push_admission_wait_delay(0, 95, Duration::from_secs(60));
-        let bounded = push_admission_wait_delay(32, 95, Duration::from_secs(1));
+    fn push_admission_backoff_is_bounded_by_remaining_wait() {
+        let first = push_admission_wait_delay(0, Duration::from_secs(60));
+        let bounded = push_admission_wait_delay(32, Duration::from_secs(1));
 
-        assert!(front >= PUSH_ADMISSION_WAIT_PER_WAVE);
-        assert!(front <= PUSH_ADMISSION_WAIT_PER_WAVE + PUSH_ADMISSION_WAIT_BACKOFF_BASE);
-        assert!(tail >= Duration::from_millis(4_750));
-        assert!(tail <= PUSH_ADMISSION_WAIT_BACKOFF_CAP);
+        assert!(first <= PUSH_ADMISSION_WAIT_BACKOFF_BASE);
         assert!(bounded <= Duration::from_secs(1));
     }
 
@@ -16866,6 +17049,16 @@ mod tests {
         *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
         pipeline.prepare_git_pack().await.expect("prepare pack");
         pipeline.upload_packs().await.expect("upload pack");
+        for uploaded in pipeline.uploaded_packs.lock().await.iter() {
+            store
+                .head(&router.pack_index_path(&uploaded.entry.pack_id))
+                .await
+                .expect("canonical pack index evidence");
+            store
+                .head(&router.pack_reverse_index_path(&uploaded.entry.pack_id))
+                .await
+                .expect("canonical pack reverse-index evidence");
+        }
         let (candidate, bulk) = pipeline
             .apply_decisions_with_sha_map(&decisions, false, &sha_map)
             .await
@@ -17269,14 +17462,12 @@ mod tests {
         let store = Store::new(inner);
         let mut blockers = Vec::new();
         for _ in 0..PUSH_ADMISSION_SLOTS {
-            let mut blocker = crab_coordination::PushAdmissionTicket::enqueue(
+            let mut blocker = crab_coordination::PushAdmissionTicket::new(
                 store.inner(),
                 "repo",
                 PUSH_ADMISSION_SLOTS,
                 Duration::from_secs(60),
-                PUSH_ADMISSION_QUEUED_TTL,
             )
-            .await
             .unwrap();
             assert!(blocker.try_admit().await.unwrap());
             blockers.push(blocker);
@@ -17308,14 +17499,12 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let store = Store::new(inner);
-        let mut permit = crab_coordination::PushAdmissionTicket::enqueue(
+        let mut permit = crab_coordination::PushAdmissionTicket::new(
             store.inner(),
             "repo",
             1,
             Duration::from_secs(60),
-            PUSH_ADMISSION_QUEUED_TTL,
         )
-        .await
         .unwrap();
         assert!(permit.try_admit().await.unwrap());
         let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
@@ -17334,14 +17523,12 @@ mod tests {
         });
 
         let contender = tokio::time::timeout(Duration::from_secs(1), async {
-            let mut ticket = crab_coordination::PushAdmissionTicket::enqueue(
+            let mut ticket = crab_coordination::PushAdmissionTicket::new(
                 store.inner(),
                 "repo",
                 1,
                 Duration::from_secs(60),
-                PUSH_ADMISSION_QUEUED_TTL,
             )
-            .await
             .unwrap();
             loop {
                 if ticket.try_admit().await.unwrap() {
@@ -18304,7 +18491,8 @@ mod tests {
     #[tokio::test]
     async fn git_object_locator_cli_publisher_advances_generations_without_new_packs() {
         let (store, router) = test_store_router("locator-publisher");
-        let (_fixture, idx_path, rev_path, git_sha1, oid, pack_size) = locator_pack_fixture();
+        let (_fixture, pack_path, idx_path, rev_path, git_sha1, oid, pack_size) =
+            locator_pack_fixture_for(b"locator fixture object\n");
         let pack_id = "a".repeat(64);
         let pack = PackManifestEntry {
             pack_id: pack_id.clone(),
@@ -18333,6 +18521,27 @@ mod tests {
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish manifest");
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack_path).expect("read fixture pack")),
+            )
+            .await
+            .expect("upload fixture pack");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read fixture index")),
+            )
+            .await
+            .expect("upload fixture index");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&rev_path).expect("read fixture reverse index")),
+            )
+            .await
+            .expect("upload fixture reverse index");
 
         let anchor = CommittedManifestAnchor {
             generation: 7,
@@ -18392,6 +18601,65 @@ mod tests {
                     && locator.location.entry_len > 0
         ));
 
+        let location = match lookup[0] {
+            crab_metadata::git_object_locator::GitObjectLookup::Hit(locator) => locator.location,
+            _ => unreachable!("initial locator must hit"),
+        };
+        let stale_pack_id = MerkleHash::from_hex(&"b".repeat(64)).expect("stale pack id");
+        let mut stale_writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open stale locator writer");
+        let stale_binding = stale_writer
+            .bind_packs(&[crab_metadata::git_object_locator::GitPackLocatorRecord {
+                pack_id: stale_pack_id,
+                committed_generation: 8,
+                pack_index_hash: MerkleHash::from([8, 9, 10, 11]),
+                object_count: 1,
+                pack_size,
+            }])
+            .await
+            .expect("bind stale pack")[0];
+        stale_writer
+            .write_locations(
+                stale_binding,
+                &[crab_metadata::git_object_locator::GitObjectLocatorEntry {
+                    oid: oid_bytes,
+                    location,
+                }],
+            )
+            .await
+            .expect("overwrite covered object with stale pack");
+        stale_writer.flush_objects().await.expect("flush stale row");
+        stale_writer.close().await.expect("close stale writer");
+
+        let repaired =
+            publish_uploaded_pack_locators(&store, &router, &[], anchor, Duration::from_secs(60))
+                .await
+                .expect("repair stale duplicate row");
+        assert_eq!(repaired.object_rows_written, 1);
+        let repaired_session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open repaired locator session");
+        let repaired_lookup = repaired_session
+            .lookup_batch(&[oid_bytes], &inventory)
+            .await
+            .expect("lookup repaired object");
+        assert!(matches!(
+            repaired_lookup.as_slice(),
+            [crab_metadata::git_object_locator::GitObjectLookup::Hit(locator)]
+                if locator.pack_id == parsed_pack_id
+        ));
+        repaired_session
+            .close()
+            .await
+            .expect("close repaired locator session");
+
         let (mut next_manifest, etag) = read_manifest(&store, &router)
             .await
             .expect("read next manifest base");
@@ -18433,6 +18701,144 @@ mod tests {
             .close()
             .await
             .expect("close advanced locator session");
+    }
+
+    #[tokio::test]
+    async fn git_object_locator_cli_publisher_recovers_concurrent_sibling_evidence() {
+        let (store, router) = test_store_router("locator-concurrent-sibling");
+        let (
+            _first_fixture,
+            first_pack_path,
+            first_idx_path,
+            first_rev_path,
+            _first_git_sha1,
+            first_oid,
+            first_pack_size,
+        ) = locator_pack_fixture_for(b"first concurrent locator object\n");
+        let (
+            _second_fixture,
+            _second_pack_path,
+            second_idx_path,
+            second_rev_path,
+            second_git_sha1,
+            second_oid,
+            second_pack_size,
+        ) = locator_pack_fixture_for(b"second concurrent locator object\n");
+        let first_pack_bytes = std::fs::read(&first_pack_path).expect("read first pack");
+        let first_pack_id = blake3::hash(&first_pack_bytes).to_hex().to_string();
+        let second_pack_bytes = std::fs::read(&_second_pack_path).expect("read second pack");
+        let second_pack_id = blake3::hash(&second_pack_bytes).to_hex().to_string();
+        store
+            .put(
+                &router.pack_path(&first_pack_id),
+                Bytes::from(first_pack_bytes),
+            )
+            .await
+            .expect("upload first pack body");
+        store
+            .put(
+                &router.pack_index_path(&first_pack_id),
+                Bytes::from(std::fs::read(&first_idx_path).expect("read first index")),
+            )
+            .await
+            .expect("upload first index evidence");
+        store
+            .put(
+                &router.pack_reverse_index_path(&first_pack_id),
+                Bytes::from(std::fs::read(&first_rev_path).expect("read first reverse index")),
+            )
+            .await
+            .expect("upload first reverse-index evidence");
+
+        let first_pack = PackManifestEntry {
+            pack_id: first_pack_id.clone(),
+            size: first_pack_size,
+            content_hash: first_pack_id,
+            ref_tips: vec!["1".repeat(40)],
+            object_count: 1,
+        };
+        let second_pack = PackManifestEntry {
+            pack_id: second_pack_id.clone(),
+            size: second_pack_size,
+            content_hash: second_pack_id,
+            ref_tips: vec!["2".repeat(40)],
+            object_count: 1,
+        };
+        let current_packs = vec![first_pack.clone(), second_pack.clone()];
+        let (pack_index_hash, _, pack_write) =
+            crate::metadata::manifest::compact_pack_index(9, &current_packs)
+                .expect("build concurrent pack index");
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index: pack_write,
+            },
+        )
+        .await
+        .expect("upload concurrent pack index");
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 9;
+        manifest.pack_index_hash = pack_index_hash.clone();
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest)
+            .await
+            .expect("publish concurrent manifest");
+        let anchor = CommittedManifestAnchor {
+            generation: manifest.generation,
+            shard_index_hash: MerkleHash::default(),
+            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).expect("pack index hash"),
+        };
+
+        let stats = publish_committed_pack_locators(
+            &store,
+            &router,
+            &[CommittedPackIndex {
+                pack: &second_pack,
+                idx_path: &second_idx_path,
+                rev_path: &second_rev_path,
+                git_sha1: &second_git_sha1,
+            }],
+            anchor,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("publish complete concurrent generation");
+
+        assert!(stats.coverage_updated);
+        assert_eq!(stats.object_rows_written, 2);
+        let inventory = current_packs
+            .iter()
+            .map(|pack| {
+                let pack_id = MerkleHash::from_hex(&pack.pack_id).expect("pack id");
+                (
+                    pack_id,
+                    crab_metadata::git_object_locator::GitPackInventoryEntry {
+                        pack_id,
+                        object_count: pack.object_count,
+                        pack_size: pack.size,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let object_ids =
+            [first_oid, second_oid].map(|oid| oid.as_bytes().try_into().expect("SHA-1 oid"));
+        let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open concurrent locator session");
+        let lookups = session
+            .lookup_batch(&object_ids, &inventory)
+            .await
+            .expect("lookup both concurrent objects");
+        assert!(lookups.iter().all(|lookup| matches!(
+            lookup,
+            crab_metadata::git_object_locator::GitObjectLookup::Hit(_)
+        )));
+        session.close().await.expect("close locator session");
     }
 
     #[tokio::test]

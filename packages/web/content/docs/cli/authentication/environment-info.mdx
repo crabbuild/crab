@@ -60,6 +60,10 @@ are visible to the current process. Secret values are still your
 responsibility: avoid sharing raw keys, tokens, service account JSON, SAS
 tokens, or connection strings.
 
+`AWS_PROFILE` is displayed for diagnostics, but the current S3 provider does
+not consume profiles or shared AWS configuration files. Use one of the
+credential sources documented under [Static Credentials](static-credentials).
+
 ### Include in a bug report
 
 ```bash

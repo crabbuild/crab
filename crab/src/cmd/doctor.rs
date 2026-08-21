@@ -799,13 +799,7 @@ async fn check_credential_discovery(root: &Path) -> CheckResult {
     let result = discover_credentials(&url, project_auth.as_ref()).await;
 
     match result.source {
-        CredentialSource::None => CheckResult::warn(
-            "credential discovery",
-            format!(
-                "No credentials found for {}. Run: aws configure / gcloud auth login / az login",
-                url.split("://").next().unwrap_or("unknown"),
-            ),
-        ),
+        CredentialSource::None => CheckResult::warn("credential discovery", result.description),
         _ if !result.valid => CheckResult::warn(
             "credential discovery",
             format!("{} (invalid)", result.description),

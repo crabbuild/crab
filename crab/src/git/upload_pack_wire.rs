@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_read::{
-    UploadPackFilter, UploadPackRequest, combine_upload_pack_filters, parse_upload_pack_filter,
-    plan_upload_pack,
+    FetchAdmissionPolicy, UploadPackFilter, UploadPackRequest, combine_upload_pack_filters,
+    parse_upload_pack_filter, plan_upload_pack,
 };
 use crab_remote_git::{
     RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
@@ -91,6 +91,7 @@ pub async fn serve<R, W>(
     store: &crab_storage::Store,
     prefix: &str,
     hidden_ref_patterns: &[String],
+    fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
     cancellation: &CancellationToken,
 ) -> Result<()>
@@ -154,6 +155,15 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
+                if let Err(error) = validate_fetch_admission(
+                    &repository,
+                    &visibility,
+                    &visible_ref_names,
+                    &fetch,
+                    fetch_policy,
+                ) {
+                    return reject_protocol_request(writer, error, cancellation).await;
+                }
                 if !fetch.done {
                     let common_haves = common_haves(&fetch, &visibility, &visible_ref_names);
                     if common_haves.is_empty() {
@@ -194,6 +204,55 @@ where
             }
         }
     }
+}
+
+fn validate_fetch_admission(
+    repository: &RemoteGitRepository,
+    visibility: &GitVisibilityIndex,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    policy: &FetchAdmissionPolicy,
+) -> Result<()> {
+    let advertised_tips = repository
+        .refs()
+        .entries
+        .iter()
+        .filter(|reference| visible_ref_names.contains(&reference.name))
+        .flat_map(|reference| [Some(reference.target), reference.peeled])
+        .flatten()
+        .collect::<HashSet<_>>();
+    validate_fetch_wants(
+        &advertised_tips,
+        visibility,
+        visible_ref_names,
+        request,
+        policy,
+    )
+}
+
+fn validate_fetch_wants(
+    advertised_tips: &HashSet<ObjectId>,
+    visibility: &GitVisibilityIndex,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    policy: &FetchAdmissionPolicy,
+) -> Result<()> {
+    for want in &request.wants {
+        if policy.allow_any_sha_in_want
+            || (policy.allow_tip_sha_in_want && advertised_tips.contains(want))
+            || (policy.allow_reachable_sha_in_want
+                && visibility.contains_for_refs(
+                    visible_ref_names.iter().map(String::as_str),
+                    &want.to_hex().to_string(),
+                ))
+        {
+            continue;
+        }
+        return Err(protocol(format!(
+            "want {want} is denied by upload-pack policy"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) async fn open_repository(
@@ -1139,5 +1198,68 @@ mod tests {
                 .to_string()
                 .contains("invalid transfer.hideRefs pattern")
         );
+    }
+
+    #[test]
+    fn reachable_non_tip_want_is_denied_by_default() {
+        let ancestor = parse_oid(&"a".repeat(40)).expect("ancestor oid");
+        let tip = parse_oid(&"b".repeat(40)).expect("tip oid");
+        let request = FetchRequest {
+            wants: vec![ancestor],
+            ..FetchRequest::default()
+        };
+        let visible_refs = vec!["refs/heads/main".to_owned()];
+        let visibility = GitVisibilityIndex::new(
+            1,
+            "c".repeat(64),
+            std::collections::BTreeMap::from([(
+                visible_refs[0].clone(),
+                vec![ancestor.to_string(), tip.to_string()],
+            )]),
+        );
+
+        let error = validate_fetch_wants(
+            &HashSet::from([tip]),
+            &visibility,
+            &visible_refs,
+            &request,
+            &FetchAdmissionPolicy::default(),
+        )
+        .expect_err("a reachable non-tip want must be denied without opt-in");
+
+        assert!(error.to_string().contains("denied by upload-pack policy"));
+    }
+
+    #[test]
+    fn reachable_non_tip_want_is_accepted_when_enabled() {
+        let ancestor = parse_oid(&"a".repeat(40)).expect("ancestor oid");
+        let tip = parse_oid(&"b".repeat(40)).expect("tip oid");
+        let request = FetchRequest {
+            wants: vec![ancestor],
+            ..FetchRequest::default()
+        };
+        let visible_refs = vec!["refs/heads/main".to_owned()];
+        let visibility = GitVisibilityIndex::new(
+            1,
+            "c".repeat(64),
+            std::collections::BTreeMap::from([(
+                visible_refs[0].clone(),
+                vec![ancestor.to_string(), tip.to_string()],
+            )]),
+        );
+        let policy = FetchAdmissionPolicy {
+            allow_reachable_sha_in_want: true,
+            ..FetchAdmissionPolicy::default()
+        };
+
+        let result = validate_fetch_wants(
+            &HashSet::from([tip]),
+            &visibility,
+            &visible_refs,
+            &request,
+            &policy,
+        );
+
+        assert!(result.is_ok());
     }
 }

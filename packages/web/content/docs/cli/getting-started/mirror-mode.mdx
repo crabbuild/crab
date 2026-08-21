@@ -5,7 +5,7 @@ description: "Use GitHub or GitLab for code review while Crab handles large-file
 
 # Mirror Mode (GitHub + Crab)
 
-Mirror mode lets you keep GitHub (or GitLab) for code review and pull requests while Crab handles large-file storage. Code goes to GitHub, large files go to your cloud bucket — your team's workflow stays unchanged.
+Mirror mode keeps GitHub (or GitLab) as the collaboration control plane for pull requests, reviews, branch protection, CI, issues, and webhooks. Crab is a second Git remote backed by object storage and stores both the pushed Git graph and large-file data.
 
 ## Data Flow
 
@@ -71,10 +71,15 @@ needs the mirror remote and hooks installed locally.
 #!/bin/sh
 # Crab mirror: push xorbs before refs go to origin
 crab add . --skip-git-add 2>/dev/null
-crab push crab 2>/dev/null
+crab push --remote crab --quiet 2>/dev/null
 ```
 
 Ensures large-file content reaches your bucket before pointer blobs reach GitHub. If the Crab push fails, the git push is aborted — preventing dangling pointers.
+
+The two remote updates are not one distributed transaction. Crab can be ahead
+if its push succeeds and GitHub later rejects the push. Server-side merges,
+bots, and clients without the hook can also advance GitHub without advancing
+Crab. Retry to converge and monitor ref divergence.
 
 ### `post-checkout` — After switching branches or cloning
 
@@ -136,6 +141,22 @@ crab_remote = "crab"        # Crab storage remote name
 - Crab is your only remote (no GitHub/GitLab)
 - You don't need code review on a separate platform
 - You want the simplest possible setup
+
+## Production Team Posture
+
+- Keep GitHub/GitLab canonical for collaboration and policy. Crab does not
+  provide pull requests, branch protection, merge queues, CI, issues, or
+  webhooks.
+- Keep Crab/object storage canonical for large data, using workload identity
+  and least-privilege bucket policy instead of shared static keys.
+- Install hooks on every developer and automation clone, then enforce pointer
+  availability in CI because client hooks are bypassable.
+- Use `crab mirror SOURCE DESTINATION` only as a scheduled one-way full-ref DR
+  sync. It uses `git push --mirror`, which deletes destination-only refs; never
+  schedule it in both directions.
+- Before using Crab as the sole Git backbone, qualify multi-node storage
+  failures and prove monitoring, backup restore, RPO, and RTO in your own
+  environment.
 
 ## Troubleshooting
 
