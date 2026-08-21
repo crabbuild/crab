@@ -47,13 +47,9 @@ EOF
   NFS_RELEASE_EVIDENCE_WAIT_TIMEOUT_SECS=5 \
   NFS_RELEASE_EVIDENCE_POLL_SECS=1 \
   NFS_RELEASE_EVIDENCE_OUTPUT="$output_file" \
-  NFS_READ_PATH_BENCH_BASELINE_RUN_ID="11111" \
-  NFS_READ_PATH_BENCH_VERIFY_ARGS="--min-pointer-sequential-lease-ratio 1.05" \
-  NFS_READ_PATH_BENCH_COMPARE_ARGS="--max-throughput-regression-pct 12" \
   NFS_SMOKE_BASELINE_RUN_ID="22222" \
   NFS_SMOKE_VERIFY_ARGS="--max-native-read-rpcs-per-mib 99" \
   NFS_SMOKE_COMPARE_ARGS="--max-native-read-rpc-density-regression-pct 15" \
-  NFS_THRESHOLD_MIN_BENCHMARK_REPORTS="3" \
   NFS_THRESHOLD_MIN_SMOKE_SUMMARIES="4" \
   NFS_THRESHOLD_REQUIRE_CALIBRATION_READY="1" \
   NFS_THRESHOLD_REQUIRE_RELEASE_GRADE="1" \
@@ -76,13 +72,9 @@ EOF
     [ "$NFS_RELEASE_EVIDENCE_GIT_COMMIT" = "$expected_sha" ]
   )
   grep -q "workflow run nfs-mount.yml --ref HEAD" "$log_file"
-  grep -q -- "-f nfs_read_path_benchmark_baseline_run_id=11111" "$log_file"
-  grep -q -- "-f nfs_read_path_benchmark_verify_args=--min-pointer-sequential-lease-ratio 1.05" "$log_file"
-  grep -q -- "-f nfs_read_path_benchmark_compare_args=--max-throughput-regression-pct 12" "$log_file"
   grep -q -- "-f nfs_smoke_baseline_run_id=22222" "$log_file"
   grep -q -- "-f nfs_smoke_verify_args=--max-native-read-rpcs-per-mib 99" "$log_file"
   grep -q -- "-f nfs_smoke_compare_args=--max-native-read-rpc-density-regression-pct 15" "$log_file"
-  grep -q -- "-f nfs_threshold_min_benchmark_reports=3" "$log_file"
   grep -q -- "-f nfs_threshold_min_smoke_summaries=4" "$log_file"
   grep -q -- "-f nfs_threshold_require_calibration_ready=true" "$log_file"
   grep -q -- "-f nfs_threshold_require_release_grade=true" "$log_file"
@@ -229,13 +221,9 @@ add_bool_input() {
   esac
 }
 
-add_input "nfs_read_path_benchmark_baseline_run_id" "${NFS_READ_PATH_BENCH_BASELINE_RUN_ID:-}"
-add_input "nfs_read_path_benchmark_verify_args" "${NFS_READ_PATH_BENCH_VERIFY_ARGS:-}"
-add_input "nfs_read_path_benchmark_compare_args" "${NFS_READ_PATH_BENCH_COMPARE_ARGS:-}"
 add_input "nfs_smoke_baseline_run_id" "${NFS_SMOKE_BASELINE_RUN_ID:-}"
 add_input "nfs_smoke_verify_args" "${NFS_SMOKE_VERIFY_ARGS:-}"
 add_input "nfs_smoke_compare_args" "${NFS_SMOKE_COMPARE_ARGS:-}"
-add_input "nfs_threshold_min_benchmark_reports" "${NFS_THRESHOLD_MIN_BENCHMARK_REPORTS:-}"
 add_input "nfs_threshold_min_smoke_summaries" "${NFS_THRESHOLD_MIN_SMOKE_SUMMARIES:-}"
 add_bool_input "nfs_threshold_require_calibration_ready" "${NFS_THRESHOLD_REQUIRE_CALIBRATION_READY:-}"
 add_bool_input "nfs_threshold_require_release_grade" "${NFS_THRESHOLD_REQUIRE_RELEASE_GRADE:-}"

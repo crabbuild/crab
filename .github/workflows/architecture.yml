@@ -11,10 +11,8 @@ on:
       - "Cargo.toml"
       - "crab/Cargo.toml"
       - "crab/Makefile"
-      - "crab/benches/nfs_read_path_bench.rs"
-      - "crab/deploy/auth/**"
+      - "crab/deploy/auth-service/**"
       - "crab/docs/architecture/multi-crate-transition.md"
-      - "crab/docs/architecture/nfs-mount-architecture.md"
       - "crab/scripts/check-architecture-gates.py"
       - "crab/scripts/release/check-auth-helper-packaging.py"
       - "crab/scripts/check-crate-behavior.py"
@@ -47,10 +45,8 @@ on:
       - "Cargo.toml"
       - "crab/Cargo.toml"
       - "crab/Makefile"
-      - "crab/benches/nfs_read_path_bench.rs"
-      - "crab/deploy/auth/**"
+      - "crab/deploy/auth-service/**"
       - "crab/docs/architecture/multi-crate-transition.md"
-      - "crab/docs/architecture/nfs-mount-architecture.md"
       - "crab/scripts/check-architecture-gates.py"
       - "crab/scripts/release/check-auth-helper-packaging.py"
       - "crab/scripts/check-crate-behavior.py"
@@ -220,11 +216,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install auth service dependencies
-        working-directory: crab/deploy/auth
+        working-directory: crab/deploy/auth-service
         run: python -m pip install -r requirements.txt
 
       - name: Run auth service tests
-        working-directory: crab/deploy/auth
+        working-directory: crab/deploy/auth-service
         run: python -m pytest tests/ -q
 
   release-archive-contents:

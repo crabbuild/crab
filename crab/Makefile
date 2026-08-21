@@ -91,10 +91,6 @@
 #   make nfs-feature-gate
 #                     Verify NFS-only builds do not depend on FUSE IPC and
 #                     FUSE IPC contracts still run when FUSE is enabled.
-#   make nfs-read-path-bench
-#                     Emit release-mode JSON timings for the shared NFS/VFS read path.
-#   make nfs-read-path-bench-report
-#                     Run the read-path benchmark and write retained JSON evidence.
 #   make nfs-read-path-bench-report-verify
 #                     Verify a retained NFS read-path benchmark report.
 #                     Optional: NFS_READ_PATH_BENCH_VERIFY_ARGS="--min-pointer-sequential-lease-ratio 1"
@@ -197,14 +193,12 @@ CACHE_SERVICE_RELEASE_DOCTOR_OUTPUT ?= cache-service-release-evidence-doctor.jso
 CACHE_SERVICE_RELEASE_DOCTOR_TEXT_OUTPUT ?= cache-service-release-evidence-doctor.txt
 CACHE_SERVICE_RELEASE_REQUIRE_EVIDENCE ?= 1
 CACHE_SERVICE_RELEASE_REQUIRE_EXPECTED_RUN_ID ?= 1
-NFS_READ_PATH_BENCH_ARGS ?=
 NFS_READ_PATH_BENCH_BASELINE_REPORT ?=
 NFS_READ_PATH_BENCH_COMPARE_ARGS ?=
 NFS_READ_PATH_BENCH_COMPARE_OUTPUT ?=
 NFS_READ_PATH_BENCH_EXPECTED_GIT_COMMIT ?=
 NFS_READ_PATH_BENCH_EXPECTED_RUN_ID ?=
 NFS_READ_PATH_BENCH_REPORT ?= nfs-read-path-bench-report.json
-NFS_READ_PATH_BENCH_RUN_ID ?=
 NFS_READ_PATH_BENCH_VERIFY_ARGS ?=
 NFS_SMOKE_BASELINE_REPORT ?=
 NFS_SMOKE_BASELINE_REPORT_DIR ?=
@@ -308,7 +302,7 @@ SPLIT_CRATE_PACKAGES := \
 	-p crab-storage \
 	-p crab-workflow
 
-.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench nfs-read-path-bench-report nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report clean install uninstall release release-build release-dry release-strict release-macos-full release-target release-list release-ci release-macos-publish release-publish-dist release-full homebrew homebrew-local homebrew-dry
+.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report clean install uninstall release release-build release-dry release-strict release-macos-full release-target release-list release-ci release-macos-publish release-publish-dist release-full homebrew homebrew-local homebrew-dry
 .PHONY: nfs-release-gate nfs-release-evidence-ci
 
 all: build
@@ -590,13 +584,9 @@ nfs-release-evidence-ci:
 	NFS_RELEASE_EVIDENCE_WAIT_TIMEOUT_SECS="$(NFS_RELEASE_EVIDENCE_WAIT_TIMEOUT_SECS)" \
 	NFS_RELEASE_EVIDENCE_POLL_SECS="$(NFS_RELEASE_EVIDENCE_POLL_SECS)" \
 	NFS_RELEASE_EVIDENCE_OUTPUT="$(NFS_RELEASE_EVIDENCE_OUTPUT)" \
-	NFS_READ_PATH_BENCH_BASELINE_RUN_ID="$(NFS_READ_PATH_BENCH_BASELINE_RUN_ID)" \
-	NFS_READ_PATH_BENCH_VERIFY_ARGS="$(NFS_READ_PATH_BENCH_VERIFY_ARGS)" \
-	NFS_READ_PATH_BENCH_COMPARE_ARGS="$(NFS_READ_PATH_BENCH_COMPARE_ARGS)" \
 	NFS_SMOKE_BASELINE_RUN_ID="$(NFS_SMOKE_BASELINE_RUN_ID)" \
 	NFS_SMOKE_VERIFY_ARGS="$(NFS_SMOKE_VERIFY_ARGS)" \
 	NFS_SMOKE_COMPARE_ARGS="$(NFS_SMOKE_COMPARE_ARGS)" \
-	NFS_THRESHOLD_MIN_BENCHMARK_REPORTS="$(NFS_THRESHOLD_MIN_BENCHMARK_REPORTS)" \
 	NFS_THRESHOLD_MIN_SMOKE_SUMMARIES="$(NFS_THRESHOLD_MIN_SMOKE_SUMMARIES)" \
 	NFS_THRESHOLD_REQUIRE_CALIBRATION_READY="$(NFS_THRESHOLD_REQUIRE_CALIBRATION_READY)" \
 	NFS_THRESHOLD_REQUIRE_RELEASE_GRADE="$(NFS_THRESHOLD_REQUIRE_RELEASE_GRADE)" \
@@ -693,12 +683,6 @@ nfs-feature-gate:
 	@$(PYTHON) scripts/nfs-read-path-bench-report.py self-test
 	@$(PYTHON) scripts/nfs-evidence-summary.py self-test
 	@bash scripts/release/dispatch-nfs-release-evidence.sh self-test
-
-nfs-read-path-bench:
-	@$(CARGO) bench --bench nfs_read_path_bench --no-default-features --features nfs -- $(NFS_READ_PATH_BENCH_ARGS)
-
-nfs-read-path-bench-report:
-	@CRAB_NFS_READ_PATH_BENCH_RUN_ID="$(NFS_READ_PATH_BENCH_RUN_ID)" $(PYTHON) scripts/nfs-read-path-bench-report.py run --cargo "$(CARGO)" --output "$(NFS_READ_PATH_BENCH_REPORT)" -- $(NFS_READ_PATH_BENCH_ARGS)
 
 nfs-read-path-bench-report-verify:
 	@if [ -z "$(NFS_READ_PATH_BENCH_REPORT)" ]; then \

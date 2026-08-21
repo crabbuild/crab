@@ -68,7 +68,7 @@ updates.
 Test the full flow locally with Docker:
 
 ```bash
-cd crab/deploy/auth
+cd crab/deploy/auth-service
 
 # API smoke: start mock IdP + crab-auth
 docker compose up --build -d
@@ -87,7 +87,7 @@ For a stronger local E2E with a real S3-compatible object store and the Crab
 CLI push/clone/hydrate flow, run this from the repository root:
 
 ```bash
-crab/deploy/auth/scripts/e2e-rustfs-docker.sh
+crab/deploy/auth-service/scripts/e2e-rustfs-docker.sh
 ```
 
 The RustFS wrapper builds the local binaries, starts RustFS in Docker, runs the

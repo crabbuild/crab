@@ -22,7 +22,7 @@ def crab_root() -> Path:
 
 
 def auth_dir() -> Path:
-    return crab_root() / "deploy" / "auth"
+    return crab_root() / "deploy" / "auth-service"
 
 
 def read_text(path: Path) -> str:
@@ -90,7 +90,7 @@ def checks() -> list[TextCheck]:
             root / "docker-compose.yaml",
             contains=(
                 "context: ../../..",
-                "dockerfile: crab/deploy/auth/Dockerfile",
+                "dockerfile: crab/deploy/auth-service/Dockerfile",
             ),
         ),
         TextCheck(
@@ -166,8 +166,8 @@ def checks() -> list[TextCheck]:
             "auth deployment docs cover helper packaging",
             root / "README.md",
             contains=(
-                "docker build -f crab/deploy/auth/Dockerfile -t crab-auth .",
-                "docker build -f crab/deploy/auth/cloudrun/Dockerfile",
+                "docker build -f crab/deploy/auth-service/Dockerfile -t crab-auth .",
+                "docker build -f crab/deploy/auth-service/cloudrun/Dockerfile",
                 "Terraform builds the Lambda zip locally",
                 "./scripts/build-receive-helper.sh --linux-amd64",
                 "/opt/bin/git",
