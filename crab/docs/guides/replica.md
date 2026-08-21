@@ -832,7 +832,7 @@ The release workflow also runs `make replica-feature-matrix-all-locked`,
 replica schema validation, and retained-evidence recorder contract tests before
 building release archives. Release packaging then downloads a retained live
 evidence artifact from `.github/workflows/replica-live-evidence.yml` and runs
-`crab/scripts/verify-replica-release-evidence.sh` against the artifact's
+`crab/scripts/release/verify-replica-release-evidence.sh` against the artifact's
 `replica-live-evidence/` directory. A release cannot build archives unless that
 bundle passes `crab replica evidence verify --profile enterprise
 --require-redacted --expected-run-id replica-live-<run-id>-<attempt>`.

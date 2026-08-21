@@ -495,7 +495,7 @@ contract tests before release packaging can continue. Release packaging now also
 downloads the retained artifact from an enterprise
 `.github/workflows/replica-live-evidence.yml` run, locates the artifact's
 `replica-live-evidence/` directory, and runs
-`crab/scripts/verify-replica-release-evidence.sh` so the archive build is
+`crab/scripts/release/verify-replica-release-evidence.sh` so the archive build is
 blocked unless redacted retained live evidence passes the `enterprise` verifier
 profile. The release workflow checks that the referenced run is a successful,
 completed `Replica Live Evidence` workflow_dispatch run before downloading the

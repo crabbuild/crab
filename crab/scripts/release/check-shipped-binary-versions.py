@@ -27,7 +27,7 @@ CHECKS = (
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def run(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:

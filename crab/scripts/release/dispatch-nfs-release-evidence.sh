@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-crab_dir="$(cd "$script_dir/.." && pwd)"
+crab_dir="$(cd "$script_dir/../.." && pwd)"
 repo_root="$(cd "$crab_dir/.." && pwd)"
 
 self_test() {

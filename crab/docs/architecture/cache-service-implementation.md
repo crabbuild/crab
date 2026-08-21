@@ -310,7 +310,6 @@ cargo test -p crab-cache-server --lib preflight::tests
 cargo test -p crab-cache-server --test cache_service_integration
 cargo test -p crab-cache-server --test cache_server_preflight_cli
 cargo check -p crab-cache-server --bin crab-cache-server
-make cache-service-verify-smoke-report-self-test
 python3 scripts/e2e/run_cache_service_mtls_smoke.py
 python3 scripts/e2e/run_cache_service_rustfs_smoke.py
 python3 scripts/e2e/run_cache_service_rustfs_smoke.py --audit-report <report.json>

@@ -26,7 +26,7 @@ class TextCheck:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def read_text(path: Path) -> str:
@@ -107,7 +107,7 @@ def check_makefile_nfs_feature_gate(root: Path) -> list[str]:
 
     for needle in (
         "$(MAKE) --no-print-directory nfs-smoke-script-check",
-        "$(PYTHON) scripts/check-release-archive-contents.py",
+        "$(PYTHON) scripts/release/check-release-archive-contents.py",
         "$(PYTHON) scripts/verify-nfs-smoke-report.py self-test",
     ):
         if needle not in body:
@@ -116,7 +116,7 @@ def check_makefile_nfs_feature_gate(root: Path) -> list[str]:
 
 
 def check_release_script(root: Path) -> list[str]:
-    path = root / "crab" / "scripts" / "release.sh"
+    path = root / "crab" / "scripts" / "release" / "release.sh"
     text = read_text(path)
     errors: list[str] = []
 
@@ -223,8 +223,8 @@ def check_release_workflow(root: Path) -> list[str]:
             if needle not in build_step:
                 errors.append(f"release.yml Build: expected {needle!r}")
 
-    if 'DIST_DIR="$PWD/dist" crab/scripts/update-homebrew.sh --local "$TAG"' not in text:
-        errors.append("release.yml: Homebrew publishing must use crab/scripts/update-homebrew.sh")
+    if 'DIST_DIR="$PWD/dist" crab/scripts/release/update-homebrew.sh --local "$TAG"' not in text:
+        errors.append("release.yml: Homebrew publishing must use crab/scripts/release/update-homebrew.sh")
 
     for needle in (
         "path: dist/crab-${{ matrix.name }}.*",
@@ -305,7 +305,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "local release Dockerfiles export CLI and FUSE mount helper",
-            root / "crab" / "scripts" / "docker" / "Dockerfile.linux-x86_64",
+            root / "crab" / "scripts" / "release" / "docker" / "Dockerfile.linux-x86_64",
             contains=(
                 "cp target/release/crab /crab",
                 "cp target/release/crab /crab-fuse-mount",
@@ -316,7 +316,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "local release Dockerfiles export CLI and FUSE mount helper",
-            root / "crab" / "scripts" / "docker" / "Dockerfile.linux-aarch64",
+            root / "crab" / "scripts" / "release" / "docker" / "Dockerfile.linux-aarch64",
             contains=(
                 "cp target/release/crab /crab",
                 "cp target/release/crab /crab-fuse-mount",
@@ -354,7 +354,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "local install-layout verifier covers mount helpers",
-            root / "crab" / "scripts" / "check-install-layout.py",
+            root / "crab" / "scripts" / "release" / "check-install-layout.py",
             contains=(
                 '"crab-nfs-mount"',
                 '"crab-fuse-mount"',
@@ -616,7 +616,7 @@ def checks(root: Path) -> list[TextCheck]:
                 "$(POWERSHELL) not found; skipping Windows smoke PowerShell parse",
                 "@$(MAKE) --no-print-directory nfs-smoke-script-check",
                 "dispatch-nfs-release-evidence.sh",
-                "scripts/dispatch-nfs-release-evidence.sh self-test",
+                "scripts/release/dispatch-nfs-release-evidence.sh self-test",
                 "nfs-evidence-summary-self-test",
                 "scripts/nfs-evidence-summary.py self-test",
                 "scripts/nfs-evidence-summary.py thresholds",
@@ -818,7 +818,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "NFS release evidence dispatch helper forwards calibration inputs",
-            root / "crab" / "scripts" / "dispatch-nfs-release-evidence.sh",
+            root / "crab" / "scripts" / "release" / "dispatch-nfs-release-evidence.sh",
             contains=(
                 "workflow run nfs-mount.yml",
                 "NFS_RELEASE_EVIDENCE_REF",
@@ -920,7 +920,7 @@ def checks(root: Path) -> list[TextCheck]:
             root / ".github" / "workflows" / "architecture.yml",
             contains=(
                 "make release-archive-contents-check",
-                "crab/scripts/dispatch-nfs-release-evidence.sh",
+                "crab/scripts/release/dispatch-nfs-release-evidence.sh",
                 "crab/scripts/nfs-evidence-summary.py",
                 "crab/scripts/nfs-read-path-bench-report.py",
                 "crab/scripts/verify-nfs-smoke-report.py",
@@ -945,7 +945,7 @@ def checks(root: Path) -> list[TextCheck]:
                 "NFS_THRESHOLD_MIN_SMOKE_SUMMARIES",
                 "inputs.nfs_threshold_min_benchmark_reports",
                 "inputs.nfs_threshold_min_smoke_summaries",
-                "crab/scripts/dispatch-nfs-release-evidence.sh",
+                "crab/scripts/release/dispatch-nfs-release-evidence.sh",
                 "crab/scripts/nfs-evidence-summary.py",
                 "make nfs-read-path-bench-report",
                 "make nfs-read-path-bench-report-verify",
@@ -1249,7 +1249,7 @@ def checks(root: Path) -> list[TextCheck]:
         ),
         TextCheck(
             "Homebrew tap seed delegates formula generation",
-            root / "crab" / "scripts" / "seed-homebrew-tap.sh",
+            root / "crab" / "scripts" / "release" / "seed-homebrew-tap.sh",
             contains=('"$SCRIPT_DIR/update-homebrew.sh" "$TAG"',),
             excludes=("PLACEHOLDER",),
         ),
@@ -1270,7 +1270,7 @@ def main() -> int:
     errors.extend(
         check_homebrew_script(
             root,
-            "crab/scripts/update-homebrew.sh",
+            "crab/scripts/release/update-homebrew.sh",
             'cat > "$FORMULA_PATH" << EOF',
             "EOF",
         )

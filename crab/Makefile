@@ -116,8 +116,6 @@
 #                     Alias for the onboarding-backed RustFS/S3 smoke
 #   make cache-service-verify-smoke-report
 #                     Verify retained cache-service RustFS smoke evidence
-#   make cache-service-verify-smoke-report-self-test
-#                     Exercise cache-service report verifier regressions
 #   make cache-service-validate-manifests
 #                     Validate cache-service Kubernetes observability manifests
 #   make clean        Remove build artifacts
@@ -310,7 +308,7 @@ SPLIT_CRATE_PACKAGES := \
 	-p crab-storage \
 	-p crab-workflow
 
-.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench nfs-read-path-bench-report nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report cache-service-verify-smoke-report-self-test clean install uninstall release release-build release-dry release-strict release-macos-full release-target release-list release-ci release-macos-publish release-publish-dist release-full homebrew homebrew-local homebrew-dry
+.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench nfs-read-path-bench-report nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report clean install uninstall release release-build release-dry release-strict release-macos-full release-target release-list release-ci release-macos-publish release-publish-dist release-full homebrew homebrew-local homebrew-dry
 .PHONY: nfs-release-gate nfs-release-evidence-ci
 
 all: build
@@ -381,16 +379,16 @@ crate-behavior-check:
 	@$(PYTHON) scripts/check-crate-behavior.py --cargo "$(CARGO)"
 
 shipped-binary-version-check:
-	@$(PYTHON) scripts/check-shipped-binary-versions.py --cargo "$(CARGO)"
+	@$(PYTHON) scripts/release/check-shipped-binary-versions.py --cargo "$(CARGO)"
 
 install-layout-check:
-	@$(PYTHON) scripts/check-install-layout.py --cargo "$(CARGO)"
+	@$(PYTHON) scripts/release/check-install-layout.py --cargo "$(CARGO)"
 
 auth-helper-packaging-check:
-	@$(PYTHON) scripts/check-auth-helper-packaging.py
+	@$(PYTHON) scripts/release/check-auth-helper-packaging.py
 
 release-archive-contents-check:
-	@$(PYTHON) scripts/check-release-archive-contents.py
+	@$(PYTHON) scripts/release/check-release-archive-contents.py
 
 final-integration-check:
 	@$(PYTHON) scripts/check-final-integration.py --cargo "$(CARGO)"
@@ -427,7 +425,7 @@ replica-live-preflight:
 		$$extra_flags
 
 replica-release-evidence:
-	@./scripts/verify-replica-release-evidence.sh \
+	@./scripts/release/verify-replica-release-evidence.sh \
 		"$(REPLICA_RELEASE_EVIDENCE_DIR)" \
 		"$(REPLICA_RELEASE_EVIDENCE_OUTPUT)" \
 		"$(REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID)"
@@ -602,10 +600,10 @@ nfs-release-evidence-ci:
 	NFS_THRESHOLD_MIN_SMOKE_SUMMARIES="$(NFS_THRESHOLD_MIN_SMOKE_SUMMARIES)" \
 	NFS_THRESHOLD_REQUIRE_CALIBRATION_READY="$(NFS_THRESHOLD_REQUIRE_CALIBRATION_READY)" \
 	NFS_THRESHOLD_REQUIRE_RELEASE_GRADE="$(NFS_THRESHOLD_REQUIRE_RELEASE_GRADE)" \
-		./scripts/dispatch-nfs-release-evidence.sh
+		./scripts/release/dispatch-nfs-release-evidence.sh
 
 nfs-release-evidence-dispatch-self-test:
-	@bash scripts/dispatch-nfs-release-evidence.sh self-test
+	@bash scripts/release/dispatch-nfs-release-evidence.sh self-test
 
 nfs-evidence-summary-self-test:
 	@$(PYTHON) scripts/nfs-evidence-summary.py self-test
@@ -687,14 +685,14 @@ nfs-threshold-suggestions:
 
 nfs-feature-gate:
 	@$(MAKE) --no-print-directory nfs-smoke-script-check
-	@$(PYTHON) scripts/check-release-archive-contents.py
+	@$(PYTHON) scripts/release/check-release-archive-contents.py
 	@$(CARGO) check -p crab --bin crab --no-default-features --features nfs,gix-all
 	@$(CARGO) test -p crab-vfs --features nfs,gix-facade
 	@$(CARGO) test -p crab --test prop_coordinator response_contains --features fuse
 	@$(PYTHON) scripts/verify-nfs-smoke-report.py self-test
 	@$(PYTHON) scripts/nfs-read-path-bench-report.py self-test
 	@$(PYTHON) scripts/nfs-evidence-summary.py self-test
-	@bash scripts/dispatch-nfs-release-evidence.sh self-test
+	@bash scripts/release/dispatch-nfs-release-evidence.sh self-test
 
 nfs-read-path-bench:
 	@$(CARGO) bench --bench nfs_read_path_bench --no-default-features --features nfs -- $(NFS_READ_PATH_BENCH_ARGS)
@@ -802,13 +800,10 @@ cache-service-verify-smoke-report:
 		python3 scripts/verify-cache-service-smoke-report.py "$(CACHE_SERVICE_RUSTFS_REPORT)"; \
 	fi
 
-cache-service-verify-smoke-report-self-test:
-	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_verify_cache_service_smoke_report.py
-
 # --- Install ---
 
 install: build
-	@$(PYTHON) scripts/install-binaries.py \
+	@$(PYTHON) scripts/release/install-binaries.py \
 		--prefix "$(PREFIX)" \
 		--cargo-bin "$(CARGO_BIN)" \
 		--crab-bin "$(RELEASE_BIN)" \
@@ -840,16 +835,16 @@ uninstall:
 # --- Version bump ---
 
 bump-patch:
-	@./scripts/bump-version.sh patch
+	@./scripts/release/bump-version.sh patch
 
 bump-minor:
-	@./scripts/bump-version.sh minor
+	@./scripts/release/bump-version.sh minor
 
 bump-major:
-	@./scripts/bump-version.sh major
+	@./scripts/release/bump-version.sh major
 
 bump-set:
-	@./scripts/bump-version.sh set $(VERSION)
+	@./scripts/release/bump-version.sh set $(VERSION)
 
 # Bump + install in one shot:
 #   make release-patch
@@ -864,29 +859,29 @@ release-major: bump-major install
 release: release-ci
 
 release-build: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release.sh --dry-run --allow-partial
+	@./scripts/release/release.sh --dry-run --allow-partial
 
 release-dry: release-build
 
 release-strict: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release.sh --dry-run
+	@./scripts/release/release.sh --dry-run
 
 release-macos-full: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release.sh --dry-run
+	@./scripts/release/release.sh --dry-run
 
 release-target:
 	@if [ -z "$(TARGET)" ]; then \
 		echo "usage: make release-target TARGET=linux-x86_64"; \
-		./scripts/release.sh --list-targets; \
+		./scripts/release/release.sh --list-targets; \
 		exit 2; \
 	fi
 	@$(MAKE) --no-print-directory replica-release-gate
 	@$(MAKE) --no-print-directory cache-service-release-gate
 	@$(MAKE) --no-print-directory nfs-release-gate
-	@./scripts/release.sh --dry-run --target "$(TARGET)"
+	@./scripts/release/release.sh --dry-run --target "$(TARGET)"
 
 release-list:
-	@./scripts/release.sh --list-targets
+	@./scripts/release/release.sh --list-targets
 
 release-ci:
 	@if ! command -v gh >/dev/null 2>&1; then \
@@ -959,7 +954,7 @@ release-macos-publish:
 		REPLICA_RELEASE_EVIDENCE_DIR="$(REPLICA_RELEASE_EVIDENCE_DIR)" \
 		REPLICA_RELEASE_EVIDENCE_OUTPUT="$(REPLICA_RELEASE_EVIDENCE_OUTPUT)" \
 		REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID="$(REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID)" \
-			./scripts/release.sh; \
+			./scripts/release/release.sh; \
 	fi
 
 release-publish-dist:
@@ -1019,13 +1014,13 @@ release-publish-dist:
 # --- Homebrew tap ---
 
 homebrew:
-	@./scripts/update-homebrew.sh
+	@./scripts/release/update-homebrew.sh
 
 homebrew-local:
-	@./scripts/update-homebrew.sh --local
+	@./scripts/release/update-homebrew.sh --local
 
 homebrew-dry:
-	@./scripts/update-homebrew.sh --dry-run
+	@./scripts/release/update-homebrew.sh --dry-run
 
 # Full release pipeline: build + publish + update Homebrew tap
 release-full: release-ci

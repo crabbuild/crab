@@ -6,7 +6,7 @@ export LC_ALL=C
 export LANG=C
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CRAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKSPACE_DIR="$(cd "$CRAB_DIR/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 

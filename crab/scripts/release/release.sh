@@ -11,22 +11,21 @@
 # GitHub Actions workflow for publishing.
 #
 # Usage:
-#   ./scripts/release.sh --dry-run
-#   ./scripts/release.sh --dry-run
-#   ./scripts/release.sh
-#   ./scripts/release.sh --target linux-x86_64 --dry-run
-#   ./scripts/release.sh --allow-partial --dry-run
+#   ./scripts/release/release.sh --dry-run
+#   ./scripts/release/release.sh
+#   ./scripts/release/release.sh --target linux-x86_64 --dry-run
+#   ./scripts/release/release.sh --allow-partial --dry-run
 #
 # Publishing requires `gh` authenticated with access to crabbuild/crab-release.
 # Publishing also requires retained enterprise replica evidence verified through
-# `scripts/verify-replica-release-evidence.sh`.
+# `scripts/release/verify-replica-release-evidence.sh`.
 
 set -euo pipefail
 export LC_ALL=C
 export LANG=C
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CRAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKSPACE_DIR="$(cd "$CRAB_DIR/.." && pwd)"
 
 RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-release}"

@@ -326,7 +326,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          crab/scripts/verify-replica-release-evidence.sh \
+          crab/scripts/release/verify-replica-release-evidence.sh \
             "$REPLICA_RELEASE_EVIDENCE_DIR" \
             replica-release-evidence-verify.json \
             "$REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID"
@@ -1577,4 +1577,4 @@ jobs:
             exit 0
           fi
           TAG="${{ needs.prepare.outputs.tag }}"
-          DIST_DIR="$PWD/dist" crab/scripts/update-homebrew.sh --local "$TAG"
+          DIST_DIR="$PWD/dist" crab/scripts/release/update-homebrew.sh --local "$TAG"
