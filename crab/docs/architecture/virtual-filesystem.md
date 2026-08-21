@@ -133,9 +133,6 @@ NFS mount commands use local client-side locking or disable remote locking
 because the embedded NFS server does not provide an NLM service. Locks are
 therefore advisory within one mounted client, not cross-client coordination.
 
-The long-term performance and correctness target for this backend is documented
-in [NFS Mount Architecture](nfs-mount-architecture.md).
-
 ### FUSE Handler (`fuse.rs`)
 
 The FUSE handler implements the low-level FUSE operations:
