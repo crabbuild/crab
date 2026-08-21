@@ -2,7 +2,6 @@
   "title": "Crab CLI",
   "pages": [
     "getting-started",
-    "managed-service",
     "daily-workflow",
     "file-inspection",
     "workflow",
@@ -14,6 +13,7 @@
     "virtual-filesystem",
     "diagnostics",
     "guides",
+    "managed-service",
     "reference"
   ]
 }
