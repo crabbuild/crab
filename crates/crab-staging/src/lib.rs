@@ -51,10 +51,13 @@ pub mod stats;
 pub mod stream;
 
 #[cfg(test)]
+#[path = "../tests/unit/prop_compaction_preserves_reads.rs"]
 mod prop_compaction_preserves_reads;
 #[cfg(test)]
+#[path = "../tests/unit/prop_orphan_sweep_idempotence.rs"]
 mod prop_orphan_sweep_idempotence;
 #[cfg(test)]
+#[path = "../tests/unit/prop_torn_tail_recovery.rs"]
 mod prop_torn_tail_recovery;
 
 pub use config::StagingConfig;
