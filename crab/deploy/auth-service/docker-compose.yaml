@@ -30,7 +30,7 @@ services:
   crab-auth:
     build:
       context: ../../..
-      dockerfile: crab/deploy/auth/Dockerfile
+      dockerfile: crab/deploy/auth-service/Dockerfile
     ports:
       - "8080:8080"
     environment:

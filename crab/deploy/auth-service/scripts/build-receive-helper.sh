@@ -3,7 +3,7 @@ set -euo pipefail
 
 CRAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORKSPACE_ROOT="$(cd "$CRAB_ROOT/.." && pwd)"
-AUTH_DIR="$CRAB_ROOT/deploy/auth"
+AUTH_DIR="$CRAB_ROOT/deploy/auth-service"
 TARGET_DIR="${CARGO_TARGET_DIR:-$WORKSPACE_ROOT/target}"
 MODE="${1:---host}"
 DOCKER_CONTAINER=""

@@ -31,7 +31,7 @@ from moto.server import ThreadedMotoServer
 
 
 ROOT = Path(__file__).resolve().parents[3]
-AUTH_ROOT = ROOT / "deploy" / "auth"
+AUTH_ROOT = ROOT / "deploy" / "auth-service"
 WORKSPACE = ROOT.parent
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", WORKSPACE / "target")) / "debug"
 CRAB = TARGET / "crab"

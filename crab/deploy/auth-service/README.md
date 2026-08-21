@@ -23,13 +23,13 @@ crab CLI → /v1/credentials or /v1/push/* → Crab Auth → Evaluate RBAC polic
 cd CrabBuild
 
 # 1. Configure your IdP and RBAC policy
-cp crab/deploy/auth/config/policy.example.yaml crab/deploy/auth/config/policy.yaml
+cp crab/deploy/auth-service/config/policy.example.yaml crab/deploy/auth-service/config/policy.yaml
 # Edit policy.yaml with your users, repos, and permissions
 
 # 2. Build and run
-docker build -f crab/deploy/auth/Dockerfile -t crab-auth .
+docker build -f crab/deploy/auth-service/Dockerfile -t crab-auth .
 docker run -p 8080:8080 \
-  -v $(pwd)/crab/deploy/auth/config:/etc/crab-auth:ro \
+  -v $(pwd)/crab/deploy/auth-service/config:/etc/crab-auth:ro \
   -e CRAB_AUTH_JWKS_URL=https://your-idp.example.com/.well-known/jwks.json \
   -e CRAB_AUTH_ISSUER=https://your-idp.example.com \
   -e CRAB_AUTH_AUDIENCE=crab-cli \
@@ -66,7 +66,7 @@ the runtime should not receive enterprise traffic.
 ### AWS Lambda (Terraform)
 
 ```bash
-cd crab/deploy/auth/terraform
+cd crab/deploy/auth-service/terraform
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars with your settings
 
@@ -87,7 +87,7 @@ and filtered read-view materialization.
 ### AWS Lambda (SAM)
 
 ```bash
-cd crab/deploy/auth
+cd crab/deploy/auth-service
 ./scripts/build-receive-helper.sh --linux-amd64
 
 cd sam/
@@ -102,7 +102,7 @@ When prompted, provide `GitLayerArn`, a versioned Lambda layer ARN containing a
 
 ```bash
 cd CrabBuild
-docker build -f crab/deploy/auth/cloudrun/Dockerfile -t gcr.io/YOUR_PROJECT/crab-auth .
+docker build -f crab/deploy/auth-service/cloudrun/Dockerfile -t gcr.io/YOUR_PROJECT/crab-auth .
 docker push gcr.io/YOUR_PROJECT/crab-auth
 gcloud run deploy crab-auth \
   --image gcr.io/YOUR_PROJECT/crab-auth \
@@ -198,7 +198,7 @@ credentials, run the RustFS-backed E2E wrapper:
 
 ```bash
 cd CrabBuild
-crab/deploy/auth/scripts/e2e-rustfs-docker.sh
+crab/deploy/auth-service/scripts/e2e-rustfs-docker.sh
 ```
 
 The wrapper builds `crab`, `crab-auth-receive`, and `crab-auth-view`; creates a
@@ -219,7 +219,7 @@ export CRAB_AUTH_RUSTFS_BUCKET=crab
 export CRAB_AUTH_S3_ACCESS_KEY_ID=...
 export CRAB_AUTH_S3_SECRET_ACCESS_KEY=...
 
-crab/deploy/auth/scripts/e2e-path-acl-rustfs.py
+crab/deploy/auth-service/scripts/e2e-path-acl-rustfs.py
 ```
 
 The script starts a local Crab Auth endpoint, writes a policy with
@@ -397,7 +397,7 @@ client-sent active-active config without a service-owned allowlist.
 ## Development
 
 ```
-cd crab/deploy/auth
+cd crab/deploy/auth-service
 
 # Install dependencies
 pip install -r requirements.txt
@@ -422,7 +422,7 @@ ruff format --check .
 ## File Structure
 
 ```
-deploy/auth/
+deploy/auth-service/
 ├── README.md                  This file
 ├── Dockerfile                 Standalone container
 ├── requirements.txt           Python dependencies

@@ -42,7 +42,7 @@ def test_docker_compose_uses_repo_root_build_context():
     crab_auth_build = config["services"]["crab-auth"]["build"]
     assert crab_auth_build == {
         "context": "../../..",
-        "dockerfile": "crab/deploy/auth/Dockerfile",
+        "dockerfile": "crab/deploy/auth-service/Dockerfile",
     }
 
 
@@ -66,8 +66,8 @@ def test_lambda_docs_require_linux_receive_helper_before_packaging():
     guide = _read("GUIDE.md")
 
     assert "../scripts/build-receive-helper.sh --linux-amd64" in guide
-    assert "docker build -f crab/deploy/auth/Dockerfile -t crab-auth ." in readme
-    assert "docker build -f crab/deploy/auth/cloudrun/Dockerfile" in readme
+    assert "docker build -f crab/deploy/auth-service/Dockerfile -t crab-auth ." in readme
+    assert "docker build -f crab/deploy/auth-service/cloudrun/Dockerfile" in readme
     assert "Terraform builds the Lambda zip locally" in readme
     assert "Terraform builds the Lambda zip locally" in guide
 

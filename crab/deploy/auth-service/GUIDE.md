@@ -258,7 +258,7 @@ aws iam get-role --role-name crab-auth-base --query 'Role.Arn' --output text
 Create a `policy.yaml` that defines who can access which repos.
 
 ```bash
-cd crab/deploy/auth
+cd crab/deploy/auth-service
 cp config/policy.example.yaml config/policy.yaml
 ```
 
@@ -324,12 +324,12 @@ Best for: Kubernetes, ECS, any container platform.
 ```bash
 cd CrabBuild
 
-docker build -f crab/deploy/auth/Dockerfile -t crab-auth .
+docker build -f crab/deploy/auth-service/Dockerfile -t crab-auth .
 
 docker run -d \
   --name crab-auth \
   -p 8080:8080 \
-  -v $(pwd)/crab/deploy/auth/config:/etc/crab-auth:ro \
+  -v $(pwd)/crab/deploy/auth-service/config:/etc/crab-auth:ro \
   -e CRAB_AUTH_JWKS_URL="https://yourcompany.okta.com/.well-known/jwks.json" \
   -e CRAB_AUTH_ISSUER="https://yourcompany.okta.com" \
   -e CRAB_AUTH_AUDIENCE="your-client-id" \
@@ -358,7 +358,7 @@ availability, packaged helper binaries, and `git` availability.
 Best for: Serverless, zero maintenance, auto-scaling.
 
 ```bash
-cd crab/deploy/auth/terraform
+cd crab/deploy/auth-service/terraform
 
 cp terraform.tfvars.example terraform.tfvars
 ```
@@ -402,7 +402,7 @@ api_endpoint = "https://abc123.execute-api.us-west-2.amazonaws.com"
 ### Option C: AWS SAM
 
 ```bash
-cd crab/deploy/auth/sam
+cd crab/deploy/auth-service/sam
 ../scripts/build-receive-helper.sh --linux-amd64
 sam build
 sam deploy --guided

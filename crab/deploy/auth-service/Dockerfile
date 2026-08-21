@@ -1,11 +1,11 @@
 # Standalone Docker image for the crab-auth endpoint.
 #
 # Build:
-#   docker build -f crab/deploy/auth/Dockerfile -t crab-auth .
+#   docker build -f crab/deploy/auth-service/Dockerfile -t crab-auth .
 #
 # Run:
 #   docker run -p 8080:8080 \
-#     -v $(pwd)/crab/deploy/auth/config:/etc/crab-auth:ro \
+#     -v $(pwd)/crab/deploy/auth-service/config:/etc/crab-auth:ro \
 #     -e CRAB_AUTH_JWKS_URL=https://your-idp.example.com/.well-known/jwks.json \
 #     -e CRAB_AUTH_ISSUER=https://your-idp.example.com \
 #     -e CRAB_AUTH_AUDIENCE=crab-cli \
@@ -43,11 +43,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first for layer caching.
-COPY crab/deploy/auth/requirements-docker.txt .
+COPY crab/deploy/auth-service/requirements-docker.txt .
 RUN pip install --no-cache-dir -r requirements-docker.txt
 
 # Copy application code.
-COPY crab/deploy/auth/src/ src/
+COPY crab/deploy/auth-service/src/ src/
 COPY --from=receive-helper /workspace/target/release/crab-auth-receive /usr/local/bin/crab-auth-receive
 COPY --from=receive-helper /workspace/target/release/crab-auth-view /usr/local/bin/crab-auth-view
 COPY --from=receive-helper /workspace/target/release/crab /usr/local/bin/crab

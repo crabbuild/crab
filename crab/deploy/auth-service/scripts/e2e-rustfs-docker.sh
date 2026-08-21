@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-AUTH_ROOT="$WORKSPACE_ROOT/crab/deploy/auth"
+AUTH_ROOT="$WORKSPACE_ROOT/crab/deploy/auth-service"
 
 RUSTFS_IMAGE="${CRAB_AUTH_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc}"
 CONTAINER="${CRAB_AUTH_RUSTFS_CONTAINER:-crab-auth-rustfs-e2e}"
@@ -24,7 +24,7 @@ SKIP_DEPS=0
 
 usage() {
     cat <<EOF
-Usage: crab/deploy/auth/scripts/e2e-rustfs-docker.sh [options]
+Usage: crab/deploy/auth-service/scripts/e2e-rustfs-docker.sh [options]
 
 Runs a local end-to-end Crab Auth verification:
   Docker RustFS -> local JWKS -> local Crab Auth -> crab CLI push/clone/hydrate.

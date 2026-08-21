@@ -20,7 +20,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
-AUTH_ROOT = ROOT / "deploy" / "auth"
+AUTH_ROOT = ROOT / "deploy" / "auth-service"
 WORKSPACE = ROOT.parent
 LOCAL_SCRIPT = Path(__file__).with_name("e2e-path-acl-local.py")
 ISSUER = "https://login.corp.example.com"

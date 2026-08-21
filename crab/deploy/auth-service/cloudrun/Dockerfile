@@ -1,7 +1,7 @@
 # Cloud Run Dockerfile for the crab-auth endpoint.
 #
 # Deploy:
-#   docker build -f crab/deploy/auth/cloudrun/Dockerfile -t gcr.io/PROJECT/crab-auth .
+#   docker build -f crab/deploy/auth-service/cloudrun/Dockerfile -t gcr.io/PROJECT/crab-auth .
 #   docker push gcr.io/PROJECT/crab-auth
 #   gcloud run deploy crab-auth --image gcr.io/PROJECT/crab-auth
 
@@ -34,12 +34,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies.
-COPY crab/deploy/auth/requirements-docker.txt .
+COPY crab/deploy/auth-service/requirements-docker.txt .
 RUN pip install --no-cache-dir -r requirements-docker.txt
 
 # Copy application code.
-COPY crab/deploy/auth/src/ src/
-COPY crab/deploy/auth/config/ /etc/crab-auth/
+COPY crab/deploy/auth-service/src/ src/
+COPY crab/deploy/auth-service/config/ /etc/crab-auth/
 COPY --from=receive-helper /workspace/target/release/crab-auth-receive /usr/local/bin/crab-auth-receive
 COPY --from=receive-helper /workspace/target/release/crab-auth-view /usr/local/bin/crab-auth-view
 
