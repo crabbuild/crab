@@ -1,6 +1,6 @@
 //! Protected-push receive validation helpers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -1048,6 +1048,109 @@ async fn while_renewing_git_locator_lock<T>(
     }
 }
 
+#[derive(Debug)]
+struct ServiceLocatorEvidence {
+    pack_id: MerkleHash,
+    _temp: tempfile::TempDir,
+    idx_path: std::path::PathBuf,
+    rev_path: std::path::PathBuf,
+    git_sha1: String,
+}
+
+fn validate_service_locator_evidence(
+    pack: &PackManifestEntry,
+    idx_path: &Path,
+    rev_path: &Path,
+    expected_git_sha1: &str,
+) -> Result<()> {
+    let locations = crab_git::pack_locator::PackLocationIter::open(idx_path, rev_path, pack.size)
+        .map_err(crab_git::pack::PackError::from)?;
+    if locations.object_count() != pack.object_count {
+        return Err(invalid(format!(
+            "committed pack index has {} objects, expected {}",
+            locations.object_count(),
+            pack.object_count
+        )));
+    }
+    if locations.pack_checksum().to_string() != expected_git_sha1 {
+        return Err(invalid(
+            "committed pack index checksum disagrees with pack trailer",
+        ));
+    }
+    Ok(())
+}
+
+async fn download_service_locator_evidence(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    pack: &PackManifestEntry,
+) -> Result<ServiceLocatorEvidence> {
+    if pack.size < 20 {
+        return Err(invalid("committed Git pack is too short for its trailer"));
+    }
+    let trailer = store
+        .range_get(&router.pack_path(&pack.pack_id), pack.size - 20..pack.size)
+        .await?;
+    let git_sha1 = gix_hash::ObjectId::from(
+        <[u8; 20]>::try_from(trailer.as_ref())
+            .map_err(|_| invalid("committed Git pack trailer is not 20 bytes"))?,
+    )
+    .to_string();
+    let temp = tempfile::tempdir()?;
+    let idx_path = temp.path().join("pack.idx");
+    let rev_path = temp.path().join("pack.rev");
+    store
+        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .await?;
+    match store
+        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .await
+    {
+        Ok(_) => {}
+        // v1.0.14 and earlier direct pushes did not persist `.rev` evidence.
+        Err(StorageError::NotFound { .. }) => {
+            let index = idx_path.clone();
+            let reverse = rev_path.clone();
+            let (reverse_size, reverse_hash) = tokio::task::spawn_blocking(move || {
+                crab_git::pack_locator::write_pack_reverse_index(&index, &reverse)
+                    .map_err(crab_git::pack::PackError::from)
+                    .map_err(AuthServerError::from)?;
+                let mut file = std::fs::File::open(&reverse)?;
+                let size = file.metadata()?.len();
+                let mut hasher = blake3::Hasher::new();
+                std::io::copy(&mut file, &mut hasher)?;
+                Ok::<_, AuthServerError>((size, *hasher.finalize().as_bytes()))
+            })
+            .await
+            .map_err(|error| {
+                AuthServerError::Internal(format!(
+                    "legacy reverse-index generation worker failed: {error}"
+                ))
+            })??;
+            store
+                .put_multipart_file_retry(
+                    &router.pack_reverse_index_path(&pack.pack_id),
+                    &rev_path,
+                    reverse_size,
+                    reverse_hash,
+                    8 * 1024 * 1024,
+                    &tokio_util::sync::CancellationToken::new(),
+                    None,
+                )
+                .await?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    validate_service_locator_evidence(pack, &idx_path, &rev_path, &git_sha1)?;
+    Ok(ServiceLocatorEvidence {
+        pack_id: merkle_hash_from_hex(&pack.pack_id, "committed pack id")?,
+        _temp: temp,
+        idx_path,
+        rev_path,
+        git_sha1,
+    })
+}
+
 /// Publish exact Git object locators after the manifest commit.
 pub async fn commit_service_git_locators(
     store: &Store,
@@ -1076,59 +1179,74 @@ pub async fn commit_service_git_locators(
         }
         let canonical_name = pack.pack_id.clone();
         let expected_object_count = pack.object_count;
-        let (actual_pack_id, temp, idx_path, rev_path, git_sha1, idx_size, idx_hash) =
-            tokio::task::spawn_blocking(move || {
-                let pack_dir = temp.path().join("objects/pack");
-                std::fs::create_dir_all(&pack_dir)?;
-                let installed = crab_git::pack::install_pack_file_from_path(
-                    &pack_dir,
-                    &source,
-                    &canonical_name,
-                    0,
-                    // Receive validation already fscked the complete repository. This
-                    // isolated acceleration directory lacks objects retained in older
-                    // packs, so object fsck would reject valid incremental packs.
-                    false,
-                )?;
-                let locations = crab_git::pack_locator::PackLocationIter::open(
-                    &installed.idx_path,
-                    &installed.rev_path,
-                    downloaded,
-                )
-                .map_err(crab_git::pack::PackError::from)?;
-                if locations.object_count() != expected_object_count {
-                    return Err(invalid(format!(
-                        "committed pack index has {} objects, expected {}",
-                        locations.object_count(),
-                        expected_object_count
-                    )));
-                }
-                if locations.pack_checksum().to_string() != installed.git_sha1 {
-                    return Err(invalid(
-                        "committed pack index checksum disagrees with pack trailer",
-                    ));
-                }
-                let mut file = std::fs::File::open(&source)?;
-                let mut hasher = blake3::Hasher::new();
-                std::io::copy(&mut file, &mut hasher)?;
-                let mut idx_file = std::fs::File::open(&installed.idx_path)?;
-                let idx_size = idx_file.metadata()?.len();
-                let mut idx_hasher = blake3::Hasher::new();
-                std::io::copy(&mut idx_file, &mut idx_hasher)?;
-                Ok::<_, AuthServerError>((
-                    hasher.finalize().to_hex().to_string(),
-                    temp,
-                    installed.idx_path,
-                    installed.rev_path,
-                    installed.git_sha1,
-                    idx_size,
-                    *idx_hasher.finalize().as_bytes(),
-                ))
-            })
-            .await
-            .map_err(|error| {
-                AuthServerError::Internal(format!("pack indexing join failed: {error}"))
-            })??;
+        let (
+            actual_pack_id,
+            temp,
+            idx_path,
+            rev_path,
+            git_sha1,
+            idx_size,
+            idx_hash,
+            rev_size,
+            rev_hash,
+        ) = tokio::task::spawn_blocking(move || {
+            let pack_dir = temp.path().join("objects/pack");
+            std::fs::create_dir_all(&pack_dir)?;
+            let installed = crab_git::pack::install_pack_file_from_path(
+                &pack_dir,
+                &source,
+                &canonical_name,
+                0,
+                // Receive validation already fscked the complete repository. This
+                // isolated acceleration directory lacks objects retained in older
+                // packs, so object fsck would reject valid incremental packs.
+                false,
+            )?;
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &installed.idx_path,
+                &installed.rev_path,
+                downloaded,
+            )
+            .map_err(crab_git::pack::PackError::from)?;
+            if locations.object_count() != expected_object_count {
+                return Err(invalid(format!(
+                    "committed pack index has {} objects, expected {}",
+                    locations.object_count(),
+                    expected_object_count
+                )));
+            }
+            if locations.pack_checksum().to_string() != installed.git_sha1 {
+                return Err(invalid(
+                    "committed pack index checksum disagrees with pack trailer",
+                ));
+            }
+            let mut file = std::fs::File::open(&source)?;
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut file, &mut hasher)?;
+            let mut idx_file = std::fs::File::open(&installed.idx_path)?;
+            let idx_size = idx_file.metadata()?.len();
+            let mut idx_hasher = blake3::Hasher::new();
+            std::io::copy(&mut idx_file, &mut idx_hasher)?;
+            let mut rev_file = std::fs::File::open(&installed.rev_path)?;
+            let rev_size = rev_file.metadata()?.len();
+            let mut rev_hasher = blake3::Hasher::new();
+            std::io::copy(&mut rev_file, &mut rev_hasher)?;
+            Ok::<_, AuthServerError>((
+                hasher.finalize().to_hex().to_string(),
+                temp,
+                installed.idx_path,
+                installed.rev_path,
+                installed.git_sha1,
+                idx_size,
+                *idx_hasher.finalize().as_bytes(),
+                rev_size,
+                *rev_hasher.finalize().as_bytes(),
+            ))
+        })
+        .await
+        .map_err(|error| {
+            AuthServerError::Internal(format!("pack indexing join failed: {error}"))
+        })??;
         if actual_pack_id != pack.pack_id {
             return Err(invalid(format!(
                 "committed pack {} body hash mismatch",
@@ -1146,7 +1264,24 @@ pub async fn commit_service_git_locators(
                 None,
             )
             .await?;
-        derived.push((pack, pack_id, temp, idx_path, rev_path, git_sha1));
+        store
+            .put_multipart_file_retry(
+                &router.pack_reverse_index_path(&pack.pack_id),
+                &rev_path,
+                rev_size,
+                rev_hash,
+                8 * 1024 * 1024,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await?;
+        derived.push(ServiceLocatorEvidence {
+            pack_id,
+            _temp: temp,
+            idx_path,
+            rev_path,
+            git_sha1,
+        });
     }
 
     let lock = crab_coordination::PushLock::acquire_internal_default(
@@ -1174,22 +1309,6 @@ pub async fn commit_service_git_locators(
             )
             .await?
         };
-        let published_ids = derived
-            .iter()
-            .map(|(_, pack_id, _, _, _, _)| *pack_id)
-            .collect::<BTreeSet<_>>();
-        let records = derived
-            .iter()
-            .map(|(pack, pack_id, _, _, _, _)| {
-                crab_metadata::git_object_locator::GitPackLocatorRecord {
-                    pack_id: *pack_id,
-                    committed_generation: manifest.generation,
-                    pack_index_hash,
-                    object_count: pack.object_count,
-                    pack_size: pack.size,
-                }
-            })
-            .collect::<Vec<_>>();
         let mut writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
             Arc::clone(store.inner()),
             router.repo_prefix(),
@@ -1197,17 +1316,77 @@ pub async fn commit_service_git_locators(
         .await?;
         let operation = async {
             let prior_coverage = writer.coverage();
+            let covered_packs = if let Some(coverage) = prior_coverage {
+                crab_metadata::manifest_store::read_bulk_pack_list(
+                    store,
+                    router,
+                    &coverage.pack_index_hash.hex(),
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            let covered = covered_packs
+                .iter()
+                .map(|pack| (pack.pack_id.as_str(), (pack.object_count, pack.size)))
+                .collect::<HashMap<_, _>>();
+            let records = current_packs
+                .iter()
+                .map(|pack| {
+                    Ok(crab_metadata::git_object_locator::GitPackLocatorRecord {
+                        pack_id: merkle_hash_from_hex(&pack.pack_id, "committed pack id")?,
+                        committed_generation: manifest.generation,
+                        pack_index_hash,
+                        object_count: pack.object_count,
+                        pack_size: pack.size,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             let bindings = writer.bind_packs(&records).await?;
-            for (binding, (_, _, _, idx_path, rev_path, git_sha1)) in
-                bindings.into_iter().zip(&derived)
-            {
+            let retained_slots = bindings
+                .iter()
+                .map(|binding| binding.pack_slot)
+                .collect::<HashSet<_>>();
+            let sweep = writer.sweep_unreferenced(&retained_slots).await?;
+            let rebuild_all = sweep.pack_rows_deleted != 0;
+            let mut pending_ids = HashSet::new();
+            for pack in &current_packs {
+                if !rebuild_all
+                    && covered.get(pack.pack_id.as_str()) == Some(&(pack.object_count, pack.size))
+                {
+                    continue;
+                }
+                let pack_id = merkle_hash_from_hex(&pack.pack_id, "committed pack id")?;
+                pending_ids.insert(pack_id);
+                if let Some(local) = derived.iter().find(|item| item.pack_id == pack_id) {
+                    validate_service_locator_evidence(
+                        pack,
+                        &local.idx_path,
+                        &local.rev_path,
+                        &local.git_sha1,
+                    )?;
+                    continue;
+                }
+                derived.push(download_service_locator_evidence(store, router, pack).await?);
+            }
+            let bindings = bindings
+                .into_iter()
+                .map(|binding| (binding.record.pack_id, binding))
+                .collect::<HashMap<_, _>>();
+            for evidence in &derived {
+                if !pending_ids.contains(&evidence.pack_id) {
+                    continue;
+                }
+                let Some(binding) = bindings.get(&evidence.pack_id).copied() else {
+                    continue;
+                };
                 let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                    idx_path,
-                    rev_path,
+                    &evidence.idx_path,
+                    &evidence.rev_path,
                     binding.record.pack_size,
                 )
                 .map_err(crab_git::pack::PackError::from)?;
-                if locations.pack_checksum().to_string() != *git_sha1 {
+                if locations.pack_checksum().to_string() != evidence.git_sha1 {
                     return Err(invalid(
                         "committed pack index checksum changed before locator publication",
                     ));
@@ -1244,38 +1423,6 @@ pub async fn commit_service_git_locators(
             {
                 return Err(invalid(
                     "committed manifest changed during Git locator publication",
-                ));
-            }
-            let all_current_published = current_packs.iter().all(|pack| {
-                merkle_hash_from_hex(&pack.pack_id, "committed pack id")
-                    .ok()
-                    .is_some_and(|pack_id| published_ids.contains(&pack_id))
-            });
-            let prior_covers_remainder = if all_current_published {
-                true
-            } else if let Some(coverage) = prior_coverage {
-                let covered_packs = crab_metadata::manifest_store::read_bulk_pack_list(
-                    store,
-                    router,
-                    &coverage.pack_index_hash.hex(),
-                )
-                .await?;
-                current_packs.iter().all(|current| {
-                    merkle_hash_from_hex(&current.pack_id, "committed pack id")
-                        .ok()
-                        .is_some_and(|pack_id| published_ids.contains(&pack_id))
-                        || covered_packs.iter().any(|covered| {
-                            covered.pack_id == current.pack_id
-                                && covered.object_count == current.object_count
-                                && covered.size == current.size
-                        })
-                })
-            } else {
-                false
-            };
-            if !prior_covers_remainder {
-                return Err(invalid(
-                    "Git locator prior coverage does not cover retained committed packs",
                 ));
             }
             writer

@@ -88,8 +88,10 @@ Run `crab track '*.bin'` (or your desired pattern) to start tracking files.
 Run `crab init <url>` to set the remote URL.
 
 **Credentials check failed**
-Ensure AWS credentials are configured. Check `AWS_PROFILE`, `AWS_REGION`, and
-`~/.aws/credentials`. Run `aws sts get-caller-identity` to verify.
+Ensure supported AWS credentials are available to the Crab process. Check
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, web identity,
+ECS task credentials, or EC2 instance credentials, plus `AWS_REGION`. The
+current provider does not read `AWS_PROFILE` or shared AWS configuration files.
 
 **Staging area warnings**
 A large staging area may indicate that staged data hasn't been pushed yet. Run

@@ -3,15 +3,13 @@
 
 use std::path::Path;
 
-use serde::Serialize;
-use tracing::debug;
-
 use crate::core::error::Result;
-use crate::core::metrics::MetricsSummary;
+use crate::core::metrics::{MetricsSummary, load_metrics_summary};
 use crate::core::output::{OutputMode, emit_json};
 use crab_staging::push_plan::{PushPlanStats, PushPlanSummaryOptions, empty_push_plan_stats};
 use crab_staging::stats::StagingStats;
 use crab_staging::{StagingAreaReadOnly, StagingError};
+use serde::Serialize;
 
 /// Payload emitted by `crab stat --json`.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -180,23 +178,7 @@ pub fn run_perf(perf_path: &str, mode: OutputMode) -> Result<()> {
 /// Load a [`MetricsSummary`] from a JSON file, returning a zeroed summary
 /// if the file is missing or malformed.
 fn load_perf_summary(path: &Path) -> Result<MetricsSummary> {
-    match std::fs::read_to_string(path) {
-        Ok(data) => match serde_json::from_str::<MetricsSummary>(&data) {
-            Ok(summary) => {
-                debug!(path = %path.display(), "loaded perf counters");
-                Ok(summary)
-            }
-            Err(e) => {
-                debug!(path = %path.display(), error = %e, "corrupt perf-state.json, showing zeros");
-                Ok(MetricsSummary::zeroed())
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            debug!(path = %path.display(), "no perf-state.json, showing zeros");
-            Ok(MetricsSummary::zeroed())
-        }
-        Err(e) => Err(crate::core::error::CrabError::Io(e)),
-    }
+    load_metrics_summary(path)
 }
 
 /// Payload emitted by `crab stat classes --json`.
@@ -315,6 +297,11 @@ mod tests {
             xorb_fetch_requests_coalesced: 12,
             xorb_fetch_bytes_saved: 512,
             multipart_resumed_uploads: 1,
+            head_list_requests: 2,
+            head_point_requests: 4,
+            metadb_buffered_batch_write_count: 8,
+            metadb_wal_flush_count: 1,
+            metadb_memtable_flush_count: 1,
             workflow_runs_total: 0,
             workflow_stages_total: 0,
             workflow_retry_attempts_total: 0,

@@ -211,6 +211,7 @@ pub async fn run_native_push(
         cancel,
         mut pre_acquired_locks,
     } = inputs;
+    let operation_metrics = metrics.clone();
 
     if let Some(result) = duplicate_destination_result(specs) {
         if let Some(leases) = pre_acquired_locks.take() {
@@ -559,6 +560,10 @@ pub async fn run_native_push(
                 None,
             );
         }
+    }
+
+    if let Some(metrics) = operation_metrics {
+        metrics.add_push_duration_ms(pipeline_start.elapsed().as_millis() as u64);
     }
 
     Ok(result)

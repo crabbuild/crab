@@ -236,5 +236,5 @@ Source: `crab/src/cmd/config.rs`
 | `CRAB_CACHE_DIR` | Custom cache directory |
 | `CRAB_LOG_DIR` | Custom log directory |
 | `AWS_REGION` | AWS region for S3 |
-| `AWS_PROFILE` | Named AWS credentials profile |
+| `AWS_PROFILE` | Diagnostic only; the current S3 provider does not consume profiles |
 | `AWS_ENDPOINT_URL` | Custom S3 endpoint |

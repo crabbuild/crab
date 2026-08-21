@@ -24,7 +24,9 @@ The verifier loads `pack-list.json` and cross-references it against actual pack 
 - **Listed but missing** — a pack ID is in the manifest but the object doesn't exist in storage
 - **Present but unlisted** — a pack object exists but isn't in the manifest
 
-The "present but unlisted" direction is repairable — `--repair` re-adds the manifest entry after confirming the pack exists.
+Unreferenced immutable packs are expected after interrupted or conflicted
+pushes and are protected by the normal GC grace period. `fsck` does not add
+them to the committed manifest.
 
 ### Shard-list vs. storage
 
@@ -36,7 +38,8 @@ For each file-index entry, the verifier confirms the referenced shard exists eit
 
 ### Push lock expiry
 
-Push locks under `<prefix>/locks/` are checked against current time. Expired locks indicate a previous push that crashed without cleanup — safely deletable with `--repair`.
+Push locks are checked against their backend-clock lease. Holder-safe repair
+can remove a genuinely expired lock.
 
 ## Usage
 
@@ -76,11 +79,22 @@ Only specific issue types are auto-repaired:
 
 | Issue | Repair action |
 |-------|--------------|
-| Missing pack-list entry (pack exists in storage) | Re-add manifest entry |
 | Expired push lock | Delete the lock |
-| Abandoned multipart upload | Abort the upload |
 
-Repairs are reversible and conservative. No data is deleted.
+Repairs are conservative. Expired lock objects are deleted only after the
+holder-safe expiry check; committed repository content is not deleted.
+
+## Current Boundaries
+
+- The current Git-object check does not reconstruct current head and run full
+  Git reachability. Monitor an independent clone/fetch; use `crab recover
+  history verify <generation>` for strict Git fsck of a historical root.
+- The generic object-store API cannot enumerate provider-side incomplete
+  multipart uploads, so configure the provider lifecycle rule that aborts old
+  incomplete uploads.
+- Locator or visibility acceleration damage requires `crab metadb rebuild`
+  followed by another verification run.
+- Same-bucket manifest history is recovery history, not an independent backup.
 
 ## Exit Codes
 

@@ -1293,12 +1293,15 @@ crab uses cloud-native authentication exclusively. No custom usernames, password
 
 |Cloud     |Mechanism                                           |
 |----------|----------------------------------------------------|
-|AWS       |IAM user, IAM role (via STS AssumeRole), IMDS on EC2|
+|AWS       |Environment credentials, web identity, ECS task credentials, IMDS on EC2|
 |GCP       |Service account, ADC                                |
 |Azure     |Entra ID, managed identity                          |
 |R2 / MinIO|S3-compatible access key pair                       |
 
-Credentials are discovered by `object_store`’s provider chain (e.g., env vars, `~/.aws/credentials`, instance metadata).
+Credentials are discovered by `object_store`'s provider chain. The current S3
+provider supports environment credentials, web identity, ECS task credentials,
+and EC2 instance metadata; it does not read shared AWS profiles or credential
+files.
 
 For human users who don’t already have cloud credentials: crab documents how to set up short-lived STS tokens via SSO providers (AWS IAM Identity Center, Google Workload Identity, etc.). Writing yet-another-auth system is explicitly non-goals.
 

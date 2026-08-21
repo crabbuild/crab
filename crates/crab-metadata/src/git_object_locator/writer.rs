@@ -300,6 +300,13 @@ impl GitObjectLocatorWriter {
                 "Git locator sweep retained an invalid pack slot".to_owned(),
             ));
         }
+        if self
+            .bindings
+            .keys()
+            .all(|slot| retained_slots.contains(slot))
+        {
+            return Ok(LocatorSweepStats::default());
+        }
 
         let mut stats = LocatorSweepStats::default();
         let mut object_rows = self
@@ -730,6 +737,37 @@ mod tests {
             .expect("sweep stale slot");
         assert_eq!(stats.object_rows_deleted, 1);
         assert_eq!(stats.pack_rows_deleted, 1);
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_object_scan_when_every_binding_is_retained() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let bindings = writer
+            .bind_packs(&[pack(1), pack(2)])
+            .await
+            .expect("bind packs");
+        writer
+            .write_locations(bindings[0], &[entry(1)])
+            .await
+            .expect("write first");
+        writer
+            .write_locations(bindings[1], &[entry(2)])
+            .await
+            .expect("write second");
+
+        let stats = writer
+            .sweep_unreferenced(&HashSet::from([
+                bindings[0].pack_slot,
+                bindings[1].pack_slot,
+            ]))
+            .await
+            .expect("skip retained sweep");
+
+        assert_eq!(stats, LocatorSweepStats::default());
         writer.close().await.expect("close writer");
     }
 

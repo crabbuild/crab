@@ -184,8 +184,10 @@ Ensure the URL follows the `crab://<bucket>/<path>` format. The bucket name
 must not contain slashes.
 
 For S3, `crab://my-bucket/my-repo` is the correct Crab remote URL. Configure
-AWS credentials separately with `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY`.
+AWS credentials separately with `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, web identity, ECS task credentials, or EC2 instance
+credentials. The current provider does not read `AWS_PROFILE` or shared AWS
+configuration files.
 
 For GCS or Azure, keep the `crab://` URL and add `--storage-provider gcs` or
 `--storage-provider azure`.

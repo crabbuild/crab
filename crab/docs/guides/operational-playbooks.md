@@ -202,3 +202,92 @@ ls .crab/restripe/journal.db
 crab optimize xorbs --resume   # or --abort
 crab gc
 ```
+
+## Playbook 7: Operate Crab as a team data backbone
+
+**When to use:** A team is evaluating Crab and object storage as production
+Git and large-data infrastructure rather than as a developer convenience.
+
+### Define the service contract first
+
+Record these values before rollout:
+
+| Contract | Team decision |
+|----------|---------------|
+| Recovery point objective | Maximum acceptable refs and object data lost |
+| Recovery time objective | Maximum time to restore clone, fetch, and hydrate |
+| Canonical collaboration plane | Usually GitHub/GitLab; Crab has no PR, review, CI, or branch-policy service |
+| Object-store durability | Node/zone count, erasure or replication policy, and versioning/immutability |
+| Identity lifetime | Short-lived workload or user federation; no shared team access key |
+
+A single-node RustFS process is useful for compatibility tests, not a
+production durability topology. Qualify the exact multi-node RustFS or managed
+object-store topology, including one-node loss, one-disk loss, latency, request
+timeouts, and a network partition, before committing to an RPO.
+
+Use test credentials such as `crab`/`crab` only on an isolated development
+endpoint. Production RustFS credentials must be unique per workload or user,
+least-privilege, regularly rotated, and separated between normal writes,
+backup, and destructive administration.
+
+### Backup and restore
+
+Crab manifest history protects against logical ref/manifest mistakes while the
+same object store remains healthy. It is not an independent backup: history
+and current data share the bucket and account failure domain.
+
+1. Enable provider object versioning and, where required, retention/object
+   lock before onboarding repositories.
+2. Replicate or back up the complete repository prefix, including manifests,
+   ref journal, packs and indexes, metadb objects, shards, xorbs, and history.
+   Backing up only the current manifest is insufficient.
+3. Keep a copy in a separate account or failure domain with separately
+   administered delete credentials.
+4. At least monthly, restore the backup into an isolated bucket/prefix. Clone,
+   run `crab recover history list`, verify a sampled historical generation,
+   run `crab fsck`, and hydrate representative large files. Measure the result
+   against the declared RPO and RTO.
+5. Before production GC, require a recent successful restore drill and run
+   `crab gc --scope repo --dry-run`. Never use bucket-wide GC in a shared
+   bucket without the repository registry and an explicit change window.
+
+### Monitoring schedule
+
+| Frequency | Check | Alert condition |
+|-----------|-------|-----------------|
+| Every minute | Object-store node health, request error/latency, disk capacity, replication/heal backlog | Any unavailable node, sustained 5xx/timeout rate, capacity threshold, or stalled repair |
+| Every push | Push exit status and structured ref outcomes | Any `internal`, `unpack-failed`, `missing-object`, or repeated conflict beyond retry policy |
+| Hourly | `git ls-remote`/read probe from an independent runner | Advertised refs differ from the collaboration-plane policy or cannot be read |
+| Daily | `crab doctor`, `crab fsck`, and backup freshness | Unrepaired error, expired backup, lock/admission saturation, or unexpected request amplification |
+| Weekly | `crab recover history verify <generation>` on a rotating sample | Digest, Git connectivity, shard, xorb, or index verification failure |
+| Monthly | Isolated backup restore drill | RPO/RTO miss or non-byte-identical hydration |
+
+`crab stat perf` is repository-local and cumulative. Collect it after pushes if
+you use it for cost trends; it is not a central metrics exporter. Correlate its
+upload, resume-probe, and metadb-flush counters with provider billing and
+RustFS/OpenTelemetry request metrics.
+
+### Current verification limits
+
+- `crab fsck` validates manifest-selected pack/index presence and Crab's
+  shard/xorb chain, but its Git-object check does not currently reconstruct the
+  repository and run full Git connectivity. Historical
+  `crab recover history verify` does run strict Git fsck for a selected root.
+- The generic object-store API does not expose remote multipart enumeration,
+  so `crab fsck --repair` cannot currently discover or abort provider-side
+  abandoned multipart uploads. Configure a provider lifecycle rule for
+  incomplete uploads.
+- Locator or visibility acceleration damage is reported rather than rebuilt by
+  `fsck`; use `crab metadb rebuild` and verify again.
+- Cross-ref fan-out can commit every ref while post-commit Git locator or
+  visibility publication loses its shared writer lease or lacks another
+  writer's objects. Treat `Git locator coverage is stale` and `Git visibility
+  proof unavailable` from `crab doctor --metadb` as repair-required, then run
+  `crab metadb rebuild`. Do not use `fsck` success alone as proof that these
+  accelerators are current.
+- Short-lived Git helper processes do not remain alive for SlateDB's periodic
+  garbage collector. Track metadb object growth and schedule a supported
+  cleanup workflow before high-volume production use.
+- Client-side mirror hooks are bypassable and GitHub/GitLab and Crab ref
+  updates are not one transaction. Enforce pointer availability in CI and
+  alert on ref divergence.

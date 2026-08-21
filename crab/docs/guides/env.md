@@ -67,7 +67,7 @@ Only set variables are shown. Checked variables:
 |----------|---------|
 | `AWS_REGION` | AWS region for S3 operations |
 | `AWS_DEFAULT_REGION` | Fallback AWS region |
-| `AWS_PROFILE` | Named AWS credentials profile |
+| `AWS_PROFILE` | Diagnostic only; the current S3 provider does not consume profiles |
 | `AWS_ENDPOINT_URL` | Custom S3 endpoint (for MinIO, LocalStack, etc.) |
 | `CRAB_LOG` | Log verbosity level |
 | `CRAB_CACHE_DIR` | Custom local cache directory |

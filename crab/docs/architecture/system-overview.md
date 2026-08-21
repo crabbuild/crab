@@ -21,7 +21,7 @@ blobs.
 │          │ remote helper protocol (stdio)                         │
 │          │ clean/smudge filter protocol (stdio)                   │
 │   ┌──────▼──────────────────────────────────────────────────┐     │
-│   │                    crab binary                        │     │
+│   │                    crab binary                          │     │
 │   │                                                         │     │
 │   │  ┌───────────────┐  ┌───────────────┐  ┌─────────────┐  │     │
 │   │  │ Remote Helper │  │ Filter Driver │  │   CLI cmds  │  │     │
@@ -40,7 +40,7 @@ blobs.
 │                             │                                     │
 │   ┌─────────────────────────┴────────────────────────┐            │
 │   │  Local state                                     │            │
-│   │  .crab/staging/  ~/.cache/crab/  .git/lfs/   │            │
+│   │  .crab/staging/  ~/.cache/crab/  .git/lfs/       │            │
 │   └──────────────────────────────────────────────────┘            │
 └─────────────────────────────┼─────────────────────────────────────┘
                               │ HTTPS + cloud-native auth

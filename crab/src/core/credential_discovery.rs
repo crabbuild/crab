@@ -2,8 +2,8 @@
 //!
 //! Probes credentials in priority order:
 //! 1. Project config (`[auth]` section in `.crab.toml`)
-//! 2. Environment variables (AWS_PROFILE, GOOGLE_APPLICATION_CREDENTIALS, etc.)
-//! 3. Cloud SDK default configs (~/.aws/config, gcloud, az)
+//! 2. Environment variables (AWS web identity, GCP ADC, Azure workload identity)
+//! 3. Supported cloud SDK default configs (gcloud and Azure CLI)
 //! 4. Instance metadata (EC2 IMDS with 200ms timeout)
 //!
 //! The discovery chain is read-only — it never writes credentials, creates
@@ -22,7 +22,7 @@ use crate::core::project_config::ProjectAuthConfig;
 pub enum CredentialSource {
     /// Explicit `[auth]` section in `.crab.toml`.
     ProjectConfig,
-    /// Environment variables (AWS_PROFILE, AWS_ACCESS_KEY_ID, etc.).
+    /// Environment variables supported by the active object-store provider.
     Environment,
     /// Cloud SDK config files (~/.aws/config, gcloud, az).
     CloudSdk,
@@ -106,16 +106,31 @@ pub fn check_environment_vars(url: &str) -> Option<DiscoveryResult> {
 }
 
 fn check_aws_env_vars() -> Option<DiscoveryResult> {
-    // Check AWS_PROFILE first (named profile)
-    if let Ok(profile) = std::env::var("AWS_PROFILE") {
+    if let (Ok(token_file), Ok(role_arn)) = (
+        std::env::var("AWS_WEB_IDENTITY_TOKEN_FILE"),
+        std::env::var("AWS_ROLE_ARN"),
+    ) {
+        let valid = PathBuf::from(&token_file).is_file();
         return Some(DiscoveryResult {
             source: CredentialSource::Environment,
-            description: format!("AWS_PROFILE={profile}"),
+            description: format!(
+                "AWS web identity for {role_arn}{}",
+                if valid { "" } else { " (token file not found)" }
+            ),
+            valid,
+        });
+    }
+
+    if std::env::var_os("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
+        || std::env::var_os("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
+    {
+        return Some(DiscoveryResult {
+            source: CredentialSource::Environment,
+            description: "AWS container task-role credentials".to_owned(),
             valid: true,
         });
     }
 
-    // Check explicit access key pair
     let key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
     let _secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
 
@@ -154,12 +169,34 @@ fn check_gcp_env_vars() -> Option<DiscoveryResult> {
 }
 
 fn check_azure_env_vars() -> Option<DiscoveryResult> {
-    let account = std::env::var("AZURE_STORAGE_ACCOUNT").ok()?;
-    let _key = std::env::var("AZURE_STORAGE_KEY").ok()?;
+    let account = std::env::var("AZURE_STORAGE_ACCOUNT_NAME").ok()?;
+
+    if std::env::var_os("AZURE_FEDERATED_TOKEN_FILE").is_some()
+        && std::env::var_os("AZURE_CLIENT_ID").is_some()
+        && std::env::var_os("AZURE_TENANT_ID").is_some()
+    {
+        return Some(DiscoveryResult {
+            source: CredentialSource::Environment,
+            description: format!("Azure workload identity for {account}"),
+            valid: true,
+        });
+    }
+
+    if std::env::var_os("IDENTITY_ENDPOINT").is_some() {
+        return Some(DiscoveryResult {
+            source: CredentialSource::Environment,
+            description: format!("Azure managed identity for {account}"),
+            valid: true,
+        });
+    }
+
+    let _key = std::env::var("AZURE_STORAGE_ACCOUNT_KEY")
+        .or_else(|_| std::env::var("AZURE_STORAGE_ACCESS_KEY"))
+        .ok()?;
 
     Some(DiscoveryResult {
         source: CredentialSource::Environment,
-        description: format!("AZURE_STORAGE_ACCOUNT={account}"),
+        description: format!("AZURE_STORAGE_ACCOUNT_NAME={account}"),
         valid: true,
     })
 }
@@ -192,41 +229,8 @@ fn dirs_or_env() -> Option<PathBuf> {
 }
 
 fn check_aws_sdk() -> Option<DiscoveryResult> {
-    let home = home_dir()?;
-
-    let config_path = home.join(".aws").join("config");
-    let credentials_path = home.join(".aws").join("credentials");
-
-    // Both files must exist
-    if !config_path.exists() && !credentials_path.exists() {
-        return Option::None;
-    }
-
-    // Check for a [default] section in either file
-    let has_default = has_ini_section(&config_path, "[default]")
-        || has_ini_section(&credentials_path, "[default]");
-
-    if has_default {
-        Some(DiscoveryResult {
-            source: CredentialSource::CloudSdk,
-            description: "AWS SDK: profile 'default' from ~/.aws/config".to_string(),
-            valid: true,
-        })
-    } else {
-        Some(DiscoveryResult {
-            source: CredentialSource::CloudSdk,
-            description: "AWS SDK: ~/.aws/config exists but no [default] section".to_string(),
-            valid: false,
-        })
-    }
-}
-
-/// Check if an INI-style file contains a given section header.
-fn has_ini_section(path: &PathBuf, section: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    content.lines().any(|line| line.trim() == section)
+    // object_store 0.14 does not read shared AWS config/profile files.
+    Option::None
 }
 
 fn check_gcp_sdk() -> Option<DiscoveryResult> {
@@ -356,13 +360,13 @@ pub async fn discover_credentials(
     let provider = detect_provider(url);
     let instructions = match provider {
         Some(CloudProvider::Aws) => {
-            "No AWS credentials found. Try: aws configure, or set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
+            "No supported AWS credentials found. Use web identity, an ECS/EC2 role, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN for temporary credentials)"
         }
         Some(CloudProvider::Gcp) => {
             "No GCP credentials found. Try: gcloud auth application-default login, or set GOOGLE_APPLICATION_CREDENTIALS"
         }
         Some(CloudProvider::Azure) => {
-            "No Azure credentials found. Try: az login, or set AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY"
+            "No Azure credentials found. Use workload/managed identity, Azure CLI auth, or AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY"
         }
         None => {
             "Could not determine cloud provider from URL scheme. Supported: crab://, s3://, gs://, az://, azure://"
@@ -478,18 +482,40 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_aws_profile() {
+    fn env_vars_aws_profile_is_not_reported_as_supported() {
         let _guard = EnvGuard::apply(
             &[("AWS_PROFILE", "production")],
-            &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+            &[
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_ROLE_ARN",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            ],
+        );
+        assert!(check_environment_vars("crab://bucket/repo").is_none());
+    }
+
+    #[test]
+    fn env_vars_aws_web_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let token = temp.path().join("token");
+        std::fs::write(&token, "oidc-token").unwrap();
+        let _guard = EnvGuard::apply(
+            &[
+                ("AWS_WEB_IDENTITY_TOKEN_FILE", token.to_str().unwrap()),
+                ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/crab"),
+            ],
+            &[
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            ],
         );
         let result = check_environment_vars("crab://bucket/repo").unwrap();
-        assert_eq!(result.source, CredentialSource::Environment);
-        assert!(
-            result.description.contains("production"),
-            "expected 'production' in description: {}",
-            result.description
-        );
+        assert!(result.description.contains("web identity"));
         assert!(result.valid);
     }
 
@@ -546,29 +572,36 @@ mod tests {
     #[test]
     fn env_vars_azure() {
         let _guard = EnvGuard::set(&[
-            ("AZURE_STORAGE_ACCOUNT", "myaccount"),
-            ("AZURE_STORAGE_KEY", "base64key=="),
+            ("AZURE_STORAGE_ACCOUNT_NAME", "myaccount"),
+            ("AZURE_STORAGE_ACCOUNT_KEY", "base64key=="),
         ]);
         let result = check_environment_vars("az://container/path").unwrap();
         assert_eq!(result.source, CredentialSource::Environment);
         assert!(
             result
                 .description
-                .contains("AZURE_STORAGE_ACCOUNT=myaccount")
+                .contains("AZURE_STORAGE_ACCOUNT_NAME=myaccount")
         );
         assert!(result.valid);
     }
 
     #[test]
     fn env_vars_none_when_missing() {
-        let _guard =
-            EnvGuard::clear(&["AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+        let _guard = EnvGuard::clear(&[
+            "AWS_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        ]);
         let result = check_environment_vars("crab://bucket/repo");
         assert!(result.is_none());
     }
 
     #[test]
-    fn cloud_sdk_aws_with_default_section() {
+    fn cloud_sdk_aws_profile_is_not_supported_by_storage_provider() {
         let dir = tempfile::TempDir::new().unwrap();
         let aws_dir = dir.path().join(".aws");
         std::fs::create_dir_all(&aws_dir).unwrap();
@@ -581,28 +614,7 @@ mod tests {
 
         // Override HOME to point to our temp dir
         let _guard = EnvGuard::apply(&[("HOME", dir.path().to_str().unwrap())], &["USERPROFILE"]);
-        let result = check_cloud_sdk("crab://bucket/repo").unwrap();
-        assert_eq!(result.source, CredentialSource::CloudSdk);
-        assert!(result.valid);
-        assert!(result.description.contains("default"));
-    }
-
-    #[test]
-    fn cloud_sdk_aws_no_default_section() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let aws_dir = dir.path().join(".aws");
-        std::fs::create_dir_all(&aws_dir).unwrap();
-        std::fs::write(
-            aws_dir.join("config"),
-            "[profile production]\nregion = us-west-2\n",
-        )
-        .unwrap();
-
-        let _guard = EnvGuard::apply(&[("HOME", dir.path().to_str().unwrap())], &["USERPROFILE"]);
-        let result = check_cloud_sdk("crab://bucket/repo").unwrap();
-        assert_eq!(result.source, CredentialSource::CloudSdk);
-        assert!(!result.valid);
-        assert!(result.description.contains("no [default] section"));
+        assert!(check_cloud_sdk("crab://bucket/repo").is_none());
     }
 
     #[test]
@@ -694,7 +706,19 @@ mod tests {
 
     #[tokio::test]
     async fn discover_falls_back_to_env() {
-        let _guard = EnvGuard::set(&[("AWS_PROFILE", "test-profile")]);
+        let _guard = EnvGuard::apply(
+            &[
+                ("AWS_ACCESS_KEY_ID", "temporary-key"),
+                ("AWS_SECRET_ACCESS_KEY", "temporary-secret"),
+                ("AWS_SESSION_TOKEN", "temporary-session"),
+            ],
+            &[
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_ROLE_ARN",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            ],
+        );
         let result = discover_credentials("crab://bucket/repo", None).await;
         assert_eq!(result.source, CredentialSource::Environment);
         assert!(result.valid);
@@ -705,13 +729,25 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let _guard = EnvGuard::apply(
             &[("HOME", dir.path().to_str().unwrap())],
-            &["AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+            &[
+                "AWS_PROFILE",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_ROLE_ARN",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            ],
         );
 
         let result = discover_credentials("crab://bucket/repo", None).await;
         assert_eq!(result.source, CredentialSource::None);
         assert!(!result.valid);
-        assert!(result.description.contains("No AWS credentials found"));
+        assert!(
+            result
+                .description
+                .contains("No supported AWS credentials found")
+        );
     }
 
     #[tokio::test]

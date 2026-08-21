@@ -26,7 +26,7 @@ Source: `crates/crab-vfs/src/coordinator.rs`
 │                                                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  IPC Server (daemon.sock)                                     │  │
-│  │  • Accepts connections, reads newline-delimited JSON           │  │
+│  │  • Accepts connections, reads newline-delimited JSON          │  │
 │  │  • Dispatches: mount, unmount, list, status, refresh, switch  │  │
 │  │  • Returns JSON responses                                     │  │
 │  └───────────────────────────────────────────────────────────────┘  │
@@ -36,20 +36,20 @@ Source: `crates/crab-vfs/src/coordinator.rs`
 │  │                     │  │                                      │  │
 │  │  • ChunkCache       │  │  Mount A: /mnt/models (running)      │  │
 │  │    (LRU, bounded)   │  │  Mount B: /mnt/code   (running)      │  │
-│  │                     │  │  Mount C: /tmp/browse  (running)      │  │
+│  │                     │  │  Mount C: /tmp/browse  (running)     │  │
 │  │  • HydrationService │  │                                      │  │
 │  │    (worker pool)    │  │  ref_count = 3                       │  │
 │  └─────────────────────┘  └──────────────────────────────────────┘  │
 │                                                                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
-│  │  Mount A     │  │  Mount B     │  │  Mount C     │              │
-│  │  Snapshot    │  │  Snapshot    │  │  Snapshot    │              │
-│  │  Overlay     │  │  Overlay     │  │  Overlay     │              │
-│  │  Resolver    │  │  Resolver    │  │  Resolver    │              │
-│  │  Engine      │  │  Engine      │  │  Engine      │              │
-│  │  RefreshLoop │  │  RefreshLoop │  │  RefreshLoop │              │
-│  │  FUSE Session│  │  FUSE Session│  │  FUSE Session│              │
-│  └──────────────┘  └──────────────┘  └──────────────┘              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │
+│  │  Mount A     │  │  Mount B     │  │  Mount C     │               │
+│  │  Snapshot    │  │  Snapshot    │  │  Snapshot    │               │
+│  │  Overlay     │  │  Overlay     │  │  Overlay     │               │
+│  │  Resolver    │  │  Resolver    │  │  Resolver    │               │
+│  │  Engine      │  │  Engine      │  │  Engine      │               │
+│  │  RefreshLoop │  │  RefreshLoop │  │  RefreshLoop │               │
+│  │  FUSE Session│  │  FUSE Session│  │  FUSE Session│               │
+│  └──────────────┘  └──────────────┘  └──────────────┘               │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

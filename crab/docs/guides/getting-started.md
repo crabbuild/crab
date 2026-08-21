@@ -19,9 +19,11 @@ joining an existing one.
    works automatically on clone.
 
 3. Cloud credentials configured for your backend:
-   - S3: `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+   - S3: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, web identity,
+     ECS task credentials, or EC2 instance credentials
    - GCS: `gcloud auth application-default login` or `GOOGLE_APPLICATION_CREDENTIALS`
-   - Azure: `AZURE_STORAGE_CONNECTION_STRING`, account key, SAS token, or `az login`
+   - Azure: workload/managed identity, `AZURE_STORAGE_CONNECTION_STRING`,
+     account key, or SAS token
 
 ## New Repository (Owner)
 

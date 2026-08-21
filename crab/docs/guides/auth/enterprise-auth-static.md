@@ -1,14 +1,13 @@
 # Static / Multi-Cloud Authentication
 
-Use environment variables or cloud SDK default credentials with S3, GCS, or
+Use provider-supported environment or workload credentials with S3, GCS, or
 Azure Blob Storage.
 
 ## Overview
 
 The `"static"` provider is the default. Crab reads credentials from
-environment variables or the cloud SDK's default credential chain — the same
-way it worked before enterprise auth was added. No login flow, no token
-management, no IdP.
+environment variables or provider-native workload credentials. No Crab login
+flow or Crab-managed token cache is involved.
 
 This guide covers how to use static credentials with each cloud backend.
 
@@ -52,16 +51,25 @@ provider = "static"
 storage_provider = "s3"
 ```
 
-Set your AWS credentials via environment variables or `~/.aws/credentials`:
+Prefer web identity or an attached ECS/EC2 role for teams and CI:
+
+```bash
+export AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/oidc-token
+export AWS_ROLE_ARN=arn:aws:iam::123456789012:role/crab-writer
+```
+
+Temporary or static environment credentials are also accepted:
 
 ```bash
 export AWS_ACCESS_KEY_ID=AKIA...
 export AWS_SECRET_ACCESS_KEY=wJalr...
+export AWS_SESSION_TOKEN=... # required for temporary STS credentials
 export AWS_REGION=us-west-2
-
-# Or use a named profile:
-export AWS_PROFILE=my-profile
 ```
+
+The current S3 provider does not read `AWS_PROFILE`, `~/.aws/config`, or
+`~/.aws/credentials`. Export the temporary credentials produced by an SSO or
+profile workflow into the Crab process.
 
 ### Option B: Google Cloud Storage
 
@@ -96,12 +104,15 @@ Set Azure credentials (any one of these):
 export AZURE_STORAGE_ACCOUNT_NAME=myaccount
 export AZURE_STORAGE_ACCOUNT_KEY=base64key...
 
+# Workload identity:
+export AZURE_STORAGE_ACCOUNT_NAME=myaccount
+export AZURE_CLIENT_ID=...
+export AZURE_TENANT_ID=...
+export AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+
 # SAS token:
 export AZURE_STORAGE_ACCOUNT_NAME=myaccount
 export AZURE_STORAGE_SAS_TOKEN="sv=2024-11-04&ss=b&..."
-
-# Connection string:
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
 ```
 
 ### Option D: Auto-detect

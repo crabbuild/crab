@@ -413,10 +413,7 @@ impl Inner {
 
     async fn remote_snapshot_git_dir(&self, rev: &str) -> Result<(String, PathBuf)> {
         let snapshot = self.read_remote_snapshot().await?;
-        let mut manifest = snapshot.manifest;
-        manifest.refs = snapshot.journal.refs;
-        manifest.peeled_refs = snapshot.journal.peeled_refs;
-        manifest.head = snapshot.journal.head;
+        let manifest = snapshot.materialized_manifest();
         let resolved = resolve_manifest_rev(&manifest, rev).ok_or_else(|| CrabError::NotFound {
             path: format!("revision:{rev}"),
         })?;

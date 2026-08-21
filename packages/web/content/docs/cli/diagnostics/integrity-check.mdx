@@ -5,7 +5,9 @@ description: "How to verify repository integrity by checking for dangling refs, 
 
 ## Verifying Repository Integrity
 
-`crab fsck` performs a comprehensive integrity check on your repository, examining both local and remote state for inconsistencies. It detects dangling refs, missing blobs, orphan shards, expired push locks, abandoned multipart uploads, and manifest divergence.
+`crab fsck` cross-checks Crab manifests, pack/index presence, the shard/xorb
+data chain, and coordination state against the object store. It is not yet a
+full reconstruction and Git-connectivity check of current head.
 
 Think of it as `git fsck` extended to cover Crab's object store layer.
 
@@ -36,19 +38,15 @@ crab fsck
 
 | Issue | Description | Auto-repairable |
 |-------|-------------|:---:|
-| Dangling ref | Ref points to a non-existent commit | ✗ |
-| Missing tree | Commit references a missing tree object | ✗ |
-| Missing blob | Tree references a missing blob | ✗ |
 | Missing file index | Pointer references a missing file index | ✗ |
 | Missing xorb | File index references a non-existent xorb | ✗ |
+| Pack list divergence | Manifest-selected pack or index is absent | ✗ |
 
 ### Warnings (operational)
 
 | Issue | Description | Auto-repairable |
 |-------|-------------|:---:|
 | Expired push lock | Lock from a crashed process | ✓ |
-| Abandoned multipart upload | Upload never completed | ✓ |
-| Pack list divergence | Manifest doesn't match actual packs | ✓ |
 | Orphan shard | Shard not referenced by any file index | ✗ |
 | Shard list divergence | Shard list doesn't match actual shards | ✗ |
 
@@ -60,10 +58,12 @@ crab fsck --repair
 
 Repair is conservative:
 - Expired locks are deleted
-- Abandoned uploads are aborted
-- Missing manifest entries are re-added
+- Derivable historical Git visibility proofs can be rebuilt
 
-No data is ever deleted by `--repair` — only metadata cleanup. Critical issues (missing blobs, trees, xorbs) require manual intervention.
+Repair is limited to issues explicitly marked repairable. Missing content
+requires history, replica, cache, or backup recovery. Provider-side incomplete
+multipart uploads require a provider lifecycle rule because the generic
+object-store API cannot enumerate them.
 
 ## When to Run
 

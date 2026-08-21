@@ -1889,9 +1889,6 @@ fn duplicate_reuse_plan_from_fingerprints(
     let mut first_path_by_fingerprint = HashMap::<CandidateFingerprint, PathBuf>::new();
     let mut representative_by_path = HashMap::<PathBuf, PathBuf>::new();
     for record in fingerprints {
-        if record.size < ADD_DUPLICATE_REUSE_MIN_BYTES {
-            continue;
-        }
         if let Some(representative) = first_path_by_fingerprint.get(&record.fingerprint) {
             representative_by_path.insert(record.path.clone(), representative.clone());
         } else {
@@ -3962,6 +3959,32 @@ mod tests {
         assert!(enabled.contains(&first));
         assert!(!enabled.contains(&second));
         assert!(enabled.contains(&unique));
+    }
+
+    #[test]
+    fn duplicate_reuse_plan_serializes_candidates_at_stream_threshold() {
+        let fingerprint = CandidateFingerprint {
+            size: 16 * 1024 * 1024,
+            head_hash: [1; 32],
+            middle_hash: [2; 32],
+            tail_hash: [3; 32],
+        };
+        let first = PathBuf::from("first.bin");
+        let second = PathBuf::from("second.bin");
+        let plan = duplicate_reuse_plan_from_fingerprints(&[
+            CandidateFingerprintRecord {
+                path: first.clone(),
+                size: fingerprint.size,
+                fingerprint: fingerprint.clone(),
+            },
+            CandidateFingerprintRecord {
+                path: second.clone(),
+                size: fingerprint.size,
+                fingerprint,
+            },
+        ]);
+
+        assert_eq!(plan.representative_for(&second), Some(first.as_path()));
     }
 
     #[tokio::test]

@@ -56,7 +56,7 @@ crab doctor
 | Filter driver not configured | Run `crab install` or `crab init <url>` |
 | No crab patterns in .gitattributes | Run `crab track '*.bin'` |
 | Remote URL not configured | Run `crab init <url>` |
-| Credentials check failed | Verify `AWS_PROFILE`, `AWS_REGION`, and `~/.aws/credentials` |
+| Credentials check failed | Verify supported environment, web identity, ECS task, or EC2 instance credentials and `AWS_REGION` |
 | Large staging area warning | Run `git push` to upload, then `crab staging clean` |
 
 ## Typical Workflows

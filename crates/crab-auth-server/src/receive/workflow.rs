@@ -822,6 +822,9 @@ mod tests {
             ctx.store()
                 .head(&ctx.router().pack_index_path(&pack.pack_id))
                 .await?;
+            ctx.store()
+                .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
+                .await?;
         }
         let committed_pack_inventory = committed_packs
             .iter()

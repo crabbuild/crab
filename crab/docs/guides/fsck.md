@@ -10,10 +10,8 @@ crab fsck [OPTIONS]
 
 ## Description
 
-`crab fsck` performs a comprehensive integrity check on the crab repository,
-examining both local and remote state for inconsistencies. It detects issues
-such as dangling refs, missing blobs, missing shard/xorb objects, orphan shards,
-expired push locks, abandoned multipart uploads, and pack list divergence.
+`crab fsck` cross-checks Crab manifests, pack/index presence, the shard/xorb
+data chain, and coordination state against the object store.
 
 With `--repair`, it can automatically fix certain categories of issues.
 
@@ -29,9 +27,6 @@ With `--repair`, it can automatically fix certain categories of issues.
 
 | Issue | Description | Repairable |
 |-------|-------------|------------|
-| Dangling ref | A ref points to a commit that doesn't exist | No |
-| Missing tree | A commit references a tree object that's missing | No |
-| Missing blob | A tree references a blob that doesn't exist | No |
 | Missing file index | A pointer references a file index that's not in any shard | No |
 | Missing xorb | A shard references a xorb that doesn't exist in the store | No |
 | Pack list divergence | A manifest-selected pack or canonical index is missing from storage | No |
@@ -52,8 +47,8 @@ damage, and remain protected by the normal GC grace period.
 
 | Issue | Description | Repair Action |
 |-------|-------------|---------------|
-| Expired push lock | A push lock older than the TTL, likely from a crashed process | Delete the lock |
-| Abandoned multipart upload | An S3 multipart upload that was never completed | Abort the upload |
+| Expired push lock | A push lock older than its backend-clock lease | Delete through holder-safe repair |
+| Historical visibility backfill | A historical generation lacks its derivable Git visibility proof | Rebuild the proof |
 
 ## Examples
 
@@ -66,13 +61,7 @@ crab fsck
 Example output:
 
 ```
-crab fsck
-  ✓ Git objects          all refs resolve
-  ✓ Data chain           all file indices and xorbs present
-  ✓ Pack list            consistent
-  ⚠ Push locks           1 expired lock (3 days old)
-  ✓ Multipart uploads    none abandoned
-  ✓ Shard list           consistent
+crab fsck: 1 error(s), 0 info, 0 repaired, 0 repair failure(s)
 
 1 issue found:
   ⚠ Expired push lock: refs/push-locks/abc123 (age: 3d 2h)
@@ -86,23 +75,16 @@ crab fsck --repair
 ```
 
 ```
-crab fsck --repair
-  ✓ Git objects          all refs resolve
-  ✓ Data chain           all file indices and xorbs present
-  ✓ Pack list            consistent
-  ⚠ Push locks           1 expired lock → deleted
-  ✓ Multipart uploads    none abandoned
-
-Repaired 1 issue.
+crab fsck: 1 error(s), 0 info, 1 repaired, 0 repair failure(s)
 ```
 
 ## Repair Safety
 
 - Only issues marked as "repairable" are fixed with `--repair`.
-- Repairs are conservative: expired locks are deleted, abandoned uploads are
-  aborted, and missing manifest entries are re-added.
-- No data is ever deleted by `--repair` — only metadata cleanup.
-- Critical issues (missing blobs, trees, xorbs) require manual intervention.
+- Repairs are conservative and limited to issue types the report marks as
+  repairable.
+- Missing xorbs and other content damage require recovery from history, a
+  replica, cache, or backup.
 - Missing shard and xorb warning events can be fed to
   [`crab recover`](repository-recovery.md) with `--fsck-jsonl` to build a
   verified repair plan from cache, source, or replica candidates.
@@ -119,6 +101,22 @@ Repaired 1 issue.
 - The repository must be initialized with `crab init`.
 - AWS credentials must be configured for the remote bucket.
 - `--repair` requires write permissions on the bucket.
+
+## Verification Boundaries
+
+- The Git-object check currently confirms that ref-journal records are
+  readable; it does not reconstruct the current repository and run full Git
+  reachability for missing commits, trees, or blobs. Use `crab recover history
+  verify <generation>` for strict Git fsck of a selected historical root, and
+  qualify current-head clone/fetch in production monitoring.
+- Generic `object_store` does not expose provider multipart enumeration. The
+  current multipart check therefore cannot find or abort remote incomplete
+  uploads; configure the provider's incomplete-multipart lifecycle rule.
+- Git locator and visibility acceleration damage is diagnostic. Rebuild it
+  with `crab metadb rebuild`, then rerun `crab fsck`.
+- Full backup recovery requires provider versioning/replication or another
+  failure domain. Manifest history in the same bucket is not an independent
+  backup.
 
 ## Related Commands
 

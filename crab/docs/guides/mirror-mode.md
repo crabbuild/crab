@@ -1,23 +1,24 @@
 # Mirror Mode (GitHub + Crab Coexistence)
 
-Mirror mode lets you keep GitHub (or GitLab) for code review and pull requests
-while Crab handles large-file storage transparently. Code goes to GitHub,
-large files go to your cloud bucket — your team's PR workflow stays unchanged.
+Mirror mode keeps GitHub (or GitLab) as the collaboration control plane for
+pull requests, reviews, branch protection, CI, issues, and webhooks. Crab is a
+second Git remote backed by object storage; it stores the pushed Git graph and
+the large-file data plane.
 
 ## How It Works
 
 ```
 ┌─────────────┐     git push origin     ┌──────────────┐
 │  Developer  │ ──────────────────────── │    GitHub    │
-│  Workstation│                          │  (code only) │
+│  Workstation│                          │ review + CI  │
 └──────┬──────┘                          └──────────────┘
        │
        │  pre-push hook: crab push --remote crab
        │
        ▼
 ┌──────────────┐
-│  S3 Bucket   │
-│ (large files)│
+│ Object Store │
+│ Git + data   │
 └──────────────┘
 ```
 
@@ -86,6 +87,12 @@ Ensures all large-file content is in the bucket before pointer blobs reach
 GitHub. If the crab push fails, the git push is aborted (preventing dangling
 pointers on GitHub).
 
+This ordering is not a distributed transaction. If Crab succeeds and the
+later GitHub/GitLab push is rejected, Crab can temporarily be ahead. Retrying
+after resolving the origin rejection converges the refs. Server-side merges,
+bots, and pushes made without the installed hook can advance origin without
+advancing Crab.
+
 ### `post-checkout` (runs after `git checkout`, `git switch`, `git clone`)
 
 ```bash
@@ -146,6 +153,25 @@ Mirror mode is ideal when:
 
 If you don't need GitHub/GitLab integration (e.g. Crab is your only remote),
 standard `crab init <url>` without `--mirror` is simpler.
+
+## Team Production Posture
+
+- Treat GitHub/GitLab as the canonical collaboration and policy plane. Crab
+  does not replace pull requests, branch protection, merge queues, CI,
+  repository administration, or issue tracking.
+- Treat the object store as the canonical large-data plane. Require workload
+  identity and least-privilege bucket policy; do not distribute shared static
+  keys.
+- Install and verify hooks on every developer and automation clone. Hooks are
+  client-side convenience, not enforcement; add a CI check that hydrates or
+  verifies every pointer required by the proposed merge.
+- Run `crab mirror SOURCE DESTINATION` as a scheduled, one-way disaster-
+  recovery sync when full-ref mirroring is required. It uses `git push
+  --mirror`, so destination-only refs are deleted. Never schedule both
+  directions.
+- Alert on origin/Crab ref divergence. Do not declare Crab the sole team Git
+  backbone until access policy, multi-node object-store failure tests, backup
+  restore drills, and central monitoring meet the team's RPO and RTO.
 
 ## Troubleshooting
 
