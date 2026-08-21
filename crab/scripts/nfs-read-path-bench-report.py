@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Run or verify retained NFS read-path benchmark evidence."""
+"""Verify or compare retained NFS read-path benchmark evidence."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import os
 import platform
-import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -70,10 +68,6 @@ NUMERIC_RECORD_FIELDS = (
 )
 
 
-def crab_dir() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -90,77 +84,12 @@ def benchmark_run_id_suffix(run_id: Any) -> str | None:
     return suffix
 
 
-def benchmark_run_id() -> str:
-    configured = os.environ.get("CRAB_NFS_READ_PATH_BENCH_RUN_ID")
-    if configured:
-        return configured
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return f"{BENCHMARK_SUITE}-{timestamp}"
-
-
-def run_text(command: list[str], cwd: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
-
-
-def git_metadata(cwd: Path) -> dict[str, Any]:
-    commit = run_text(["git", "rev-parse", "HEAD"], cwd)
-    dirty = subprocess.run(
-        ["git", "diff", "--quiet", "--"],
-        cwd=cwd,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ).returncode != 0
-    return {"commit": commit, "dirty": dirty}
-
-
 def is_full_git_object_id(value: Any) -> bool:
     return (
         isinstance(value, str)
         and len(value) in (40, 64)
         and all(char in "0123456789abcdef" for char in value)
     )
-
-
-def tool_versions(cwd: Path) -> dict[str, Any]:
-    return {
-        "cargo": run_text(["cargo", "--version"], cwd),
-        "rustc": run_text(["rustc", "--version"], cwd),
-    }
-
-
-def parse_bench_records(stdout: str) -> tuple[list[dict[str, Any]], list[str]]:
-    records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for line_number, raw_line in enumerate(stdout.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        if not line.startswith("{"):
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as error:
-            errors.append(f"stdout line {line_number} is not valid JSON: {error}")
-            continue
-        if not isinstance(value, dict):
-            errors.append(f"stdout line {line_number} must be a JSON object")
-            continue
-        records.append(value)
-    return records, errors
 
 
 def validate_record(record: dict[str, Any], errors: list[str], index: int) -> None:
@@ -532,79 +461,6 @@ def compare_reports(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_bench(args: argparse.Namespace) -> int:
-    cwd = crab_dir()
-    cargo = args.cargo
-    bench_args = args.bench_args or []
-    command = [
-        cargo,
-        "bench",
-        "--manifest-path",
-        str(cwd / "Cargo.toml"),
-        "--bench",
-        "nfs_read_path_bench",
-        "--no-default-features",
-        "--features",
-        "nfs",
-        "--",
-        *bench_args,
-    ]
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-    if result.returncode != 0:
-        return result.returncode
-
-    records, parse_errors = parse_bench_records(result.stdout)
-    record_errors = validate_records(records)
-    errors = parse_errors + record_errors
-    if errors:
-        for error in errors:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-
-    run_id = benchmark_run_id()
-    report = {
-        "schema_version": 1,
-        "suite": BENCHMARK_SUITE,
-        "generated_at": now_iso(),
-        "run_id": run_id,
-        "run_id_suffix": benchmark_run_id_suffix(run_id),
-        "platform": {
-            "system": platform.system(),
-            "release": platform.release(),
-            "machine": platform.machine(),
-            "python": platform.python_version(),
-        },
-        "git": git_metadata(cwd),
-        "tools": tool_versions(cwd),
-        "command": command,
-        "bench_args": bench_args,
-        "summary": build_summary(records),
-        "records": records,
-    }
-    errors = validate_report(report)
-    if errors:
-        for error in errors:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"nfs_read_path_bench_report={output}")
-    return 0
-
-
 def verify_report(args: argparse.Namespace) -> int:
     path = Path(args.report)
     report, errors = load_report(path)
@@ -766,12 +622,6 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
 
-    run = subcommands.add_parser("run", help="run the benchmark and write a report")
-    run.add_argument("--output", default="nfs-read-path-bench-report.json")
-    run.add_argument("--cargo", default="cargo")
-    run.add_argument("bench_args", nargs=argparse.REMAINDER)
-    run.set_defaults(func=run_bench)
-
     verify = subcommands.add_parser("verify", help="verify an existing report")
     verify.add_argument("report")
     verify.add_argument(
@@ -808,8 +658,6 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
-    if getattr(args, "bench_args", None) and args.bench_args[0] == "--":
-        args.bench_args = args.bench_args[1:]
     return args.func(args)
 
 
