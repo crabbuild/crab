@@ -11,6 +11,7 @@
 //! unversioned rows are read only by tests and removed after a complete
 //! manifest-scoped rebuild.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -19,8 +20,8 @@ use crate::core::error::{CrabError, Result};
 use crate::metadata::metadb::db::Db;
 use crate::metadata::metadb::transaction::{DbTarget, Transaction};
 use crab_metadata::key_codec::{
-    PREFIX_CONTENT, decode_committed_file_key, decode_content_key, encode_committed_content_prefix,
-    encode_committed_file_key, encode_content_key,
+    PREFIX_COMMITTED, PREFIX_CONTENT, decode_committed_file_key, decode_content_key,
+    encode_committed_content_prefix, encode_committed_file_key, encode_content_key,
 };
 use crab_metadata::value_codec::{
     CommittedFileRecord, decode_committed_file_record, encode_committed_file_record,
@@ -225,6 +226,51 @@ impl FileIndexStore {
             txn.delete(DbTarget::FileIndex, key.clone());
         }
     }
+
+    /// Remove generation-pinned rows whose file hash is outside the retained
+    /// shard closure. The caller must hold the repository maintenance lease.
+    pub(crate) async fn gc_unreferenced_committed(
+        &self,
+        referenced: &HashSet<MerkleHash>,
+        dry_run: bool,
+        batch_size: usize,
+    ) -> Result<u64> {
+        let mut rows = self.db.scan_prefix(&[PREFIX_COMMITTED]).await?;
+        let mut batch = slatedb::WriteBatch::new();
+        let mut pending = 0usize;
+        let mut removed = 0u64;
+
+        while let Some(row) = rows.next().await.map_err(|source| {
+            CrabError::from(crate::core::error::MetaDbError::Read {
+                db: DB_LABEL.to_owned(),
+                prefix: String::from("<committed-file-gc>"),
+                source,
+            })
+        })? {
+            let (file_hash, _) = decode_committed_file_key(&row.key)
+                .map_err(|error| super::map_value_codec_error(error, DB_LABEL, &row.key))?;
+            if referenced.contains(&file_hash) {
+                continue;
+            }
+
+            removed += 1;
+            if dry_run {
+                continue;
+            }
+            batch.delete(row.key.as_ref());
+            pending += 1;
+            if pending >= batch_size.max(1) {
+                self.db.write(batch).await?;
+                batch = slatedb::WriteBatch::new();
+                pending = 0;
+            }
+        }
+
+        if pending > 0 {
+            self.db.write(batch).await?;
+        }
+        Ok(removed)
+    }
 }
 
 /// Decode a raw SlateDB value as a 32-byte shard hash.
@@ -418,6 +464,57 @@ mod tests {
             "delete must remove the entry"
         );
 
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn file_index_gc_tombstones_only_unreferenced_committed_rows() {
+        let db = open_store().await;
+        let store = FileIndexStore::new(Arc::clone(&db));
+        let retained = hash_from_seed(10);
+        let stale = hash_from_seed(20);
+        let entries = [
+            (
+                retained,
+                CommittedFileRecord {
+                    recipe_hash: [1; 32],
+                    shard_hash: hash_from_seed(100),
+                    committed_generation: 1,
+                    shard_index_hash: hash_from_seed(200),
+                },
+            ),
+            (
+                stale,
+                CommittedFileRecord {
+                    recipe_hash: [2; 32],
+                    shard_hash: hash_from_seed(101),
+                    committed_generation: 1,
+                    shard_index_hash: hash_from_seed(201),
+                },
+            ),
+            (
+                stale,
+                CommittedFileRecord {
+                    recipe_hash: [3; 32],
+                    shard_hash: hash_from_seed(102),
+                    committed_generation: 2,
+                    shard_index_hash: hash_from_seed(202),
+                },
+            ),
+        ];
+        let mut txn = Transaction::new();
+        store.save_committed_batch(&mut txn, &entries);
+        let (batch, _) = crate::metadata::metadb::transaction::into_per_db_batches(txn);
+        db.write(batch).await.expect("seed committed rows");
+
+        let removed = store
+            .gc_unreferenced_committed(&HashSet::from([retained]), false, 1)
+            .await
+            .expect("sweep stale rows");
+
+        assert_eq!(removed, 2);
+        assert!(store.get_committed_batch(&[retained]).await.unwrap()[0].is_some());
+        assert!(store.get_committed_batch(&[stale]).await.unwrap()[0].is_none());
         db.close().await.expect("close");
     }
 

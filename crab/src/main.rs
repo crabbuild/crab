@@ -3684,6 +3684,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         dry_run,
                         grace_period: parsed_grace,
                         force,
+                        list_concurrency: config.gc_list_concurrency,
+                        delete_concurrency: config.gc_delete_concurrency,
                     };
                     let outcome = crab::cmd::gc::bucket::run_bucket_gc(
                         &args,
@@ -3698,9 +3700,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         OutputMode::Text => {
                             let verb = if dry_run { "would delete" } else { "deleted" };
                             eprintln!(
-                                "crab gc: bucket GC complete; {verb} {} xorb(s), {} shard(s), reclaimed {} byte(s).",
+                                "crab gc: bucket GC complete; {verb} {} xorb(s), {} shard(s), tombstoned {} file-index row(s), reclaimed {} byte(s).",
                                 summary.xorbs_deleted,
                                 summary.shards_deleted,
+                                summary.file_index_entries_deleted,
                                 summary.bytes_reclaimed,
                             );
                         }

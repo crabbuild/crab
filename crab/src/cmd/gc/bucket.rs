@@ -12,15 +12,14 @@
 //! 5. Dry-run reports; otherwise delete candidates.
 //!
 //! The legacy `.crab/file-index/` enumeration is gone — per-file
-//! objects don't exist anymore. Dead-entry tombstones in the per-repo
-//! `file_index_db` are a future enhancement; for now the
-//! content-addressed idempotency of SlateDB keys keeps any orphan
-//! entries harmless until the GC sweep grows a tombstone pass.
+//! objects don't exist anymore. Each repository's `file_index_db` is
+//! swept against the file hashes reachable from its retained shards.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +44,10 @@ pub struct BucketGcArgs {
     pub grace_period: Duration,
     /// Bypass object age checks, but never registry or coordinator safety proof.
     pub force: bool,
+    /// Maximum concurrent LIST, history, and metadata-read operations.
+    pub list_concurrency: usize,
+    /// Maximum concurrent object DELETE requests.
+    pub delete_concurrency: usize,
 }
 
 /// Structured outcome of a bucket-scope GC run.
@@ -84,10 +87,13 @@ impl BucketGcOutcome {
             packs_deleted: 0,
             xorbs_deleted: self.xorbs_deleted,
             shards_deleted: self.shards_deleted,
+            file_index_entries_deleted: self.file_index_deleted,
             bytes_reclaimed: self.bytes_reclaimed,
             dry_run: self.dry_run,
             cancelled: false,
             partial_enumeration: false,
+            delete_failures: 0,
+            reconciliation_failed: false,
         }
     }
 }
@@ -97,6 +103,7 @@ const MIN_GRACE_PERIOD: Duration = Duration::from_secs(3600);
 
 /// Global prefix for content-addressed objects.
 const GLOBAL_PREFIX: &str = ".crab";
+const FILE_INDEX_GC_BATCH_SIZE: usize = 4_096;
 
 /// Run bucket-scope garbage collection.
 ///
@@ -163,8 +170,15 @@ async fn run_bucket_gc_under_maintenance(
     let now = SystemTime::now();
     let cutoff = now - effective_grace;
 
-    let mut referenced_shards = registry.all_referenced_shards();
-    referenced_shards.extend(historical_referenced_shards(store, registry).await?);
+    let (repo_shards, shard_objects, xorb_objects) = tokio::try_join!(
+        repository_referenced_shards(store, registry, args.list_concurrency),
+        list_global_objects(store, "shards"),
+        list_global_objects(store, "xorbs"),
+    )?;
+    let referenced_shards = repo_shards
+        .values()
+        .flat_map(|shards| shards.iter().cloned())
+        .collect::<HashSet<_>>();
     info!(
         repos = registry.repos.len(),
         referenced_shards = referenced_shards.len(),
@@ -172,7 +186,6 @@ async fn run_bucket_gc_under_maintenance(
     );
 
     // Step 2: List shards, find unreferenced candidates.
-    let shard_objects = list_global_objects(store, "shards").await?;
     check_cancelled(cancel)?;
     let listed_shards = shard_objects
         .iter()
@@ -210,20 +223,22 @@ async fn run_bucket_gc_under_maintenance(
 
     // Step 3: Download each referenced shard once, in parallel, and
     // extract both xorb hashes (for step 4) and file hashes (for step 5)
-    // in a single pass. See findings CR5-F3 and CR5-F4.
+    // in a single pass so the shard objects are not downloaded twice.
     let ShardHashes {
         xorb_hashes: referenced_xorbs,
-        file_hashes: referenced_file_hashes,
-    } = extract_hashes_from_shards(store, &referenced_shard_objects).await?;
+        file_hashes_by_shard,
+    } = extract_hashes_from_shards(store, &referenced_shard_objects, args.list_concurrency).await?;
+    let referenced_file_hashes = file_hashes_by_shard
+        .values()
+        .map(HashSet::len)
+        .sum::<usize>();
     check_cancelled(cancel)?;
     info!(
         referenced_xorbs = referenced_xorbs.len(),
-        referenced_file_hashes = referenced_file_hashes.len(),
-        "computed referenced xorbs + file-index entries from shards"
+        referenced_file_hashes, "computed referenced xorbs + file-index entries from shards"
     );
 
     // Step 4: List xorbs, find unreferenced candidates.
-    let xorb_objects = list_global_objects(store, "xorbs").await?;
     check_cancelled(cancel)?;
     let xorb_partition =
         partition_xorbs_for_gc(xorb_objects, &referenced_xorbs, coordinator_protected_keys);
@@ -235,15 +250,14 @@ async fn run_bucket_gc_under_maintenance(
         protected_xorbs, "unreferenced xorbs eligible for deletion"
     );
 
-    // Legacy per-file `.crab/file-index/{hash}` enumeration is gone —
-    // file_index lives in the per-repo `file_index_db` SlateDB now.
-    // Dead-entry tombstoning through a MetaDb `Transaction` is a
-    // future enhancement; today, orphaned entries are harmless
-    // (content-addressed keys) and get compacted away by SlateDB's
-    // background compaction. `referenced_file_hashes` is still read
-    // above so we can plug the tombstone pass in without touching the
-    // shard-download path.
-    let _ = &referenced_file_hashes;
+    outcome.file_index_deleted = gc_file_indexes(
+        store,
+        &repo_shards,
+        &file_hashes_by_shard,
+        args.dry_run,
+        args.list_concurrency,
+    )
+    .await?;
 
     // Step 6: Delete or report.
     check_cancelled(cancel)?;
@@ -252,40 +266,66 @@ async fn run_bucket_gc_under_maintenance(
         "shards",
         &shard_candidates,
         args.dry_run,
+        args.delete_concurrency,
         &mut outcome,
     )
     .await?;
-    delete_or_report(store, "xorbs", &xorb_candidates, args.dry_run, &mut outcome).await?;
+    delete_or_report(
+        store,
+        "xorbs",
+        &xorb_candidates,
+        args.dry_run,
+        args.delete_concurrency,
+        &mut outcome,
+    )
+    .await?;
 
     outcome.log();
     Ok(outcome)
 }
 
-async fn historical_referenced_shards(
+async fn repository_referenced_shards(
     store: &Store,
     registry: &RefRegistry,
-) -> Result<HashSet<String>> {
-    let storage = store.as_storage();
-    let mut shards = HashSet::new();
-    let mut repositories = registry.repos.keys().collect::<Vec<_>>();
-    repositories.sort_unstable();
-    for repo_prefix in repositories {
-        let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
-        for entry in crab_metadata::manifest_store::list_manifest_history(storage, &router).await? {
-            if entry.manifest.shard_index_hash.is_empty() {
-                continue;
-            }
-            shards.extend(
-                crab_metadata::manifest_store::read_bulk_shard_list(
-                    storage,
-                    &router,
-                    &entry.manifest.shard_index_hash,
-                )
-                .await?,
-            );
+    concurrency: usize,
+) -> Result<HashMap<String, HashSet<String>>> {
+    let storage = store.clone().into_storage();
+    let parallelism = concurrency.max(1);
+    futures_util::stream::iter(registry.repos.iter().map(|(repo_prefix, current)| {
+        let storage = storage.clone();
+        let repo_prefix = repo_prefix.clone();
+        let mut shards = current.iter().cloned().collect::<HashSet<_>>();
+        async move {
+            let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+            let history =
+                crab_metadata::manifest_store::list_manifest_history(&storage, &router).await?;
+            let historical = futures_util::stream::iter(history.into_iter().filter_map(|entry| {
+                (!entry.manifest.shard_index_hash.is_empty())
+                    .then_some(entry.manifest.shard_index_hash)
+            }))
+            .map(|shard_index_hash| {
+                let storage = storage.clone();
+                let router = router.clone();
+                async move {
+                    crab_metadata::manifest_store::read_bulk_shard_list(
+                        &storage,
+                        &router,
+                        &shard_index_hash,
+                    )
+                    .await
+                }
+            })
+            .buffer_unordered(parallelism)
+            .try_collect::<Vec<_>>()
+            .await?;
+            shards.extend(historical.into_iter().flatten());
+            Ok::<_, crab_metadata::error::MetadataError>((repo_prefix, shards))
         }
-    }
-    Ok(shards)
+    }))
+    .buffer_unordered(parallelism)
+    .map(|result| result.map_err(CrabError::from))
+    .try_collect()
+    .await
 }
 
 fn ensure_registry_complete_for_destructive_gc(registry: &RefRegistry) -> Result<()> {
@@ -428,8 +468,12 @@ fn partition_xorbs_for_gc(
 /// List all objects under `.crab/{kind}/`.
 async fn list_global_objects(store: &Store, kind: &str) -> Result<Vec<ListedObject>> {
     let prefix = ObjectPath::from(format!("{GLOBAL_PREFIX}/{kind}/"));
-    let stream = store.inner().list(Some(&prefix));
-    let objects: Vec<_> = stream.try_collect().await.map_err(CrabError::Storage)?;
+    let objects = store
+        .inner()
+        .list(Some(&prefix))
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(CrabError::Storage)?;
 
     Ok(objects
         .into_iter()
@@ -464,23 +508,19 @@ fn filter_by_grace(
 /// Hashes extracted from a batch of shards.
 struct ShardHashes {
     xorb_hashes: HashSet<String>,
-    file_hashes: HashSet<String>,
+    file_hashes_by_shard: HashMap<String, HashSet<MerkleHash>>,
 }
 
 /// Download each referenced shard once and extract both xorb hashes and
 /// file hashes in a single pass. Runs downloads in parallel with a
 /// bounded concurrency budget. Previously GC downloaded each shard
-/// twice (once per extraction pass) and serially. See findings
-/// CR5-F3 and CR5-F4.
+/// twice (once per extraction pass) and serially.
 async fn extract_hashes_from_shards(
     store: &Store,
     shard_objects: &[ListedObject],
+    concurrency: usize,
 ) -> Result<ShardHashes> {
-    use futures_util::stream::{self, StreamExt};
-
-    const SHARD_DOWNLOAD_CONCURRENCY: usize = 16;
-
-    let per_shard = stream::iter(shard_objects.iter())
+    let per_shard = futures_util::stream::iter(shard_objects.iter())
         .map(|obj| async move {
             let hash_hex = extract_hash_from_key(&obj.location);
             let path = ObjectPath::from(obj.location.as_str());
@@ -536,7 +576,7 @@ async fn extract_hashes_from_shards(
             }
 
             // Second pass: file info (sequential but no re-download).
-            let mut files: HashSet<String> = HashSet::new();
+            let mut files = HashSet::new();
             let mut cursor = std::io::Cursor::new(v1_bytes);
             let file_infos = shard_info
                 .read_all_file_info_sections(&mut cursor)
@@ -545,26 +585,82 @@ async fn extract_hashes_from_shards(
                     reason: format!("failed to read referenced shard file info: {error}"),
                 })?;
             for file_info in &file_infos {
-                files.insert(file_info.metadata.file_hash.hex());
+                files.insert(file_info.metadata.file_hash);
             }
 
-            Ok((xorbs, files))
+            Ok((hash_hex, xorbs, files))
         })
-        .buffer_unordered(SHARD_DOWNLOAD_CONCURRENCY)
+        .buffer_unordered(concurrency.max(1))
         .try_collect::<Vec<_>>()
         .await?;
 
     let mut xorb_hashes = HashSet::new();
-    let mut file_hashes = HashSet::new();
-    for (x, f) in per_shard {
+    let mut file_hashes_by_shard = HashMap::new();
+    for (shard_hash, x, f) in per_shard {
         xorb_hashes.extend(x);
-        file_hashes.extend(f);
+        file_hashes_by_shard.insert(shard_hash, f);
     }
 
     Ok(ShardHashes {
         xorb_hashes,
-        file_hashes,
+        file_hashes_by_shard,
     })
+}
+
+async fn gc_file_indexes(
+    store: &Store,
+    repo_shards: &HashMap<String, HashSet<String>>,
+    file_hashes_by_shard: &HashMap<String, HashSet<MerkleHash>>,
+    dry_run: bool,
+    concurrency: usize,
+) -> Result<u64> {
+    futures_util::stream::iter(repo_shards.iter())
+        .map(|(repo_prefix, shards)| async move {
+            let db_prefix = ObjectPath::from(format!(
+                "{}/file_index_db/",
+                repo_prefix.trim_end_matches('/')
+            ));
+            let mut objects = store.inner().list(Some(&db_prefix));
+            match objects.next().await {
+                None => return Ok(0),
+                Some(Err(error)) => return Err(CrabError::Storage(error)),
+                Some(Ok(_)) => {}
+            }
+
+            let referenced = shards
+                .iter()
+                .filter_map(|shard| file_hashes_by_shard.get(shard))
+                .flat_map(|files| files.iter().copied())
+                .collect::<HashSet<_>>();
+            let config =
+                crate::metadata::MetaDbConfig::for_repo(repo_prefix).with_read_only(dry_run);
+            let metadb = crate::metadata::MetaDb::new(
+                Arc::clone(store.inner()),
+                repo_prefix.clone(),
+                config,
+            );
+            let guard = crate::metadata::MetaDbGuard::new(metadb);
+            let operation = async {
+                guard
+                    .file_index()
+                    .await?
+                    .gc_unreferenced_committed(&referenced, dry_run, FILE_INDEX_GC_BATCH_SIZE)
+                    .await
+            }
+            .await;
+            let close = guard.close().await;
+            match (operation, close) {
+                (Ok(removed), Ok(())) => Ok(removed),
+                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            }
+        })
+        .buffer_unordered(concurrency.max(1))
+        .try_fold(0u64, |total, removed| async move {
+            total
+                .checked_add(removed)
+                .ok_or_else(|| CrabError::Internal("file-index GC count overflow".to_owned()))
+        })
+        .await
 }
 
 /// Delete or report candidates depending on dry-run mode.
@@ -573,28 +669,31 @@ async fn delete_or_report(
     kind: &str,
     candidates: &[ListedObject],
     dry_run: bool,
+    concurrency: usize,
     outcome: &mut BucketGcOutcome,
 ) -> Result<()> {
-    for obj in candidates {
-        let hash = extract_hash_from_key(&obj.location);
-        if dry_run {
-            info!(kind = %kind, hash = %hash, size = obj.size, "would delete (dry-run)");
-        } else {
+    let deleted = futures_util::stream::iter(candidates.iter())
+        .map(|obj| async move {
+            let hash = extract_hash_from_key(&obj.location);
+            if dry_run {
+                info!(kind = %kind, hash = %hash, size = obj.size, "would delete (dry-run)");
+                return Ok::<_, CrabError>(obj);
+            }
             let path = ObjectPath::from(obj.location.as_str());
             match store.delete(&path).await {
-                Ok(()) => {
-                    debug!(kind = %kind, hash = %hash, "deleted");
-                }
+                Ok(()) => debug!(kind = %kind, hash = %hash, "deleted"),
                 Err(CrabError::NotFound { .. }) => {
-                    // Already gone — idempotent.
                     debug!(kind = %kind, hash = %hash, "already deleted");
                 }
-                Err(e) => {
-                    return Err(e);
-                }
+                Err(error) => return Err(error),
             }
-        }
+            Ok(obj)
+        })
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
 
+    for obj in deleted {
         match kind {
             "shards" => outcome.shards_deleted += 1,
             "xorbs" => outcome.xorbs_deleted += 1,
@@ -890,11 +989,14 @@ mod tests {
         let mut registry = RefRegistry::default();
         registry.register("org/models", Vec::new());
 
-        let historical = historical_referenced_shards(&store, &registry)
+        let historical = repository_referenced_shards(&store, &registry, 4)
             .await
             .unwrap();
 
-        assert_eq!(historical, [historical_shard].into_iter().collect());
+        assert_eq!(
+            historical["org/models"],
+            [historical_shard].into_iter().collect()
+        );
     }
 
     #[tokio::test]
@@ -911,6 +1013,8 @@ mod tests {
             dry_run: true,
             grace_period: Duration::from_secs(3600),
             force: false,
+            list_concurrency: 16,
+            delete_concurrency: 64,
         };
 
         let protected = HashSet::new();
@@ -955,6 +1059,8 @@ mod tests {
                 dry_run: false,
                 grace_period: Duration::from_secs(3600),
                 force: false,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -991,6 +1097,8 @@ mod tests {
                 dry_run: false,
                 grace_period: Duration::from_secs(3600),
                 force: true,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -1014,6 +1122,77 @@ mod tests {
         assert!(!summary.dry_run);
         assert!(!summary.cancelled);
         assert!(!summary.partial_enumeration);
+    }
+
+    #[tokio::test]
+    async fn bucket_gc_tombstones_file_rows_outside_each_repo_closure() {
+        use crab_metadata::value_codec::CommittedFileRecord;
+
+        let store = memory_store();
+        let repo = "org/models";
+        let retained = MerkleHash::from([1, 2, 3, 4]);
+        let stale = MerkleHash::from([5, 6, 7, 8]);
+        let shard = MerkleHash::from([9, 10, 11, 12]);
+        let config = crate::metadata::MetaDbConfig::for_repo(repo);
+        let guard = crate::metadata::MetaDbGuard::new(crate::metadata::MetaDb::new(
+            Arc::clone(store.inner()),
+            repo.to_owned(),
+            config.clone(),
+        ));
+        let file_index = guard.file_index().await.unwrap();
+        let mut transaction = guard.new_transaction().unwrap();
+        file_index.save_committed_batch(
+            &mut transaction,
+            &[
+                (
+                    retained,
+                    CommittedFileRecord {
+                        recipe_hash: [1; 32],
+                        shard_hash: shard,
+                        committed_generation: 1,
+                        shard_index_hash: shard,
+                    },
+                ),
+                (
+                    stale,
+                    CommittedFileRecord {
+                        recipe_hash: [2; 32],
+                        shard_hash: shard,
+                        committed_generation: 1,
+                        shard_index_hash: shard,
+                    },
+                ),
+            ],
+        );
+        guard.commit(transaction).await.unwrap();
+        guard.close().await.unwrap();
+
+        let removed = gc_file_indexes(
+            &store,
+            &HashMap::from([(repo.to_owned(), HashSet::from(["live-shard".to_owned()]))]),
+            &HashMap::from([("live-shard".to_owned(), HashSet::from([retained]))]),
+            false,
+            4,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        let guard = crate::metadata::MetaDbGuard::new(crate::metadata::MetaDb::new(
+            Arc::clone(store.inner()),
+            repo.to_owned(),
+            config.with_read_only(true),
+        ));
+        let values = guard
+            .file_index()
+            .await
+            .unwrap()
+            .get_committed_batch(&[retained, stale])
+            .await
+            .unwrap();
+        assert!(values[0].is_some());
+        assert!(values[1].is_none());
+        guard.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -1043,6 +1222,8 @@ mod tests {
                 dry_run: false,
                 grace_period: Duration::from_secs(3600),
                 force: false,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -1058,6 +1239,8 @@ mod tests {
                 dry_run: true,
                 grace_period: Duration::from_secs(3600),
                 force: false,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -1101,6 +1284,8 @@ mod tests {
                 dry_run: false,
                 grace_period: Duration::from_secs(3600),
                 force: false,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -1133,6 +1318,8 @@ mod tests {
                 dry_run: false,
                 grace_period: Duration::from_secs(3600),
                 force: false,
+                list_concurrency: 16,
+                delete_concurrency: 64,
             },
             &store,
             &HashSet::new(),
@@ -1167,6 +1354,8 @@ mod tests {
             dry_run: false,
             grace_period: Duration::from_secs(3600),
             force: false,
+            list_concurrency: 16,
+            delete_concurrency: 64,
         };
         let protected = HashSet::new();
         let protected_repos = HashSet::new();
@@ -1207,6 +1396,8 @@ mod tests {
             dry_run: false,
             grace_period: Duration::from_secs(3600),
             force: false,
+            list_concurrency: 16,
+            delete_concurrency: 64,
         };
         let protected = HashSet::new();
         let protected_repos = ["org/models".to_owned()].into_iter().collect();
@@ -1239,6 +1430,8 @@ mod tests {
             dry_run: false,
             grace_period: Duration::from_secs(3600),
             force: true,
+            list_concurrency: 16,
+            delete_concurrency: 64,
         };
 
         let err = run_bucket_gc(
@@ -1366,6 +1559,8 @@ mod tests {
             dry_run: true,
             grace_period: Duration::from_secs(3600),
             force: true,
+            list_concurrency: 16,
+            delete_concurrency: 64,
         };
         let protected = HashSet::new();
         let protected_repos = HashSet::new();

@@ -71,6 +71,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         // deep inside the push pipeline still gets the backoff it
         // needs, while a hard auth failure surfaces fatally.
         CrabError::PushPartialOutcome { source, .. } => retry_class(source),
+        CrabError::GcPartialFailure { source, .. } => retry_class(source),
         CrabError::ManagedRepository { diagnostic } => {
             if matches!(
                 diagnostic,

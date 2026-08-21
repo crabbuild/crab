@@ -30,6 +30,17 @@ Destructive repository GC takes a renewable repository-maintenance lease. A
 destructive bucket GC takes that lease for every registered repository. Neither
 can run concurrently with history pruning or history restoration.
 
+Bucket GC reads current and retained historical shard roots for registered
+repositories in parallel, downloads referenced shards with bounded concurrency,
+and lists the complete global shard and xorb namespaces concurrently. It also
+tombstones generation-pinned `file_index_db` rows that are outside each
+repository's retained shard closure.
+
+If any repository-scope object deletion or post-delete reconciliation fails,
+Crab exits non-zero with `CRAB-E0322`. Its structured error details report the
+number of successful deletions, failed deletions, and whether reconciliation
+failed. Rerunning GC is safe because successful deletions are idempotent.
+
 For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-collection).
 
 ## Options
@@ -37,8 +48,13 @@ For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-co
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--dry-run` | `false` | Show what would be deleted without removing |
-| `--grace-period` | `24h` | Don't delete objects newer than this |
+| `--scope` | `repo` | Collect repository objects, or use `bucket` for global deduplicated objects |
+| `--bucket` | — | Physical bucket name required by bucket scope and registry maintenance |
+| `--grace-period` | `1h` | Don't delete objects newer than this |
+| `--force` | `false` | Bypass age checks without bypassing registry or coordinator safety proof |
+| `--yes` | `false` | Skip repository force-mode confirmation |
 | `--json` | `false` | Emit structured JSON output |
+| `--jsonl` | `false` | Emit streaming structured output |
 
 ## Examples
 

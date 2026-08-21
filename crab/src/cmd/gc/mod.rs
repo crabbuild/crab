@@ -135,6 +135,10 @@ pub struct GcOutcome {
     /// `true` when one or more LIST requests failed — enumeration was
     /// partial and GC may not have considered all objects. See S1-P5-1.
     pub partial_enumeration: bool,
+    /// Number of object DELETE requests that failed.
+    pub delete_failures: u64,
+    /// Whether post-delete metadata reconciliation failed.
+    pub reconciliation_failed: bool,
 }
 
 impl GcOutcome {
@@ -150,13 +154,16 @@ impl GcOutcome {
                 list_wall_secs = format!("{:.2}", self.list_wall_seconds),
                 "gc dry-run complete (no objects deleted)"
             );
-        } else if self.cancelled {
+        } else if self.cancelled || self.delete_failures > 0 || self.reconciliation_failed {
             warn!(
                 packs = self.packs_deleted,
                 xorbs = self.xorbs_deleted,
                 shards = self.shards_deleted,
                 bytes = self.bytes_reclaimed,
-                "gc cancelled — partial results"
+                delete_failures = self.delete_failures,
+                reconciliation_failed = self.reconciliation_failed,
+                cancelled = self.cancelled,
+                "gc incomplete — partial results"
             );
         } else {
             info!(
@@ -178,10 +185,13 @@ impl GcOutcome {
             packs_deleted: self.packs_deleted,
             xorbs_deleted: self.xorbs_deleted,
             shards_deleted: self.shards_deleted,
+            file_index_entries_deleted: 0,
             bytes_reclaimed: self.bytes_reclaimed,
             dry_run: self.dry_run,
             cancelled: self.cancelled,
             partial_enumeration: self.partial_enumeration,
+            delete_failures: self.delete_failures,
+            reconciliation_failed: self.reconciliation_failed,
         }
     }
 }
@@ -207,6 +217,9 @@ pub struct GcSummary {
     pub xorbs_deleted: u64,
     /// Number of shard objects deleted.
     pub shards_deleted: u64,
+    /// Number of stale per-repository file-index rows tombstoned.
+    #[serde(default)]
+    pub file_index_entries_deleted: u64,
     /// Total bytes reclaimed.
     pub bytes_reclaimed: u64,
     /// Whether this was a dry-run (no mutations).
@@ -219,6 +232,12 @@ pub struct GcSummary {
     /// recommended. See finding S1-P5-1.
     #[serde(default)]
     pub partial_enumeration: bool,
+    /// Number of object deletions that failed.
+    #[serde(default)]
+    pub delete_failures: u64,
+    /// Whether post-delete metadata reconciliation failed.
+    #[serde(default)]
+    pub reconciliation_failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +651,7 @@ pub async fn run_gc(
 
     // Phase 5: Parallel deletes bounded by delete_concurrency.
     check_cancelled(cancel)?;
-    let deleted_keys = execute_deletes(
+    let delete_outcome = execute_deletes(
         &to_delete,
         cancel,
         delete_concurrency,
@@ -650,16 +669,26 @@ pub async fn run_gc(
 
     // Phase 6: Manifest CAS to remove deleted entries.
     check_cancelled(cancel)?;
-    if let Err(e) = deleter.reconcile_manifest(&deleted_keys).await {
-        warn!(error = %e, "manifest reconciliation failed");
-    }
+    outcome.delete_failures = delete_outcome.failure_count;
+    let reconciliation_error = deleter
+        .reconcile_manifest(&delete_outcome.deleted_keys)
+        .await
+        .err();
+    outcome.reconciliation_failed = reconciliation_error.is_some();
 
     // Phase 7: Log structured outcome.
     outcome.log();
+    if let Some(source) = delete_outcome.first_error.or(reconciliation_error) {
+        return Err(CrabError::GcPartialFailure {
+            objects_deleted: delete_outcome.deleted_keys.len() as u64,
+            delete_failures: outcome.delete_failures,
+            reconciliation_failed: outcome.reconciliation_failed,
+            source: Box::new(source),
+        });
+    }
     Ok(outcome)
 }
 
-/// Execute deletes with bounded concurrency, checking cancellation between
 /// Execute deletes with bounded concurrency, checking cancellation between
 /// batches. Returns the list of successfully deleted keys.
 ///
@@ -667,8 +696,14 @@ pub async fn run_gc(
 /// then we wait for all deletes in the chunk to complete before moving to
 /// the next one. This gives up to `concurrency`-way parallelism while
 /// keeping results and cancellation coordinated batch-by-batch. The
-/// previous implementation processed each chunk serially despite the
-/// `concurrency` parameter. See finding CR5-F1.
+/// This keeps the concurrency setting effective while preserving coordinated
+/// cancellation and result accounting between batches.
+struct DeleteOutcome {
+    deleted_keys: Vec<String>,
+    failure_count: u64,
+    first_error: Option<CrabError>,
+}
+
 async fn execute_deletes(
     objects: &[ObjectMeta],
     cancel: &CancellationToken,
@@ -676,8 +711,10 @@ async fn execute_deletes(
     deleter: &dyn ObjectDeleter,
     outcome: &mut GcOutcome,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
-) -> Vec<String> {
+) -> DeleteOutcome {
     let mut deleted_keys = Vec::new();
+    let mut failure_count = 0u64;
+    let mut first_error = None;
     let start = Instant::now();
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
 
@@ -723,12 +760,20 @@ async fn execute_deletes(
                 }
                 Err(e) => {
                     warn!(key = %key, error = %e, "delete failed, skipping");
+                    failure_count += 1;
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
                 }
             }
         }
     }
 
-    deleted_keys
+    DeleteOutcome {
+        deleted_keys,
+        failure_count,
+        first_error,
+    }
 }
 
 /// Production-ready parallel delete using `Arc<dyn ObjectDeleter>`.
@@ -1316,6 +1361,41 @@ pub async fn cleanup_orphaned_bulk_objects(
 mod tests {
     use super::*;
 
+    struct FailingDeleter {
+        fail_delete_for: Option<String>,
+        fail_reconcile: bool,
+    }
+
+    impl ObjectDeleter for FailingDeleter {
+        fn delete(
+            &self,
+            key: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+            let should_fail = self.fail_delete_for.as_deref() == Some(key);
+            Box::pin(async move {
+                if should_fail {
+                    return Err(CrabError::Internal("injected delete failure".to_owned()));
+                }
+                Ok(())
+            })
+        }
+
+        fn reconcile_manifest(
+            &self,
+            _deleted_keys: &[String],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+            let should_fail = self.fail_reconcile;
+            Box::pin(async move {
+                if should_fail {
+                    return Err(CrabError::Internal(
+                        "injected reconciliation failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+        }
+    }
+
     fn make_obj(key: &str, size: u64, age: Duration) -> ObjectMeta {
         ObjectMeta {
             key: key.to_string(),
@@ -1625,6 +1705,86 @@ mod tests {
         assert_eq!(outcome.xorbs_deleted, 1);
         assert_eq!(outcome.packs_deleted, 1);
         assert_eq!(outcome.bytes_reclaimed, 500);
+    }
+
+    #[tokio::test]
+    async fn gc_returns_error_when_any_delete_fails() {
+        let objects = vec![
+            make_obj("xorbs/ab/good", 100, Duration::from_secs(48 * 3600)),
+            make_obj("xorbs/ab/bad", 200, Duration::from_secs(48 * 3600)),
+        ];
+        let deleter = FailingDeleter {
+            fail_delete_for: Some("xorbs/ab/bad".to_owned()),
+            fail_reconcile: false,
+        };
+
+        let result = run_gc(
+            &GcArgs::default(),
+            objects,
+            &HashSet::<String>::new(),
+            &HashSet::<String>::new(),
+            &ShardListSnapshot {
+                generation: 0,
+                shard_keys: HashSet::new(),
+            },
+            &CancellationToken::new(),
+            2,
+            Duration::from_secs(3600),
+            ListOutcome::default(),
+            &deleter,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(CrabError::GcPartialFailure {
+                objects_deleted: 1,
+                delete_failures: 1,
+                reconciliation_failed: false,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn gc_returns_error_when_reconciliation_fails() {
+        let deleter = FailingDeleter {
+            fail_delete_for: None,
+            fail_reconcile: true,
+        };
+
+        let result = run_gc(
+            &GcArgs::default(),
+            vec![make_obj(
+                "packs/ab/good",
+                100,
+                Duration::from_secs(48 * 3600),
+            )],
+            &HashSet::<String>::new(),
+            &HashSet::<String>::new(),
+            &ShardListSnapshot {
+                generation: 0,
+                shard_keys: HashSet::new(),
+            },
+            &CancellationToken::new(),
+            1,
+            Duration::from_secs(3600),
+            ListOutcome::default(),
+            &deleter,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(CrabError::GcPartialFailure {
+                objects_deleted: 1,
+                delete_failures: 0,
+                reconciliation_failed: true,
+                ..
+            })
+        ));
     }
 
     // --- Manifest-aware GC reachability (Task 8.4) ---
