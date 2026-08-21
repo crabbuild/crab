@@ -3,8 +3,8 @@ import {
   ArrowRight,
   BookOpen,
   Bug,
+  CloudCog,
   FolderSync,
-  Layers,
   Rocket,
   Terminal,
   Workflow,
@@ -44,7 +44,7 @@ const cliCategories = [
     href: "/docs/cli/guides",
   },
   {
-    icon: Layers,
+    icon: CloudCog,
     name: "Managed Service",
     description: "Hosted repositories, access management, migration, and service APIs.",
     href: "/docs/cli/managed-service",

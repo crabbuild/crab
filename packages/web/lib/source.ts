@@ -56,7 +56,12 @@ function attachIcons(nodes: PageTree.Node[], depth = 0) {
       if (depth === 0) {
         const slug = extractSlugFromFolder(node);
         const Icon = getSidebarIcon(slug);
-        if (Icon) node.icon = createElement(Icon, { key: `icon-${slug}`, className: "text-fd-muted-foreground size-4 shrink-0" });
+        if (Icon) node.icon = createElement(Icon, {
+          key: `icon-${slug}`,
+          className: slug === "managed-service"
+            ? "size-4 shrink-0 text-amber-500"
+            : "text-fd-muted-foreground size-4 shrink-0",
+        });
       }
       attachIcons(node.children, depth + 1);
     }

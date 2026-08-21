@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react"
 import {
   Bot,
   Bug,
+  CloudCog,
   Copy,
   Database,
   Download,
@@ -48,6 +49,7 @@ export const docsSidebarIcons: Record<string, LucideIcon> = {
   authentication: ShieldCheck,
   storage: HardDrive,
   "cache-service": Database,
+  "managed-service": CloudCog,
   automation: Play,
   agent: Bot,
   "virtual-filesystem": Globe,

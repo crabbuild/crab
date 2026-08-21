@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Info,
   Lightbulb,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react"
 
@@ -14,7 +15,7 @@ import {
 import { cn } from "@/lib/utils"
 
 export interface DocsCalloutProps {
-  type: "tip" | "warning" | "note" | "danger"
+  type: "tip" | "warning" | "note" | "danger" | "preview"
   title?: string
   children: React.ReactNode
 }
@@ -39,6 +40,12 @@ const calloutConfig: Record<
   danger: {
     icon: AlertCircle,
     variant: "destructive",
+  },
+  preview: {
+    icon: Sparkles,
+    variant: "default",
+    className:
+      "border-amber-200 bg-amber-50/80 text-amber-950 *:data-[slot=alert-description]:text-amber-900/80 [&>svg]:text-amber-600 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-100 dark:*:data-[slot=alert-description]:text-amber-200/80 dark:[&>svg]:text-amber-400",
   },
 }
 
