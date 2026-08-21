@@ -51,17 +51,14 @@ pub mod stats;
 pub mod stream;
 
 #[cfg(test)]
+#[path = "../tests/unit/prop_compaction_preserves_reads.rs"]
 mod prop_compaction_preserves_reads;
 #[cfg(test)]
+#[path = "../tests/unit/prop_orphan_sweep_idempotence.rs"]
 mod prop_orphan_sweep_idempotence;
 #[cfg(test)]
+#[path = "../tests/unit/prop_torn_tail_recovery.rs"]
 mod prop_torn_tail_recovery;
-#[cfg(test)]
-mod scale_100gib_nightly;
-#[cfg(test)]
-mod scale_10gib;
-#[cfg(test)]
-mod scale_1tib_manual;
 
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};
