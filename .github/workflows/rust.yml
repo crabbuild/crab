@@ -61,7 +61,7 @@ jobs:
           files="$(git diff --name-only "${base}" "${HEAD_SHA}")"
           rust=false
           web=false
-          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/|\.github/actionlint\.yaml)' <<< "${files}"; then
+          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
             rust=true
           fi
           if grep -Eq '^packages/web/' <<< "${files}"; then
