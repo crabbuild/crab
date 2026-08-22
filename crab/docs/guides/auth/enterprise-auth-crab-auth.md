@@ -155,6 +155,12 @@ with service-owned cloud credentials.
 Verification hashes every staged object. Finalization validates the staged
 layout again, then re-hashes each body at its canonical promotion boundary;
 it does not perform a separate full-candidate download immediately beforehand.
+Verification also materializes source refs and Git visibility once, stores the
+result under the service-owned protected-push session prefix, and returns its
+content hash as the authorization token. Finalization requires that exact
+plan-, source-generation-, and prepare-bound evidence instead of rebuilding a
+second temporary Git object database. Session evidence is removed after a
+successful commit or by the staging TTL cleanup.
 Path-scoped push rules require at least one server-verified changed path; use a
 non-path-scoped push rule for intentional ref-only or metadata-only updates.
 Protected push accepts branch ref updates only. The receive helper rejects

@@ -97,7 +97,8 @@ pub struct ProtectedPushPlan {
 }
 
 /// Source-repository materialization produced from a protected view push.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterializedSourcePush {
     pub ref_updates: Vec<PushRefUpdate>,
     pub packs: Vec<PackManifestEntry>,
@@ -105,7 +106,8 @@ pub struct MaterializedSourcePush {
     pub(crate) git_visibility: MaterializedGitVisibility,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum MaterializedGitVisibility {
     Exact(BTreeMap<String, Vec<String>>),
     CompletePackOnly { observed: usize, maximum: usize },
