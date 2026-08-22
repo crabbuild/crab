@@ -17,13 +17,16 @@ two AI-agent push cases:
   the push pipeline.
 
 The retained report is written atomically across worker threads and includes
-per-phase RustFS object-count and stored-byte deltas for cost analysis.
+per-phase S3 HTTP attempts plus RustFS object-count and stored-byte deltas for
+cost analysis.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import http.client
+import http.server
 import json
 import os
 import shutil
@@ -31,6 +34,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -48,6 +52,243 @@ BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-o
 
 class SmokeError(RuntimeError):
     """Raised when a smoke step fails."""
+
+
+class RequestCountingProxy:
+    """Forward S3 traffic while counting every HTTP request attempt."""
+
+    def __init__(self, upstream_url: str, key_prefix: str) -> None:
+        upstream = urllib.parse.urlsplit(upstream_url)
+        if upstream.scheme not in {"http", "https"} or not upstream.hostname:
+            raise SmokeError(f"unsupported request-meter upstream: {upstream_url}")
+        self.upstream = upstream
+        self.key_prefix = key_prefix.strip("/") + "/"
+        self.lock = threading.Lock()
+        self.requests = 0
+        self.request_bytes = 0
+        self.response_bytes = 0
+        self.methods: dict[str, int] = {}
+        self.operations: dict[str, int] = {}
+        self.categories: dict[str, int] = {}
+        self.classes: dict[str, int] = {}
+        self.statuses: dict[str, int] = {}
+        self.server: http.server.ThreadingHTTPServer | None = None
+        self.thread: threading.Thread | None = None
+
+    @property
+    def url(self) -> str:
+        if self.server is None:
+            raise SmokeError("request meter has not started")
+        host, port = self.server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def start(self) -> None:
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                self.forward()
+
+            def do_HEAD(self) -> None:
+                self.forward()
+
+            def do_PUT(self) -> None:
+                self.forward()
+
+            def do_POST(self) -> None:
+                self.forward()
+
+            def do_DELETE(self) -> None:
+                self.forward()
+
+            def do_PATCH(self) -> None:
+                self.forward()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+            def forward(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else None
+                headers = {
+                    key: value
+                    for key, value in self.headers.items()
+                    if key.lower() not in {"connection", "proxy-connection"}
+                }
+                upstream_path = proxy.upstream.path.rstrip("/") + self.path
+                connection_class = (
+                    http.client.HTTPSConnection
+                    if proxy.upstream.scheme == "https"
+                    else http.client.HTTPConnection
+                )
+                connection = connection_class(
+                    proxy.upstream.hostname,
+                    proxy.upstream.port,
+                    timeout=60,
+                )
+                try:
+                    connection.request(self.command, upstream_path, body=body, headers=headers)
+                    response = connection.getresponse()
+                    response_body = response.read()
+                    response_headers = response.getheaders()
+                    status = response.status
+                    self.send_response_only(status, response.reason)
+                    original_content_length = None
+                    for key, value in response_headers:
+                        lower = key.lower()
+                        if lower == "content-length":
+                            original_content_length = value
+                            continue
+                        if lower in {
+                            "connection",
+                            "keep-alive",
+                            "proxy-authenticate",
+                            "proxy-authorization",
+                            "te",
+                            "trailer",
+                            "transfer-encoding",
+                            "upgrade",
+                        }:
+                            continue
+                        self.send_header(key, value)
+                    content_length = (
+                        original_content_length
+                        if self.command == "HEAD" and original_content_length is not None
+                        else str(len(response_body))
+                    )
+                    self.send_header("Content-Length", content_length)
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    if self.command != "HEAD" and response_body:
+                        self.wfile.write(response_body)
+                    proxy.record(
+                        self.command,
+                        self.path,
+                        self.headers,
+                        length,
+                        len(response_body),
+                        status,
+                    )
+                except Exception as exc:
+                    message = f"request meter upstream failure: {exc}".encode()
+                    self.send_response(502)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(message)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(message)
+                    proxy.record(
+                        self.command,
+                        self.path,
+                        self.headers,
+                        length,
+                        len(message),
+                        502,
+                    )
+                finally:
+                    connection.close()
+                    self.close_connection = True
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="rustfs-request-meter",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+
+    def record(
+        self,
+        method: str,
+        path: str,
+        headers: http.client.HTTPMessage,
+        request_bytes: int,
+        response_bytes: int,
+        status: int,
+    ) -> None:
+        operation = self.operation(method, path, headers)
+        key = urllib.parse.unquote(urllib.parse.urlsplit(path).path).lstrip("/")
+        relative_key = key.removeprefix(self.key_prefix)
+        category = (
+            store_category(relative_key)
+            if relative_key != key
+            else "outside-repository"
+        )
+        request_class = f"{category}:{operation}"
+        status_class = f"{status // 100}xx"
+        with self.lock:
+            self.requests += 1
+            self.request_bytes += request_bytes
+            self.response_bytes += response_bytes
+            self.methods[method] = self.methods.get(method, 0) + 1
+            self.operations[operation] = self.operations.get(operation, 0) + 1
+            self.categories[category] = self.categories.get(category, 0) + 1
+            self.classes[request_class] = self.classes.get(request_class, 0) + 1
+            self.statuses[status_class] = self.statuses.get(status_class, 0) + 1
+
+    @staticmethod
+    def operation(method: str, path: str, headers: http.client.HTTPMessage) -> str:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(path).query, keep_blank_values=True
+        )
+        if method == "HEAD":
+            return "head"
+        if method == "GET":
+            return "list" if "list-type" in query or "versions" in query else "get"
+        if method == "PUT":
+            if "x-amz-copy-source" in headers:
+                return "copy"
+            return "multipart_part" if "partNumber" in query else "put"
+        if method == "POST":
+            if "uploads" in query:
+                return "multipart_create"
+            if "uploadId" in query:
+                return "multipart_complete"
+            if "delete" in query:
+                return "delete_batch"
+            return "post"
+        if method == "DELETE":
+            return "multipart_abort" if "uploadId" in query else "delete"
+        return method.lower()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "requests": self.requests,
+                "request_body_bytes": self.request_bytes,
+                "response_body_bytes": self.response_bytes,
+                "methods": dict(sorted(self.methods.items())),
+                "operations": dict(sorted(self.operations.items())),
+                "categories": dict(sorted(self.categories.items())),
+                "classes": dict(sorted(self.classes.items())),
+                "statuses": dict(sorted(self.statuses.items())),
+            }
+
+    @staticmethod
+    def delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key in {"requests", "request_body_bytes", "response_body_bytes"}:
+            result[key] = int(after.get(key, 0)) - int(before.get(key, 0))
+        for key in {"methods", "operations", "categories", "classes", "statuses"}:
+            earlier = before.get(key, {})
+            later = after.get(key, {})
+            result[key] = {
+                name: int(later.get(name, 0)) - int(earlier.get(name, 0))
+                for name in sorted(set(earlier) | set(later))
+                if int(later.get(name, 0)) != int(earlier.get(name, 0))
+            }
+        return result
 
 
 @dataclass
@@ -89,6 +330,7 @@ class SmokeReport:
     branch_reads: list[dict[str, Any]] = field(default_factory=list)
     same_branch: list[dict[str, Any]] = field(default_factory=list)
     same_branch_read: dict[str, Any] = field(default_factory=dict)
+    request_snapshots: list[dict[str, Any]] = field(default_factory=list)
     store_snapshots: list[dict[str, Any]] = field(default_factory=list)
     cost_model: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -106,6 +348,23 @@ def make_run_id() -> str:
 def slug(value: str) -> str:
     out = "".join(c if c.isalnum() or c in "._-" else "-" for c in value.lower())
     return out.strip("-") or "command"
+
+
+def store_category(relative_key: str) -> str:
+    parts = relative_key.split("/")
+    if len(parts) > 2 and parts[0] == "metadata" and parts[1] in {"pack", "shard"}:
+        return "/".join(parts[:3])
+    if len(parts) > 1 and parts[0] in {
+        "git_locator_db",
+        "git-visibility",
+        "locks",
+        "manifests",
+        "metadata",
+        "ref-journal",
+        "refs",
+    }:
+        return "/".join(parts[:2])
+    return parts[0] or "repository-root"
 
 
 def redact_env(env: dict[str, str]) -> dict[str, str]:
@@ -146,6 +405,7 @@ class ConcurrentPushSmoke:
         self.same_agents = self.run_root / "same-branch-agents"
         self.same_branch_reader = self.run_root / "same-branch-reader"
         self.remote_url = f"crab://{args.bucket}/{REMOTE_PREFIX}/{self.run_id}"
+        self.request_proxy: RequestCountingProxy | None = None
         self.env = self.build_env()
         self.command_index = 0
         self.command_lock = threading.Lock()
@@ -153,7 +413,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.2",
+            version="1.3",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -174,12 +434,15 @@ class ConcurrentPushSmoke:
 
     def build_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        endpoint_url = (
+            self.request_proxy.url if self.request_proxy is not None else self.args.endpoint_url
+        )
         env.update(
             {
                 "AWS_ACCESS_KEY_ID": self.args.access_key,
                 "AWS_SECRET_ACCESS_KEY": self.args.secret_key,
                 "AWS_REGION": self.args.region,
-                "AWS_ENDPOINT_URL": self.args.endpoint_url,
+                "AWS_ENDPOINT_URL": endpoint_url,
                 "AWS_ALLOW_HTTP": "true",
                 "AWS_EC2_METADATA_DISABLED": "true",
                 "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
@@ -347,6 +610,31 @@ class ConcurrentPushSmoke:
             return
         self.check("rustfs-endpoint-reachable", status < 500, {"status": status})
 
+        if not self.args.no_request_capture:
+            self.request_proxy = RequestCountingProxy(
+                self.args.endpoint_url,
+                f"{self.args.bucket}/{REMOTE_PREFIX}/{self.run_id}",
+            )
+            self.request_proxy.start()
+            self.env = self.build_env()
+            with self.report_lock:
+                self.report.env = redact_env(self.env)
+                self.report.cost_model = {
+                    "basis": "metered S3 HTTP attempts plus net live-object inventory deltas",
+                    "request_counts_available": True,
+                    "request_scope": (
+                        "every HTTP attempt crossing the local meter, including object_store "
+                        "retries and LIST pages"
+                    ),
+                    "limitations": [
+                        "provider prices and free tiers are not applied",
+                        "request operation classes are inferred from HTTP method and S3 query",
+                        "provider minimum billable object sizes are not applied",
+                        "network transfer price depends on provider, region, and destination",
+                    ],
+                }
+                self.write_report()
+
         if shutil.which("aws"):
             record = self.run_cmd(
                 "aws create bucket",
@@ -381,22 +669,47 @@ class ConcurrentPushSmoke:
                 )
                 self.write_report()
 
-    @staticmethod
-    def store_category(relative_key: str) -> str:
-        parts = relative_key.split("/")
-        if len(parts) > 2 and parts[0] == "metadata" and parts[1] in {"pack", "shard"}:
-            return "/".join(parts[:3])
-        if len(parts) > 1 and parts[0] in {
-            "git_locator_db",
-            "git-visibility",
-            "locks",
-            "manifests",
-            "metadata",
-            "ref-journal",
-            "refs",
-        }:
-            return "/".join(parts[:2])
-        return parts[0] or "repository-root"
+    def request_snapshot(
+        self,
+        label: str,
+        before: dict[str, Any] | None,
+        *,
+        attempted_pushes: int,
+        successful_pushes: int,
+    ) -> None:
+        if self.request_proxy is None or before is None:
+            return
+        delta = RequestCountingProxy.delta(before, self.request_proxy.snapshot())
+        snapshot = {
+            "label": label,
+            "attempted_pushes": attempted_pushes,
+            "successful_pushes": successful_pushes,
+            **delta,
+            "timestamp": utc_now(),
+        }
+        if attempted_pushes > 0:
+            snapshot["requests_per_attempt"] = round(
+                delta["requests"] / attempted_pushes, 3
+            )
+            snapshot["request_body_bytes_per_attempt"] = round(
+                delta["request_body_bytes"] / attempted_pushes, 3
+            )
+            snapshot["response_body_bytes_per_attempt"] = round(
+                delta["response_body_bytes"] / attempted_pushes, 3
+            )
+        if successful_pushes > 0:
+            snapshot["requests_per_successful_push"] = round(
+                delta["requests"] / successful_pushes, 3
+            )
+            snapshot["request_body_bytes_per_successful_push"] = round(
+                delta["request_body_bytes"] / successful_pushes, 3
+            )
+            snapshot["response_body_bytes_per_successful_push"] = round(
+                delta["response_body_bytes"] / successful_pushes, 3
+            )
+        with self.report_lock:
+            self.report.request_snapshots.append(snapshot)
+            self.write_report()
 
     def store_snapshot(
         self,
@@ -431,7 +744,7 @@ class ConcurrentPushSmoke:
         categories: dict[str, dict[str, int]] = {}
         for key, size in inventory.items():
             relative = key.removeprefix(prefix)
-            category = self.store_category(relative)
+            category = store_category(relative)
             entry = categories.setdefault(category, {"objects": 0, "stored_bytes": 0})
             entry["objects"] += 1
             entry["stored_bytes"] += size
@@ -455,7 +768,7 @@ class ConcurrentPushSmoke:
                 before = self.store_inventory.get(key)
                 after = inventory.get(key)
                 relative = key.removeprefix(prefix)
-                category = self.store_category(relative)
+                category = store_category(relative)
                 entry = delta_categories.setdefault(
                     category, {"objects": 0, "stored_bytes": 0}
                 )
@@ -562,6 +875,7 @@ class ConcurrentPushSmoke:
         )
         self.run_git(self.seed, ["add", "-A"])
         self.run_git(self.seed, ["commit", "-m", "seed concurrent push smoke"])
+        request_before = self.request_proxy.snapshot() if self.request_proxy else None
         self.run_crab(
             self.seed,
             [
@@ -573,6 +887,9 @@ class ConcurrentPushSmoke:
                 "HEAD:refs/heads/main",
             ],
             name="crab push seed",
+        )
+        self.request_snapshot(
+            "seed", request_before, attempted_pushes=1, successful_pushes=1
         )
         self.store_snapshot("seed", attempted_pushes=1, successful_pushes=1)
 
@@ -689,7 +1006,14 @@ class ConcurrentPushSmoke:
             (agent, branch, repo, f"HEAD:{branch}")
             for agent, branch, repo in prepared
         ]
+        request_before = self.request_proxy.snapshot() if self.request_proxy else None
         results = self.push_concurrently(jobs)
+        self.request_snapshot(
+            "branch-fanout",
+            request_before,
+            attempted_pushes=len(results),
+            successful_pushes=sum(result.status == "ok" for result in results),
+        )
         with self.report_lock:
             self.report.branch_fanout = [asdict(result) for result in results]
             self.write_report()
@@ -725,12 +1049,19 @@ class ConcurrentPushSmoke:
     def run_same_branch_contention(self) -> None:
         prepared = [self.prepare_same_branch_agent(i) for i in range(self.args.same_branch_agents)]
         jobs = [(agent, branch, repo, "HEAD:refs/heads/main") for agent, branch, repo in prepared]
+        request_before = self.request_proxy.snapshot() if self.request_proxy else None
         results = self.push_concurrently(jobs)
         with self.report_lock:
             self.report.same_branch = [asdict(result) for result in results]
             self.write_report()
 
         ok = [result for result in results if result.status == "ok" and result.command.exit_code == 0]
+        self.request_snapshot(
+            "same-branch",
+            request_before,
+            attempted_pushes=len(results),
+            successful_pushes=len(ok),
+        )
         rejected = [result for result in results if result.status != "ok"]
         bad = [result for result in results if result.status in BAD_PUSH_STATUSES]
         if self.args.rebase_on_non_fast_forward:
@@ -844,15 +1175,18 @@ class ConcurrentPushSmoke:
             print(f"FAILED: {exc}")
             print(f"report: {self.report.artifacts.get('report')}")
             return 1
-
-        with self.report_lock:
-            self.report.status = "ok"
-            self.write_report()
-        print("OK")
-        print(f"run: {self.run_root}")
-        print(f"remote: {self.remote_url}")
-        print(f"report: {self.report.artifacts.get('report')}")
-        return 0
+        else:
+            with self.report_lock:
+                self.report.status = "ok"
+                self.write_report()
+            print("OK")
+            print(f"run: {self.run_root}")
+            print(f"remote: {self.remote_url}")
+            print(f"report: {self.report.artifacts.get('report')}")
+            return 0
+        finally:
+            if self.request_proxy is not None:
+                self.request_proxy.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -880,6 +1214,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-branch-fanout", action="store_true")
     parser.add_argument("--skip-same-branch", action="store_true")
     parser.add_argument("--skip-fsck", action="store_true")
+    parser.add_argument("--no-request-capture", action="store_true")
     args = parser.parse_args()
     args.crab_bin = resolve_executable(args.crab_bin)
     args.git_bin = resolve_executable(args.git_bin)

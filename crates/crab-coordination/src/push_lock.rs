@@ -458,16 +458,20 @@ async fn acquire_contended(
             });
         }
     };
-    let now = backend_unix_time(store, object_path).await?;
-    if !existing.is_released() && !lease_expired(&existing, last_modified, now) {
-        let expires_at_unix = authoritative_expiry(&existing, last_modified);
-        return Ok(ContendedAcquire::Held {
-            holder: existing.holder,
-            expires_at_unix,
-        });
+    if !existing.is_released() {
+        let now = backend_unix_time(store, object_path).await?;
+        if !lease_expired(&existing, last_modified, now) {
+            let expires_at_unix = authoritative_expiry(&existing, last_modified);
+            return Ok(ContendedAcquire::Held {
+                holder: existing.holder,
+                expires_at_unix,
+            });
+        }
     }
 
-    debug!(ref_name, expired_holder = %existing.holder, "reclaiming expired push lock");
+    // An explicit release is already authoritative. Sampling backend time is
+    // only required before reclaiming a live lease whose age could be skewed.
+    debug!(ref_name, prior_holder = %existing.holder, "reclaiming available push lock");
     match update(store, object_path, body, reclaim_etag).await {
         Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
         Err(object_store::Error::AlreadyExists { .. })
@@ -740,6 +744,27 @@ mod tests {
         let payload: PushLockPayload = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.holder, second.holder());
         assert!(!payload.is_released());
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_tombstone_reacquire_skips_backend_clock_probe() {
+        let store = memory_store();
+        let first = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        let lock_path = first.path().to_owned();
+        first.release().await.unwrap();
+
+        let second = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+
+        let clock_path = Path::from(format!("{lock_path}/clock"));
+        assert!(matches!(
+            store.head(&clock_path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
         second.release().await.unwrap();
     }
 

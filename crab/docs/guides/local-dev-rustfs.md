@@ -217,9 +217,19 @@ each write swarm, fresh Git protocol-v2 clients clone the resulting branches,
 run strict Git fsck, and compare the checked-out agent files byte-for-byte. The
 retained JSON report also records atomic command evidence and RustFS net
 live-object and stored-byte deltas by storage-layout class, normalized per
-attempted and successful push. These are lower bounds: RustFS does not expose
-per-S3-method counters here, so overwrites, reads, retries, deletes, egress, and
-provider minimum billable sizes remain outside the estimate.
+attempted and successful push. By default, an in-process forwarding meter also
+records every S3 HTTP attempt made during each push cohort, including SDK
+retries and LIST pages. It groups requests by method, inferred S3 operation,
+and bounded Crab storage-layout class without retaining object keys or
+credentials. The snapshots bracket only the push commands, so the subsequent
+clone, strict fsck, and AWS CLI inventory reads do not inflate push cost.
+
+The request trace is suitable for applying a provider's current request rates;
+it is not itself a bill. Provider free tiers, minimum billable object sizes,
+storage duration, region-specific transfer, and operation-specific pricing
+still need to be applied. Use `--no-request-capture` only when the local proxy
+would interfere with a specialized endpoint test; the report then falls back
+to lower-bound net inventory deltas.
 The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.

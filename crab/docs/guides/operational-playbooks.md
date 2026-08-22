@@ -265,7 +265,12 @@ and current data share the bucket and account failure domain.
 `crab stat perf` is repository-local and cumulative. Collect it after pushes if
 you use it for cost trends; it is not a central metrics exporter. Correlate its
 upload, resume-probe, and metadb-flush counters with provider billing and
-RustFS/OpenTelemetry request metrics.
+RustFS/OpenTelemetry request metrics. Before committing to object storage as a
+team's Git backbone, run the concurrent-push RustFS harness with the intended
+writer count. Its push-bracketed HTTP-attempt and live-inventory snapshots give
+the request-class and storage inputs for the provider's current price sheet;
+repeat against the production provider because latency, retries, LIST paging,
+minimum object sizes, and transfer rates are topology-specific.
 
 ### Current verification limits
 
