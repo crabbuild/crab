@@ -48,7 +48,11 @@ git ↔ helper:  protocol-v2 pkt-lines over the same stdio
 
 The helper performs the temporary upload-pack role locally. It does not start
 a listener or require a Crab service. Repositories without a current locator
-and visibility proof remain on the legacy complete-pack path.
+and visibility proof remain on the legacy complete-pack path. That legacy path
+downloads and installs the immutable packs named by the manifest, then lets
+local Git satisfy the fetch; it is retained for older Git clients, repositories
+above the synchronous 100,000-object proof profile, and recovery while derived
+proof coverage is unavailable.
 
 Source: `crab/src/git/remote_helper.rs`
 
@@ -216,18 +220,20 @@ Phase 3: UPLOAD (steps 7-10)
   10. Upload bounded Git pack set (.pack + .idx + .meta per pack)
 
 Phase 4: COMMIT (steps 11-14)
-  11. Upload immutable segmented indexes, then CAS the unified manifest
-  12. Publish the generation's locators through one renewed SlateDB writer lease
+  11. Publish ref-scoped visibility evidence, then commit the ref journal marker
+  12. One owner compacts the journal and publishes generation proof + locators
   13. Post-success cleanup (staging → cache, shard install)
   14. On failure before CAS: refs and manifest remain unchanged
 ```
 
 ### Critical Ordering Invariant
 
-Steps 7-10 (immutable data uploads) must complete before steps 11-12
-(mutable manifest/ref updates). This ensures the fail-forward property:
-an interrupted push may leave orphaned immutable data (cleaned by GC) but
-never creates dangling references.
+Steps 7-10 (immutable data uploads) and the supported-profile visibility
+evidence must complete before the ref marker in step 11. This ensures the
+fail-forward property: an interrupted push may leave orphaned immutable data
+(cleaned by GC) but never creates dangling or proofless supported-profile
+references. Protected/service paths apply the same rule to the candidate
+generation proof before manifest or coordinator commit.
 
 Source: `crab/src/git/push.rs`, `crab/src/git/push_manifest.rs`,
 `crates/crab-git/src/push_state.rs`

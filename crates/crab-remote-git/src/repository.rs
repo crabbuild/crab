@@ -547,6 +547,23 @@ impl RemoteGitRepository {
         Ok(index)
     }
 
+    /// Rebuild complete ref visibility from this locator-pinned generation.
+    ///
+    /// This does not read or trust an existing visibility proof. Canonical
+    /// commit, tree, and tag objects are fetched once, while the resulting
+    /// per-ref closures retain the proof format's aggregate object bound.
+    pub async fn rebuild_visibility_index(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let pack_index_hash = self
+            .state
+            .coverage
+            .map(|coverage| coverage.pack_index_hash.to_string())
+            .unwrap_or_default();
+        crate::visibility::rebuild(self, pack_index_hash, cancellation).await
+    }
+
     /// Check whether the canonical manifest still names this pinned generation.
     ///
     /// This performs one metadata-only provider request and never mutates the

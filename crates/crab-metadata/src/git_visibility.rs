@@ -22,6 +22,9 @@ const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
 /// Maximum number of ref-rooted object entries accepted in one proof.
 pub const MAX_GIT_VISIBILITY_OBJECTS: u64 = 10_000_000;
 
+/// Maximum ref-rooted object entries built synchronously on a push or repair path.
+pub const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
+
 /// Current serialized ref-update evidence format.
 pub const GIT_VISIBILITY_EDIT_VERSION: u32 = 1;
 

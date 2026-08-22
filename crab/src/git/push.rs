@@ -2441,8 +2441,46 @@ const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
 const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = PUSH_ADMISSION_SLOTS;
 const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
-const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
+const GIT_VISIBILITY_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GitVisibilityCapacity {
+    observed: u64,
+    maximum: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitVisibilityPublication {
+    Published,
+    CompletePackOnly(GitVisibilityCapacity),
+}
+
+fn git_visibility_capacity_exceeded<'a>(
+    packs: impl IntoIterator<Item = &'a PackManifestEntry>,
+    ref_count: usize,
+) -> Result<Option<GitVisibilityCapacity>> {
+    let mut seen = HashSet::new();
+    let packed_objects = packs
+        .into_iter()
+        .filter(|pack| seen.insert(pack.pack_id.as_str()))
+        .try_fold(0u64, |total, pack| total.checked_add(pack.object_count))
+        .ok_or_else(|| CrabError::Internal("Git pack object count overflow".to_owned()))?;
+    let ref_count = u64::try_from(ref_count)
+        .map_err(|_| CrabError::Internal("Git ref count overflow".to_owned()))?;
+    // The serialized proof stores one closure per ref. This conservative bound
+    // keeps publication cost bounded without walking every closure twice.
+    let proof_objects = packed_objects
+        .checked_mul(ref_count)
+        .ok_or_else(|| CrabError::Internal("Git visibility object count overflow".to_owned()))?;
+    Ok(
+        (proof_objects > crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS)
+            .then_some(GitVisibilityCapacity {
+                observed: proof_objects,
+                maximum: crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+            }),
+    )
+}
 
 /// Multipart threshold: xorbs larger than this use multipart upload.
 const XORB_MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
@@ -5487,6 +5525,298 @@ pub(crate) async fn repair_git_object_locator_if_current(
     Ok(stats.coverage_updated)
 }
 
+pub(crate) async fn repair_git_visibility_if_current(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<GitVisibilityPublication>> {
+    let (manifest, _) = read_manifest(store, router).await?;
+    if manifest.generation != required_generation {
+        return Ok(None);
+    }
+    if git_visibility_index_exists_for_manifest(store, router, &manifest).await? {
+        return Ok(Some(GitVisibilityPublication::Published));
+    }
+    if manifest.refs.is_empty() {
+        return Ok(Some(GitVisibilityPublication::Published));
+    }
+    if let Some(capacity) = git_visibility_capacity_exceeded(
+        read_bulk_pack_list(store, router, &manifest.pack_index_hash)
+            .await?
+            .iter(),
+        manifest.refs.len(),
+    )? {
+        return Ok(Some(GitVisibilityPublication::CompletePackOnly(capacity)));
+    }
+
+    // Visibility traversal depends on exact locator ranges but owns a separate
+    // manifest-generation lock. Finish locator repair before taking that lock
+    // so no cross-resource lock order can deadlock another publisher.
+    let _ =
+        repair_git_object_locator_if_current(store, router, required_generation, lock_ttl, cancel)
+            .await?;
+    let Some(mut lock) =
+        acquire_current_git_manifest_lock(store, router, required_generation, lock_ttl, cancel)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let repair = while_renewing_internal_lock(&mut lock, async {
+        let (current, _) = read_manifest(store, router).await?;
+        if current.generation != required_generation
+            || current.pack_index_hash != manifest.pack_index_hash
+            || current.git_validation_digest != manifest.git_validation_digest
+        {
+            return Ok(None);
+        }
+        if git_visibility_index_exists_for_manifest(store, router, &current).await? {
+            return Ok(Some(GitVisibilityPublication::Published));
+        }
+
+        let storage = store.as_storage().clone();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        let bucket = storage.bucket_identity();
+        let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+        let identity =
+            crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
+                .map_err(remote_git_visibility_error)?;
+        let operation_limits = crab_remote_git::OperationLimits {
+            max_logical_objects:
+                crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+            max_storage_requests:
+                crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS
+                    .saturating_mul(10),
+            max_fetched_bytes: 2 * 1024 * 1024 * 1024,
+            max_inflated_bytes: 2 * 1024 * 1024 * 1024,
+            ..crab_remote_git::OperationLimits::default()
+        };
+        let options = crab_remote_git::RepositoryOptions::new(
+            crab_remote_git::ObjectLimits::default(),
+            operation_limits,
+        )
+        .map_err(remote_git_visibility_error)?;
+        let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        let repository = crab_remote_git::RemoteGitRepository::open(
+            storage.clone(),
+            storage_router.clone(),
+            identity,
+            runtime,
+            options,
+            cancel,
+        )
+        .await
+        .map_err(remote_git_visibility_error)?;
+        let index = match repository.rebuild_visibility_index(cancel).await {
+            Ok(index) => index,
+            Err(crab_remote_git::Error::LimitExceeded {
+                limit: "visibility proof objects",
+                actual,
+                maximum,
+            }) => {
+                return Ok(Some(GitVisibilityPublication::CompletePackOnly(
+                    GitVisibilityCapacity {
+                        observed: actual,
+                        maximum,
+                    },
+                )));
+            }
+            Err(error) => return Err(remote_git_visibility_error(error)),
+        };
+        let (before_upload, _) = read_manifest(store, router).await?;
+        if before_upload.generation != required_generation
+            || before_upload.pack_index_hash != current.pack_index_hash
+            || before_upload.git_validation_digest != current.git_validation_digest
+        {
+            return Ok(None);
+        }
+        crab_metadata::git_visibility::upload_if_absent(&storage, &storage_router, &index)
+            .await
+            .map_err(CrabError::from)?;
+        let (after_upload, _) = read_manifest(store, router).await?;
+        if after_upload.generation != required_generation
+            || after_upload.pack_index_hash != current.pack_index_hash
+            || after_upload.git_validation_digest != current.git_validation_digest
+        {
+            return Ok(None);
+        }
+        Ok(Some(GitVisibilityPublication::Published))
+    })
+    .await;
+    let release = lock.release().await.map_err(CrabError::from);
+    match (repair, release) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            warn!(
+                error = %release_error,
+                "Git visibility lock release also failed after repair error"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn ensure_current_git_visibility(
+    store: &Store,
+    router: &StoreLayout,
+    lock_ttl: Duration,
+    max_retries: u32,
+    cancel: &CancellationToken,
+) -> Result<GitVisibilityPublication> {
+    for _ in 0..max_retries.max(1) {
+        check_cancelled(cancel)?;
+        let (current, _) = read_manifest(store, router).await?;
+        let Some(publication) =
+            repair_git_visibility_if_current(store, router, current.generation, lock_ttl, cancel)
+                .await?
+        else {
+            continue;
+        };
+        let (after, _) = read_manifest(store, router).await?;
+        if after.generation == current.generation
+            && after.pack_index_hash == current.pack_index_hash
+            && after.git_validation_digest == current.git_validation_digest
+        {
+            return Ok(publication);
+        }
+    }
+    Err(CrabError::CasConflict {
+        path: router.manifest_path().to_string(),
+        expected_etag: None,
+    })
+}
+
+async fn acquire_current_git_manifest_lock(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<PushLock>> {
+    let deadline =
+        Instant::now() + lock_ttl.saturating_mul(GIT_VISIBILITY_LOCK_WAIT_TTL_MULTIPLIER);
+    let mut attempt = 0;
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+    loop {
+        check_cancelled(cancel)?;
+        let (current, _) = read_manifest(store, router).await?;
+        if current.generation != required_generation {
+            return Ok(None);
+        }
+        match acquire_context
+            .acquire_internal(
+                router.repo_prefix(),
+                crab_coordination::GIT_MANIFEST_RESOURCE,
+                lock_ttl,
+            )
+            .await
+            .map_err(CrabError::from)
+        {
+            Ok(lock) => return Ok(Some(lock)),
+            Err(error @ CrabError::PushLockHeld { .. }) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                let delay = push_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    generation = required_generation,
+                    "current Git visibility generation is waiting for the manifest owner"
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn git_visibility_index_exists_for_manifest(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<bool> {
+    let storage = store.as_storage();
+    let storage_router =
+        crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+    match crab_metadata::git_visibility::read(
+        storage,
+        &storage_router,
+        manifest.generation,
+        &manifest.pack_index_hash,
+    )
+    .await
+    {
+        Ok(index) => {
+            ensure_git_visibility_matches_manifest(&index, manifest, router)?;
+            Ok(true)
+        }
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: StorageError::NotFound { .. },
+        }) => Ok(false),
+        Err(error) => Err(CrabError::from(error)),
+    }
+}
+
+fn ensure_git_visibility_matches_manifest(
+    index: &crab_metadata::git_visibility::GitVisibilityIndex,
+    manifest: &Manifest,
+    router: &StoreLayout,
+) -> Result<()> {
+    let matches = index.generation == manifest.generation
+        && index.pack_index_hash == manifest.pack_index_hash
+        && index.refs.keys().eq(manifest.refs.keys())
+        && manifest.refs.iter().all(|(name, tip)| {
+            index
+                .refs
+                .get(name)
+                .is_some_and(|objects| objects.binary_search(tip).is_ok())
+        })
+        && manifest.peeled_refs.iter().all(|(name, peeled)| {
+            index
+                .refs
+                .get(name)
+                .is_some_and(|objects| objects.binary_search(peeled).is_ok())
+        });
+    if matches {
+        return Ok(());
+    }
+    Err(CrabError::CorruptObject {
+        path: router
+            .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+            .as_ref()
+            .to_owned(),
+        reason: "Git visibility proof does not match its manifest refs".to_owned(),
+    })
+}
+
+fn remote_git_visibility_error(error: crab_remote_git::Error) -> CrabError {
+    match error {
+        crab_remote_git::Error::Storage(source) => CrabError::from(source),
+        crab_remote_git::Error::Metadata(source)
+        | crab_remote_git::Error::Manifest { source }
+        | crab_remote_git::Error::Inventory { source } => CrabError::from(source),
+        crab_remote_git::Error::Cancelled => CrabError::Cancelled,
+        crab_remote_git::Error::RepositoryIndexing { .. } => CrabError::CasConflict {
+            path: "Git visibility source generation".to_owned(),
+            expected_etag: None,
+        },
+        error => CrabError::CorruptObject {
+            path: "Git visibility source generation".to_owned(),
+            reason: error.to_string(),
+        },
+    }
+}
+
 async fn publish_uploaded_pack_locators(
     store: &Store,
     router: &StoreLayout,
@@ -6956,23 +7286,25 @@ impl PushPipeline {
         self.register_active_active_coordinator_for_bucket_gc(replication)
             .await?;
         upload_segmented_bulk(store, &self.router, bulk).await?;
-        // The coordinator owns ref publication, but the local helper still
-        // owns the immutable object-visibility proof used by v2 admission.
-        // Publish it before the coordinator can expose the candidate refs;
-        // a failure keeps v2 gated and remains repairable without weakening
-        // the existing push commit contract.
-        let visibility_proof_published =
-            match self.publish_git_visibility_index(manifest, store).await {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        generation = manifest.generation,
-                        "active-active push committed; Git visibility proof requires repair"
-                    );
-                    false
-                }
-            };
+        // The coordinator owns ref publication, but the local helper owns the
+        // immutable proof used by v2 admission. Supported repositories cannot
+        // cross that commit boundary after a transient publication failure.
+        let visibility_proof_published = match self
+            .publish_git_visibility_index(manifest, store)
+            .await
+        {
+            Ok(GitVisibilityPublication::Published) => true,
+            Ok(GitVisibilityPublication::CompletePackOnly(capacity)) => {
+                warn!(
+                    generation = manifest.generation,
+                    proof_objects = capacity.observed,
+                    maximum = capacity.maximum,
+                    "active-active push exceeds the synchronous Git visibility profile; complete-pack fetch remains available"
+                );
+                false
+            }
+            Err(error) => return Err(error),
+        };
         self.git_visibility_published.store(
             visibility_proof_published,
             std::sync::atomic::Ordering::Relaxed,
@@ -7256,15 +7588,51 @@ impl PushPipeline {
             });
         }
         // Evidence precedes the active marker so a sibling compactor can prove
-        // the ref. Failure retains the evidence-less repair path and withholds v2.
-        if let Err(error) = self
-            .publish_ref_visibility_edits(store, &current_snapshot.manifest, &current, &mut edits)
+        // the ref without this client's ODB. Only repositories outside the
+        // synchronous proof profile may intentionally commit without it.
+        let uploaded_packs = self
+            .uploaded_packs
+            .lock()
             .await
-        {
-            warn!(
-                %error,
-                "Git visibility evidence could not be published; ref commit remains repairable"
-            );
+            .iter()
+            .map(|uploaded| uploaded.entry.clone())
+            .collect::<Vec<_>>();
+        let visibility = if let Some(capacity) = git_visibility_capacity_exceeded(
+            current_snapshot
+                .journal
+                .packs
+                .iter()
+                .chain(uploaded_packs.iter()),
+            manifest.refs.len(),
+        )? {
+            GitVisibilityPublication::CompletePackOnly(capacity)
+        } else {
+            ensure_current_git_visibility(
+                store,
+                &self.router,
+                self.config.lock_ttl,
+                self.config.max_cas_retries,
+                &self.cancel,
+            )
+            .await?
+        };
+        match visibility {
+            GitVisibilityPublication::Published => {
+                self.publish_ref_visibility_edits(
+                    store,
+                    &current_snapshot.manifest,
+                    &current,
+                    &mut edits,
+                )
+                .await?;
+            }
+            GitVisibilityPublication::CompletePackOnly(capacity) => {
+                warn!(
+                    proof_objects = capacity.observed,
+                    maximum = capacity.maximum,
+                    "push exceeds the synchronous Git visibility profile; complete-pack fetch remains available"
+                );
+            }
         }
         let mut expected_heads = Vec::with_capacity(edits.len());
         let mut parents = BTreeMap::new();
@@ -7379,7 +7747,16 @@ impl PushPipeline {
                         .publish_git_visibility_index(&compacted_manifest, store)
                         .await
                     {
-                        Ok(()) => true,
+                        Ok(GitVisibilityPublication::Published) => true,
+                        Ok(GitVisibilityPublication::CompletePackOnly(capacity)) => {
+                            warn!(
+                                generation = compacted_manifest.generation,
+                                proof_objects = capacity.observed,
+                                maximum = capacity.maximum,
+                                "compacted repository exceeds the synchronous Git visibility profile; complete-pack fetch remains available"
+                            );
+                            false
+                        }
                         Err(error) => {
                             warn!(
                                 error = %error,
@@ -7418,16 +7795,23 @@ impl PushPipeline {
         let compacted_visibility = if compacted.refs.is_empty() {
             None
         } else {
-            Some(
-                crab_metadata::git_visibility::read(
-                    storage,
-                    &storage_router,
-                    compacted.generation,
-                    &compacted.pack_index_hash,
-                )
-                .await
-                .map_err(CrabError::from)?,
+            match crab_metadata::git_visibility::read(
+                storage,
+                &storage_router,
+                compacted.generation,
+                &compacted.pack_index_hash,
             )
+            .await
+            {
+                Ok(visibility) => {
+                    ensure_git_visibility_matches_manifest(&visibility, compacted, &self.router)?;
+                    Some(visibility)
+                }
+                Err(crab_metadata::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => None,
+                Err(error) => return Err(CrabError::from(error)),
+            }
         };
         let plans = edits
             .iter()
@@ -7534,25 +7918,34 @@ impl PushPipeline {
         &self,
         manifest: &Manifest,
         store: &crate::storage::store::Store,
-    ) -> Result<()> {
+    ) -> Result<GitVisibilityPublication> {
         if self.git_visibility_index_exists(manifest, store).await? {
-            return Ok(());
+            return Ok(GitVisibilityPublication::Published);
         }
-        let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
-        let packed_objects = packs
-            .iter()
-            .try_fold(0u64, |total, pack| total.checked_add(pack.object_count))
-            .ok_or_else(|| CrabError::Internal("Git pack object count overflow".to_owned()))?;
-        if packed_objects > MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS {
-            return Err(CrabError::Internal(format!(
-                "Git visibility proof deferred: {packed_objects} packed objects exceed the synchronous push budget of {MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS}"
-            )));
+        if let Some(capacity) = self
+            .git_visibility_capacity_exceeded(manifest, store)
+            .await?
+        {
+            return Ok(GitVisibilityPublication::CompletePackOnly(capacity));
         }
         let git_dir = self
             .git_dir_override()
             .map(Path::to_path_buf)
             .unwrap_or_else(crab_git::discover::discover_git_dir);
-        publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router).await
+        publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router).await?;
+        Ok(GitVisibilityPublication::Published)
+    }
+
+    async fn git_visibility_capacity_exceeded(
+        &self,
+        manifest: &Manifest,
+        store: &crate::storage::store::Store,
+    ) -> Result<Option<GitVisibilityCapacity>> {
+        if manifest.refs.is_empty() {
+            return Ok(None);
+        }
+        let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
+        git_visibility_capacity_exceeded(packs.iter(), manifest.refs.len())
     }
 
     async fn git_visibility_index_exists(
@@ -7560,23 +7953,7 @@ impl PushPipeline {
         manifest: &Manifest,
         store: &crate::storage::store::Store,
     ) -> Result<bool> {
-        let storage = store.as_storage();
-        let storage_router =
-            crab_storage::StoreLayout::new(storage.clone(), self.router.repo_prefix().to_owned());
-        match crab_metadata::git_visibility::read(
-            storage,
-            &storage_router,
-            manifest.generation,
-            &manifest.pack_index_hash,
-        )
-        .await
-        {
-            Ok(_) => Ok(true),
-            Err(crab_metadata::error::MetadataError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => Ok(false),
-            Err(error) => return Err(CrabError::from(error)),
-        }
+        git_visibility_index_exists_for_manifest(store, &self.router, manifest).await
     }
 
     async fn record_current_git_visibility(
@@ -14742,7 +15119,7 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     git_dir: &Path,
     manifest: &Manifest,
 ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+    if manifest.refs.is_empty() {
         return Ok(crab_metadata::git_visibility::GitVisibilityIndex::new(
             manifest.generation,
             manifest.pack_index_hash.clone(),
@@ -16310,7 +16687,8 @@ mod tests {
     #[derive(Debug)]
     struct DelayedFailurePutStore {
         inner: object_store::memory::InMemory,
-        fail_path: Path,
+        fail_path: Option<Path>,
+        fail_path_prefix: Option<String>,
         delay: std::time::Duration,
         completed_puts: Arc<AtomicUsize>,
     }
@@ -16323,10 +16701,35 @@ mod tests {
         ) -> Self {
             Self {
                 inner: object_store::memory::InMemory::new(),
-                fail_path,
+                fail_path: Some(fail_path),
+                fail_path_prefix: None,
                 delay,
                 completed_puts,
             }
+        }
+
+        fn for_prefix(
+            fail_path_prefix: String,
+            delay: std::time::Duration,
+            completed_puts: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                inner: object_store::memory::InMemory::new(),
+                fail_path: None,
+                fail_path_prefix: Some(fail_path_prefix),
+                delay,
+                completed_puts,
+            }
+        }
+
+        fn matches(&self, location: &Path) -> bool {
+            self.fail_path
+                .as_ref()
+                .is_some_and(|path| location.as_ref() == path.as_ref())
+                || self
+                    .fail_path_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| location.as_ref().starts_with(prefix))
         }
     }
 
@@ -16344,7 +16747,7 @@ mod tests {
             payload: PutPayload,
             opts: PutOptions,
         ) -> object_store::Result<PutResult> {
-            if location.as_ref() == self.fail_path.as_ref() {
+            if self.matches(location) {
                 return Err(object_store::Error::NotFound {
                     path: location.to_string(),
                     source: Box::<dyn std::error::Error + Send + Sync>::from("injected missing"),
@@ -16874,6 +17277,45 @@ mod tests {
             ref_tips,
             object_count: 1,
         }
+    }
+
+    #[test]
+    fn git_visibility_capacity_deduplicates_packs_and_reports_complete_pack_fallback() {
+        let mut pack = pack_manifest_entry_with_tips(Vec::new());
+        pack.object_count =
+            crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS.saturating_add(1);
+
+        let capacity = git_visibility_capacity_exceeded([&pack, &pack], 1)
+            .expect("count packs")
+            .expect("oversized repository should use complete-pack fallback");
+
+        assert_eq!(capacity.observed, pack.object_count);
+        assert_eq!(
+            capacity.maximum,
+            crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS
+        );
+    }
+
+    #[test]
+    fn git_visibility_must_match_manifest_refs() {
+        let (_, router) = test_store_router("visibility-manifest-match");
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 3;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        manifest.seal_git_validation();
+        let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            manifest.generation,
+            manifest.pack_index_hash.clone(),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
+        );
+
+        assert!(matches!(
+            ensure_git_visibility_matches_manifest(&index, &manifest, &router),
+            Err(CrabError::CorruptObject { .. })
+        ));
     }
 
     #[test]
@@ -17823,12 +18265,19 @@ mod tests {
             .apply_decisions_with_sha_map(&decisions, false, &sha_map)
             .await
             .expect("build candidate");
+        upload_segmented_bulk(&store, &router, &bulk)
+            .await
+            .expect("publish concurrent pack inventory");
 
         let (mut concurrent, etag) = read_manifest(&store, &router)
             .await
             .expect("read concurrent base");
-        let concurrent_main = "f".repeat(40);
+        let concurrent_main = sha_map
+            .get("refs/heads/main")
+            .cloned()
+            .expect("resolved concurrent main");
         concurrent.generation += 1;
+        concurrent.pack_index_hash = candidate.pack_index_hash.clone();
         concurrent
             .refs
             .insert("refs/heads/main".to_owned(), concurrent_main.clone());
@@ -18090,6 +18539,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn visibility_evidence_failure_does_not_commit_ref_marker() {
+        let _guard = GitDirGuard::new();
+        let repo_prefix = "visibility-evidence-failure";
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(DelayedFailurePutStore::for_prefix(
+                format!("{repo_prefix}/metadata/git-visibility-edits/"),
+                Duration::ZERO,
+                Arc::new(AtomicUsize::new(0)),
+            ));
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create initial manifest");
+
+        let result = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        )
+        .execute()
+        .await;
+
+        assert_ne!(
+            result.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok),
+            "proof publication failure must reject the ref"
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read failed push state");
+        assert!(snapshot.manifest.refs.is_empty());
+        assert!(snapshot.journal.transactions.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn next_writer_repairs_publication_cancelled_at_active_marker() {
         let _guard = GitDirGuard::new();
         let cancel = CancellationToken::new();
@@ -18288,6 +18784,74 @@ mod tests {
             .close()
             .await
             .expect("close repaired locator session");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upload_pack_repairs_missing_visibility_for_current_manifest_generation() {
+        let _guard = GitDirGuard::new();
+        let repo_prefix = "upload-pack-visibility-repair";
+        let (store, router) = test_store_router(repo_prefix);
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        let pushed = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        )
+        .execute()
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok)
+        );
+
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read pushed manifest");
+        let visibility_path =
+            router.git_visibility_path(manifest.generation, &manifest.pack_index_hash);
+        store
+            .delete(&visibility_path)
+            .await
+            .expect("remove derived visibility proof");
+        assert!(matches!(
+            store.head(&visibility_path).await,
+            Err(CrabError::NotFound { .. })
+        ));
+
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "upload-pack admission should rebuild current visibility from locator-backed objects"
+        );
+        let repaired = crab_metadata::git_visibility::read(
+            store.as_storage(),
+            &crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned()),
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        .expect("read repaired visibility proof");
+        assert!(repaired.refs.keys().eq(manifest.refs.keys()));
+        assert!(manifest.refs.iter().all(|(name, tip)| {
+            repaired
+                .refs
+                .get(name)
+                .is_some_and(|objects| objects.binary_search(tip).is_ok())
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -35,6 +35,18 @@ pub enum AuthServerError {
     #[error("hash mismatch: requested {requested}, actual {actual}")]
     HashMismatch { requested: String, actual: String },
 
+    #[error("Git visibility traversal failed")]
+    GitVisibilityWalk {
+        #[source]
+        source: crab_git::walk::WalkError,
+    },
+
+    #[error("Git visibility traversal task failed")]
+    GitVisibilityJoin {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+
     #[error("incomplete shard reconstruction for {file_hash}")]
     IncompleteShardReconstruction {
         file_hash: String,

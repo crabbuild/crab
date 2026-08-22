@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crab_auth::{PushFinalizeResponse, PushRefUpdate};
 
+use super::GitVisibilityPublication;
 use super::{
     PreparedViewScope, ReceiveContext, ReceiveManifestCommit, build_service_candidate_manifest,
     commit_receive_manifest, commit_service_git_locators, commit_service_metadata,
@@ -130,6 +131,17 @@ pub async fn commit_receive(
         &materialized,
     )
     .await?;
+    let visibility_publication =
+        publish_git_visibility_index(ctx.store(), ctx.router(), &manifest).await?;
+    if let GitVisibilityPublication::CompletePackOnly { observed, maximum } = visibility_publication
+    {
+        tracing::warn!(
+            generation = manifest.generation,
+            proof_objects = observed,
+            maximum,
+            "protected push exceeds the Git visibility proof profile; complete-pack fetch remains available"
+        );
+    }
     let committed_shards = if manifest.shard_index_hash.is_empty() {
         Vec::new()
     } else {
@@ -156,6 +168,7 @@ pub async fn commit_receive(
             materialized: &materialized,
             manifest: &manifest,
             base_etag: base.as_ref().map(|state| state.etag()),
+            visibility_proof_published: visibility_publication.is_published(),
         },
     )
     .await?;
@@ -222,13 +235,6 @@ pub async fn commit_receive(
             None
         }
     };
-    if let Err(error) = publish_git_visibility_index(ctx.store(), ctx.router(), &manifest).await {
-        tracing::warn!(
-            error = %error,
-            generation = manifest.generation,
-            "protected push committed; Git visibility proof requires repair"
-        );
-    }
     if let (Some(file_index_digest), Some(git_object_locator_digest)) =
         (file_index_digest, git_object_locator_digest)
         && let Err(error) = write_service_generation_index_receipt(
@@ -811,6 +817,20 @@ mod tests {
             .get("refs/heads/main")
             .ok_or_else(|| invalid("test final ref missing"))?;
         assert_eq!(final_oid, &final_update.new_oid);
+        let visibility = crab_metadata::git_visibility::read(
+            ctx.store(),
+            ctx.router(),
+            final_state.manifest().generation,
+            &final_state.manifest().pack_index_hash,
+        )
+        .await?;
+        assert!(
+            visibility
+                .refs
+                .get("refs/heads/main")
+                .is_some_and(|objects| objects.binary_search(final_oid).is_ok()),
+            "the visibility proof must be durable when the protected ref commits"
+        );
 
         let committed_packs = manifest_store::read_bulk_pack_list(
             ctx.store(),

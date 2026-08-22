@@ -868,18 +868,35 @@ pub async fn install_manifest_packs(
     git_workspace::install_manifest_packs(store, router, manifest, git_dir).await
 }
 
-/// Publishes the complete Git object visibility proof for a committed view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitVisibilityPublication {
+    Published,
+    CompletePackOnly { observed: usize, maximum: usize },
+}
+
+enum GitVisibilityBuildError {
+    Prepare(AuthServerError),
+    Walk(crab_git::walk::WalkError),
+}
+
+impl GitVisibilityPublication {
+    #[must_use]
+    pub(crate) const fn is_published(self) -> bool {
+        matches!(self, Self::Published)
+    }
+}
+
+/// Publishes the complete Git object visibility proof from canonical packs.
 ///
-/// The proof is intentionally built from the same immutable packs named by
-/// the committed manifest. A failure leaves the manifest usable for legacy
-/// reads while keeping protocol-v2 advertisement gated.
-pub async fn publish_git_visibility_index(
+/// The proof is built from the same immutable packs named by the candidate
+/// manifest and may therefore be published before the manifest commit.
+pub(crate) async fn publish_git_visibility_index(
     store: &Store,
     router: &StoreLayout<Store>,
     manifest: &Manifest,
-) -> Result<()> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
-        return Ok(());
+) -> Result<GitVisibilityPublication> {
+    if manifest.refs.is_empty() {
+        return Ok(GitVisibilityPublication::Published);
     }
 
     let temp = tempfile::tempdir()?;
@@ -897,28 +914,57 @@ pub async fn publish_git_visibility_index(
     }
     install_manifest_packs(store, router, manifest, &git_dir).await?;
 
+    publish_git_visibility_index_from_git_dir(store, router, manifest, &git_dir).await
+}
+
+pub(crate) async fn publish_git_visibility_index_from_git_dir(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    manifest: &Manifest,
+    git_dir: &Path,
+) -> Result<GitVisibilityPublication> {
+    if manifest.refs.is_empty() {
+        return Ok(GitVisibilityPublication::Published);
+    }
+
     let refs = manifest
         .refs
         .iter()
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
-    let git_dir_for_walk = git_dir.clone();
-    let closures = tokio::task::spawn_blocking(move || {
-        let peeled = derive_peeled_refs(&git_dir_for_walk, &refs)?;
-        crab_git::walk::walk_reachable_by_ref_bounded(
+    let git_dir_for_walk = git_dir.to_owned();
+    let walk = tokio::task::spawn_blocking(move || {
+        let peeled = derive_peeled_refs(&git_dir_for_walk, &refs)
+            .map_err(GitVisibilityBuildError::Prepare)?;
+        let closures = crab_git::walk::walk_reachable_by_ref_bounded(
             &git_dir_for_walk,
             &refs,
             &peeled,
-            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize,
+            crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS as usize,
         )
-        .map(|closures| (closures, peeled))
-        .map_err(|error| invalid(format!("Git visibility walk failed: {error}")))
+        .map_err(GitVisibilityBuildError::Walk)?;
+        Ok::<_, GitVisibilityBuildError>(closures)
     })
     .await
-    .map_err(|error| invalid(format!("Git visibility walk join failed: {error}")))??;
+    .map_err(|source| AuthServerError::GitVisibilityJoin { source })?;
+    let closures = match walk {
+        Ok(closures) => closures,
+        Err(GitVisibilityBuildError::Walk(crab_git::walk::WalkError::LimitExceeded {
+            actual,
+            maximum,
+        })) => {
+            return Ok(GitVisibilityPublication::CompletePackOnly {
+                observed: actual,
+                maximum,
+            });
+        }
+        Err(GitVisibilityBuildError::Walk(source)) => {
+            return Err(AuthServerError::GitVisibilityWalk { source });
+        }
+        Err(GitVisibilityBuildError::Prepare(error)) => return Err(error),
+    };
 
     let refs = closures
-        .0
         .into_iter()
         .map(|(name, closure)| {
             let mut objects = BTreeSet::new();
@@ -936,7 +982,8 @@ pub async fn publish_git_visibility_index(
     );
     crab_metadata::git_visibility::upload_if_absent(store, router, &index)
         .await
-        .map_err(AuthServerError::from)
+        .map_err(AuthServerError::from)?;
+    Ok(GitVisibilityPublication::Published)
 }
 
 fn path_str(path: &Path) -> Result<&str> {

@@ -18,6 +18,7 @@ mod runtime;
 mod snapshot;
 mod state;
 mod traversal;
+mod visibility;
 
 pub use budget::BudgetDimension;
 pub use crab_metadata::git_visibility::GitVisibilityIndex;

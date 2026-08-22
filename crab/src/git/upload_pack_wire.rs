@@ -79,7 +79,47 @@ pub async fn snapshot_available(
     let Ok(repository) = open_repository(store, prefix, cancellation).await else {
         return false;
     };
-    repository.visibility_index(cancellation).await.is_ok()
+    match repository.visibility_index(cancellation).await {
+        Ok(_) => true,
+        Err(error) if visibility_index_is_missing(&error) => {
+            let repair_store = crate::storage::Store::from_storage(store.clone());
+            let repair_layout =
+                crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+            match super::push::repair_git_visibility_if_current(
+                &repair_store,
+                &repair_layout,
+                repository.generation(),
+                LOCATOR_READ_REPAIR_LOCK_TTL,
+                cancellation,
+            )
+            .await
+            {
+                Ok(Some(super::push::GitVisibilityPublication::Published)) => {
+                    let Ok(repository) = open_repository(store, prefix, cancellation).await else {
+                        return false;
+                    };
+                    repository.visibility_index(cancellation).await.is_ok()
+                }
+                Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => {
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "current Git visibility repair failed");
+                    false
+                }
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn visibility_index_is_missing(error: &RemoteGitError) -> bool {
+    matches!(
+        error,
+        RemoteGitError::Metadata(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        })
+    )
 }
 
 pub(crate) fn hidden_ref_patterns_are_valid(patterns: &[String]) -> bool {

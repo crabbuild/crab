@@ -51,6 +51,8 @@ pub enum OperationKind {
     Archive,
     /// Protocol-v2 upload-pack generation.
     UploadPack,
+    /// Rebuild of generation-bound ref visibility from canonical objects.
+    Visibility,
     /// Symbolic-link target metadata.
     Symlink,
     /// Submodule gitlink metadata.
@@ -75,6 +77,7 @@ impl OperationKind {
             Self::Blame => "blame",
             Self::Archive => "archive",
             Self::UploadPack => "upload_pack",
+            Self::Visibility => "visibility",
             Self::Symlink => "symlink",
             Self::Submodule => "submodule",
         }

@@ -462,13 +462,7 @@ async fn publish_filtered_view(
     .await?;
     let pack = upload_view_git_pack(store, &router, filtered_git, &refs).await?;
     let packs_for_index: Vec<PackManifestEntry> = pack.iter().cloned().collect();
-    let gc_registry_generation = crab_metadata::ref_registry::union_register_repo_shards(
-        store,
-        &router,
-        uploaded_crab.shard_hashes.clone(),
-    )
-    .await?;
-    let manifest = write_view_manifest(
+    let manifest = prepare_view_manifest(
         store,
         &router,
         view_generation,
@@ -479,6 +473,30 @@ async fn publish_filtered_view(
         pack,
     )
     .await?;
+    let visibility_publication = crate::receive::publish_git_visibility_index_from_git_dir(
+        store,
+        &router,
+        &manifest,
+        filtered_git,
+    )
+    .await?;
+    if let crate::receive::GitVisibilityPublication::CompletePackOnly { observed, maximum } =
+        visibility_publication
+    {
+        tracing::warn!(
+            generation = manifest.generation,
+            proof_objects = observed,
+            maximum,
+            "ACL view exceeds the Git visibility proof profile; complete-pack fetch remains available"
+        );
+    }
+    let gc_registry_generation = crab_metadata::ref_registry::union_register_repo_shards(
+        store,
+        &router,
+        uploaded_crab.shard_hashes.clone(),
+    )
+    .await?;
+    create_manifest(store, &router, &manifest).await?;
     let file_index_digest = match commit_view_metadb(
         store,
         &router,
@@ -516,15 +534,6 @@ async fn publish_filtered_view(
             None
         }
     };
-    if let Err(error) =
-        crate::receive::publish_git_visibility_index(store, &router, &manifest).await
-    {
-        tracing::warn!(
-            error = %error,
-            generation = manifest.generation,
-            "ACL view committed; Git visibility proof requires repair"
-        );
-    }
     if let (Some(file_index_digest), Some(git_object_locator_digest)) =
         (file_index_digest, git_object_locator_digest)
         && let Err(error) = crate::receive::write_service_generation_index_receipt(
@@ -598,7 +607,7 @@ fn view_store_layout(store: &Store, repo_prefix: &str) -> StoreLayout {
     )
 }
 
-async fn write_view_manifest(
+async fn prepare_view_manifest(
     store: &Store,
     router: &StoreLayout,
     generation: u64,
@@ -635,7 +644,6 @@ async fn write_view_manifest(
     // View packs are generated from the already validated source workspace;
     // bind the final filtered refs and compacted inventory atomically.
     manifest.seal_git_validation();
-    create_manifest(store, router, &manifest).await?;
     Ok(manifest)
 }
 
@@ -847,7 +855,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let source_manifest = write_view_manifest(
+        let source_manifest = prepare_view_manifest(
             &store,
             &source_router,
             1,
@@ -859,6 +867,9 @@ mod tests {
         )
         .await
         .unwrap();
+        create_manifest(&store, &source_router, &source_manifest)
+            .await
+            .unwrap();
         commit_view_metadb(
             &store,
             &source_router,
@@ -935,6 +946,20 @@ mod tests {
 
         let view_router = view_store_layout(&store, view_prefix);
         let (manifest, _) = read_manifest(&store, &view_router).await.unwrap();
+        let visibility = crab_metadata::git_visibility::read(
+            &store,
+            &view_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        .unwrap();
+        assert!(manifest.refs.iter().all(|(name, tip)| {
+            visibility
+                .refs
+                .get(name)
+                .is_some_and(|objects| objects.binary_search(tip).is_ok())
+        }));
         let packs = read_bulk_pack_list(&store, &view_router, &manifest.pack_index_hash)
             .await
             .unwrap();

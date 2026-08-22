@@ -15,7 +15,7 @@ use crab_storage::{Store, StoreLayout};
 
 use super::{
     ActiveActiveReceiveConfig, MaterializedSourcePush, ProtectedPushPlan,
-    active_active_coordinator_registration, non_empty, publish_git_visibility_index,
+    active_active_coordinator_registration, non_empty,
 };
 use crate::error::{AuthServerError, Result};
 
@@ -27,6 +27,7 @@ pub struct ReceiveManifestCommit<'a> {
     pub materialized: &'a MaterializedSourcePush,
     pub manifest: &'a Manifest,
     pub base_etag: Option<&'a str>,
+    pub visibility_proof_published: bool,
 }
 
 /// Commits a finalized receive manifest through normal CAS or active-active coordination.
@@ -69,25 +70,13 @@ async fn commit_active_active_manifest(
             force: false,
         })
         .collect::<Vec<_>>();
-    let visibility_proof_published =
-        match publish_git_visibility_index(store, router, commit.manifest).await {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    generation = commit.manifest.generation,
-                    "active-active protected push committed; Git visibility proof requires repair"
-                );
-                false
-            }
-        };
     let uploaded_objects = active_active_uploaded_objects(
         store,
         router,
         commit.plan,
         commit.materialized,
         commit.manifest,
-        visibility_proof_published,
+        commit.visibility_proof_published,
     )
     .await?;
     let push_plan = coordination_active_active::plan_active_active_push(
@@ -279,6 +268,7 @@ mod tests {
                 materialized: &materialized,
                 manifest: &candidate,
                 base_etag: None,
+                visibility_proof_published: false,
             },
         )
         .await
