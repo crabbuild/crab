@@ -196,30 +196,7 @@ impl PushAdmissionTicket {
                 origin: "cannot renew an unadmitted push contender".to_owned(),
             });
         }
-        for (path, etag) in &mut self.leases {
-            let object_path = Path::from(path.as_str());
-            let (body, version, _) = get_with_version_and_modified(&self.store, &object_path)
-                .await
-                .map_err(|source| store_error(path, source))?;
-            let payload = deserialize_payload(path, &body)?;
-            if payload.holder != self.holder || payload.is_released() {
-                return Err(expired_ticket(path));
-            }
-            let body = serialize_payload(
-                path,
-                &PushLockPayload::new(
-                    &self.holder,
-                    unix_now().saturating_add(self.lease_ttl.as_secs()),
-                    self.lease_ttl.as_secs(),
-                ),
-            )?;
-            *etag = Some(
-                update(&self.store, &object_path, body, version)
-                    .await
-                    .map_err(|source| store_error(path, source))?,
-            );
-        }
-        Ok(())
+        self.update_lease_duration(self.lease_ttl).await
     }
 
     /// Releases this writer's slots for other pushes.
@@ -227,6 +204,25 @@ impl PushAdmissionTicket {
         let result = self.release_acquired().await;
         self.released = result.is_ok();
         result
+    }
+
+    /// Leaves the acquired slots unavailable for a bounded backend cooldown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ticket is not admitted, the cooldown is less
+    /// than one second, ownership changed, or a slot update fails.
+    pub async fn cool_down(mut self, cooldown: Duration) -> Result<()> {
+        if !self.is_admitted() {
+            return Err(CoordinationError::Configuration {
+                key: self.prefix.clone(),
+                origin: "cannot cool down an unadmitted push contender".to_owned(),
+            });
+        }
+        validate_ttl(cooldown)?;
+        self.update_lease_duration(cooldown).await?;
+        self.released = true;
+        Ok(())
     }
 
     /// Returns the permit lifetime used for active renewal.
@@ -278,6 +274,33 @@ impl PushAdmissionTicket {
     async fn abort_partial<T>(&mut self, error: CoordinationError) -> Result<T> {
         self.release_acquired().await?;
         Err(error)
+    }
+
+    async fn update_lease_duration(&mut self, duration: Duration) -> Result<()> {
+        for (path, etag) in &mut self.leases {
+            let object_path = Path::from(path.as_str());
+            let (body, version, _) = get_with_version_and_modified(&self.store, &object_path)
+                .await
+                .map_err(|source| store_error(path, source))?;
+            let payload = deserialize_payload(path, &body)?;
+            if payload.holder != self.holder || payload.is_released() {
+                return Err(expired_ticket(path));
+            }
+            let body = serialize_payload(
+                path,
+                &PushLockPayload::new(
+                    &self.holder,
+                    unix_now().saturating_add(duration.as_secs()),
+                    duration.as_secs(),
+                ),
+            )?;
+            *etag = Some(
+                update(&self.store, &object_path, body, version)
+                    .await
+                    .map_err(|source| store_error(path, source))?,
+            );
+        }
+        Ok(())
     }
 
     async fn backend_now(&mut self) -> Result<i64> {
@@ -573,6 +596,26 @@ mod tests {
                 .unwrap()
                 .is_released()
         );
+    }
+
+    #[tokio::test]
+    async fn cooldown_leaves_owned_slot_live_for_backend_retry_window() {
+        let store = memory_store();
+        let mut ticket = contender(&store, 1, Duration::from_secs(60));
+        assert!(ticket.try_admit().await.unwrap());
+        let path = Path::from(push_admission_slot_path(
+            &push_admission_prefix("org/repo").unwrap(),
+            0,
+        ));
+
+        ticket.cool_down(Duration::from_secs(2)).await.unwrap();
+
+        let body = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let payload = deserialize_payload(path.as_ref(), &body).unwrap();
+        assert_eq!((payload.is_released(), payload.lease_secs), (false, 2));
+        crate::push_lock::release_if_holder(&store, path.as_ref(), &payload.holder)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

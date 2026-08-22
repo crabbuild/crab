@@ -2542,9 +2542,12 @@ const PUSH_LOCK_SUCCESSOR_POLL_CAP: Duration = Duration::from_millis(250);
 // concurrency while a wider client consumes proportionally more capacity.
 const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT: usize = 8;
+const PUSH_ADMISSION_MEMORY_SLOTS: usize = PUSH_ADMISSION_SLOTS - 1;
+const PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT: u64 = 64 * 1024 * 1024;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
+const PUSH_ADMISSION_THROTTLE_COOLDOWN: Duration = Duration::from_secs(1);
 const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = PUSH_ADMISSION_SLOTS;
 const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
@@ -3147,14 +3150,28 @@ fn push_admission_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     Duration::from_nanos(pick)
 }
 
-fn push_admission_required_slots(upload_concurrency: usize, has_xorb_work: bool) -> usize {
-    if !has_xorb_work {
+fn push_admission_required_slots(upload_concurrency: usize, planned_xorb_bytes: u64) -> usize {
+    if planned_xorb_bytes == 0 {
         return 1;
     }
-    upload_concurrency
+    let worker_slots = upload_concurrency
         .max(1)
         .div_ceil(PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT)
-        .clamp(1, PUSH_ADMISSION_SLOTS)
+        .clamp(1, PUSH_ADMISSION_SLOTS);
+    let upload_memory_limit = u64::try_from(XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT)
+        .unwrap_or(PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT);
+    let memory_bytes = planned_xorb_bytes.min(upload_memory_limit);
+    let memory_slots = memory_bytes
+        .div_ceil(PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT)
+        .clamp(1, PUSH_ADMISSION_MEMORY_SLOTS as u64) as usize;
+    worker_slots.max(memory_slots)
+}
+
+fn push_admission_throttle_cooldown(retry_after: Option<Duration>, ttl: Duration) -> Duration {
+    retry_after
+        .unwrap_or(PUSH_ADMISSION_THROTTLE_COOLDOWN)
+        .max(Duration::from_secs(1))
+        .min(ttl)
 }
 
 /// Structured reject reason for a per-ref push failure.
@@ -3913,6 +3930,9 @@ pub struct PushPipeline {
     /// Step 5 only packs chunks in this set. Empty means "pack all"
     /// (fallback when classification didn't run).
     new_chunk_hashes: tokio::sync::Mutex<Option<std::collections::HashSet<MerkleHash>>>,
+    /// Estimated bytes that can enter the xorb pack/upload memory window.
+    /// Classification owns this value; repository admission reads it once.
+    planned_xorb_bytes: std::sync::atomic::AtomicU64,
     /// Xorb payloads retained until `post_success_cleanup` can warm
     /// local and remote caches. Large payloads stay temp-file backed
     /// here so a successful upload does not pin all pushed bytes until
@@ -5434,7 +5454,17 @@ async fn while_admitted_until_commit<T>(
     loop {
         tokio::select! {
             result = &mut operation => {
-                if let Err(error) = permit.release().await {
+                let cooldown = match (&result, &renewal_error) {
+                    (Err(CrabError::Throttled { retry_after }), None) => Some(
+                        push_admission_throttle_cooldown(*retry_after, permit.ttl())
+                    ),
+                    _ => None,
+                };
+                let release_result = match cooldown {
+                    Some(cooldown) => permit.cool_down(cooldown).await,
+                    None => permit.release().await,
+                };
+                if let Err(error) = release_result {
                     warn!(error = %error, "push admission ticket release failed");
                 }
                 return match (result, renewal_error) {
@@ -6425,6 +6455,7 @@ impl PushPipeline {
             connectivity_frontier_tips: tokio::sync::Mutex::new(Vec::new()),
             uploaded_shard_hashes: tokio::sync::Mutex::new(Vec::new()),
             new_chunk_hashes: tokio::sync::Mutex::new(None),
+            planned_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
             uploaded_xorbs: tokio::sync::Mutex::new(Vec::new()),
             chunk_cache: tokio::sync::Mutex::new(HashMap::new()),
             add_push_plans: tokio::sync::Mutex::new(HashMap::new()),
@@ -10155,6 +10186,22 @@ impl PushPipeline {
         let prepared_chunks = placement_map.len();
         let existing_chunks = verified_placement.len();
         let residual_chunk_count = residual_chunks.len();
+        let residual_bytes = needed_plans
+            .iter()
+            .flat_map(|(_, _, chunks)| chunks)
+            .filter(|(hash, _)| residual_chunks.contains(hash))
+            .fold(HashMap::new(), |mut sizes, (hash, size)| {
+                sizes.entry(*hash).or_insert(*size);
+                sizes
+            })
+            .into_values()
+            .fold(0u64, u64::saturating_add);
+        self.planned_xorb_bytes.store(
+            u64::try_from(prepared_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(residual_bytes),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         *self.chunk_placement.lock().await = placement_map;
         *self.xorbs.lock().await = xorb_results;
@@ -10218,6 +10265,8 @@ impl PushPipeline {
     ///
     /// Only class-C chunks proceed to step 5 for xorb packing.
     async fn classify_chunks(&self) -> Result<()> {
+        self.planned_xorb_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.verified_existing_placement.lock().await.clear();
         self.verified_existing_xorb_info.lock().await.clear();
 
@@ -10451,11 +10500,13 @@ impl PushPipeline {
             },
             "step 4: chunk classification complete"
         );
+        let new_bytes = new_set
+            .iter()
+            .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
+            .sum::<u64>();
+        self.planned_xorb_bytes
+            .store(new_bytes, std::sync::atomic::Ordering::Relaxed);
         if let Some(metrics) = &self.metrics {
-            let new_bytes = new_set
-                .iter()
-                .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
-                .sum::<u64>();
             metrics.set_dedup_metrics(&xet_data::deduplication::DeduplicationMetrics {
                 total_bytes: occurrence_bytes,
                 deduped_bytes: occurrence_bytes.saturating_sub(new_bytes),
@@ -14991,19 +15042,12 @@ impl PushPipeline {
         (bytes, pointers.len() as u64)
     }
 
-    async fn push_admission_required_slots(&self) -> usize {
-        let classified_xorb_work = self
-            .new_chunk_hashes
-            .lock()
-            .await
-            .as_ref()
-            .map(|chunks| !chunks.is_empty());
-        let prepared_xorb_work = !self.xorbs.lock().await.is_empty();
-        let has_xorb_work = match classified_xorb_work {
-            Some(classified) => classified || prepared_xorb_work,
-            None => prepared_xorb_work || !self.pointers.lock().await.is_empty(),
-        };
-        push_admission_required_slots(self.config.upload_concurrency, has_xorb_work)
+    fn push_admission_required_slots(&self) -> usize {
+        push_admission_required_slots(
+            self.config.upload_concurrency,
+            self.planned_xorb_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     async fn execute_inner(&self) -> Result<PushResult> {
@@ -15117,7 +15161,7 @@ impl PushPipeline {
         // Ref ownership and the under-lock no-op recheck come before
         // repository-wide admission. Same-ref waiters cannot perform upload
         // work, so making them scan admission slots only amplifies contention.
-        let required_admission_slots = self.push_admission_required_slots().await;
+        let required_admission_slots = self.push_admission_required_slots();
         let admission_lock = if self.config.active_active_replication.is_none() {
             match self.store.as_ref() {
                 Some(store) => Some(
@@ -18614,17 +18658,38 @@ mod tests {
     }
 
     #[test]
-    fn push_admission_charges_xorb_worker_width() {
+    fn push_admission_charges_xorb_worker_width_and_memory() {
+        let upload_memory_limit =
+            u64::try_from(XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT).expect("memory limit fits u64");
         let slots = [
-            push_admission_required_slots(64, false),
-            push_admission_required_slots(1, true),
-            push_admission_required_slots(8, true),
-            push_admission_required_slots(9, true),
-            push_admission_required_slots(40, true),
-            push_admission_required_slots(64, true),
+            push_admission_required_slots(64, 0),
+            push_admission_required_slots(1, 1),
+            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT),
+            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT + 1),
+            push_admission_required_slots(8, upload_memory_limit),
+            push_admission_required_slots(40, 1),
+            push_admission_required_slots(64, 1),
         ];
 
-        assert_eq!(slots, [1, 1, 1, 2, 5, 5]);
+        assert_eq!(slots, [1, 1, 1, 2, 4, 5, 5]);
+    }
+
+    #[test]
+    fn push_admission_throttle_cooldown_honors_hint_and_ttl() {
+        let ttl = Duration::from_secs(60);
+
+        assert_eq!(
+            push_admission_throttle_cooldown(None, ttl),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            push_admission_throttle_cooldown(Some(Duration::from_secs(3)), ttl),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            push_admission_throttle_cooldown(Some(Duration::from_secs(90)), ttl),
+            ttl
+        );
     }
 
     #[test]
@@ -20278,6 +20343,43 @@ mod tests {
         finish_tx.send(()).unwrap();
         operation.await.unwrap().unwrap();
         contender.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn throttled_push_keeps_admission_during_retry_window() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let mut permit = crab_coordination::PushAdmissionTicket::new(
+            store.inner(),
+            "repo",
+            1,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(permit.try_admit().await.unwrap());
+        let (_committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+
+        let result = while_admitted_until_commit(
+            permit,
+            async {
+                Err::<(), _>(CrabError::Throttled {
+                    retry_after: Some(Duration::from_secs(2)),
+                })
+            },
+            committed_rx,
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::Throttled { .. })));
+        let mut contender = crab_coordination::PushAdmissionTicket::new(
+            store.inner(),
+            "repo",
+            1,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(!contender.try_admit().await.unwrap());
     }
 
     #[tokio::test]
