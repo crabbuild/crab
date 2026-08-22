@@ -265,7 +265,12 @@ and current data share the bucket and account failure domain.
 `crab stat perf` is repository-local and cumulative. Collect it after pushes if
 you use it for cost trends; it is not a central metrics exporter. Correlate its
 upload, resume-probe, and metadb-flush counters with provider billing and
-RustFS/OpenTelemetry request metrics.
+RustFS/OpenTelemetry request metrics. Before committing to object storage as a
+team's Git backbone, run the concurrent-push RustFS harness with the intended
+writer count. Its push-bracketed HTTP-attempt and live-inventory snapshots give
+the request-class and storage inputs for the provider's current price sheet;
+repeat against the production provider because latency, retries, LIST paging,
+minimum object sizes, and transfer rates are topology-specific.
 
 ### Current verification limits
 
@@ -279,15 +284,21 @@ RustFS/OpenTelemetry request metrics.
   incomplete uploads.
 - Locator or visibility acceleration damage is reported rather than rebuilt by
   `fsck`; use `crab metadb rebuild` and verify again.
-- Cross-ref fan-out can commit every ref while post-commit Git locator or
-  visibility publication loses its shared writer lease or lacks another
-  writer's objects. Treat `Git locator coverage is stale` and `Git visibility
-  proof unavailable` from `crab doctor --metadb` as repair-required, then run
-  `crab metadb rebuild`. Do not use `fsck` success alone as proof that these
-  accelerators are current.
-- Short-lived Git helper processes do not remain alive for SlateDB's periodic
-  garbage collector. Track metadb object growth and schedule a supported
-  cleanup workflow before high-volume production use.
+- Cross-ref fan-out publishes immutable per-ref visibility evidence before the
+  ref journal commit. The compaction owner combines every writer's evidence and
+  publishes the generation proof before advancing the compacted manifest, so
+  it does not need sibling pack bodies in its local Git ODB. Evidence-less
+  transactions from older clients, failed evidence uploads, or a lost locator
+  writer lease remain repair cases. Treat `Git locator coverage is stale` and
+  `Git visibility proof unavailable` from `crab doctor --metadb` as
+  repair-required, then run `crab metadb rebuild`. Do not use `fsck` success
+  alone as proof that these accelerators are current.
+- Git locator writers suppress SlateDB's immediate background garbage-collector
+  scan and run one foreground collection pass when exact coverage crosses
+  each 32-generation boundary. Continue tracking metadb object growth: the
+  dependency still performs boundary reads during normal manifest and
+  compaction transactions, and collection retains objects younger than five
+  minutes.
 - Client-side mirror hooks are bypassable and GitHub/GitLab and Crab ref
   updates are not one transaction. Enforce pointer availability in CI and
   alert on ref divergence.

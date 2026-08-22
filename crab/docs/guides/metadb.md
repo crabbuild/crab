@@ -224,6 +224,13 @@ tombstones, then closes it. Code-only and no-op pushes do not open a metadata
 writer. This prevents a large push from holding the bucket-global writer fence
 during classification and upload.
 
+The Git object locator uses the same short-lived writer model. It disables
+SlateDB's periodic collector because the dependency's first timer tick would
+scan remote state on every publication. A writer that advances exact locator
+coverage across a 32-generation boundary instead runs one foreground collection
+after its reader checkpoint is published and the database is closed. SlateDB's
+five-minute minimum age remains in force.
+
 If you are upgrading from a pre-spec build that wrote
 `{repo_prefix}/file-index/{hash}` objects, those legacy remote
 objects are garbage after the cutover and must be wiped manually

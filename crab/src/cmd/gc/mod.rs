@@ -986,6 +986,11 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     for pack in &snapshot.journal.packs {
         insert_pack_objects(router, &pack.pack_id, &mut reachable);
     }
+    for edit in &snapshot.journal.ordered_edits {
+        if let Some(hash) = &edit.visibility_evidence_hash {
+            reachable.insert(router.git_visibility_edit_path(hash).as_ref().to_owned());
+        }
+    }
     // Journal metadata is the recovery root when publication succeeded but
     // derived manifest compaction did not. GC may compact it only with the
     // same frontier protocol as writers.
@@ -2057,7 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn reachable_repo_objects_include_uncompacted_journal_pack_objects() {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::Arc;
 
         use object_store::memory::InMemory;
@@ -2081,6 +2086,21 @@ mod tests {
         let head = read_ref_journal_head(&store, &router, "refs/heads/side")
             .await
             .unwrap();
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let visibility_evidence_hash = crab_metadata::git_visibility::upload_edit(
+            store.as_storage(),
+            &storage_router,
+            &crab_metadata::git_visibility::GitVisibilityEdit::replacement(
+                None,
+                "b".repeat(40),
+                &BTreeSet::from(["b".repeat(40)]),
+            ),
+        )
+        .await
+        .unwrap();
         let pack_id = "c".repeat(64);
         let transaction = RefJournalTransaction::new(
             BTreeMap::from([("refs/heads/side".to_owned(), None)]),
@@ -2089,6 +2109,8 @@ mod tests {
                 old_oid: None,
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(visibility_evidence_hash.clone()),
             }],
             None,
             vec![PackManifestEntry {
@@ -2110,6 +2132,13 @@ mod tests {
             .unwrap();
 
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.pack")));
+        assert!(
+            reachable.contains(
+                router
+                    .git_visibility_edit_path(&visibility_evidence_hash)
+                    .as_ref()
+            )
+        );
     }
 
     #[tokio::test]

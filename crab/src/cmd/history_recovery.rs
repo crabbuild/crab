@@ -540,7 +540,7 @@ async fn apply_verified_history(
         (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
     };
 
-    let locator_rebuilt = rebuild_locator_inventory(store, router, &restored, verified)
+    let locator_rebuilt = rebuild_locator_inventory(store, router, &restored, verified, cancel)
         .await
         .map_or_else(
             |error| {
@@ -1110,6 +1110,7 @@ async fn rebuild_locator_inventory(
     router: &StoreLayout,
     restored: &Manifest,
     verified: &VerifiedHistory,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let shard_index_hash = manifest_hash_or_default(&restored.shard_index_hash)?;
     let pack_index_hash = manifest_hash_or_default(&restored.pack_index_hash)?;
@@ -1133,6 +1134,7 @@ async fn rebuild_locator_inventory(
             pack_index_hash,
         },
         RECOVERY_LOCK_TTL,
+        cancel,
     )
     .await?;
     Ok(())

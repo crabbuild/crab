@@ -22,6 +22,154 @@ const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
 /// Maximum number of ref-rooted object entries accepted in one proof.
 pub const MAX_GIT_VISIBILITY_OBJECTS: u64 = 10_000_000;
 
+/// Current serialized ref-update evidence format.
+pub const GIT_VISIBILITY_EDIT_VERSION: u32 = 1;
+
+/// Immutable visibility delta published before one ref update becomes visible.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitVisibilityEdit {
+    /// Schema version of this object.
+    pub version: u32,
+    /// Ref tip expected before the update, if the ref already exists.
+    pub old_oid: Option<String>,
+    /// Ref tip made visible by the update.
+    pub new_oid: String,
+    /// Whether `added` is the complete new closure rather than a delta.
+    pub replaces: bool,
+    /// Objects added to the prior closure, or the complete replacement closure.
+    pub added: Vec<String>,
+    /// Objects removed from the prior closure. Empty for replacement evidence.
+    pub removed: Vec<String>,
+}
+
+impl GitVisibilityEdit {
+    /// Build normalized evidence from complete old and new closures.
+    #[must_use]
+    pub fn delta(
+        old_oid: Option<String>,
+        new_oid: String,
+        old: &BTreeSet<String>,
+        new: &BTreeSet<String>,
+    ) -> Self {
+        Self {
+            version: GIT_VISIBILITY_EDIT_VERSION,
+            old_oid,
+            new_oid,
+            replaces: false,
+            added: new.difference(old).cloned().collect(),
+            removed: old.difference(new).cloned().collect(),
+        }
+    }
+
+    /// Build normalized evidence that replaces an unavailable prior closure.
+    #[must_use]
+    pub fn replacement(old_oid: Option<String>, new_oid: String, new: &BTreeSet<String>) -> Self {
+        Self {
+            version: GIT_VISIBILITY_EDIT_VERSION,
+            old_oid,
+            new_oid,
+            replaces: true,
+            added: new.iter().cloned().collect(),
+            removed: Vec::new(),
+        }
+    }
+
+    /// Validate the evidence before applying it to authorization state.
+    pub fn validate(&self) -> Result<()> {
+        if self.version != GIT_VISIBILITY_EDIT_VERSION {
+            return Err(corrupt("visibility edit version is unsupported"));
+        }
+        if let Some(old_oid) = &self.old_oid {
+            validate_oid(old_oid)?;
+        }
+        validate_oid(&self.new_oid)?;
+        if self.replaces && !self.removed.is_empty() {
+            return Err(corrupt(
+                "replacement visibility edit cannot contain removed objects",
+            ));
+        }
+        let object_count = self
+            .added
+            .len()
+            .checked_add(self.removed.len())
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or_else(|| corrupt("visibility edit object count overflows"))?;
+        if object_count > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt("visibility edit contains too many objects"));
+        }
+        validate_sorted_oids(&self.added, "added")?;
+        validate_sorted_oids(&self.removed, "removed")?;
+        if self
+            .added
+            .iter()
+            .any(|oid| self.removed.binary_search(oid).is_ok())
+        {
+            return Err(corrupt("visibility edit adds and removes the same object"));
+        }
+        if self.replaces && !self.added.iter().any(|oid| oid == &self.new_oid) {
+            return Err(corrupt("visibility edit does not add its new ref tip"));
+        }
+        Ok(())
+    }
+
+    /// Apply this evidence to an existing ref closure.
+    pub fn apply(&self, prior: Option<&[String]>) -> Result<Vec<String>> {
+        self.validate()?;
+        if !self.replaces && self.old_oid.is_some() && prior.is_none() {
+            return Err(corrupt("visibility delta has no prior ref closure"));
+        }
+        if !self.replaces
+            && let Some(old_oid) = &self.old_oid
+            && !prior.is_some_and(|objects| objects.binary_search(old_oid).is_ok())
+        {
+            return Err(corrupt(
+                "visibility delta prior closure does not contain its old ref tip",
+            ));
+        }
+        let mut objects = if self.replaces {
+            BTreeSet::new()
+        } else {
+            prior
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        for oid in &self.removed {
+            if !objects.remove(oid) {
+                return Err(corrupt(
+                    "visibility edit removes an object outside the prior closure",
+                ));
+            }
+        }
+        objects.extend(self.added.iter().cloned());
+        if objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt("visibility edit result contains too many objects"));
+        }
+        if !objects.contains(&self.new_oid) {
+            return Err(corrupt(
+                "visibility edit result does not contain its new ref tip",
+            ));
+        }
+        Ok(objects.into_iter().collect())
+    }
+}
+
+fn validate_sorted_oids(objects: &[String], field: &str) -> Result<()> {
+    let mut previous: Option<&str> = None;
+    for object in objects {
+        validate_oid(object)?;
+        if previous.is_some_and(|value| value >= object.as_str()) {
+            return Err(corrupt(format!(
+                "visibility edit {field} objects must be sorted and deduplicated"
+            )));
+        }
+        previous = Some(object.as_str());
+    }
+    Ok(())
+}
+
 /// Complete ref-rooted Git object visibility proof for one repository snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitVisibilityIndex {
@@ -190,11 +338,17 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 
 #[cfg(feature = "storage")]
 mod storage {
+    use std::collections::BTreeMap;
+
     use bytes::Bytes;
     use crab_storage::{StorageError, Store, StoreLayout};
 
-    use super::{GitVisibilityIndex, MAX_GIT_VISIBILITY_INDEX_BYTES};
+    use super::{
+        GitVisibilityEdit, GitVisibilityIndex, MAX_GIT_VISIBILITY_INDEX_BYTES, validate_hash,
+    };
     use crate::error::Result;
+    use crate::manifests::Manifest;
+    use crate::ref_journal::RefJournalEdit;
 
     /// Read and validate a generation-bound visibility proof.
     pub async fn read(
@@ -307,10 +461,165 @@ mod storage {
             Err(error) => Err(error.into()),
         }
     }
+
+    /// Upload content-addressed ref-update visibility evidence.
+    pub async fn upload_edit(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        edit: &GitVisibilityEdit,
+    ) -> Result<String> {
+        edit.validate()?;
+        let body = serde_json::to_vec(edit).map_err(|error| {
+            crate::error::MetadataError::Internal(format!("visibility edit serialize: {error}"))
+        })?;
+        if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
+            return Err(crate::error::MetadataError::CorruptObject {
+                path: "git-visibility-edit".to_owned(),
+                reason: format!(
+                    "visibility edit exceeds {} bytes",
+                    MAX_GIT_VISIBILITY_INDEX_BYTES
+                ),
+            });
+        }
+        let hash = blake3::hash(&body).to_hex().to_string();
+        store
+            .put(&router.git_visibility_edit_path(&hash), Bytes::from(body))
+            .await?;
+        Ok(hash)
+    }
+
+    /// Read and verify content-addressed ref-update visibility evidence.
+    pub async fn read_edit(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        evidence_hash: &str,
+    ) -> Result<GitVisibilityEdit> {
+        validate_hash(evidence_hash, "visibility edit hash")?;
+        let path = router.git_visibility_edit_path(evidence_hash);
+        let metadata = store.head(&path).await?;
+        if metadata.size > MAX_GIT_VISIBILITY_INDEX_BYTES {
+            return Err(crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!(
+                    "visibility edit is {} bytes; maximum is {}",
+                    metadata.size, MAX_GIT_VISIBILITY_INDEX_BYTES
+                ),
+            });
+        }
+        let (body, _) = store.get_with_etag(&path).await?;
+        if blake3::hash(&body).to_hex().as_str() != evidence_hash {
+            return Err(crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: "visibility edit body does not match its identity".to_owned(),
+            });
+        }
+        let edit: GitVisibilityEdit = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid visibility edit JSON: {error}"),
+            }
+        })?;
+        edit.validate()?;
+        Ok(edit)
+    }
+
+    /// Build a generation proof by applying journal-owned immutable evidence.
+    ///
+    /// Returns `None` when the base proof or any transaction evidence is absent,
+    /// so callers can retain the evidence-less repair path.
+    pub async fn compact_journal_edits(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        base: &Manifest,
+        edits: &[RefJournalEdit],
+        generation: u64,
+        pack_index_hash: &str,
+        final_refs: &BTreeMap<String, String>,
+    ) -> Result<Option<GitVisibilityIndex>> {
+        let mut refs = if base.refs.is_empty() {
+            BTreeMap::new()
+        } else {
+            match read(store, router, base.generation, &base.pack_index_hash).await {
+                Ok(index) => {
+                    if index.refs.keys().ne(base.refs.keys())
+                        || base.refs.iter().any(|(name, tip)| {
+                            !index
+                                .refs
+                                .get(name)
+                                .is_some_and(|objects| objects.binary_search(tip).is_ok())
+                        })
+                    {
+                        return Err(crate::error::MetadataError::CorruptObject {
+                            path: router
+                                .git_visibility_path(base.generation, &base.pack_index_hash)
+                                .as_ref()
+                                .to_owned(),
+                            reason: "base visibility proof does not match its manifest refs"
+                                .to_owned(),
+                        });
+                    }
+                    index.refs
+                }
+                Err(crate::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        };
+
+        for edit in edits {
+            match &edit.new_oid {
+                None => {
+                    refs.remove(&edit.ref_name);
+                }
+                Some(new_oid) => {
+                    let Some(evidence_hash) = edit.visibility_evidence_hash.as_deref() else {
+                        return Ok(None);
+                    };
+                    let evidence = read_edit(store, router, evidence_hash).await?;
+                    if evidence.old_oid != edit.old_oid || evidence.new_oid != *new_oid {
+                        return Err(crate::error::MetadataError::CorruptObject {
+                            path: router
+                                .git_visibility_edit_path(evidence_hash)
+                                .as_ref()
+                                .to_owned(),
+                            reason: "visibility edit does not match its ref journal edit"
+                                .to_owned(),
+                        });
+                    }
+                    let closure = evidence.apply(refs.get(&edit.ref_name).map(Vec::as_slice))?;
+                    refs.insert(edit.ref_name.clone(), closure);
+                }
+            }
+        }
+
+        if refs.keys().ne(final_refs.keys()) {
+            return Err(crate::error::MetadataError::CorruptObject {
+                path: "git-visibility-index".to_owned(),
+                reason: "compacted visibility refs do not match the manifest".to_owned(),
+            });
+        }
+        for (name, tip) in final_refs {
+            if !refs
+                .get(name)
+                .is_some_and(|objects| objects.binary_search(tip).is_ok())
+            {
+                return Err(crate::error::MetadataError::CorruptObject {
+                    path: "git-visibility-index".to_owned(),
+                    reason: format!("compacted visibility proof does not contain ref tip {name}"),
+                });
+            }
+        }
+        Ok(Some(GitVisibilityIndex::new(
+            generation,
+            pack_index_hash,
+            refs,
+        )))
+    }
 }
 
 #[cfg(feature = "storage")]
-pub use storage::{read, upload_if_absent};
+pub use storage::{compact_journal_edits, read, read_edit, upload_edit, upload_if_absent};
 
 #[cfg(test)]
 mod tests {
@@ -352,5 +661,118 @@ mod tests {
             .collect();
         let index = GitVisibilityIndex::new(4, "a".repeat(64), refs);
         assert!(index.validate().is_err());
+    }
+
+    #[test]
+    fn ref_edit_delta_reconstructs_exact_new_closure() {
+        let old = BTreeSet::from(["a".repeat(40), "b".repeat(40)]);
+        let new = BTreeSet::from(["b".repeat(40), "c".repeat(40)]);
+        let edit = GitVisibilityEdit::delta(Some("a".repeat(40)), "c".repeat(40), &old, &new);
+
+        assert_eq!(
+            edit.apply(Some(&old.into_iter().collect::<Vec<_>>()))
+                .unwrap(),
+            new.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn journal_compaction_combines_independent_writer_evidence() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        use crate::manifests::Manifest;
+        use crate::ref_journal::RefJournalEdit;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "f".repeat(64);
+        let mut base = Manifest::default_for_repo("refs/heads/left");
+        base.generation = 4;
+        base.pack_index_hash.clone_from(&pack_hash);
+        base.refs
+            .insert("refs/heads/left".to_owned(), "a".repeat(40));
+        base.refs
+            .insert("refs/heads/right".to_owned(), "b".repeat(40));
+        base.seal_git_validation();
+        let base_index = GitVisibilityIndex::new(
+            4,
+            &pack_hash,
+            BTreeMap::from([
+                (
+                    "refs/heads/left".to_owned(),
+                    vec!["1".repeat(40), "a".repeat(40)],
+                ),
+                (
+                    "refs/heads/right".to_owned(),
+                    vec!["2".repeat(40), "b".repeat(40)],
+                ),
+            ]),
+        );
+        upload_if_absent(&store, &router, &base_index)
+            .await
+            .unwrap();
+
+        let left_evidence = GitVisibilityEdit::delta(
+            Some("a".repeat(40)),
+            "c".repeat(40),
+            &BTreeSet::from(["1".repeat(40), "a".repeat(40)]),
+            &BTreeSet::from(["1".repeat(40), "3".repeat(40), "c".repeat(40)]),
+        );
+        let right_evidence = GitVisibilityEdit::delta(
+            Some("b".repeat(40)),
+            "d".repeat(40),
+            &BTreeSet::from(["2".repeat(40), "b".repeat(40)]),
+            &BTreeSet::from(["2".repeat(40), "4".repeat(40), "d".repeat(40)]),
+        );
+        let left_hash = upload_edit(&store, &router, &left_evidence).await.unwrap();
+        let right_hash = upload_edit(&store, &router, &right_evidence).await.unwrap();
+        let edits = vec![
+            RefJournalEdit {
+                ref_name: "refs/heads/left".to_owned(),
+                old_oid: Some("a".repeat(40)),
+                new_oid: Some("c".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(left_hash),
+            },
+            RefJournalEdit {
+                ref_name: "refs/heads/right".to_owned(),
+                old_oid: Some("b".repeat(40)),
+                new_oid: Some("d".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(right_hash),
+            },
+        ];
+        let final_refs = BTreeMap::from([
+            ("refs/heads/left".to_owned(), "c".repeat(40)),
+            ("refs/heads/right".to_owned(), "d".repeat(40)),
+        ]);
+
+        let compacted = compact_journal_edits(
+            &store,
+            &router,
+            &base,
+            &edits,
+            5,
+            &"e".repeat(64),
+            &final_refs,
+        )
+        .await
+        .unwrap()
+        .expect("every writer published visibility evidence");
+
+        assert_eq!(
+            compacted.refs["refs/heads/left"],
+            vec!["1".repeat(40), "3".repeat(40), "c".repeat(40)]
+        );
+        assert_eq!(
+            compacted.refs["refs/heads/right"],
+            vec!["2".repeat(40), "4".repeat(40), "d".repeat(40)]
+        );
     }
 }

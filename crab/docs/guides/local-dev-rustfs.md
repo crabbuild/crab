@@ -212,10 +212,49 @@ The smoke creates a scratch remote under
 `crab://crab/e2e-concurrent-push/<run-id>` and workdirs under
 `/Volumes/Workspace/CrabRepos`. It verifies that independent agent branches can
 push concurrently, and that simultaneous divergent pushes to `main` produce one
-winner plus structured loser statuses instead of corrupting the remote.
+winner plus structured loser statuses instead of corrupting the remote. After
+each write swarm, fresh Git protocol-v2 clients clone the resulting branches,
+run strict Git fsck, and compare the checked-out agent files byte-for-byte. The
+retained JSON report also records atomic command evidence and RustFS net
+live-object and stored-byte deltas by storage-layout class, normalized per
+attempted and successful push. By default, an in-process forwarding meter also
+records every S3 HTTP attempt made during each push cohort, including SDK
+retries and LIST pages. It groups requests by method, inferred S3 operation,
+and bounded Crab storage-layout class without retaining object keys or
+credentials. The snapshots bracket only the push commands, so the subsequent
+clone, strict fsck, and AWS CLI inventory reads do not inflate push cost.
+
+The request trace is suitable for applying a provider's current request rates;
+it is not itself a bill. Provider free tiers, minimum billable object sizes,
+storage duration, region-specific transfer, and operation-specific pricing
+still need to be applied. Use `--no-request-capture` only when the local proxy
+would interfere with a specialized endpoint test; the report then falls back
+to lower-bound net inventory deltas.
 The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.
+
+Use `--max-locator-requests-per-success N` with request capture to make the
+same-branch cohort fail when `git_locator_db/*` HTTP attempts divided by
+successful pushes exceed `N`. This is a workload-specific regression budget,
+not a provider bill: record the agent count, integration mode, and parallelism
+with the result. The CI four-agent integration profile uses 180; larger swarms
+can exceed that while repeatedly waiting, fetching, and rebasing against one
+serialized branch tip.
+
+Add `--crash-boundary --crash-lock-ttl-secs 21` to SIGKILL one push after its
+prepared ref head and another after its active marker. The first ref must stay
+invisible and its immediate retry must honor the structured lease-expiry hint;
+the retry then replaces abandoned prepared state after TTL. The second ref
+must be readable immediately, and its first successor must release the exact
+committed holder before TTL. Both paths finish with a protocol-v2 clone,
+byte-content comparison, and strict Git fsck.
+
+Add `--marker-faults` to inject active-marker failures on both sides of the
+object-store commit boundary. A repeated pre-commit 503 must leave the ref
+invisible, return structured retryable status, and allow a clean retry before
+lock TTL. A lost response after the immutable marker is stored must reconcile
+as success. Both cases verify the exact ref and content through protocol v2.
 
 To exercise the opt-in same-branch agent integration loop, add:
 
@@ -231,8 +270,9 @@ crab/scripts/e2e/run_concurrent_push_smoke.py \
 In that mode every same-branch agent runs `crab push
 --rebase-on-non-fast-forward`; the harness verifies that all pushes eventually
 report `ok` and that a final clone contains every agent file. The command-layer
-loop handles both non-fast-forward rejects and retryable push-lock contention.
-When no explicit lock wait is set, this integration mode waits up to 30 seconds
+loop handles non-fast-forward rejects, retryable push-lock contention, and typed
+transient storage or throttling failures.
+When no explicit lock wait is set, this integration mode waits up to 300 seconds
 inside each push attempt before retrying the whole command; the harness's
 `--omit-lock-wait-secs` flag exercises that default. The rebase pull also uses
 conservative ref-aware pack filtering internally to avoid unrelated pack

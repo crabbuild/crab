@@ -1008,7 +1008,8 @@ is durable before any ref moves.
 | During manifest CAS (step 11)    | Xorbs uploaded, manifests may be stale     | Retry push; CAS loop re-reads and re-applies|
 | During ref CAS (step 12)         | Some refs updated, others not              | Push manifest records intent; fsck reconciles|
 | During smudge (checkout)         | Partial file in working tree               | `git checkout -- <file>` retries smudge     |
-| Process killed (SIGKILL)         | Push lock may be orphaned                  | Lock expires after TTL; next acquire reclaims |
+| Process killed before ref-journal marker | Ref remains invisible; push lock is orphaned | Lock expires after TTL; next acquire replaces prepared state |
+| Process killed after ref-journal marker | Ref is visible; push lock may be orphaned | Next acquire verifies the visible holder and releases it by CAS |
 
 ### 10.3 Crash Recovery Scan
 

@@ -24,6 +24,12 @@ pub struct RefJournalEdit {
     pub new_oid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peeled_oid: Option<String>,
+    /// Holder of the ref lease that this committed edit makes releasable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_holder: Option<String>,
+    /// Immutable closure delta required to publish visibility for `new_oid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility_evidence_hash: Option<String>,
 }
 
 /// Immutable data published atomically by one push.
@@ -140,6 +146,8 @@ pub struct RefJournalSnapshot {
     pub shards: Vec<String>,
     /// Canonically ordered transaction identities included in this view.
     pub transactions: Vec<String>,
+    /// Ref edits in the same canonical transaction order.
+    pub ordered_edits: Vec<RefJournalEdit>,
     /// Visible per-ref journal positions used to publish a compaction frontier.
     pub visible_heads: BTreeMap<String, String>,
     /// Digest binding the base manifest and ordered transaction set.
@@ -344,6 +352,23 @@ pub async fn list_active_transactions(
         .collect()
 }
 
+/// Return whether a committed transaction's active marker still exists.
+///
+/// Compaction normally removes the marker after its manifest CAS. It may be
+/// retained when ref-head promotion still needs repair.
+pub async fn transaction_is_active(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction_id: &str,
+) -> Result<bool> {
+    validate_content_hash(
+        transaction_id,
+        "ref journal transaction id",
+        "ref journal active marker",
+    )?;
+    active_marker_exists(store, router, transaction_id).await
+}
+
 /// Remove compacted visibility markers once no failed head promotion needs them.
 pub async fn cleanup_compacted_transactions(
     store: &Store,
@@ -459,6 +484,7 @@ pub async fn materialize_ref_journal(
         .map(|pack| (pack.pack_id.clone(), pack))
         .collect::<BTreeMap<_, _>>();
     let mut shards = base_shards.iter().cloned().collect::<BTreeSet<_>>();
+    let mut ordered_edits = Vec::new();
 
     for transaction_id in &order {
         let transaction = transactions.get(transaction_id).ok_or_else(|| {
@@ -489,6 +515,7 @@ pub async fn materialize_ref_journal(
                 }
             }
             visible_heads.insert(edit.ref_name.clone(), transaction_id.clone());
+            ordered_edits.push(edit.clone());
         }
         if let Some(next_head) = &transaction.head {
             head.clone_from(next_head);
@@ -529,6 +556,7 @@ pub async fn materialize_ref_journal(
         packs: packs.into_values().collect(),
         shards: shards.into_iter().collect(),
         transactions: order,
+        ordered_edits,
         visible_heads,
         state_digest: hasher.finalize().to_hex().to_string(),
     })
@@ -749,6 +777,21 @@ fn validate_transaction(transaction: &RefJournalTransaction) -> Result<()> {
         if let Some(oid) = &edit.peeled_oid {
             validate_sha1(oid, "ref journal peeled oid", "ref journal transaction")?;
         }
+        if let Some(holder) = &edit.lock_holder
+            && (holder.is_empty() || holder.len() > 1_024 || holder.chars().any(char::is_control))
+        {
+            return Err(corrupt_object(
+                "ref journal transaction",
+                "ref journal lock holder is invalid",
+            ));
+        }
+        if let Some(hash) = &edit.visibility_evidence_hash {
+            validate_content_hash(
+                hash,
+                "ref journal visibility evidence hash",
+                "ref journal transaction",
+            )?;
+        }
         match transaction.parents.get(&edit.ref_name) {
             Some(Some(parent)) => validate_content_hash(
                 parent,
@@ -871,6 +914,8 @@ mod tests {
             old_oid: None,
             new_oid: Some(byte.to_string().repeat(40)),
             peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: None,
         }
     }
 
@@ -1099,6 +1144,8 @@ mod tests {
                 old_oid: Some("a".repeat(40)),
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),

@@ -3,15 +3,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use object_store::ObjectStore;
 use object_store::path::Path;
+use object_store::{ObjectStore, UpdateVersion};
 use tracing::warn;
 
 use crate::error::{CoordinationError, Result};
 use crate::push_lock::{
     PushLockPayload, backend_unix_time, create_strict, deserialize_payload,
-    get_with_version_and_modified, push_locks_prefix, release_if_holder, serialize_payload,
-    store_error, unix_now, update,
+    get_with_version_and_modified, push_locks_prefix, serialize_payload, store_error, unix_now,
+    update,
 };
 
 /// Contender that becomes one of a fixed number of push-admission leases.
@@ -25,6 +25,7 @@ pub struct PushAdmissionTicket {
     occupied_slots: usize,
     backend_clock: Option<(i64, Instant)>,
     path: Option<String>,
+    etag: Option<UpdateVersion>,
     released: bool,
 }
 
@@ -54,6 +55,7 @@ impl PushAdmissionTicket {
             occupied_slots: 0,
             backend_clock: None,
             path: None,
+            etag: None,
             released: false,
         })
     }
@@ -86,7 +88,7 @@ impl PushAdmissionTicket {
                     Ok(existing) => existing,
                     Err(object_store::Error::NotFound { .. }) => {
                         match create_strict(&self.store, &path, body.clone()).await {
-                            Ok(_) => return Ok(self.admit(path)),
+                            Ok(etag) => return Ok(self.admit(path, etag)),
                             Err(error) if is_cas_conflict(&error) => continue,
                             Err(source) => return Err(store_error(path.as_ref(), source)),
                         }
@@ -96,7 +98,7 @@ impl PushAdmissionTicket {
             let payload = deserialize_payload(path.as_ref(), &existing_body)?;
             if payload.is_released() {
                 match update(&self.store, &path, body.clone(), version).await {
-                    Ok(_) => return Ok(self.admit(path)),
+                    Ok(etag) => return Ok(self.admit(path, etag)),
                     Err(error) if is_cas_conflict(&error) => continue,
                     Err(source) => return Err(store_error(path.as_ref(), source)),
                 }
@@ -114,7 +116,7 @@ impl PushAdmissionTicket {
                 continue;
             }
             match update(&self.store, &path, body.clone(), version).await {
-                Ok(_) => return Ok(self.admit(path)),
+                Ok(etag) => return Ok(self.admit(path, etag)),
                 Err(error) if is_cas_conflict(&error) => {}
                 Err(source) => return Err(store_error(path.as_ref(), source)),
             }
@@ -123,7 +125,7 @@ impl PushAdmissionTicket {
     }
 
     /// Extends an active permit's lease.
-    pub async fn renew(&self) -> Result<()> {
+    pub async fn renew(&mut self) -> Result<()> {
         let Some(path) = self.path.as_deref() else {
             return Err(CoordinationError::Configuration {
                 key: self.prefix.clone(),
@@ -146,16 +148,26 @@ impl PushAdmissionTicket {
                 self.lease_ttl.as_secs(),
             ),
         )?;
-        update(&self.store, &object_path, body, version)
-            .await
-            .map(|_| ())
-            .map_err(|source| store_error(path, source))
+        self.etag = Some(
+            update(&self.store, &object_path, body, version)
+                .await
+                .map_err(|source| store_error(path, source))?,
+        );
+        Ok(())
     }
 
     /// Releases this writer's slot for another push.
     pub async fn release(mut self) -> Result<()> {
         let result = match self.path.as_deref() {
-            Some(path) => release_if_holder(&self.store, path, &self.holder).await,
+            Some(path) => {
+                crate::push_lock::release_with_known_etag(
+                    &self.store,
+                    path,
+                    &self.holder,
+                    self.etag.clone(),
+                )
+                .await
+            }
             None => Ok(()),
         };
         self.released = true;
@@ -174,8 +186,9 @@ impl PushAdmissionTicket {
         self.occupied_slots
     }
 
-    fn admit(&mut self, path: Path) -> bool {
+    fn admit(&mut self, path: Path, etag: UpdateVersion) -> bool {
         self.path = Some(path.as_ref().to_owned());
+        self.etag = Some(etag);
         self.occupied_slots = self.capacity;
         true
     }
@@ -202,9 +215,12 @@ impl Drop for PushAdmissionTicket {
         };
         let store = Arc::clone(&self.store);
         let holder = self.holder.clone();
+        let etag = self.etag.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = release_if_holder(&store, &path, &holder).await {
+                if let Err(error) =
+                    crate::push_lock::release_with_known_etag(&store, &path, &holder, etag).await
+                {
                     warn!(path, %error, "failed to release push admission slot on drop");
                 }
             });
@@ -414,7 +430,7 @@ mod tests {
         let mut previous = contender(&store, 1, Duration::from_secs(60));
         assert!(previous.try_admit().await.unwrap());
         let path = previous.path.clone().unwrap();
-        release_if_holder(&store, &path, &previous.holder)
+        crate::push_lock::release_if_holder(&store, &path, &previous.holder)
             .await
             .unwrap();
         let mut current = contender(&store, 1, Duration::from_secs(60));
@@ -426,6 +442,23 @@ mod tests {
         ));
 
         previous.released = true;
+        current.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_release_does_not_clear_reacquired_slot() {
+        let store = memory_store();
+        let mut previous = contender(&store, 1, Duration::from_secs(60));
+        assert!(previous.try_admit().await.unwrap());
+        let path = previous.path.clone().unwrap();
+        crate::push_lock::release_if_holder(&store, &path, &previous.holder)
+            .await
+            .unwrap();
+        let mut current = contender(&store, 1, Duration::from_secs(60));
+        assert!(current.try_admit().await.unwrap());
+
+        previous.release().await.unwrap();
+        current.renew().await.unwrap();
         current.release().await.unwrap();
     }
 
