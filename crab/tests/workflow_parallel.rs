@@ -378,13 +378,13 @@ async fn stages_without_resources_default_to_cpu_one() {
     outs:
       - a.out
   b:
-    cmd: "sleep 0.4 && cp a.out b.out"
+    cmd: "printf started > b.started; while [ ! -f release ]; do sleep 0.01; done; cp a.out b.out"
     deps:
       - a.out
     outs:
       - b.out
   c:
-    cmd: "sleep 0.4 && cp a.out c.out"
+    cmd: "printf started > c.started; while [ ! -f release ]; do sleep 0.01; done; cp a.out c.out"
     deps:
       - a.out
     outs:
@@ -396,22 +396,46 @@ async fn stages_without_resources_default_to_cpu_one() {
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(root).unwrap();
 
-    let start = Instant::now();
     let mut args = dag_args();
     args.parallelism = Some(4);
-    let result = run_in(&args, root, OutputMode::Text).await;
-    let elapsed = start.elapsed();
+
+    let b_started = root.join("b.started");
+    let c_started = root.join("c.started");
+    let release = root.join("release");
+    // A release barrier proves overlap without relying on a loaded runner's
+    // wall-clock scheduling margin.
+    let mut run = Box::pin(run_in(&args, root, OutputMode::Text));
+    let mut marker_wait = Box::pin(async {
+        loop {
+            if b_started.is_file() && c_started.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let mut marker_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+    let mut completed = None;
+    let both_started = tokio::select! {
+        result = &mut run => {
+            completed = Some(result);
+            false
+        }
+        () = &mut marker_wait => true,
+        () = &mut marker_timeout => false,
+    };
+    fs::write(&release, b"release").unwrap();
+    let result = match completed {
+        Some(result) => result,
+        None => run.await,
+    };
 
     std::env::set_current_dir(&prev_cwd).unwrap();
 
     assert!(result.is_ok(), "DAG run failed: {:?}", result.err());
 
-    // With parallelism=4 and default cpu=1, b and c run concurrently.
-    // Total time should be < 700ms (not 800ms serial).
     assert!(
-        elapsed < Duration::from_millis(700),
-        "Expected parallel execution (< 700ms), got {:?}",
-        elapsed
+        both_started,
+        "both default-resource stages must start before the release barrier"
     );
 
     assert!(root.join("b.out").exists());
