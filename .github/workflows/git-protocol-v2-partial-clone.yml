@@ -308,7 +308,7 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"
 
-      - name: Run concurrent-push visibility lifecycle
+      - name: Run concurrent-push visibility and crash-recovery lifecycle
         run: |
           python3 crab/scripts/e2e/run_concurrent_push_smoke.py \
             --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
@@ -320,6 +320,8 @@ jobs:
             --same-branch-agents 4 \
             --max-parallel-pushes 8 \
             --upload-concurrency 2 \
+            --crash-boundary \
+            --crash-lock-ttl-secs 21 \
             --lock-wait-secs 30 \
             --manifest-cas-retries 64
 
