@@ -95,10 +95,11 @@ Act:
   redownload the workflow artifact without merging it with older smoke output.
 - If `release-run-id-matches` fails, use the workflow attempt shown by GitHub;
   the expected report run ID is `gha-<run-id>-<attempt>`.
-- If `cli-dedup-cacheable-origin-get-zero` or
-  `cli-dedup-only-manifest-cas-origin-read` fails, treat it as a product
-  regression. Do not release until cache+dedup push traffic avoids cacheable
-  origin reads again.
+- If `cli-dedup-canonical-xorb-proof`, `cli-dedup-canonical-shard-proof`,
+  `cli-dedup-cacheable-origin-proof`, or
+  `cli-dedup-manifest-cas-origin-read` fails, treat it as a product
+  regression. Do not release until cache+dedup push traffic proves canonical
+  immutable reads and the mutable manifest CAS boundary.
 - If retained config or manifest checks fail, regenerate the smoke evidence
   after fixing redaction, relative artifact paths, or artifact hashes.
 

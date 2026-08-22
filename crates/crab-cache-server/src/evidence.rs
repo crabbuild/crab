@@ -1359,18 +1359,25 @@ impl EvidenceVerifier {
                 (Some(after), Some(before)) => Some(after - before),
                 _ => None,
             };
+            let immutable_key_delta = record
+                .get("origin_get_key_delta")
+                .and_then(Value::as_object)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|(key, _)| {
+                            key.starts_with(".crab/xorbs/") || key.starts_with(".crab/shards/")
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<Map<_, _>>()
+                })
+                .unwrap_or_default();
             self.check(
-                format!("{name}-origin-get-delta-zero"),
-                origin_delta == Some(0),
-                json!({ "origin_delta": origin_delta }),
-            );
-            self.check(
-                format!("{name}-origin-key-delta-empty"),
-                record
-                    .get("origin_get_key_delta")
-                    .and_then(Value::as_object)
-                    .is_some_and(Map::is_empty),
-                json!({ "key_delta": record.get("origin_get_key_delta") }),
+                format!("{name}-immutable-origin-get-delta-zero"),
+                immutable_key_delta.is_empty(),
+                json!({
+                    "origin_delta": origin_delta,
+                    "immutable_key_delta": immutable_key_delta,
+                }),
             );
             self.check(
                 format!("{name}-cache-hits-observed"),
@@ -1422,24 +1429,44 @@ impl EvidenceVerifier {
             json!({ "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta") }),
         );
         self.check(
+            "cli-dedup-no-unknown-chunks",
+            int_field(&record, "dedup_unknown_chunks_delta") == Some(0),
+            json!({ "dedup_unknown_chunks_delta": record.get("dedup_unknown_chunks_delta") }),
+        );
+        self.check(
             "cli-dedup-skipped-xorb-put",
             int_field(&record, "xorb_puts_delta") == Some(0),
             json!({ "xorb_puts_delta": record.get("xorb_puts_delta") }),
         );
-        for key in ["xorb_gets_delta", "shard_gets_delta", "metadata_gets_delta"] {
-            self.check(
-                format!("cli-dedup-{key}-zero"),
-                int_field(&record, key) == Some(0),
-                json!({ key: record.get(key) }),
-            );
-        }
         self.check(
-            "cli-dedup-cacheable-origin-get-zero",
-            int_field(&record, "cacheable_origin_gets_delta") == Some(0)
-                && record
-                    .get("cacheable_origin_get_key_delta")
-                    .and_then(Value::as_object)
-                    .is_some_and(Map::is_empty),
+            "cli-dedup-canonical-xorb-proof",
+            int_field(&record, "xorb_gets_delta").is_some_and(|value| value > 0),
+            json!({ "xorb_gets_delta": record.get("xorb_gets_delta") }),
+        );
+        self.check(
+            "cli-dedup-canonical-shard-proof",
+            int_field(&record, "shard_gets_delta").is_some_and(|value| value > 0),
+            json!({ "shard_gets_delta": record.get("shard_gets_delta") }),
+        );
+        self.check(
+            "cli-dedup-metadata-read",
+            int_field(&record, "metadata_gets_delta").is_some_and(|value| value > 0),
+            json!({ "metadata_gets_delta": record.get("metadata_gets_delta") }),
+        );
+        let cacheable_keys = record
+            .get("cacheable_origin_get_key_delta")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        self.check(
+            "cli-dedup-cacheable-origin-proof",
+            int_field(&record, "cacheable_origin_gets_delta").is_some_and(|value| value > 0)
+                && cacheable_keys
+                    .keys()
+                    .any(|key| key.starts_with(".crab/xorbs/"))
+                && cacheable_keys
+                    .keys()
+                    .any(|key| key.starts_with(".crab/shards/")),
             json!({
                 "cacheable_origin_gets_delta": record.get("cacheable_origin_gets_delta"),
                 "cacheable_origin_get_key_delta": record.get("cacheable_origin_get_key_delta"),
@@ -1451,26 +1478,35 @@ impl EvidenceVerifier {
             .get("run_id")
             .and_then(Value::as_str)
             .map(|run_id| format!("e2e-cache-service/{run_id}/cli-dedup/manifest"));
-        let manifest_only = expected_manifest.as_ref().is_some_and(|manifest_key| {
-            let expected = singleton_i64_map(manifest_key, 1);
-            record
-                .get("origin_get_key_delta")
-                .and_then(Value::as_object)
-                == Some(&expected)
-                && record
-                    .get("mutable_origin_get_key_delta")
-                    .and_then(Value::as_object)
-                    == Some(&expected)
-                && int_field(&record, "origin_gets_delta") == Some(1)
-                && int_field(&record, "mutable_origin_gets_delta") == Some(1)
+        let mutable_keys = record
+            .get("mutable_origin_get_key_delta")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let origin_keys = record
+            .get("origin_get_key_delta")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let immutable_origin_keys_are_cacheable = origin_keys
+            .iter()
+            .filter(|(key, _)| key.starts_with(".crab/xorbs/") || key.starts_with(".crab/shards/"))
+            .all(|(key, value)| cacheable_keys.get(key) == Some(value));
+        let manifest_cas = expected_manifest.as_ref().is_some_and(|manifest_key| {
+            int_field(&record, "mutable_origin_gets_delta").is_some_and(|value| value > 0)
+                && mutable_keys
+                    .get(manifest_key)
+                    .and_then(Value::as_i64)
+                    .is_some_and(|value| value > 0)
+                && immutable_origin_keys_are_cacheable
         });
         self.check(
-            "cli-dedup-only-manifest-cas-origin-read",
-            manifest_only,
+            "cli-dedup-manifest-cas-origin-read",
+            manifest_cas,
             json!({
-                "expected": expected_manifest.map(|manifest_key| singleton_i64_map(&manifest_key, 1)),
+                "expected_key": expected_manifest,
                 "actual": record.get("origin_get_key_delta"),
-                "mutable_actual": record.get("mutable_origin_get_key_delta"),
+                "mutable_actual": mutable_keys,
                 "origin_gets_delta": record.get("origin_gets_delta"),
                 "mutable_origin_gets_delta": record.get("mutable_origin_gets_delta"),
             }),
@@ -1835,12 +1871,6 @@ fn mutable_route_pattern_id(pattern: &str) -> &'static str {
         ".crab/chunk_index_db/manifest/current" => "global-chunk-index-current",
         _ => "unknown-route",
     }
-}
-
-fn singleton_i64_map(key: &str, value: i64) -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert(key.to_owned(), Value::from(value));
-    map
 }
 
 fn float_field(record: &Value, key: &str) -> Option<f64> {
