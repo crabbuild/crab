@@ -3111,6 +3111,13 @@ pub enum PushRejectReason {
         /// Diagnostic output from the integration command.
         message: String,
     },
+    /// Object-store transport failed after its bounded retry policy.
+    NetworkTransient(String),
+    /// Object-store throttling persisted after bounded retries.
+    Throttled {
+        /// Provider retry hint rounded up to whole seconds.
+        retry_after_secs: Option<u64>,
+    },
     /// Everything else — kept as a last resort so we always have a
     /// variant for uncategorized errors during pipeline failures.
     Internal(String),
@@ -3143,6 +3150,7 @@ impl PushRejectReason {
             Self::UnknownRefname { .. } => "unknown-refname",
             Self::MalformedObject { .. } => "malformed-object",
             Self::IntegrationFailed { .. } => "integration-failed",
+            Self::NetworkTransient(_) | Self::Throttled { .. } => "transient",
             Self::Internal(_) => "internal",
         }
     }
@@ -3151,7 +3159,13 @@ impl PushRejectReason {
     /// edits or policy changes.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::LockContention { .. } | Self::StaleInfo)
+        matches!(
+            self,
+            Self::LockContention { .. }
+                | Self::StaleInfo
+                | Self::NetworkTransient(_)
+                | Self::Throttled { .. }
+        )
     }
 
     /// Suggested retry delay in seconds, when the reason carries one.
@@ -3161,16 +3175,18 @@ impl PushRejectReason {
             Self::LockContention {
                 ttl_remaining_secs, ..
             } => Some(*ttl_remaining_secs),
+            Self::Throttled {
+                retry_after_secs, ..
+            } => *retry_after_secs,
             _ => None,
         }
     }
 
     /// Classify a [`CrabError`] into a structured reject reason.
     ///
-    /// Errors that already carry ref-level context (`NonFastForward`,
-    /// `PushConnectivityMissing`, `BeyondShallowBoundary`,
-    /// `PushLockHeld`) map to specific variants; every other error falls back to
-    /// `Internal(e.to_string())` so we never drop diagnostic detail.
+    /// Errors that carry ref-level context or retry semantics map to specific
+    /// variants; every other error falls back to `Internal(e.to_string())` so
+    /// diagnostic detail is not dropped.
     #[must_use]
     pub fn from_error(err: &CrabError) -> Self {
         match err {
@@ -3198,6 +3214,14 @@ impl PushRejectReason {
                 oid: oid.clone(),
                 kind: kind.clone(),
                 detail: detail.clone(),
+            },
+            CrabError::NetworkTransient(_) => Self::NetworkTransient(err.to_string()),
+            CrabError::Throttled { retry_after } => Self::Throttled {
+                retry_after_secs: retry_after.map(|delay| {
+                    delay
+                        .as_secs()
+                        .saturating_add(u64::from(delay.subsec_nanos() != 0))
+                }),
             },
             // CAS conflicts mean the pusher's view of the manifest
             // diverged from the remote's current state; `stale info`
@@ -3268,6 +3292,13 @@ impl fmt::Display for PushRejectReason {
             Self::IntegrationFailed { command, message } => {
                 write!(f, "{command} failed: {message}")
             }
+            Self::NetworkTransient(message) => write!(f, "transient network failure: {message}"),
+            Self::Throttled {
+                retry_after_secs: Some(delay),
+            } => write!(f, "storage throttled; retry after {delay}s"),
+            Self::Throttled {
+                retry_after_secs: None,
+            } => write!(f, "storage throttled"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -28699,5 +28730,36 @@ mod tests {
             PushRejectReason::StaleInfo => {}
             other => panic!("expected StaleInfo, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_error_preserves_retryable_transport_failures() {
+        let network = CrabError::NetworkTransient(object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::other("connection reset")),
+        });
+        let throttled = CrabError::Throttled {
+            retry_after: Some(Duration::from_millis(1_500)),
+        };
+
+        let network_reason = PushRejectReason::from_error(&network);
+        assert_eq!(network_reason.protocol_tag(), "transient");
+        assert!(network_reason.is_retryable());
+        assert_eq!(network_reason.retry_after_secs(), None);
+        assert!(matches!(
+            network_reason,
+            PushRejectReason::NetworkTransient(message) if message.contains("connection reset")
+        ));
+
+        let throttled_reason = PushRejectReason::from_error(&throttled);
+        assert_eq!(throttled_reason.protocol_tag(), "transient");
+        assert!(throttled_reason.is_retryable());
+        assert_eq!(throttled_reason.retry_after_secs(), Some(2));
+        assert!(matches!(
+            throttled_reason,
+            PushRejectReason::Throttled {
+                retry_after_secs: Some(2)
+            }
+        ));
     }
 }

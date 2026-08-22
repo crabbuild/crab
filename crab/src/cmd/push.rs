@@ -313,6 +313,17 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
                     message: message.clone(),
                 };
             }
+            RefPushOutcome::Rejected(PushRejectReason::NetworkTransient(message)) => {
+                return CrabError::NetworkTransient(object_store::Error::Generic {
+                    store: "push",
+                    source: Box::new(std::io::Error::other(message.clone())),
+                });
+            }
+            RefPushOutcome::Rejected(PushRejectReason::Throttled { retry_after_secs }) => {
+                return CrabError::Throttled {
+                    retry_after: retry_after_secs.map(std::time::Duration::from_secs),
+                };
+            }
             RefPushOutcome::Rejected(reason) => {
                 return CrabError::Internal(reason.to_string());
             }
@@ -1577,7 +1588,7 @@ mod tests {
         )]));
 
         assert!(matches!(
-            push_failure_source(&[spec], &result),
+            push_failure_source(std::slice::from_ref(&spec), &result),
             CrabError::NonFastForward {
                 ref_name,
                 have,
@@ -2008,6 +2019,56 @@ mod tests {
         assert_eq!(summary.refs[0].status, "stale info");
         assert_eq!(summary.refs[0].retryable, Some(true));
         assert_eq!(summary.refs[0].retry_after_secs, None);
+    }
+
+    #[test]
+    fn structured_summary_and_source_preserve_transient_failures() {
+        use std::collections::HashMap;
+
+        use crate::git::push::{PushRejectReason, RefPushOutcome};
+
+        let spec = PushSpec {
+            force: false,
+            src: "refs/heads/main".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            spec.dst.clone(),
+            RefPushOutcome::Rejected(PushRejectReason::Throttled {
+                retry_after_secs: Some(3),
+            }),
+        );
+        let result = PushResult::new(outcomes);
+
+        let summary = build_push_summary(
+            std::slice::from_ref(&spec),
+            &result,
+            "crab://primary/org/repo",
+            std::time::Duration::from_millis(9),
+            None,
+        );
+
+        assert_eq!(summary.refs[0].status, "transient");
+        assert_eq!(summary.refs[0].retryable, Some(true));
+        assert_eq!(summary.refs[0].retry_after_secs, Some(3));
+        assert!(matches!(
+            push_failure_source(std::slice::from_ref(&spec), &result),
+            CrabError::Throttled {
+                retry_after: Some(delay)
+            } if delay == std::time::Duration::from_secs(3)
+        ));
+
+        let network_result = PushResult::new(HashMap::from([(
+            "refs/heads/main".to_owned(),
+            RefPushOutcome::Rejected(PushRejectReason::NetworkTransient(
+                "connection reset".to_owned(),
+            )),
+        )]));
+        assert!(matches!(
+            push_failure_source(std::slice::from_ref(&spec), &network_result),
+            CrabError::NetworkTransient(_)
+        ));
     }
 
     #[test]
