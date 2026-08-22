@@ -198,6 +198,13 @@ staging-only immutable write permissions. These credentials must not read or
 write original repo packs, metadata, shards, xorbs, LFS objects, refs, locks,
 or `{repo}/manifest`.
 
+This endpoint is the shipped Crab Auth compatibility protocol. Its prepare
+shape predates byte/object admission plans, so the client cannot safely emulate
+team-wide slots with the returned session-private staging credentials. Keep it
+for existing self-hosted deployments and their protected-push authorization
+contract; choose the managed service protocol for authenticated organization
+identity and plan-based team quota admission.
+
 ### Finalize
 
 ```

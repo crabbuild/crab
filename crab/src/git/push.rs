@@ -3167,6 +3167,10 @@ fn push_admission_required_slots(upload_concurrency: usize, planned_xorb_bytes: 
     worker_slots.max(memory_slots)
 }
 
+fn uses_object_store_push_admission(protected_push: bool, active_active: bool) -> bool {
+    !protected_push && !active_active
+}
+
 fn push_admission_throttle_cooldown(retry_after: Option<Duration>, ttl: Duration) -> Duration {
     retry_after
         .unwrap_or(PUSH_ADMISSION_THROTTLE_COOLDOWN)
@@ -15162,7 +15166,13 @@ impl PushPipeline {
         // repository-wide admission. Same-ref waiters cannot perform upload
         // work, so making them scan admission slots only amplifies contention.
         let required_admission_slots = self.push_admission_required_slots();
-        let admission_lock = if self.config.active_active_replication.is_none() {
+        // Protected pushes are admitted by the authenticated service before it
+        // grants a session-private staging store. Coordination objects written
+        // through that store cannot provide repository-wide mutual exclusion.
+        let admission_lock = if uses_object_store_push_admission(
+            self.config.protected_push.is_some(),
+            self.config.active_active_replication.is_some(),
+        ) {
             match self.store.as_ref() {
                 Some(store) => Some(
                     self.at_stage(
@@ -18672,6 +18682,13 @@ mod tests {
         ];
 
         assert_eq!(slots, [1, 1, 1, 2, 4, 5, 5]);
+    }
+
+    #[test]
+    fn object_store_admission_is_direct_push_only() {
+        assert!(!uses_object_store_push_admission(true, false));
+        assert!(!uses_object_store_push_admission(false, true));
+        assert!(uses_object_store_push_admission(false, false));
     }
 
     #[test]

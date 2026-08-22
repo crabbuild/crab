@@ -32,10 +32,11 @@ When the remote is `crab://crab.build/acme/models` or another configured
 managed authority, Crab:
 
 1. Resolves the logical repository and current authorization.
-2. Prepares a durable push session and exact staging scope.
-3. Flushes and verifies every required staged xorb and bundle object.
-4. Asks the service to recompute policy-relevant paths and validate Git connectivity.
-5. Finalizes through service-owned canonical credentials and per-ref serialization.
+2. Submits estimated bytes and objects for service-owned quota and concurrency admission.
+3. Prepares a durable push session and exact staging scope.
+4. Flushes and verifies every required staged xorb and bundle object.
+5. Asks the service to recompute policy-relevant paths and validate Git connectivity.
+6. Finalizes through service-owned canonical credentials and per-ref serialization.
 
 The client never receives canonical manifest/ref write or delete permission.
 Identical finalize retries return the recorded terminal result rather than
@@ -44,7 +45,13 @@ committing twice.
 ## Direct push
 
 Unconfigured non-`crab.build` authorities retain the existing direct BYOC push
-path. Crab does not switch between managed and direct behavior after a failure.
+path. Direct pushes use five reusable repository-scoped admission objects,
+weighted by configured worker width and the estimated xorb memory window, to
+bound concurrent upload pressure. These slots provide repository workload
+fairness within one cloud-credential trust domain; they do not identify or
+enforce quotas for separate teams. Use a managed authority when authenticated
+organization-level admission is required. Crab does not switch between managed
+and direct behavior after a failure.
 
 ## Options
 
