@@ -1086,6 +1086,8 @@ mod tests {
                 clone.to_str().unwrap(),
             ],
         );
+        git(&clone, ["config", "user.email", "refresh-test@crab.local"]);
+        git(&clone, ["config", "user.name", "refresh test"]);
 
         let old_head = git_stdout(&clone, ["rev-parse", "refs/heads/main"]);
         let local_commit = git_stdout(
@@ -1213,6 +1215,8 @@ mod tests {
                 clone.to_str().unwrap(),
             ],
         );
+        git(&clone, ["config", "user.email", "refresh-test@crab.local"]);
+        git(&clone, ["config", "user.name", "refresh test"]);
 
         let old_head = git_stdout(&clone, ["rev-parse", "refs/heads/main"]);
         let snapshot = Arc::new(SnapshotStore::open_or_create(&snapshot_path).unwrap());
