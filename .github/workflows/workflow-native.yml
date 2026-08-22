@@ -52,7 +52,7 @@ jobs:
         run: cargo test -p crab-workflow --locked
 
       - name: Run CLI migration contract tests
-        run: cargo test -p crab --test workflow_migration --locked
+        run: cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked
 
       - name: Build release CLI on Windows feature contract
         if: runner.os == 'Windows'
@@ -60,7 +60,7 @@ jobs:
 
       - name: Build release CLI on Unix
         if: runner.os != 'Windows'
-        run: cargo build -p crab --release --locked
+        run: cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch
 
       - name: Smoke the native Windows release binary
         if: runner.os == 'Windows'
