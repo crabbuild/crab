@@ -1,96 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "PushSummaryPayload",
-  "description": "Summary payload for `--json` / `--jsonl` result events.",
-  "type": "object",
-  "required": [
-    "duration_ms",
-    "refs",
-    "refs_pushed",
-    "remote_url"
-  ],
-  "properties": {
-    "commit_state": {
-      "description": "Coordinator transaction state for active-active push.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "coordinator_epoch": {
-      "description": "Coordinator epoch that accepted the push.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "duration_ms": {
-      "description": "Wall-clock duration of the operation in milliseconds.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "integration_retries": {
-      "description": "Command-layer integration retries consumed before this terminal result.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "integration_retry_limit": {
-      "description": "Configured retry budget for agent integration mode.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "operation_id": {
-      "description": "Active-active operation id when the push is coordinator-backed.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "refs": {
-      "description": "Per-ref outcomes.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/PushRefOutcome"
-      }
-    },
-    "refs_pushed": {
-      "description": "Number of refs pushed.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "remote_url": {
-      "description": "Remote URL that was pushed to.",
-      "type": "string"
-    },
-    "writer_region": {
-      "description": "Writer region used by active-active push ingress.",
-      "type": [
-        "string",
-        "null"
-      ]
-    }
-  },
   "definitions": {
     "PushRefOutcome": {
       "description": "Serializable per-ref outcome for structured output.",
-      "type": "object",
-      "required": [
-        "dst",
-        "src",
-        "status"
-      ],
       "properties": {
         "dst": {
           "description": "Destination refspec.",
@@ -105,12 +17,12 @@
         },
         "retry_after_secs": {
           "description": "Suggested delay before retrying, in seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint64",
-          "minimum": 0.0
+          ]
         },
         "retryable": {
           "description": "Whether retrying can reasonably succeed without user edits.",
@@ -127,7 +39,107 @@
           "description": "`\"ok\"` or `\"error\"`.",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "dst",
+        "src",
+        "status"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "Summary payload for `--json` / `--jsonl` result events.",
+  "properties": {
+    "commit_state": {
+      "description": "Coordinator transaction state for active-active push.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "coordinator_epoch": {
+      "description": "Coordinator epoch that accepted the push.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the operation in milliseconds.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "integration_retries": {
+      "description": "Command-layer integration retries consumed before this terminal result.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "integration_retry_limit": {
+      "description": "Configured retry budget for agent integration mode.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "integration_retry_stages": {
+      "additionalProperties": {
+        "format": "uint32",
+        "minimum": 0.0,
+        "type": "integer"
+      },
+      "description": "Retried attempts grouped by stable push failure stage.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "operation_id": {
+      "description": "Active-active operation id when the push is coordinator-backed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "refs": {
+      "description": "Per-ref outcomes.",
+      "items": {
+        "$ref": "#/definitions/PushRefOutcome"
+      },
+      "type": "array"
+    },
+    "refs_pushed": {
+      "description": "Number of refs pushed.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "remote_url": {
+      "description": "Remote URL that was pushed to.",
+      "type": "string"
+    },
+    "writer_region": {
+      "description": "Writer region used by active-active push ingress.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "duration_ms",
+    "refs",
+    "refs_pushed",
+    "remote_url"
+  ],
+  "title": "PushSummaryPayload",
+  "type": "object"
 }

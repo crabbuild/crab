@@ -614,6 +614,10 @@ fn validate_push() {
             remote_url: "crab://bucket/repo".into(),
             integration_retries: Some(3),
             integration_retry_limit: Some(256),
+            integration_retry_stages: Some(std::collections::BTreeMap::from([
+                ("lock".to_owned(), 2),
+                ("ref-commit".to_owned(), 1),
+            ])),
             operation_id: None,
             coordinator_epoch: None,
             writer_region: None,

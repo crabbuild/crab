@@ -252,6 +252,9 @@ These commands accept both flags. `--json` emits only the terminal result;
 `crab push --rebase-on-non-fast-forward` result payloads include
 `integration_retries` and `integration_retry_limit` so agent orchestrators can
 distinguish a first-attempt conflict from an exhausted integration retry budget.
+When retries occur, `integration_retry_stages` groups them by bounded stage
+name, such as `preflight`, `lock`, `xorb-upload`, or `ref-commit`; its counts
+sum to `integration_retries`.
 Per-ref push outcomes also include `retryable` and `retry_after_secs` when Crab
 can classify the rejection. If Crab's automatic rebase cannot integrate the
 agent's commit, the ref status is `integration-failed` with `retryable: false`.

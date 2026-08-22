@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_concurrent_push_smoke import (
     RequestCountingProxy,
     locator_requests_per_success,
+    parse_stage_counts,
     push_failure_stages,
     store_category,
 )
@@ -46,6 +47,14 @@ class LocatorRequestBudgetTest(unittest.TestCase):
 
 
 class PushFailureStagesTest(unittest.TestCase):
+    def test_parses_only_nonnegative_integer_stage_counts(self) -> None:
+        self.assertEqual(
+            parse_stage_counts(
+                {"ref-commit": 2, "lock": 1, "bad": -1, "bool": True}
+            ),
+            {"lock": 1, "ref-commit": 2},
+        )
+
     def test_counts_only_attributed_failures_from_current_command_slice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.jsonl"

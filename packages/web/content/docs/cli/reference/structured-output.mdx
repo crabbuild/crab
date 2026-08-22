@@ -252,6 +252,12 @@ These commands accept both flags. `--json` emits only the terminal result;
 | `crab prune` | `prune` | `prune.event` |
 | `crab clone` | `clone` | `clone.event` |
 
+`crab push --rebase-on-non-fast-forward` result payloads include
+`integration_retries`, `integration_retry_limit`, and, when retries occur,
+`integration_retry_stages`. The stage map uses bounded names such as
+`preflight`, `lock`, `xorb-upload`, and `ref-commit`, and its counts sum to the
+total retry count.
+
 ### Remote Helper Exception
 
 The `git-remote-crab` remote helper (invoked by `git push`) cannot use

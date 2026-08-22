@@ -6,6 +6,7 @@
 //! Produces identical remote state to `git push` via the remote helper,
 //! just faster for multi-file pushes.
 
+use std::collections::BTreeMap;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -119,6 +120,9 @@ pub struct PushSummaryPayload {
     /// Configured retry budget for agent integration mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integration_retry_limit: Option<u32>,
+    /// Retried attempts grouped by stable push failure stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration_retry_stages: Option<BTreeMap<String, u32>>,
     /// Active-active operation id when the push is coordinator-backed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
@@ -182,10 +186,11 @@ enum PushAttempt {
     Failed(Box<PushAttemptFailure>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PushIntegrationSummary {
     retries: u32,
     retry_limit: u32,
+    retry_stages: BTreeMap<String, u32>,
 }
 
 /// Entry point for `crab push`, following the existing subcommand pattern.
@@ -211,9 +216,10 @@ async fn execute_push(
 ) -> Result<PushSummaryPayload> {
     let mode = OutputMode::from_flags(args.json, args.jsonl);
     let mut retry_attempts = 0u32;
+    let mut retry_stages = BTreeMap::new();
 
     loop {
-        match run_push_once(args, cancel, retry_attempts, emit_terminal).await? {
+        match run_push_once(args, cancel, retry_attempts, &retry_stages, emit_terminal).await? {
             PushAttempt::Done(summary) => return Ok(summary),
             PushAttempt::Failed(mut failure) => {
                 if args.rebase_on_non_fast_forward
@@ -222,6 +228,7 @@ async fn execute_push(
                     && current_branch().as_deref() == Some(branch)
                 {
                     let branch = branch.to_owned();
+                    record_integration_retry_stage(&mut retry_stages, &failure.result);
                     retry_attempts += 1;
                     if !mode.is_machine() {
                         eprintln!(
@@ -245,6 +252,7 @@ async fn execute_push(
                     && current_branch().as_deref() == Some(branch)
                 {
                     let branch = branch.to_owned();
+                    record_integration_retry_stage(&mut retry_stages, &failure.result);
                     retry_attempts += 1;
                     if !mode.is_machine() {
                         let action = if failure.agent_integration_lock {
@@ -275,6 +283,7 @@ async fn execute_push(
                         transient_retry_branch(&failure.specs, &failure.result)
                     && current_branch().as_deref() == Some(branch)
                 {
+                    record_integration_retry_stage(&mut retry_stages, &failure.result);
                     retry_attempts += 1;
                     if !mode.is_machine() {
                         eprintln!(
@@ -382,6 +391,7 @@ pub(crate) async fn run_push_repair_refspecs(
             remote_url,
             integration_retries: None,
             integration_retry_limit: None,
+            integration_retry_stages: None,
             operation_id: None,
             coordinator_epoch: None,
             writer_region: None,
@@ -488,6 +498,7 @@ async fn run_push_once(
     args: &PushArgs,
     cancel: &CancellationToken,
     integration_retries: u32,
+    integration_retry_stages: &BTreeMap<String, u32>,
     emit_terminal: bool,
 ) -> Result<PushAttempt> {
     let start = Instant::now();
@@ -527,14 +538,19 @@ async fn run_push_once(
         if mode == OutputMode::Text {
             println!("Everything up-to-date");
         }
-        let integration = push_integration_summary(args, integration_retries);
+        let integration =
+            push_integration_summary(args, integration_retries, integration_retry_stages);
         let summary = PushSummaryPayload {
             refs_pushed: 0,
             refs: vec![],
             duration_ms: start.elapsed().as_millis() as u64,
             remote_url: remote_url.clone(),
-            integration_retries: integration.map(|summary| summary.retries),
-            integration_retry_limit: integration.map(|summary| summary.retry_limit),
+            integration_retries: integration.as_ref().map(|summary| summary.retries),
+            integration_retry_limit: integration.as_ref().map(|summary| summary.retry_limit),
+            integration_retry_stages: integration
+                .as_ref()
+                .filter(|summary| !summary.retry_stages.is_empty())
+                .map(|summary| summary.retry_stages.clone()),
             operation_id: None,
             coordinator_epoch: None,
             writer_region: None,
@@ -565,14 +581,19 @@ async fn run_push_once(
     // Dry-run: print what would be pushed and return.
     if args.dry_run {
         print_dry_run(&remote_name, &remote_url, &specs);
-        let integration = push_integration_summary(args, integration_retries);
+        let integration =
+            push_integration_summary(args, integration_retries, integration_retry_stages);
         return Ok(PushAttempt::Done(PushSummaryPayload {
             refs_pushed: 0,
             refs: Vec::new(),
             duration_ms: start.elapsed().as_millis() as u64,
             remote_url,
-            integration_retries: integration.map(|summary| summary.retries),
-            integration_retry_limit: integration.map(|summary| summary.retry_limit),
+            integration_retries: integration.as_ref().map(|summary| summary.retries),
+            integration_retry_limit: integration.as_ref().map(|summary| summary.retry_limit),
+            integration_retry_stages: integration
+                .as_ref()
+                .filter(|summary| !summary.retry_stages.is_empty())
+                .map(|summary| summary.retry_stages.clone()),
             operation_id: None,
             coordinator_epoch: None,
             writer_region: None,
@@ -603,7 +624,11 @@ async fn run_push_once(
                 specs: specs.clone(),
                 result,
                 elapsed,
-                integration: push_integration_summary(args, integration_retries),
+                integration: push_integration_summary(
+                    args,
+                    integration_retries,
+                    integration_retry_stages,
+                ),
                 agent_integration_lock: false,
             })))
         };
@@ -724,7 +749,11 @@ async fn run_push_once(
                         specs: specs.clone(),
                         result,
                         elapsed: start.elapsed(),
-                        integration: push_integration_summary(args, integration_retries),
+                        integration: push_integration_summary(
+                            args,
+                            integration_retries,
+                            integration_retry_stages,
+                        ),
                         agent_integration_lock: true,
                     };
                     if emit_terminal || mode == OutputMode::Text {
@@ -755,7 +784,11 @@ async fn run_push_once(
                     specs: specs.clone(),
                     result,
                     elapsed: start.elapsed(),
-                    integration: push_integration_summary(args, integration_retries),
+                    integration: push_integration_summary(
+                        args,
+                        integration_retries,
+                        integration_retry_stages,
+                    ),
                     agent_integration_lock: true,
                 })));
             }
@@ -805,9 +838,11 @@ async fn run_push_once(
         push_state.save(&repo_root)?;
 
         let elapsed = start.elapsed();
-        let integration = push_integration_summary(args, integration_retries);
+        let integration =
+            push_integration_summary(args, integration_retries, integration_retry_stages);
 
-        let summary = build_push_summary(&specs, &result, &remote_url, elapsed, integration);
+        let summary =
+            build_push_summary(&specs, &result, &remote_url, elapsed, integration.as_ref());
         match mode {
             OutputMode::Text => {
                 print_push_summary(&remote_name, &remote_url, &specs, &result, elapsed);
@@ -847,7 +882,7 @@ async fn run_push_once(
         specs,
         result,
         elapsed,
-        integration: push_integration_summary(args, integration_retries),
+        integration: push_integration_summary(args, integration_retries, integration_retry_stages),
         agent_integration_lock: false,
     })))
 }
@@ -867,7 +902,7 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 &failure.result,
                 &failure.remote_url,
                 failure.elapsed,
-                failure.integration,
+                failure.integration.as_ref(),
             );
             emit_json("push", "1.0", &summary);
         }
@@ -877,7 +912,7 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 &failure.result,
                 &failure.remote_url,
                 failure.elapsed,
-                failure.integration,
+                failure.integration.as_ref(),
             );
             let mut stream = JsonlStream::new("push.event", "1.0", std::io::stdout());
             stream.emit_result(&summary);
@@ -885,11 +920,25 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
     }
 }
 
-fn push_integration_summary(args: &PushArgs, retries: u32) -> Option<PushIntegrationSummary> {
+fn record_integration_retry_stage(stages: &mut BTreeMap<String, u32>, result: &PushResult) {
+    let stage = result
+        .failure_stage
+        .map(PushFailureStage::as_str)
+        .unwrap_or("unattributed");
+    let count = stages.entry(stage.to_owned()).or_default();
+    *count = count.saturating_add(1);
+}
+
+fn push_integration_summary(
+    args: &PushArgs,
+    retries: u32,
+    retry_stages: &BTreeMap<String, u32>,
+) -> Option<PushIntegrationSummary> {
     args.rebase_on_non_fast_forward
         .then_some(PushIntegrationSummary {
             retries,
             retry_limit: args.rebase_retry_limit,
+            retry_stages: retry_stages.clone(),
         })
 }
 
@@ -1162,7 +1211,7 @@ fn build_push_summary(
     result: &PushResult,
     remote_url: &str,
     elapsed: std::time::Duration,
-    integration: Option<PushIntegrationSummary>,
+    integration: Option<&PushIntegrationSummary>,
 ) -> PushSummaryPayload {
     let refs: Vec<PushRefOutcome> = specs
         .iter()
@@ -1212,6 +1261,9 @@ fn build_push_summary(
         remote_url: remote_url.to_owned(),
         integration_retries: integration.map(|summary| summary.retries),
         integration_retry_limit: integration.map(|summary| summary.retry_limit),
+        integration_retry_stages: integration
+            .filter(|summary| !summary.retry_stages.is_empty())
+            .map(|summary| summary.retry_stages.clone()),
         operation_id: result
             .active_active_commit
             .as_ref()
@@ -2109,9 +2161,10 @@ mod tests {
             &result,
             "crab://primary/org/repo",
             std::time::Duration::from_millis(9),
-            Some(PushIntegrationSummary {
+            Some(&PushIntegrationSummary {
                 retries: 5,
                 retry_limit: 256,
+                retry_stages: BTreeMap::from([("lock".to_owned(), 5)]),
             }),
         );
 
@@ -2120,6 +2173,21 @@ mod tests {
         assert_eq!(summary.refs[0].retry_after_secs, Some(7));
         assert_eq!(summary.integration_retries, Some(5));
         assert_eq!(summary.integration_retry_limit, Some(256));
+        assert_eq!(
+            summary.integration_retry_stages,
+            Some(BTreeMap::from([("lock".to_owned(), 5)]))
+        );
+    }
+
+    #[test]
+    fn integration_retry_stage_counter_matches_attempts() {
+        let result = PushResult::empty().with_failure_stage(PushFailureStage::Lock);
+        let mut stages = BTreeMap::new();
+
+        record_integration_retry_stage(&mut stages, &result);
+        record_integration_retry_stage(&mut stages, &result);
+
+        assert_eq!(stages, BTreeMap::from([("lock".to_owned(), 2)]));
     }
 
     #[test]
@@ -2256,6 +2324,7 @@ mod tests {
             integration: Some(PushIntegrationSummary {
                 retries: 1,
                 retry_limit: 256,
+                retry_stages: BTreeMap::from([("preflight".to_owned(), 1)]),
             }),
             agent_integration_lock: false,
         };
@@ -2271,7 +2340,7 @@ mod tests {
             &failure.result,
             &failure.remote_url,
             failure.elapsed,
-            failure.integration,
+            failure.integration.as_ref(),
         );
 
         assert_eq!(summary.refs[0].status, "integration-failed");

@@ -1904,6 +1904,15 @@ fn decisions_to_outcomes(
         .collect()
 }
 
+fn decisions_to_push_result(decisions: &HashMap<String, RefUpdateDecision>) -> PushResult {
+    let result = PushResult::new(decisions_to_outcomes(decisions));
+    if result.all_ok() {
+        result
+    } else {
+        result.with_failure_stage(PushFailureStage::Preflight)
+    }
+}
+
 fn ref_edits_are_manifest_noop(
     specs: &[PushSpec],
     base_manifest: Option<&Manifest>,
@@ -3396,6 +3405,31 @@ pub enum PushFailureStage {
     CommitGraph,
     /// Manifest/ref transaction commit.
     RefCommit,
+}
+
+impl PushFailureStage {
+    /// Return the stable name used by audit and structured push telemetry.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::StoreResolve => "store-resolve",
+            Self::Discovery => "discovery",
+            Self::RemoteState => "remote-state",
+            Self::Preflight => "preflight",
+            Self::Classify => "classify",
+            Self::Lock => "lock",
+            Self::XorbPack => "xorb-pack",
+            Self::XorbUpload => "xorb-upload",
+            Self::GitPackPrepare => "git-pack-prepare",
+            Self::ShardBuild => "shard-build",
+            Self::ShardUpload => "shard-upload",
+            Self::GitPackUpload => "git-pack-upload",
+            Self::Connectivity => "connectivity",
+            Self::CommitGraph => "commit-graph",
+            Self::RefCommit => "ref-commit",
+        }
+    }
 }
 
 /// Result of a push batch: per-ref outcomes keyed by destination ref name.
@@ -14038,7 +14072,7 @@ impl PushPipeline {
                 .values()
                 .any(|decision| matches!(decision, RefUpdateDecision::Proceed { .. }))
             {
-                return Ok(PushResult::new(decisions_to_outcomes(&decisions)));
+                return Ok(decisions_to_push_result(&decisions));
             }
             *self.planned_ref_decisions.lock().await = Some(decisions.clone());
             Some((sha_map, decisions))
@@ -14441,16 +14475,15 @@ impl PushPipeline {
         // rejection reason even though the pipeline committed the
         // other refs successfully. When decisions are unavailable
         // (no store path), fall back to the historical all-Ok shape.
-        let outcomes = if let Some(decisions) = decisions {
-            decisions_to_outcomes(&decisions)
+        let result = if let Some(decisions) = decisions {
+            decisions_to_push_result(&decisions)
         } else {
             let mut outcomes = HashMap::new();
             for spec in &self.specs {
                 outcomes.insert(spec.dst.clone(), RefPushOutcome::Ok);
             }
-            outcomes
+            PushResult::new(outcomes)
         };
-        let result = PushResult::new(outcomes);
         Ok(match active_active_commit {
             Some(commit) => result.with_active_active_commit(commit),
             None => result,
@@ -17251,6 +17284,51 @@ mod tests {
                 want: "new111".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn rejected_preflight_result_retains_stage() {
+        let decisions = HashMap::from([(
+            "refs/heads/main".to_owned(),
+            RefUpdateDecision::Reject(PushRejectReason::NonFastForward {
+                have: "old000".to_owned(),
+                want: "new111".to_owned(),
+            }),
+        )]);
+
+        assert_eq!(
+            decisions_to_push_result(&decisions).failure_stage,
+            Some(PushFailureStage::Preflight)
+        );
+    }
+
+    #[test]
+    fn failure_stage_names_match_serialized_audit_values() {
+        let stages = [
+            PushFailureStage::Admission,
+            PushFailureStage::StoreResolve,
+            PushFailureStage::Discovery,
+            PushFailureStage::RemoteState,
+            PushFailureStage::Preflight,
+            PushFailureStage::Classify,
+            PushFailureStage::Lock,
+            PushFailureStage::XorbPack,
+            PushFailureStage::XorbUpload,
+            PushFailureStage::GitPackPrepare,
+            PushFailureStage::ShardBuild,
+            PushFailureStage::ShardUpload,
+            PushFailureStage::GitPackUpload,
+            PushFailureStage::Connectivity,
+            PushFailureStage::CommitGraph,
+            PushFailureStage::RefCommit,
+        ];
+
+        for stage in stages {
+            assert_eq!(
+                serde_json::to_value(stage).expect("serialize failure stage"),
+                serde_json::Value::String(stage.as_str().to_owned())
+            );
+        }
     }
 
     // --- PushConfig defaults ---
