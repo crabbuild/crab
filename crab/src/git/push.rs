@@ -261,7 +261,9 @@ pub(crate) struct CommittedManifestAnchor {
     pub(crate) pack_index_hash: MerkleHash,
 }
 
-fn committed_manifest_anchor(manifest: &Manifest) -> Result<Option<CommittedManifestAnchor>> {
+pub(crate) fn committed_manifest_anchor(
+    manifest: &Manifest,
+) -> Result<Option<CommittedManifestAnchor>> {
     if manifest.shard_index_hash.is_empty() && manifest.pack_index_hash.is_empty() {
         return Ok(None);
     }
@@ -5462,6 +5464,27 @@ pub(crate) async fn publish_committed_pack_locators(
     let stats = write_result?;
     release_result?;
     Ok(stats)
+}
+
+pub(crate) async fn repair_git_object_locator_if_current(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let (manifest, _) = read_manifest(store, router).await?;
+    // An active ref-journal transaction asks readers for the next generation.
+    // Repair only an already-canonical generation or a read could bless stale state.
+    if manifest.generation != required_generation {
+        return Ok(false);
+    }
+    let Some(anchor) = committed_manifest_anchor(&manifest)? else {
+        return Ok(false);
+    };
+    let stats =
+        publish_committed_pack_locators(store, router, &[], anchor, lock_ttl, cancel).await?;
+    Ok(stats.coverage_updated)
 }
 
 async fn publish_uploaded_pack_locators(
@@ -18167,6 +18190,107 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn upload_pack_repairs_locator_for_current_manifest_generation() {
+        let _guard = GitDirGuard::new();
+        let repo_prefix = "upload-pack-locator-repair";
+        let (store, router) = test_store_router(repo_prefix);
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        let pushed = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        )
+        .execute()
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok)
+        );
+
+        let (mut manifest, etag) = read_manifest(&store, &router)
+            .await
+            .expect("read pushed manifest");
+        let covered_generation = manifest.generation;
+        let storage_router =
+            crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
+        let visibility = crab_metadata::git_visibility::read(
+            store.as_storage(),
+            &storage_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+        )
+        .await
+        .expect("read pushed visibility proof");
+        manifest.generation = manifest.generation.saturating_add(1);
+        let next_visibility = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            manifest.generation,
+            manifest.pack_index_hash.clone(),
+            visibility.refs,
+        );
+        crab_metadata::git_visibility::upload_if_absent(
+            store.as_storage(),
+            &storage_router,
+            &next_visibility,
+        )
+        .await
+        .expect("upload next visibility proof");
+        manifest.seal_git_validation();
+        write_manifest_cas(&store, &router, &manifest, &etag)
+            .await
+            .expect("advance manifest without locator publication");
+
+        let stale = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            repo_prefix,
+        )
+        .await
+        .expect("open stale locator session");
+        assert_eq!(
+            stale.coverage().map(|coverage| coverage.generation),
+            Some(covered_generation)
+        );
+        stale.close().await.expect("close stale locator session");
+
+        let repository = crate::git::upload_pack_wire::open_repository(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("upload-pack should repair current locator coverage");
+        assert_eq!(repository.generation(), manifest.generation);
+        repository
+            .visibility_index(&CancellationToken::new())
+            .await
+            .expect("repaired repository should remain exactly authorized");
+
+        let repaired = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            repo_prefix,
+        )
+        .await
+        .expect("open repaired locator session");
+        assert_eq!(
+            repaired.coverage().map(|coverage| coverage.generation),
+            Some(manifest.generation)
+        );
+        repaired
+            .close()
+            .await
+            .expect("close repaired locator session");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn under_lock_refresh_rebases_plan_before_pack_work() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("under-lock-refresh");
@@ -19743,17 +19867,27 @@ mod tests {
             ..anchor
         };
 
-        let stats = publish_uploaded_pack_locators(
+        let skipped = repair_git_object_locator_if_current(
             &store,
             &router,
-            &[],
-            next_anchor,
+            next_anchor.generation + 1,
             Duration::from_secs(60),
             &CancellationToken::new(),
         )
         .await
-        .expect("advance locator coverage without new packs");
-        assert!(stats.coverage_updated);
+        .expect("skip repair for a future generation");
+        assert!(!skipped);
+
+        let repaired = repair_git_object_locator_if_current(
+            &store,
+            &router,
+            next_anchor.generation,
+            Duration::from_secs(60),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("repair current locator coverage without new packs");
+        assert!(repaired);
 
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
