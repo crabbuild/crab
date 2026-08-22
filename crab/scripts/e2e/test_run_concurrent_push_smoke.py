@@ -13,16 +13,48 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from run_concurrent_push_smoke import (
+    ConcurrentPushSmoke,
     RequestCountingProxy,
     locator_requests_per_success,
     parse_stage_counts,
     push_failure_stages,
     store_category,
 )
+
+
+class PushCommandArgumentsTest(unittest.TestCase):
+    def test_fault_probes_control_agent_integration_retry_mode(self) -> None:
+        smoke = object.__new__(ConcurrentPushSmoke)
+        smoke.args = SimpleNamespace(
+            crab_bin="crab",
+            manifest_cas_retries=64,
+            upload_concurrency=2,
+            omit_lock_wait_secs=True,
+            lock_wait_secs=30,
+            rebase_on_non_fast_forward=True,
+            rebase_retry_limit=64,
+        )
+
+        args = smoke.push_args(
+            "HEAD:refs/heads/pre-marker-crash",
+            lock_wait_secs=0,
+            rebase_on_non_fast_forward=False,
+        )
+
+        self.assertEqual(args[3:5], ["--lock-wait-secs", "0"])
+        self.assertNotIn("--rebase-on-non-fast-forward", args)
+
+        bounded_retry_args = smoke.push_args(
+            "HEAD:refs/heads/marker-write-failure",
+            lock_wait_secs=0,
+            rebase_retry_limit=2,
+        )
+        self.assertEqual(bounded_retry_args[-2:], ["--rebase-retry-limit", "2"])
 
 
 class LocatorRequestBudgetTest(unittest.TestCase):

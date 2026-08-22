@@ -278,11 +278,10 @@ impl StoreClient {
         let hit = match &self.file_index_lookup {
             Some(lookup) => lookup.lookup(file_hash).await?,
             None => {
-                let session = FileIndexLookupSession::open_for_storage(
-                    self.store.origin(),
-                    self.router.repo_prefix(),
-                )
-                .await?;
+                let storage = self.store.cache_aware_storage();
+                let session =
+                    FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix())
+                        .await?;
                 let result = session.lookup(file_hash).await;
                 if let Err(close_error) = session.close().await {
                     warn!(error = %close_error, "store_client: file-index lookup close failed");
@@ -312,11 +311,9 @@ impl StoreClient {
                 .map_err(CrabError::from);
         }
 
-        let session = FileIndexLookupSession::open_for_storage(
-            self.store.origin(),
-            self.router.repo_prefix(),
-        )
-        .await?;
+        let storage = self.store.cache_aware_storage();
+        let session =
+            FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix()).await?;
 
         let result = session.lookup_batch(file_hashes).await;
         if let Err(close_err) = session.close().await {

@@ -558,6 +558,20 @@ impl CachingStore {
         })
     }
 
+    /// Build a cache-aware storage facade for read-only metadata consumers.
+    ///
+    /// The returned facade preserves the origin store's bucket identity and
+    /// storage scope so scoped readers keep their no-checkpoint-write mode
+    /// while immutable metadata reads still use the cache service.
+    pub fn cache_aware_storage(&self) -> Store {
+        let mut storage =
+            Store::new(self.object_store()).with_bucket_identity(self.origin.bucket_identity());
+        if let Some(scope) = self.origin.storage_scope().cloned() {
+            storage = storage.with_storage_scope(scope);
+        }
+        storage
+    }
+
     /// Whether the cache leg is active for reads.
     fn cache_reads_enabled(&self) -> bool {
         #[cfg(feature = "remote-client")]

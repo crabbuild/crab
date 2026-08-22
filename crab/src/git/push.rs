@@ -75,7 +75,7 @@ use crab_xet::xorb::builder::{
 use crab_xet::xorb::format::{
     Chunk, ChunkMeta, ChunkPlacement, CompressionScheme, XorbHash, XorbRef,
 };
-use crab_xet::xorb::parser::xorb_metadata_region;
+use crab_xet::xorb::parser::{XorbParser, xorb_metadata_region};
 
 fn bulk_data_bytes(bulk: &BulkData) -> u64 {
     let shard_segment_bytes: u64 = bulk
@@ -303,8 +303,73 @@ impl RemoteChunkRefKey {
     }
 }
 
+async fn read_remote_shard_for_proof(
+    store: &Store,
+    caching_store: Option<&crab_cache_store::CachingStore>,
+    path: &ObjectPath,
+    expected_hash: MerkleHash,
+) -> Result<Bytes> {
+    if let Some(cache) = caching_store {
+        match cache.get_cache_service_object(path).await {
+            Ok(Some(body)) => {
+                if let Ok(body_len) = u64::try_from(body.len()) {
+                    match store.head(path).await {
+                        Ok(meta)
+                            if meta.size == body_len
+                                && compute_data_hash(body.as_ref()) == expected_hash =>
+                        {
+                            return Ok(body);
+                        }
+                        Ok(meta) => {
+                            debug!(
+                                shard = %expected_hash.hex(),
+                                cache_bytes = body.len(),
+                                origin_bytes = meta.size,
+                                "cache-service shard proof did not match origin HEAD"
+                            );
+                        }
+                        Err(error) => {
+                            debug!(
+                                shard = %expected_hash.hex(),
+                                error = %error,
+                                "cache-service shard proof could not confirm origin HEAD"
+                            );
+                        }
+                    }
+                } else {
+                    debug!(
+                        shard = %expected_hash.hex(),
+                        "cache-service shard body length cannot be represented"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(
+                    shard = %expected_hash.hex(),
+                    error = %error,
+                    "cache-service shard proof unavailable; reading origin"
+                );
+            }
+        }
+    }
+
+    let (body, _) = store.get_with_etag(path).await?;
+    Ok(body)
+}
+
+#[cfg(test)]
 async fn verified_existing_remote_shards(
     store: &Store,
+    shards: &[(MerkleHash, ObjectPath)],
+    concurrency: usize,
+) -> Result<ExistingShardCheck> {
+    verified_existing_remote_shards_with_cache(store, None, shards, concurrency).await
+}
+
+async fn verified_existing_remote_shards_with_cache(
+    store: &Store,
+    caching_store: Option<&crab_cache_store::CachingStore>,
     shards: &[(MerkleHash, ObjectPath)],
     concurrency: usize,
 ) -> Result<ExistingShardCheck> {
@@ -317,12 +382,15 @@ async fn verified_existing_remote_shards(
         let path = path.clone();
         async move {
             let key = path.as_ref().to_owned();
-            // This check is a publish-time durability proof. Cache hits
-            // are useful for reads, but only origin proves another clone
-            // can fetch the shard after the manifest references it.
-            let fetched = store.get_with_etag(&path).await;
+            let fetched = read_remote_shard_for_proof(
+                &store,
+                caching_store,
+                &path,
+                expected,
+            )
+            .await;
             match fetched {
-                Ok((body, _)) => {
+                Ok(body) => {
                     let actual = compute_data_hash(body.as_ref());
                     if actual == expected {
                         Ok((Some(key), None))
@@ -732,6 +800,38 @@ fn remote_xorb_index_covers_placements(
                 meta.hash == placement.chunk_hash
                     && meta.uncompressed_len == placement.uncompressed_size
             })
+    })
+}
+
+fn cached_xorb_index_matches_placements(
+    body: &Bytes,
+    expected_hash: XorbHash,
+    placements: &[(MerkleHash, XorbRef)],
+) -> Option<RemoteXorbIndex> {
+    let Ok(parser) = XorbParser::parse(body.clone()) else {
+        return None;
+    };
+    if parser.hash() != expected_hash || parser.verify_payload_digest().is_err() {
+        return None;
+    }
+
+    if !placements.iter().all(|(chunk_hash, xorb_ref)| {
+        parser.get_chunk(xorb_ref.chunk_index).is_ok_and(|chunk| {
+            chunk.hash == *chunk_hash
+                && u64::try_from(chunk.data.len()).ok()
+                    == Some(u64::from(xorb_ref.uncompressed_size))
+        })
+    }) {
+        return None;
+    }
+
+    let chunks = (0..parser.num_chunks())
+        .map(|index| parser.chunk_meta(index).ok().cloned())
+        .collect::<Option<Vec<_>>>()?;
+    Some(RemoteXorbIndex {
+        hash: parser.hash(),
+        payload_digest: parser.payload_digest(),
+        chunks,
     })
 }
 
@@ -4303,7 +4403,7 @@ impl PackedXorb {
         if retain_payload {
             UploadedXorb::with_payload(self.hash, self.payload)
         } else {
-            UploadedXorb::remote_only(
+            UploadedXorb::remote_only_existing(
                 self.hash,
                 self.payload.len(),
                 self.payload.is_prepared_file(),
@@ -4317,6 +4417,7 @@ struct UploadedXorb {
     hash: MerkleHash,
     len: usize,
     prepared: bool,
+    cache_warm: bool,
     payload: Option<XorbPayload>,
 }
 
@@ -4326,15 +4427,30 @@ impl UploadedXorb {
             hash,
             len: payload.len(),
             prepared: payload.is_prepared_file(),
+            cache_warm: true,
             payload: Some(payload),
         }
     }
 
     fn remote_only(hash: MerkleHash, len: usize, prepared: bool) -> Self {
+        Self::remote_only_with_cache_warm(hash, len, prepared, true)
+    }
+
+    fn remote_only_existing(hash: MerkleHash, len: usize, prepared: bool) -> Self {
+        Self::remote_only_with_cache_warm(hash, len, prepared, false)
+    }
+
+    fn remote_only_with_cache_warm(
+        hash: MerkleHash,
+        len: usize,
+        prepared: bool,
+        cache_warm: bool,
+    ) -> Self {
         Self {
             hash,
             len,
             prepared,
+            cache_warm,
             payload: None,
         }
     }
@@ -4664,21 +4780,56 @@ async fn warm_uploaded_xorb_cache(
 
     let mut bytes_for_remote = None;
     if cache_needs_write {
-        if let Some((file_path, len, payload_hash)) = payload.file_source() {
-            match cache
-                .put_preverified_xorb_file(&hash, file_path, len as u64, payload_hash)
+        if let Some(payload) = uploaded_xorb.payload.as_ref() {
+            if let Some((file_path, len, payload_hash)) = payload.file_source() {
+                match cache
+                    .put_preverified_xorb_file(&hash, file_path, len as u64, payload_hash)
+                    .await
+                {
+                    Ok(()) => stats.cached = true,
+                    Err(e) => warn!(
+                        xorb = %hash.hex(),
+                        error = %e,
+                        "xorb cache warm failed (non-fatal)",
+                    ),
+                }
+            } else {
+                let bytes = match read_uploaded_xorb_payload_for_cache_warm(
+                    &uploaded_xorb,
+                    store.as_ref(),
+                    &path,
+                    Arc::clone(&payload_budget),
+                )
                 .await
-            {
-                Ok(()) => stats.cached = true,
-                Err(e) => warn!(
-                    xorb = %hash.hex(),
-                    error = %e,
-                    "xorb cache warm failed (non-fatal)",
-                ),
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        warn!(
+                            xorb = %hash.hex(),
+                            error = %e,
+                            "xorb cache warm payload read failed (non-fatal)",
+                        );
+                        return stats;
+                    }
+                };
+                match cache.put_bytes(&key, bytes.clone()).await {
+                    Ok(()) => stats.cached = true,
+                    Err(e) => warn!(
+                        xorb = %hash.hex(),
+                        error = %e,
+                        "xorb cache warm failed (non-fatal)",
+                    ),
+                }
+                bytes_for_remote = Some(bytes);
             }
         } else {
-            let bytes = match read_xorb_payload_for_cache_warm(payload, Arc::clone(&payload_budget))
-                .await
+            let bytes = match read_uploaded_xorb_payload_for_cache_warm(
+                &uploaded_xorb,
+                store.as_ref(),
+                &path,
+                Arc::clone(&payload_budget),
+            )
+            .await
             {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -4708,7 +4859,14 @@ async fn warm_uploaded_xorb_cache(
         let bytes = match bytes_for_remote {
             Some(bytes) => bytes,
             None => {
-                match read_xorb_payload_for_cache_warm(payload, Arc::clone(&payload_budget)).await {
+                match read_uploaded_xorb_payload_for_cache_warm(
+                    &uploaded_xorb,
+                    store.as_ref(),
+                    &path,
+                    Arc::clone(&payload_budget),
+                )
+                .await
+                {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         warn!(
@@ -4729,16 +4887,37 @@ async fn warm_uploaded_xorb_cache(
     stats
 }
 
-async fn read_xorb_payload_for_cache_warm(
-    payload: &XorbPayload,
+async fn read_uploaded_xorb_payload_for_cache_warm(
+    uploaded_xorb: &UploadedXorb,
+    store: Option<&Store>,
+    path: &ObjectPath,
     payload_budget: Arc<tokio::sync::Semaphore>,
 ) -> Result<Bytes> {
-    let units = xorb_cache_warm_payload_permit_units(payload.len());
+    let expected_len = uploaded_xorb.len();
+    let units = xorb_cache_warm_payload_permit_units(expected_len);
     let _permit = payload_budget
         .acquire_many_owned(units)
         .await
         .map_err(|_| CrabError::Internal("xorb cache warm payload budget closed".to_owned()))?;
-    payload.read_bytes().await
+    let bytes = match uploaded_xorb.payload.as_ref() {
+        Some(payload) => payload.read_bytes().await?,
+        None => {
+            let Some(store) = store else {
+                return Err(CrabError::Internal(
+                    "uploaded xorb cache warm has no payload or origin store".to_owned(),
+                ));
+            };
+            let (bytes, _) = store.get_with_etag(path).await?;
+            bytes
+        }
+    };
+    if bytes.len() != expected_len {
+        return Err(CrabError::Internal(format!(
+            "uploaded xorb cache warm payload changed size: expected {expected_len}, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Active push lock and its optional heartbeat task.
@@ -9196,55 +9375,87 @@ impl PushPipeline {
         &self,
         refs: &HashMap<MerkleHash, XorbRef>,
     ) -> Result<HashMap<MerkleHash, XorbRef>> {
-        // Cache-service results are scheduling candidates only. Every
-        // skipped upload needs canonical-origin proof before a shard can
-        // publish the placement.
-        let mut verified = self.verify_xorb_refs(refs).await?;
-        if verified.len() == refs.len() {
-            return Ok(verified);
-        }
         let (Some(cache), Some(origin)) = (&self.caching_store, &self.store) else {
-            return Ok(verified);
+            return self.verify_xorb_refs(refs).await;
         };
 
-        let mut repaired_xorbs = HashSet::new();
+        // A cache+dedup hit already carries a cache-server proof for the
+        // referenced chunk. Read that immutable body from the cache service
+        // and validate it locally before falling back to canonical-origin
+        // range reads; this keeps a warm duplicate push off the origin read
+        // path while retaining the repair path for a missing origin object.
+        let mut refs_by_xorb: HashMap<XorbHash, Vec<(MerkleHash, XorbRef)>> = HashMap::new();
         for (chunk_hash, xorb_ref) in refs {
-            if verified.contains_key(chunk_hash) || !repaired_xorbs.insert(xorb_ref.xorb_hash) {
-                continue;
-            }
-            let path = self.router.xorb_path(&xorb_ref.xorb_hash);
+            refs_by_xorb
+                .entry(xorb_ref.xorb_hash)
+                .or_default()
+                .push((*chunk_hash, *xorb_ref));
+        }
+
+        let mut verified = HashMap::new();
+        let mut unresolved = HashMap::new();
+        for (xorb_hash, xorb_refs) in refs_by_xorb {
+            let path = self.router.xorb_path(&xorb_hash);
             let body = match cache.get_cache_service_object(&path).await {
                 Ok(Some(body)) => body,
-                Ok(None) => continue,
+                Ok(None) => {
+                    unresolved.extend(xorb_refs);
+                    continue;
+                }
                 Err(error) => {
                     warn!(
-                        xorb_hash = %xorb_ref.xorb_hash.hex(),
+                        xorb_hash = %xorb_hash.hex(),
                         error = %error,
-                        "cache candidate could not be read for canonical-origin repair"
+                        "cache candidate could not be read for canonical-origin proof"
                     );
+                    unresolved.extend(xorb_refs);
                     continue;
                 }
             };
-            match origin.put(&path, body).await {
-                Ok(()) => info!(
-                    xorb_hash = %xorb_ref.xorb_hash.hex(),
-                    "copied hash-verified cache xorb to canonical origin"
-                ),
-                Err(CrabError::CasConflict { .. }) => {
-                    debug!(
-                        xorb_hash = %xorb_ref.xorb_hash.hex(),
-                        "canonical origin appeared during cache repair; revalidating"
+
+            let Some(index) = cached_xorb_index_matches_placements(&body, xorb_hash, &xorb_refs)
+            else {
+                unresolved.extend(xorb_refs);
+                continue;
+            };
+            let Ok(body_len) = u64::try_from(body.len()) else {
+                unresolved.extend(xorb_refs);
+                continue;
+            };
+
+            match origin.head(&path).await {
+                Ok(meta) if meta.size == body_len => {
+                    record_remote_xorb_index(cache.local_cache(), &xorb_hash, &meta, &index);
+                    record_remote_xorb_payload_proof(
+                        cache.local_cache(),
+                        &xorb_hash,
+                        &index,
+                        &meta,
                     );
+                    verified.extend(xorb_refs);
                 }
+                Ok(_) => unresolved.extend(xorb_refs),
+                Err(CrabError::NotFound { .. }) => match origin.put(&path, body).await {
+                    Ok(()) => {
+                        info!(
+                            xorb_hash = %xorb_hash.hex(),
+                            "copied hash-verified cache xorb to canonical origin"
+                        );
+                        verified.extend(xorb_refs);
+                    }
+                    Err(CrabError::CasConflict { .. }) => {
+                        debug!(
+                            xorb_hash = %xorb_hash.hex(),
+                            "canonical origin appeared during cache repair; revalidating"
+                        );
+                        unresolved.extend(xorb_refs);
+                    }
+                    Err(error) => return Err(error),
+                },
                 Err(error) => return Err(error),
             }
         }
 
-        let unresolved = refs
-            .iter()
-            .filter(|(chunk_hash, _)| !verified.contains_key(*chunk_hash))
-            .map(|(chunk_hash, xorb_ref)| (*chunk_hash, *xorb_ref))
-            .collect::<HashMap<_, _>>();
         if !unresolved.is_empty() {
             verified.extend(self.verify_xorb_refs(&unresolved).await?);
         }
@@ -11177,8 +11388,9 @@ impl PushPipeline {
             .iter()
             .map(|(shard_hash, path, _)| (*shard_hash, path.clone()))
             .collect();
-        let existing_shards = verified_existing_remote_shards(
+        let existing_shards = verified_existing_remote_shards_with_cache(
             store,
+            self.caching_store.as_ref(),
             &shard_checks,
             self.config.head_check_concurrency,
         )
@@ -12211,7 +12423,9 @@ impl PushPipeline {
             })?;
         let writer = build_push_metadb_guard_with_object_store(
             store,
-            None,
+            self.caching_store
+                .as_ref()
+                .map(crab_cache_store::CachingStore::object_store),
             &self.router,
             self.metrics.clone(),
             &self.config.metadb,
@@ -12726,6 +12940,15 @@ impl PushPipeline {
         self.upload_packs().await
     }
 
+    async fn read_remote_shard_for_proof(
+        &self,
+        store: &Store,
+        path: &ObjectPath,
+        expected_hash: MerkleHash,
+    ) -> Result<Bytes> {
+        read_remote_shard_for_proof(store, self.caching_store.as_ref(), path, expected_hash).await
+    }
+
     async fn lookup_origin_file_index_batch(
         &self,
         store: &Store,
@@ -12758,14 +12981,14 @@ impl PushPipeline {
                 .collect::<Result<Vec<_>>>()?;
         let committed_shard_set = committed_shards.iter().copied().collect::<HashSet<_>>();
 
-        // Remote-only pointer acceptance is a durability proof, so use
-        // the origin object store directly. The installed pipeline
-        // MetaDb guard may be cache-aware for fast global dedup, but a
-        // cache-only file-index view cannot prove that another clone can
-        // resolve this pointer after the manifest advances.
+        // Remote-only pointer acceptance is a durability proof. Metadata
+        // reads use the origin store, while immutable shard bodies may use a
+        // hash-verified cache response only after origin HEAD confirms the key.
         let guard = build_push_metadb_guard_with_object_store(
             store,
-            None,
+            self.caching_store
+                .as_ref()
+                .map(crab_cache_store::CachingStore::object_store),
             &self.router,
             self.metrics.clone(),
             &self.config.metadb,
@@ -12820,6 +13043,7 @@ impl PushPipeline {
         } else {
             use futures_util::StreamExt;
             let shard_search_concurrency = 16usize.min(committed_shards.len()).max(1);
+            let pipeline = self;
             let batches =
                 futures_util::stream::iter(committed_shards.into_iter().map(|shard_hash| {
                     let store = store.clone();
@@ -12827,7 +13051,9 @@ impl PushPipeline {
                     let missing = missing.clone();
                     async move {
                         let path = router.shard_path(&shard_hash);
-                        let (body, _) = store.get_with_etag(&path).await?;
+                        let body = pipeline
+                            .read_remote_shard_for_proof(&store, &path, shard_hash)
+                            .await?;
                         let actual = compute_data_hash(&body);
                         if actual != shard_hash {
                             return Err(CrabError::CorruptObject {
@@ -12923,12 +13149,11 @@ impl PushPipeline {
                 let store = store.clone();
                 let router = self.router.clone();
                 async move {
-                    // Remote-only proof must hit origin: local or cache-service
-                    // shards can accelerate reads, but they do not prove that
-                    // another clone can hydrate from object storage.
-                    let fetched = store.get_with_etag(&shard_path).await;
+                    let fetched = self
+                        .read_remote_shard_for_proof(&store, &shard_path, shard_hash)
+                        .await;
                     let proof = match fetched {
-                        Ok((body, _)) => {
+                        Ok(body) => {
                             let actual = compute_data_hash(body.as_ref());
                             if actual != shard_hash {
                                 RemoteFileIndexProof::HashMismatch { actual }
@@ -14062,11 +14287,16 @@ impl PushPipeline {
             );
         }
 
-        // Warm advisory xorb caches with small payloads we just uploaded.
+        // Warm advisory xorb caches with small xorbs just uploaded. Streamed
+        // uploads reread the bounded body from origin because their upload
+        // task intentionally releases its payload before this step.
         // Very large initial pushes already made the origin durable; copying
         // those bytes again before returning would make cache warming dominate
         // the user-visible push path.
-        let uploaded = std::mem::take(&mut *self.uploaded_xorbs.lock().await);
+        let uploaded = std::mem::take(&mut *self.uploaded_xorbs.lock().await)
+            .into_iter()
+            .filter(|uploaded_xorb| uploaded_xorb.cache_warm)
+            .collect::<Vec<_>>();
         if !uploaded.is_empty() {
             use futures_util::StreamExt;
 
@@ -15478,16 +15708,12 @@ pub(crate) fn build_push_metadb_guard_with_object_store(
     // Keep the warm tier lazy so read-only diagnostics and pushes pay
     // the local-cache open cost only when they actually need chunk
     // lookups.
-    // SlateDB's writer fencing depends on observing the latest manifest
-    // epoch after every compare-and-swap. A read-through cache may safely
-    // serve immutable tables to a reader, but it must never sit below a
-    // writer because a cached versioned manifest can regress the writer's
-    // local epoch and panic SlateDB's manifest task.
-    let metadb_store = if read_only {
-        metadb_object_store.unwrap_or_else(|| Arc::clone(store.inner()))
-    } else {
-        Arc::clone(store.inner())
-    };
+    // The cache-aware wrapper keeps SlateDB's mutable discovery, boundary,
+    // and CAS paths on origin while routing append-only versioned manifests
+    // and tables through the cache service. That is safe for both readers
+    // and the short-lived post-CAS writer, and avoids re-fetching metadata
+    // that the cache service already warmed during the previous push.
+    let metadb_store = metadb_object_store.unwrap_or_else(|| Arc::clone(store.inner()));
     let metadb = match metrics.as_ref() {
         Some(m) => crate::metadata::MetaDb::new_with_metrics(
             Arc::clone(&metadb_store),
@@ -17226,14 +17452,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn push_metadb_writer_bypasses_supplied_cache_object_store() {
+    async fn push_metadb_writer_uses_supplied_cache_object_store_for_versioned_metadata() {
         let inner = Arc::new(object_store::memory::InMemory::new());
         let store_inner: Arc<dyn object_store::ObjectStore> = inner.clone();
         let store = Store::new(store_inner);
         let router = StoreLayout::new(store.clone(), "repo-origin-writer-metadb".to_owned());
+
+        let seed_guard = build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            false,
+        );
+        seed_guard
+            .chunk_index_system_keys()
+            .await
+            .expect("seed chunk-index manifest");
+        seed_guard.close().await.expect("close seed writer");
+
         let reads = Arc::new(Mutex::new(Vec::new()));
         let recording_store: Arc<dyn object_store::ObjectStore> = Arc::new(RecordingReadStore {
-            inner,
+            inner: Arc::clone(&inner),
             reads: Arc::clone(&reads),
         });
 
@@ -17248,15 +17488,16 @@ mod tests {
         guard
             .chunk_index_system_keys()
             .await
-            .expect("writer should open the canonical origin");
+            .expect("writer should open through the supplied store");
         guard.close().await.expect("close writer guard");
 
         let seen = reads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(
-            seen.is_empty(),
-            "read-write MetaDB must bypass cache-aware object stores, saw {seen:?}"
+            seen.iter()
+                .any(|path| path.contains("chunk_index_db/manifest/")),
+            "read-write MetaDB should route versioned metadata through the supplied store, saw {seen:?}"
         );
     }
 
@@ -26847,8 +27088,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_success_cleanup_warms_remote_cache_when_local_xorb_exists() {
-        use crate::cache::{CacheKey, LocalCache};
+    async fn post_success_cleanup_warms_remote_cache_from_origin_for_remote_only_xorb() {
         use crate::core::config::{CacheConfig, ServiceAuth, ServiceMode};
         use crate::test::git_repo::CacheDirGuard;
         use crab_cache_store::CachingStore;
@@ -26857,12 +27097,7 @@ mod tests {
         let cache_tmp = tempfile::tempdir().expect("tempdir");
         let _cache_guard = CacheDirGuard::new(cache_tmp.path());
 
-        let (_, bytes, hash, _) = test_single_chunk_xorb(b"xorb bytes already on local disk");
-        let local_cache = LocalCache::new(cache_tmp.path().to_path_buf());
-        local_cache
-            .put(&CacheKey::Xorb(hash), &bytes)
-            .await
-            .expect("preload local xorb");
+        let (_, bytes, hash, _) = test_single_chunk_xorb(b"xorb bytes already on origin");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -26913,6 +27148,10 @@ mod tests {
             Arc::new(object_store::memory::InMemory::new());
         let store = crate::storage::store::Store::new(inner);
         let router = StoreLayout::new(store.clone(), String::new());
+        store
+            .put(&router.xorb_path(&hash), bytes.clone())
+            .await
+            .expect("store origin xorb");
         let cache_config = CacheConfig {
             service_url: Some(format!("http://{addr}")),
             service_mode: ServiceMode::CacheAndDedup,
@@ -26936,7 +27175,8 @@ mod tests {
             CancellationToken::new(),
             None,
         );
-        *pipeline.uploaded_xorbs.lock().await = vec![UploadedXorb::in_memory(hash, bytes.clone())];
+        *pipeline.uploaded_xorbs.lock().await =
+            vec![UploadedXorb::remote_only(hash, bytes.len(), false)];
 
         pipeline.post_success_cleanup().await;
 
