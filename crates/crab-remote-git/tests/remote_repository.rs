@@ -121,7 +121,7 @@ impl CountingStore {
     }
 
     fn release_blocked_pack_get(&self) {
-        self.release_pack_get.notify_waiters();
+        self.release_pack_get.notify_one();
     }
 
     fn slow_pack_gets(&self) {
