@@ -4242,6 +4242,10 @@ restripe_output_class = "standard-ia"
         let p = dir.path().join("config.toml");
         std::fs::write(&p, "[tier]\nenabled = true\n").unwrap();
 
+        let _guard = STORAGE_ECONOMY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_storage_economy_env();
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
             .expect("should parse partial tier section");
         assert!(cfg.tier.enabled);
@@ -4308,6 +4312,10 @@ report_max_staleness_hours = 24
         let p = dir.path().join("config.toml");
         std::fs::write(&p, "[cost]\ninventory_source = \"report\"\n").unwrap();
 
+        let _guard = STORAGE_ECONOMY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_storage_economy_env();
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
             .expect("should parse partial cost section");
         assert_eq!(cfg.cost.inventory_source, "report");

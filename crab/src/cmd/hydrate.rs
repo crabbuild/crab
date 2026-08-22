@@ -872,9 +872,10 @@ impl ShardHydrator {
         let hit = match file_index_lookup {
             Some(lookup) => lookup.lookup(file_hash).await?,
             None => {
+                let storage = self.store.cache_aware_storage();
                 let session =
                     crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
-                        self.store.origin(),
+                        &storage,
                         self.router.repo_prefix(),
                     )
                     .await?;

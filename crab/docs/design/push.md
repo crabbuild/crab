@@ -2233,8 +2233,11 @@ the referenced bytes. In `cache+dedup`, push treats that service proof as
 authoritative and does not reread immutable xorbs from origin. In `dedup`,
 push still adds the origin proof before publishing shard metadata.
 
-Step 9 also warms the cache service with newly-uploaded shards, so
-subsequent readers reach the cache before S3.
+Step 9 warms the cache service with newly-uploaded shards, and step 13
+warms small newly-uploaded xorbs. Streamed xorb uploads are reread from
+origin within the bounded warm budget when the upload task has released
+its body, so cache-service dedup can verify the cached payload before
+returning it as known.
 
 **Source:** `crates/crab-cache-server/src/*`,
 `crates/crab-cache/src/cache_client.rs`,
