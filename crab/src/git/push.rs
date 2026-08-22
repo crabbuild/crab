@@ -19268,19 +19268,21 @@ mod tests {
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
-        let pushed = PushPipeline::new(
-            PushConfig::default(),
-            vec![make_spec("refs/heads/main")],
-            Some(store.clone()),
-            None,
-            None,
-            router.repo_prefix().to_owned(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/main")],
+                Some(store.clone()),
+                None,
+                None,
+                router.repo_prefix().to_owned(),
+                router.clone(),
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
         )
-        .execute()
         .await;
         assert_eq!(
             pushed.outcomes.get("refs/heads/main"),
@@ -19403,19 +19405,21 @@ mod tests {
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
-        let pushed = PushPipeline::new(
-            PushConfig::default(),
-            vec![make_spec("refs/heads/main")],
-            Some(store.clone()),
-            None,
-            None,
-            router.repo_prefix().to_owned(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/main")],
+                Some(store.clone()),
+                None,
+                None,
+                router.repo_prefix().to_owned(),
+                router.clone(),
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
         )
-        .execute()
         .await;
         assert_eq!(
             pushed.outcomes.get("refs/heads/main"),
