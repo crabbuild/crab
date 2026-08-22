@@ -238,7 +238,8 @@ builds that proof from its existing verified materialization workspace, so the
 commit boundary does not download the candidate pack inventory a second time.
 
 Current proof keys use the manifest Git-validation digest, and current proof
-bodies store one sorted object-ID dictionary plus per-ref position closures.
+bodies store one sorted object-ID dictionary plus adaptive sparse-position or
+bitmap closures per ref.
 Crab 1.0.15's generation-and-pack-index key remains readable and GC-rooted only
 as a shipped data migration; the next write or explicit metadata repair
 backfills the digest-bound proof.

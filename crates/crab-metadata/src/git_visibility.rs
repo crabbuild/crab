@@ -390,6 +390,8 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 mod storage {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
     use bytes::Bytes;
     use crab_storage::{StorageError, Store, StoreLayout};
     use object_store::path::Path as ObjectPath;
@@ -443,7 +445,14 @@ mod storage {
         pack_index_hash: String,
         git_validation_digest: String,
         objects: Vec<String>,
-        refs: BTreeMap<String, Vec<u32>>,
+        refs: BTreeMap<String, GitVisibilityClosureV3>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum GitVisibilityClosureV3 {
+        Sparse(Vec<u32>),
+        Bitmap(String),
     }
 
     impl GitVisibilityIndexV3 {
@@ -470,7 +479,7 @@ mod storage {
                 .refs
                 .iter()
                 .map(|(name, closure)| {
-                    let closure = closure
+                    let positions = closure
                         .iter()
                         .map(|oid| {
                             positions.get(oid.as_str()).copied().ok_or_else(|| {
@@ -480,7 +489,10 @@ mod storage {
                             })
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    Ok((name.clone(), closure))
+                    Ok((
+                        name.clone(),
+                        GitVisibilityClosureV3::from_positions(positions, objects.len())?,
+                    ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
             Ok(Self {
@@ -532,8 +544,9 @@ mod storage {
                             "visibility index contains an invalid ref name",
                         ));
                     }
+                    let positions = closure.into_positions(self.objects.len())?;
                     membership_count = membership_count
-                        .checked_add(u64::try_from(closure.len()).map_err(|_| {
+                        .checked_add(u64::try_from(positions.len()).map_err(|_| {
                             super::corrupt("visibility index object count cannot be represented")
                         })?)
                         .ok_or_else(|| super::corrupt("visibility index object count overflows"))?;
@@ -541,7 +554,7 @@ mod storage {
                         return Err(super::corrupt("visibility index contains too many objects"));
                     }
                     let mut prior_position = None;
-                    let objects = closure
+                    let objects = positions
                         .into_iter()
                         .map(|position| {
                             if prior_position.is_some_and(|prior| prior >= position) {
@@ -580,6 +593,111 @@ mod storage {
             index.validate()?;
             Ok(index)
         }
+    }
+
+    impl GitVisibilityClosureV3 {
+        fn from_positions(positions: Vec<u32>, object_count: usize) -> Result<Self> {
+            let bitmap_len = object_count.div_ceil(8);
+            let bitmap_encoded_len = bitmap_len
+                .checked_div(3)
+                .and_then(|groups| groups.checked_mul(4))
+                .and_then(|size| {
+                    size.checked_add(match bitmap_len % 3 {
+                        0 => 0,
+                        1 => 2,
+                        _ => 3,
+                    })
+                })
+                .ok_or_else(|| super::corrupt("visibility closure bitmap size overflows"))?;
+            let sparse_encoded_len = positions
+                .iter()
+                .try_fold(positions.len().saturating_sub(1), |size, position| {
+                    size.checked_add(decimal_digits(*position))
+                });
+            let sparse_encoded_len = sparse_encoded_len
+                .ok_or_else(|| super::corrupt("visibility sparse closure size overflows"))?;
+            if bitmap_encoded_len >= sparse_encoded_len {
+                return Ok(Self::Sparse(positions));
+            }
+
+            let mut bitmap = vec![0_u8; bitmap_len];
+            for position in positions {
+                let position = usize::try_from(position).map_err(|_| {
+                    super::corrupt("visibility closure position cannot be represented")
+                })?;
+                let byte = bitmap.get_mut(position / 8).ok_or_else(|| {
+                    super::corrupt("visibility closure position is outside its dictionary")
+                })?;
+                *byte |= 1 << (position % 8);
+            }
+            Ok(Self::Bitmap(STANDARD_NO_PAD.encode(bitmap)))
+        }
+
+        fn into_positions(self, object_count: usize) -> Result<Vec<u32>> {
+            match self {
+                Self::Sparse(positions) => Ok(positions),
+                Self::Bitmap(encoded) => {
+                    let bitmap = STANDARD_NO_PAD.decode(&encoded).map_err(|_| {
+                        super::corrupt("visibility closure bitmap is not valid base64")
+                    })?;
+                    if STANDARD_NO_PAD.encode(&bitmap) != encoded {
+                        return Err(super::corrupt(
+                            "visibility closure bitmap is not canonical base64",
+                        ));
+                    }
+                    let expected_len = object_count.div_ceil(8);
+                    if bitmap.len() != expected_len {
+                        return Err(super::corrupt(
+                            "visibility closure bitmap length does not match its dictionary",
+                        ));
+                    }
+                    if let Some(last) = bitmap.last()
+                        && !object_count.is_multiple_of(8)
+                        && last >> (object_count % 8) != 0
+                    {
+                        return Err(super::corrupt(
+                            "visibility closure bitmap sets a position outside its dictionary",
+                        ));
+                    }
+                    let position_count = bitmap.iter().try_fold(0_u64, |count, byte| {
+                        count.checked_add(u64::from(byte.count_ones()))
+                    });
+                    let position_count = position_count
+                        .and_then(|count| usize::try_from(count).ok())
+                        .ok_or_else(|| {
+                            super::corrupt("visibility closure object count cannot be represented")
+                        })?;
+                    let mut positions = Vec::with_capacity(position_count);
+                    for (byte_index, byte) in bitmap.iter().enumerate() {
+                        for bit_index in 0..8 {
+                            if byte & (1 << bit_index) == 0 {
+                                continue;
+                            }
+                            let position = byte_index
+                                .checked_mul(8)
+                                .and_then(|position| position.checked_add(bit_index))
+                                .and_then(|position| u32::try_from(position).ok())
+                                .ok_or_else(|| {
+                                    super::corrupt(
+                                        "visibility closure position cannot be represented",
+                                    )
+                                })?;
+                            positions.push(position);
+                        }
+                    }
+                    Ok(positions)
+                }
+            }
+        }
+    }
+
+    fn decimal_digits(mut value: u32) -> usize {
+        let mut digits = 1;
+        while value >= 10 {
+            value /= 10;
+            digits += 1;
+        }
+        digits
     }
 
     impl GitVisibilityIndexV1 {
@@ -1151,9 +1269,10 @@ mod tests {
         let objects = (0..256)
             .map(|position| format!("{position:040x}"))
             .collect::<Vec<_>>();
-        let refs = (0..8)
+        let mut refs = (0..8)
             .map(|position| (format!("refs/heads/branch-{position}"), objects.clone()))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        refs.insert("refs/heads/sparse".to_owned(), vec![objects[0].clone()]);
         let index = GitVisibilityIndex::new(7, "a".repeat(64), "b".repeat(64), refs);
         let expanded = serde_json::to_vec(&serde_json::json!({
             "version": index.version,
@@ -1172,7 +1291,9 @@ mod tests {
             .unwrap();
         let stored: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(stored["objects"].as_array().unwrap().len(), 256);
-        assert!(body.len() < expanded.len() / 2);
+        assert!(stored["refs"]["refs/heads/branch-0"]["bitmap"].is_string());
+        assert!(stored["refs"]["refs/heads/sparse"]["sparse"].is_array());
+        assert!(body.len() < expanded.len() / 4);
         assert_eq!(
             read(
                 &store,
@@ -1206,7 +1327,39 @@ mod tests {
             "pack_index_hash": pack_hash.clone(),
             "git_validation_digest": digest.clone(),
             "objects": ["1".repeat(40)],
-            "refs": {"refs/heads/main": [1]},
+            "refs": {"refs/heads/main": {"sparse": [1]}},
+        });
+        store
+            .put(
+                &router.git_visibility_path(&digest),
+                Bytes::from(serde_json::to_vec(&malformed).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert!(read(&store, &router, 7, &pack_hash, &digest).await.is_err());
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn v3_storage_rejects_bitmap_bits_outside_dictionary() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "a".repeat(64);
+        let digest = "b".repeat(64);
+        let malformed = serde_json::json!({
+            "version": 3,
+            "generation": 7,
+            "pack_index_hash": pack_hash.clone(),
+            "git_validation_digest": digest.clone(),
+            "objects": ["1".repeat(40)],
+            "refs": {"refs/heads/main": {"bitmap": "gA"}},
         });
         store
             .put(
