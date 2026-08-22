@@ -15,9 +15,10 @@ default = []
 file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
 local-index = ["dep:rusqlite"]
 remote-index = ["dep:futures-util", "dep:object_store", "dep:slatedb"]
-storage = ["dep:crab-storage", "dep:futures-util", "dep:object_store"]
+storage = ["dep:base64", "dep:crab-storage", "dep:futures-util", "dep:object_store"]
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-storage = { workspace = true, optional = true }
