@@ -1,8 +1,8 @@
 //! Git protocol-v2 upload-pack over the helper's already-authenticated stdio.
 //!
-//! This module owns only wire framing and command semantics. Repository
-//! admission, generation pinning, object traversal, and pack production stay
-//! in the shared read and remote-git crates.
+//! This module owns wire framing, command semantics, and the product-level
+//! admission repair before a session starts. Generation pinning, object
+//! traversal, and pack production stay in the shared read and remote-git crates.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -14,7 +14,8 @@ use crab_read::{
     parse_upload_pack_filter, plan_upload_pack,
 };
 use crab_remote_git::{
-    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
+    Error as RemoteGitError, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
+    RepositoryOptions,
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
@@ -28,6 +29,7 @@ use crate::core::error::{CrabError, Result};
 const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const LOCATOR_READ_REPAIR_LOCK_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Packet {
@@ -67,8 +69,8 @@ struct FetchRequest {
     filter: UploadPackFilter,
 }
 
-/// Return whether the repository has the complete proof required to advertise
-/// protocol-v2 upload-pack.
+/// Ensure the repository has the complete proof required to advertise
+/// protocol-v2 upload-pack, repairing current derived locator lag when possible.
 pub async fn snapshot_available(
     store: &crab_storage::Store,
     prefix: &str,
@@ -77,7 +79,47 @@ pub async fn snapshot_available(
     let Ok(repository) = open_repository(store, prefix, cancellation).await else {
         return false;
     };
-    repository.visibility_index(cancellation).await.is_ok()
+    match repository.visibility_index(cancellation).await {
+        Ok(_) => true,
+        Err(error) if visibility_index_is_missing(&error) => {
+            let repair_store = crate::storage::Store::from_storage(store.clone());
+            let repair_layout =
+                crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+            match super::push::repair_git_visibility_if_current(
+                &repair_store,
+                &repair_layout,
+                repository.generation(),
+                LOCATOR_READ_REPAIR_LOCK_TTL,
+                cancellation,
+            )
+            .await
+            {
+                Ok(Some(super::push::GitVisibilityPublication::Published)) => {
+                    let Ok(repository) = open_repository(store, prefix, cancellation).await else {
+                        return false;
+                    };
+                    repository.visibility_index(cancellation).await.is_ok()
+                }
+                Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => {
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "current Git visibility repair failed");
+                    false
+                }
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn visibility_index_is_missing(error: &RemoteGitError) -> bool {
+    matches!(
+        error,
+        RemoteGitError::Metadata(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        })
+    )
 }
 
 pub(crate) fn hidden_ref_patterns_are_valid(patterns: &[String]) -> bool {
@@ -264,11 +306,52 @@ pub(crate) async fn open_repository(
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let open = RemoteGitRepository::open(
+        store.clone(),
+        layout.clone(),
+        identity.clone(),
+        Arc::clone(&runtime),
+        RepositoryOptions::default(),
+        cancellation,
+    )
+    .await;
+    let (observed_generation, required_generation) = match open {
+        Ok(repository) => return Ok(repository),
+        Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
+        Err(error) => return Err(remote_error(error)),
+    };
+
+    // The manifest generation check distinguishes derived publication lag from
+    // an active ref-journal transaction, which must remain unavailable.
+    let repair_store = crate::storage::Store::from_storage(store.clone());
+    let repair_layout =
+        crate::storage::StoreLayout::new(repair_store.clone(), layout.repo_prefix().to_owned());
+    let repaired = super::push::repair_git_object_locator_if_current(
+        &repair_store,
+        &repair_layout,
+        required_generation,
+        LOCATOR_READ_REPAIR_LOCK_TTL,
+        cancellation,
+    )
+    .await?;
+    if !repaired {
+        return Err(remote_error(RemoteGitError::RepositoryIndexing {
+            observed: observed_generation,
+            required: required_generation,
+        }));
+    }
+    tracing::info!(
+        observed_generation,
+        required_generation,
+        "repaired current Git locator before upload-pack admission"
+    );
+
     RemoteGitRepository::open(
         store.clone(),
         layout,
         identity,
-        Arc::new(RemoteGitRuntime::default()),
+        runtime,
         RepositoryOptions::default(),
         cancellation,
     )
@@ -1212,6 +1295,7 @@ mod tests {
         let visibility = GitVisibilityIndex::new(
             1,
             "c".repeat(64),
+            "d".repeat(64),
             std::collections::BTreeMap::from([(
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
@@ -1242,6 +1326,7 @@ mod tests {
         let visibility = GitVisibilityIndex::new(
             1,
             "c".repeat(64),
+            "d".repeat(64),
             std::collections::BTreeMap::from([(
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],

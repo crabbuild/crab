@@ -24,6 +24,14 @@ use crate::error::{MetadataError, Result};
 const DB_LABEL: &str = "git_locator_db";
 const MAX_BATCH_ROWS: usize = 25_000;
 const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
+const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
+const LOCATOR_L0_MAX_SSTS: usize = 32;
+const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
+// B-tree nodes and SlateDB bookkeeping make the in-memory row materially
+// larger than its 49 encoded bytes. This upper bound decides only whether to
+// start maintenance early; the hard L0 limit remains authoritative.
+const ESTIMATED_OBJECT_ROW_BYTES: u128 = 128;
+const FIXED_PUBLICATION_SSTS: usize = 4;
 // Amortize one directory scan over a normal fan-out while bounding the number
 // of superseded locator generations. This cadence is cost policy, not safety.
 const GC_GENERATION_INTERVAL: u64 = 32;
@@ -69,9 +77,31 @@ pub struct GitObjectLocatorWriter {
 impl GitObjectLocatorWriter {
     /// Open the compact locator and require its exact format metadata.
     pub async fn open(store: Arc<dyn ObjectStore>, repo_prefix: &str) -> Result<Self> {
+        Self::open_with_settings(store, repo_prefix, locator_settings(true)).await
+    }
+
+    /// Open a bounded publication writer, starting compaction only under L0 pressure.
+    ///
+    /// `planned_object_rows` must bound the object rows the caller may submit.
+    pub async fn open_for_publication(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+        planned_object_rows: u64,
+    ) -> Result<Self> {
+        let path = git_object_locator_path(repo_prefix);
+        let compact =
+            locator_compaction_required(&path, Arc::clone(&store), planned_object_rows).await?;
+        Self::open_with_settings(store, repo_prefix, locator_settings(compact)).await
+    }
+
+    async fn open_with_settings(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+        settings: Settings,
+    ) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
         let db = slatedb::Db::builder(ObjectPath::from(path.as_str()), Arc::clone(&store))
-            .with_settings(locator_settings())
+            .with_settings(settings)
             // Publication writes each row once and stale-row cleanup performs
             // one sequential scan. Caching that scan in SlateDB's default
             // 640 MiB block/metadata cache only inflates writer RSS.
@@ -536,26 +566,63 @@ fn locator_gc_options() -> GarbageCollectorOptions {
     }
 }
 
-fn locator_settings() -> Settings {
-    let mut compactor = CompactorOptions {
-        commit_compacted_interval: std::time::Duration::from_millis(500),
-        ..CompactorOptions::default()
-    };
-    if let Some(worker) = &mut compactor.worker {
-        worker.compactions_poll_interval = std::time::Duration::from_millis(500);
-    }
+async fn locator_compaction_required(
+    path: &str,
+    store: Arc<dyn ObjectStore>,
+    planned_object_rows: u64,
+) -> Result<bool> {
+    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    let manifest =
+        admin
+            .read_manifest(None)
+            .await
+            .map_err(|source| MetadataError::SlateDbOpen {
+                db: DB_LABEL.to_owned(),
+                path: path.to_owned(),
+                source,
+            })?;
+    let l0_ssts = manifest.map_or(0, |manifest| manifest.l0().len());
+    Ok(should_start_compactor(l0_ssts, planned_object_rows))
+}
+
+fn should_start_compactor(l0_ssts: usize, planned_object_rows: u64) -> bool {
+    let object_bytes = u128::from(planned_object_rows).saturating_mul(ESTIMATED_OBJECT_ROW_BYTES);
+    let object_ssts = object_bytes.saturating_add(LOCATOR_L0_SST_BYTES as u128 - 1)
+        / LOCATOR_L0_SST_BYTES as u128;
+    let planned_ssts = object_ssts
+        .saturating_add(FIXED_PUBLICATION_SSTS as u128)
+        .min(usize::MAX as u128) as usize;
+    l0_ssts.saturating_add(planned_ssts) >= LOCATOR_COMPACTION_TRIGGER_SSTS
+}
+
+fn locator_settings(compact: bool) -> Settings {
+    let compactor_options = compact.then(|| {
+        let mut compactor = CompactorOptions {
+            commit_compacted_interval: std::time::Duration::from_millis(500),
+            ..CompactorOptions::default()
+        };
+        if let Some(worker) = &mut compactor.worker {
+            worker.compactions_poll_interval = std::time::Duration::from_millis(500);
+        }
+        compactor
+    });
     Settings {
         flush_interval: None,
         wal_enabled: false,
         // SlateDB excludes the active memtable from max_unflushed_bytes.
         // Keep both limits small so B-tree and flush-encoding amplification
         // cannot turn a compact locator rebuild into multi-GiB process RSS.
-        l0_sst_size_bytes: 64 * 1024 * 1024,
+        l0_sst_size_bytes: LOCATOR_L0_SST_BYTES,
         max_unflushed_bytes: 96 * 1024 * 1024,
+        // Publication reads the persisted L0 count under the locator lock and
+        // starts compaction before reaching half this ceiling. The remaining
+        // headroom covers one conservatively estimated publication.
+        l0_max_ssts: LOCATOR_L0_MAX_SSTS,
+        l0_max_ssts_per_key: LOCATOR_L0_MAX_SSTS,
         l0_flush_parallelism: 1,
-        // Locator writers are short-lived. The multi-second defaults can leave
-        // small compactions unclaimed until the next push hits L0 backpressure.
-        compactor_options: Some(compactor),
+        // SlateDB tickers fire immediately. Starting these tasks only under
+        // measured L0 pressure amortizes their fixed object-store request cost.
+        compactor_options,
         // SlateDB tickers fire immediately, so default background GC runs its
         // full directory scan on every short-lived publication session.
         garbage_collector_options: None,
@@ -704,9 +771,11 @@ mod tests {
 
     #[test]
     fn locator_settings_bound_writer_memory() {
-        let settings = locator_settings();
+        let settings = locator_settings(true);
         assert_eq!(settings.l0_sst_size_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.max_unflushed_bytes, 96 * 1024 * 1024);
+        assert_eq!(settings.l0_max_ssts, LOCATOR_L0_MAX_SSTS);
+        assert_eq!(settings.l0_max_ssts_per_key, LOCATOR_L0_MAX_SSTS);
         assert_eq!(settings.l0_flush_parallelism, 1);
         assert!(settings.garbage_collector_options.is_none());
         let compactor = settings
@@ -727,6 +796,21 @@ mod tests {
                 .compactions_poll_interval,
             std::time::Duration::from_millis(500)
         );
+    }
+
+    #[test]
+    fn locator_publication_starts_compaction_before_bounded_l0_headroom_is_consumed() {
+        assert!(!should_start_compactor(0, 0));
+        assert!(!should_start_compactor(
+            LOCATOR_COMPACTION_TRIGGER_SSTS - FIXED_PUBLICATION_SSTS - 1,
+            0,
+        ));
+        assert!(should_start_compactor(
+            LOCATOR_COMPACTION_TRIGGER_SSTS - FIXED_PUBLICATION_SSTS,
+            0,
+        ));
+        assert!(should_start_compactor(0, u64::MAX));
+        assert!(locator_settings(false).compactor_options.is_none());
     }
 
     #[test]

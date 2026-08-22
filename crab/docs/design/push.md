@@ -1174,6 +1174,14 @@ retryable `transient` outcome and runs the normal holder-checked release path;
 the ref remains invisible. If the immutable marker was stored but its success
 response was lost, the exact-byte create retry observes the existing marker
 and reconciles the write as success instead of reporting an ambiguous push.
+The Git-facing rejection tag remains `transient`. The local push audit adds a
+stable `failure_stage` such as `lock`, `xorb-upload`, `git-pack-upload`, or
+`ref-commit`, allowing qualification reports to attribute retries without
+parsing backend messages or changing the remote-helper protocol.
+Retryable failures before pipeline delegation use `store-resolve` or
+`discovery` and enter the same structured command-level retry path. Legacy
+protected-push prepare failures remain terminal because that endpoint has no
+idempotency contract.
 
 ### Heartbeat
 

@@ -19,8 +19,9 @@ use crate::core::perf_phase::PerfPhaseSink;
 use crate::git::discover;
 use crate::git::progress::NativePushProgress;
 use crate::git::push::{
-    PrePopulatedWalk, PushConfig, PushLockLease, PushResult, acquire_push_lock_leases,
-    duplicate_destination_result, release_push_lock_leases, run_push_batch_with_locks,
+    PrePopulatedWalk, PushConfig, PushFailureStage, PushLockLease, PushResult,
+    acquire_push_lock_leases, duplicate_destination_result, release_push_lock_leases,
+    run_push_batch_with_locks,
 };
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::PushSpec;
@@ -620,7 +621,7 @@ fn push_lock_rejection_result(specs: &[PushSpec], err: &CrabError) -> PushResult
             super::push::RefPushOutcome::Rejected(reason.clone()),
         );
     }
-    PushResult::new(outcomes)
+    PushResult::new(outcomes).with_failure_stage(PushFailureStage::Lock)
 }
 
 async fn release_native_locks_on_error<T>(
@@ -1586,6 +1587,24 @@ mod tests {
         assert_eq!(
             prepared_ref_frontier(&updates),
             BTreeMap::from([("refs/heads/main".to_owned(), "a".repeat(40))])
+        );
+    }
+
+    #[test]
+    fn lock_rejection_retains_failure_stage() {
+        let result = push_lock_rejection_result(
+            &[main_push_spec()],
+            &CrabError::PushLockHeld {
+                ref_name: "refs/heads/main".to_owned(),
+                holder: "other-writer".to_owned(),
+                expires_at_unix: Some(1),
+            },
+        );
+
+        assert_eq!(result.failure_stage, Some(PushFailureStage::Lock));
+        assert_eq!(
+            result.outcomes["refs/heads/main"].protocol_tag(),
+            "lock-contention"
         );
     }
 

@@ -75,9 +75,13 @@ Failures detected before the `packfile` response section use Git's terminal
 keeps request rejections distinguishable from truncated pack generation.
 
 Every requested OID is admitted from the immutable visibility proof before the
-remote reader obtains object bytes. The proof and locator are tied to the same
-manifest generation and pack-index hash. Invalid or missing proof suppresses
-v2 advertisement; it never triggers a silent complete filtered fetch.
+remote reader obtains object bytes. Current proofs are keyed by and carry the
+manifest Git-validation digest, which binds generation, pack inventory, HEAD,
+refs, and peeled refs. Invalid or missing proof suppresses v2 advertisement; it
+never triggers a silent complete filtered fetch. Crab 1.0.15 proofs keyed only
+by generation and pack-index hash remain an explicit read migration: write and
+repair owners backfill the digest-bound key, and GC retains both roots while
+that tagged-data migration is supported.
 
 Each direct ref update uploads content-addressed visibility evidence before its
 journal marker becomes visible. Fast-forward and ordinary updates encode only
@@ -86,6 +90,10 @@ cannot read the prior local closure publishes a complete replacement. The
 single journal-compaction owner applies the ordered evidence and uploads the
 generation proof before advancing the compacted manifest. Concurrent writers
 therefore do not need one another's pack bodies or local Git object databases.
+Transient evidence or proof publication failures abort before the ref becomes
+visible. Repositories whose conservative per-ref proof bound exceeds the
+synchronous 100,000-entry profile explicitly remain on complete-pack fetch
+instead of turning a proof failure into a successful push.
 The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.
@@ -121,10 +129,17 @@ can request one of the supported filter forms directly.
 
 ## Operations and repair
 
-Direct pushes and protected/service publication paths rebuild the visibility
-proof for each committed generation. Repack, history recovery, and
-`crab metadb rebuild` do the same. `crab doctor --metadb` reports locator and
-visibility coverage separately. `crab fsck --store` checks current and
-historical proof roots; `crab fsck --store --repair` verifies the historical
+Direct pushes and protected/service publication paths publish visibility
+before the corresponding ref or manifest commit. Protected receive extracts
+the closure from the already-verified materialization ODB before that workspace
+is released; it does not download the candidate packs again to build proof. If
+a supported current generation predates that ordering or loses derived
+coverage, upload-pack can rebuild the proof from generation-pinned locator data
+before advertising v2. The repair reads commit, tree, and tag objects once;
+blob IDs come from verified
+tree entries, so blob bodies are not downloaded. Repack, history recovery, and
+`crab metadb rebuild` also rebuild visibility. `crab doctor --metadb` reports
+locator and visibility coverage separately. `crab fsck --store` checks current
+and historical proof roots; `crab fsck --store --repair` verifies the historical
 pack closure and idempotently backfills missing roots. Until repair completes,
 v2 stays disabled for that repository.

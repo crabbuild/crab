@@ -1192,6 +1192,7 @@ mod tests {
         GitVisibilityIndex::new(
             7,
             "a".repeat(64),
+            "b".repeat(64),
             [
                 (
                     "refs/heads/main".to_owned(),
@@ -1324,6 +1325,7 @@ mod tests {
         let proof = GitVisibilityIndex::new(
             7,
             "a".repeat(64),
+            "b".repeat(64),
             [("refs/heads/main".to_owned(), vec![oid('3').to_string()])]
                 .into_iter()
                 .collect(),
