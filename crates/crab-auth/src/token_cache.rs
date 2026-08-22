@@ -453,19 +453,11 @@ fn hex_to_key(hex: &str) -> Result<[u8; 32]> {
 fn file_based_key() -> Result<[u8; 32]> {
     let key_dir = dirs_key_dir()?;
     fs::create_dir_all(&key_dir)?;
+    let _lock = flock_dir(&key_dir)?;
     let key_path = key_dir.join(".token-key");
 
     if key_path.exists() {
-        let data = fs::read(&key_path)?;
-        if data.len() != 32 {
-            return Err(AuthError::KeyStore(format!(
-                "token key file has unexpected size {} (expected 32 bytes)",
-                data.len()
-            )));
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&data);
-        return Ok(key);
+        return read_key_file(&key_path);
     }
 
     // Generate a new random key.
@@ -473,7 +465,27 @@ fn file_based_key() -> Result<[u8; 32]> {
     rand::rng().fill(&mut key);
 
     // Write with restrictive permissions.
-    write_key_file(&key_path, &key)?;
+    match write_key_file(&key_path, &key) {
+        Ok(()) => Ok(key),
+        Err(AuthError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another Crab process won the create-new race. Use its key so
+            // concurrent provider construction remains deterministic.
+            read_key_file(&key_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_key_file(path: &Path) -> Result<[u8; 32]> {
+    let data = fs::read(path)?;
+    if data.len() != 32 {
+        return Err(AuthError::KeyStore(format!(
+            "token key file has unexpected size {} (expected 32 bytes)",
+            data.len()
+        )));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&data);
     Ok(key)
 }
 

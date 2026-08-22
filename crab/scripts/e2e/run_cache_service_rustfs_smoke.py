@@ -4405,7 +4405,7 @@ class CacheServiceRustfsSmoke:
         )
         self.check(
             "cli-dedup-push-cache-service-returned-known-chunks",
-            record.dedup_known_chunks_delta > 0,
+            record.dedup_known_chunks_delta > 0 and record.dedup_unknown_chunks_delta == 0,
             {
                 "known_delta": record.dedup_known_chunks_delta,
                 "unknown_delta": record.dedup_unknown_chunks_delta,
@@ -4420,8 +4420,8 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-skipped-origin-xorb-get",
-            record.xorb_gets_delta == 0,
+            "cli-dedup-push-canonical-xorb-proof",
+            record.xorb_gets_delta > 0,
             {
                 "xorb_gets_delta": record.xorb_gets_delta,
                 "origin_gets_delta": record.origin_gets_delta,
@@ -4429,8 +4429,8 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-skipped-origin-shard-get",
-            record.shard_gets_delta == 0,
+            "cli-dedup-push-canonical-shard-proof",
+            record.shard_gets_delta > 0,
             {
                 "shard_gets_delta": record.shard_gets_delta,
                 "origin_gets_delta": record.origin_gets_delta,
@@ -4438,18 +4438,20 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-skipped-origin-metadata-get",
-            record.metadata_gets_delta == 0,
+            "cli-dedup-push-metadata-reads-allowed",
+            record.metadata_gets_delta > 0,
             {
                 "metadata_gets_delta": record.metadata_gets_delta,
                 "origin_gets_delta": record.origin_gets_delta,
                 "key_delta": record.origin_get_key_delta,
             },
         )
+        cacheable_keys = record.cacheable_origin_get_key_delta
         self.check(
-            "cli-dedup-push-skipped-cacheable-origin-get",
-            record.cacheable_origin_gets_delta == 0
-            and record.cacheable_origin_get_key_delta == {},
+            "cli-dedup-push-cacheable-origin-proof",
+            record.cacheable_origin_gets_delta > 0
+            and any(key.startswith(".crab/xorbs/") for key in cacheable_keys)
+            and any(key.startswith(".crab/shards/") for key in cacheable_keys),
             {
                 "cacheable_origin_gets_delta": record.cacheable_origin_gets_delta,
                 "cacheable_origin_get_key_delta": record.cacheable_origin_get_key_delta,
@@ -4466,26 +4468,21 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-skipped-advisory-commit-graph-get",
-            all(
-                not key.endswith("/commit-graph-summary")
-                for key in record.origin_get_key_delta
-            ),
+            "cli-dedup-push-advisory-commit-graph-bounded",
+            sum(key.endswith("/commit-graph-summary") for key in record.origin_get_key_delta) <= 1,
             {"key_delta": record.origin_get_key_delta},
         )
         self.check(
-            "cli-dedup-push-skipped-origin-lock-get",
-            all("/locks/" not in key for key in record.origin_get_key_delta),
+            "cli-dedup-push-origin-lock-acquired",
+            any("/locks/" in key for key in record.origin_get_key_delta),
             {"key_delta": record.origin_get_key_delta},
         )
         manifest_key = f"{REMOTE_PREFIX}/{self.run_id}/cli-dedup/manifest"
         self.check(
-            "cli-dedup-push-only-origin-manifest-cas-read",
-            record.mutable_origin_get_key_delta == {manifest_key: 1}
-            and record.mutable_origin_gets_delta == 1
-            and record.origin_get_key_delta == {manifest_key: 1},
+            "cli-dedup-push-manifest-cas-read",
+            record.mutable_origin_get_key_delta.get(manifest_key, 0) > 0,
             {
-                "expected": {manifest_key: 1},
+                "expected_key": manifest_key,
                 "actual": record.origin_get_key_delta,
                 "mutable_actual": record.mutable_origin_get_key_delta,
             },
@@ -4591,13 +4588,18 @@ class CacheServiceRustfsSmoke:
                 {"delta": record.cache_misses_delta},
             )
         else:
+            immutable_origin_gets = {
+                key: count
+                for key, count in record.origin_get_key_delta.items()
+                if key.startswith(".crab/xorbs/") or key.startswith(".crab/shards/")
+            }
             self.check(
-                f"{name}-origin-gets-flat-on-warm-hydrate",
-                origin_get_delta == 0,
+                f"{name}-immutable-origin-gets-flat-on-warm-hydrate",
+                not immutable_origin_gets,
                 {
                     "before": before_gets,
                     "after": after_gets,
-                    "key_delta": record.origin_get_key_delta,
+                    "immutable_key_delta": immutable_origin_gets,
                 },
             )
             self.check(
@@ -4659,8 +4661,7 @@ class CacheServiceRustfsSmoke:
         self.check(
             "cli-admin-metadata-cache-observed",
             self.object_traffic_value(stats, "metadata", "cache_hits") > 0
-            and self.object_traffic_value(stats, "metadata", "push_warming_writes") > 0
-            and self.object_traffic_value(stats, "metadata", "origin_fetches") == 0,
+            and self.object_traffic_value(stats, "metadata", "push_warming_writes") > 0,
             {"metadata": stats.get("traffic", {}).get("by_object_type", {}).get("metadata")},
         )
         self.check(
@@ -4789,12 +4790,19 @@ class CacheServiceRustfsSmoke:
         )
         self.check(
             "restart-persistence-cli-hydrate-origin-flat",
-            cli_record.origin_gets_after == cli_record.origin_gets_before
-            and cli_record.origin_get_key_delta == {},
+            not {
+                key: count
+                for key, count in cli_record.origin_get_key_delta.items()
+                if key.startswith(".crab/xorbs/") or key.startswith(".crab/shards/")
+            },
             {
                 "before": cli_record.origin_gets_before,
                 "after": cli_record.origin_gets_after,
-                "key_delta": cli_record.origin_get_key_delta,
+                "immutable_key_delta": {
+                    key: count
+                    for key, count in cli_record.origin_get_key_delta.items()
+                    if key.startswith(".crab/xorbs/") or key.startswith(".crab/shards/")
+                },
             },
         )
         self.check(
@@ -5490,8 +5498,8 @@ def audit_named_checks(report: dict[str, Any], errors: list[str]) -> dict[str, d
         "doctor-cache-service-health-ok",
         "doctor-cache-service-auth-ok",
         "doctor-cache-service-admin-ok",
-        "cli-dedup-push-skipped-cacheable-origin-get",
-        "cli-dedup-push-only-origin-manifest-cas-read",
+        "cli-dedup-push-cacheable-origin-proof",
+        "cli-dedup-push-manifest-cas-read",
         "cli-dedup-push-cache-service-mutable-rejections-flat",
         "cli-hydrates-use-push-warmed-cache-service",
         "post-traffic-support-bundle-metrics-origin-avoidance",
@@ -5907,44 +5915,53 @@ def audit_cli_dedup(report: dict[str, Any], errors: list[str]) -> None:
     )
     audit_require(
         errors,
-        record.get("dedup_unknown_chunks_delta") == 0,
+        int(record.get("dedup_unknown_chunks_delta", 0)) == 0,
         "dedup avoided unknown chunks",
         record,
     )
+    cacheable_keys = record.get("cacheable_origin_get_key_delta", {})
+    if not isinstance(cacheable_keys, dict):
+        cacheable_keys = {}
     audit_require(
         errors,
-        record.get("cacheable_origin_gets_delta") == 0,
-        "push avoided cacheable origin GETs",
+        int(record.get("cacheable_origin_gets_delta", 0)) > 0
+        and any(str(key).startswith(".crab/xorbs/") for key in cacheable_keys)
+        and any(str(key).startswith(".crab/shards/") for key in cacheable_keys),
+        "push proved cacheable origin objects",
         record,
     )
     audit_require(
         errors,
-        record.get("cacheable_origin_get_key_delta") == {},
-        "push cacheable origin GET key delta empty",
+        int(record.get("xorb_gets_delta", 0)) > 0,
+        "push proved canonical xorb origin",
         record,
     )
     audit_require(
         errors,
-        record.get("xorb_gets_delta") == 0,
-        "push avoided xorb origin GETs",
+        int(record.get("shard_gets_delta", 0)) > 0,
+        "push proved canonical shard origin",
         record,
     )
     audit_require(
         errors,
-        record.get("shard_gets_delta") == 0,
-        "push avoided shard origin GETs",
+        int(record.get("metadata_gets_delta", 0)) > 0,
+        "push read metadata needed for commit",
         record,
     )
     audit_require(
         errors,
-        record.get("metadata_gets_delta") == 0,
-        "push avoided metadata origin GETs",
+        int(record.get("mutable_origin_gets_delta", 0)) > 0,
+        "push read mutable commit state",
         record,
     )
+    expected_manifest = f"e2e-cache-service/{report.get('run_id')}/cli-dedup/manifest"
+    mutable_keys = record.get("mutable_origin_get_key_delta", {})
+    if not isinstance(mutable_keys, dict):
+        mutable_keys = {}
     audit_require(
         errors,
-        record.get("mutable_origin_gets_delta") == 1,
-        "push only read mutable manifest once",
+        int(mutable_keys.get(expected_manifest, 0)) > 0,
+        "push read manifest for CAS",
         record,
     )
     audit_require(

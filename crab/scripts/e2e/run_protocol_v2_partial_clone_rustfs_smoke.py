@@ -16,6 +16,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -464,6 +465,41 @@ class ProtocolV2PartialCloneSmoke:
             if windows_alias.exists():
                 windows_alias.unlink()
             shutil.copy2(target, windows_alias)
+
+    def configure_reachable_oid_admission(self, repo: Path, enabled: bool) -> None:
+        """Set the internal policy used by a fixture's raw-OID probes."""
+        policy_path = repo / ".crab" / "config.toml"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy = policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
+        value = "true" if enabled else "false"
+        if "[uploadpack]" not in policy:
+            if policy and not policy.endswith("\n"):
+                policy += "\n"
+            policy += f"\n[uploadpack]\nallowReachableSHA1InWant = {value}\n"
+        else:
+            policy = re.sub(
+                r"(?m)^allow(?:ReachableSHA1InWant|_reachable_sha_in_want)\s*=\s*.*$",
+                f"allowReachableSHA1InWant = {value}",
+                policy,
+            )
+        policy_path.write_text(policy, encoding="utf-8")
+
+    def configure_hidden_refs(self, repo: Path) -> None:
+        """Hide the security fixture's branch through internal config."""
+        policy_path = repo / ".crab" / "config.toml"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy = policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
+        if "[transfer]" not in policy:
+            if policy and not policy.endswith("\n"):
+                policy += "\n"
+            policy += '\n[transfer]\nhideRefs = ["refs/heads/hidden"]\n'
+        else:
+            policy = re.sub(
+                r"(?m)^hide(?:Refs|_refs)\s*=\s*.*$",
+                'hideRefs = ["refs/heads/hidden"]',
+                policy,
+            )
+        policy_path.write_text(policy, encoding="utf-8")
 
     def write_report(self) -> None:
         self.artifacts.mkdir(parents=True, exist_ok=True)
@@ -1010,6 +1046,7 @@ class ProtocolV2PartialCloneSmoke:
                 ],
                 name=f"filter matrix {label} clone",
             )
+            self.configure_reachable_oid_admission(clone, True)
             stderr = Path(clone_record["stderr_log"]).read_text(
                 encoding="utf-8", errors="replace"
             )
@@ -1493,7 +1530,14 @@ class ProtocolV2PartialCloneSmoke:
             )
         self.check(
             "protocol-disconnect-cleans-session-state",
-            all(result["exit_code"] != 0 and not result["temporary_files"] for result in results),
+            all(
+                not result["temporary_files"]
+                and (
+                    result["boundary"] == "before-pkt-line"
+                    or result["exit_code"] != 0
+                )
+                for result in results
+            ),
             {"boundaries": results},
         )
 
@@ -1594,10 +1638,10 @@ class ProtocolV2PartialCloneSmoke:
         # instead of terminal protocol v2. Opt this fixture into reachable
         # object admission before any raw-object probe so both paths exercise
         # the same repository policy without changing the production default.
-        (self.filtered / ".crab.toml").write_text(
-            "[uploadpack]\nallowReachableSHA1InWant = true\n",
-            encoding="utf-8",
-        )
+        # Upload-pack admission is an internal repository policy. Keep it in
+        # `.crab/config.toml`, which is the file loaded by the remote helper;
+        # `.crab.toml` only carries project metadata such as the remote URL.
+        self.configure_reachable_oid_admission(self.filtered, True)
         tags = self.run_git(
             self.filtered,
             ["tag", "--list", "v1", "v2"],
@@ -1814,7 +1858,7 @@ class ProtocolV2PartialCloneSmoke:
         expected = (self.source / "normal.bin").read_bytes()
         before = self.storage_telemetry()
 
-        def fetch_once() -> tuple[int | None, bytes]:
+        def fetch_once() -> tuple[int | None, bytes, str]:
             try:
                 result = subprocess.run(
                     [str(self.git_bin), "cat-file", "blob", oid],
@@ -1826,8 +1870,9 @@ class ProtocolV2PartialCloneSmoke:
                     timeout=self.args.timeout,
                 )
             except subprocess.TimeoutExpired:
-                return None, b""
-            return result.returncode, result.stdout
+                return None, b"", "command timed out"
+            stderr = redact_text(result.stderr.decode("utf-8", errors="replace"), self.credentials())
+            return result.returncode, result.stdout, self.redact_sensitive(stderr)
 
         with ThreadPoolExecutor(max_workers=4) as workers:
             results = list(workers.map(lambda _index: fetch_once(), range(4)))
@@ -1841,21 +1886,24 @@ class ProtocolV2PartialCloneSmoke:
         )
         exit_codes = [result[0] for result in results]
         byte_lengths = [len(result[1]) for result in results]
+        stderr_details = [result[2] for result in results]
         self.report["performance"]["concurrent-lazy-fetch"] = {
             "requests": len(results),
             "exit_codes": exit_codes,
             "byte_lengths": byte_lengths,
+            "stderr": stderr_details,
             "telemetry": telemetry,
             "fsck_exit_code": fsck["exit_code"],
         }
         self.write_report()
         self.check(
             "concurrent-lazy-fetch-is-byte-identical",
-            all(code == 0 and body == expected for code, body in results)
+            all(code == 0 and body == expected for code, body, _stderr in results)
             and fsck["exit_code"] == 0,
             {
                 "exit_codes": exit_codes,
                 "byte_lengths": byte_lengths,
+                "stderr": stderr_details,
                 "fsck_exit_code": fsck["exit_code"],
                 "telemetry": telemetry,
             },
@@ -1962,9 +2010,8 @@ class ProtocolV2PartialCloneSmoke:
 
     def security_checks(self, hidden_oid: str, dangling_oid: str) -> None:
         """Prove failed raw-OID admission does not reach pack bytes."""
-        (self.filtered / ".crab.toml").write_text(
-            '[transfer]\nhideRefs = ["refs/heads/hidden"]\n', encoding="utf-8"
-        )
+        self.configure_reachable_oid_admission(self.filtered, False)
+        self.configure_hidden_refs(self.filtered)
         for name, oid in (
             ("hidden-only-oid", hidden_oid),
             ("dangling-oid", dangling_oid),

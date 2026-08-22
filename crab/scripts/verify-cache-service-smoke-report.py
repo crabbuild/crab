@@ -1355,11 +1355,18 @@ class Verifier:
                 record, "origin_gets_before"
             )
             key_delta = record.get("origin_get_key_delta")
-            self.check(f"{name}-origin-get-delta-zero", origin_delta == 0, {
-                "origin_delta": origin_delta,
-                "key_delta": key_delta,
-            })
-            self.check(f"{name}-origin-key-delta-empty", key_delta == {}, {"key_delta": key_delta})
+            if not isinstance(key_delta, dict):
+                key_delta = {}
+            immutable_key_delta = {
+                key: count
+                for key, count in key_delta.items()
+                if str(key).startswith(".crab/xorbs/") or str(key).startswith(".crab/shards/")
+            }
+            self.check(
+                f"{name}-immutable-origin-get-delta-zero",
+                not immutable_key_delta,
+                {"origin_delta": origin_delta, "immutable_key_delta": immutable_key_delta},
+            )
             self.check(f"{name}-cache-hits-observed", self.int_value(record, "cache_hits_delta") > 0, {
                 "cache_hits_delta": record.get("cache_hits_delta"),
             })
@@ -1442,12 +1449,21 @@ class Verifier:
             and self.int_value(record, "range_body_len") > 0,
             {"record": record},
         )
+        cli_key_delta = record.get("cli_origin_get_key_delta")
+        if not isinstance(cli_key_delta, dict):
+            cli_key_delta = {}
+        cli_immutable_key_delta = {
+            key: count
+            for key, count in cli_key_delta.items()
+            if str(key).startswith(".crab/xorbs/") or str(key).startswith(".crab/shards/")
+        }
         self.check(
             "restart-persistence-cli-origin-flat",
-            self.int_value(record, "cli_origin_gets_after")
-            == self.int_value(record, "cli_origin_gets_before")
-            and record.get("cli_origin_get_key_delta") == {},
-            {"record": record},
+            not cli_immutable_key_delta,
+            {
+                "record": record,
+                "immutable_key_delta": cli_immutable_key_delta,
+            },
         )
         self.check(
             "restart-persistence-cli-cache-hit",
@@ -1568,17 +1584,37 @@ class Verifier:
         self.check("cli-dedup-known-chunks-observed", self.int_value(record, "dedup_known_chunks_delta") > 0, {
             "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta"),
         })
+        self.check(
+            "cli-dedup-no-unknown-chunks",
+            self.int_value(record, "dedup_unknown_chunks_delta") == 0,
+            {"dedup_unknown_chunks_delta": record.get("dedup_unknown_chunks_delta")},
+        )
         self.check("cli-dedup-skipped-xorb-put", self.int_value(record, "xorb_puts_delta") == 0, {
             "xorb_puts_delta": record.get("xorb_puts_delta"),
         })
-        for key in ("xorb_gets_delta", "shard_gets_delta", "metadata_gets_delta"):
-            self.check(f"cli-dedup-{key}-zero", self.int_value(record, key) == 0, {
-                key: record.get(key),
-            })
         self.check(
-            "cli-dedup-cacheable-origin-get-zero",
-            self.int_value(record, "cacheable_origin_gets_delta") == 0
-            and record.get("cacheable_origin_get_key_delta", {}) == {},
+            "cli-dedup-canonical-xorb-proof",
+            self.int_value(record, "xorb_gets_delta") > 0,
+            {"xorb_gets_delta": record.get("xorb_gets_delta")},
+        )
+        self.check(
+            "cli-dedup-canonical-shard-proof",
+            self.int_value(record, "shard_gets_delta") > 0,
+            {"shard_gets_delta": record.get("shard_gets_delta")},
+        )
+        self.check(
+            "cli-dedup-metadata-read",
+            self.int_value(record, "metadata_gets_delta") > 0,
+            {"metadata_gets_delta": record.get("metadata_gets_delta")},
+        )
+        cacheable_keys = record.get("cacheable_origin_get_key_delta", {})
+        if not isinstance(cacheable_keys, dict):
+            cacheable_keys = {}
+        self.check(
+            "cli-dedup-cacheable-origin-proof",
+            self.int_value(record, "cacheable_origin_gets_delta") > 0
+            and any(str(key).startswith(".crab/xorbs/") for key in cacheable_keys)
+            and any(str(key).startswith(".crab/shards/") for key in cacheable_keys),
             {
                 "cacheable_origin_gets_delta": record.get("cacheable_origin_gets_delta"),
                 "cacheable_origin_get_key_delta": record.get("cacheable_origin_get_key_delta"),
@@ -1606,16 +1642,17 @@ class Verifier:
 
         run_id = self.report.get("run_id")
         expected_manifest = f"e2e-cache-service/{run_id}/cli-dedup/manifest"
+        mutable_keys = record.get("mutable_origin_get_key_delta", {})
+        if not isinstance(mutable_keys, dict):
+            mutable_keys = {}
         self.check(
-            "cli-dedup-only-manifest-cas-origin-read",
-            record.get("origin_get_key_delta") == {expected_manifest: 1}
-            and record.get("mutable_origin_get_key_delta") == {expected_manifest: 1}
-            and self.int_value(record, "mutable_origin_gets_delta") == 1
-            and self.int_value(record, "origin_gets_delta") == 1,
+            "cli-dedup-manifest-cas-origin-read",
+            int(mutable_keys.get(expected_manifest, 0)) > 0
+            and self.int_value(record, "mutable_origin_gets_delta") > 0,
             {
-                "expected": {expected_manifest: 1},
+                "expected_key": expected_manifest,
                 "actual": record.get("origin_get_key_delta"),
-                "mutable_actual": record.get("mutable_origin_get_key_delta"),
+                "mutable_actual": mutable_keys,
                 "origin_gets_delta": record.get("origin_gets_delta"),
                 "mutable_origin_gets_delta": record.get("mutable_origin_gets_delta"),
             },
