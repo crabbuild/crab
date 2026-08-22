@@ -1133,6 +1133,7 @@ async fn rebuild_locator_inventory(
             shard_index_hash,
             pack_index_hash,
         },
+        None,
         RECOVERY_LOCK_TTL,
         cancel,
     )
