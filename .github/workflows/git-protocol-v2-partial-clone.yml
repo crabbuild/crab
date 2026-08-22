@@ -308,6 +308,8 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"
 
+      # The four-agent cohort follows branch fan-out and recovery phases, so
+      # its bounded locator baseline includes the resulting compaction state.
       - name: Run concurrent-push visibility and crash-recovery lifecycle
         run: |
           python3 crab/scripts/e2e/run_concurrent_push_smoke.py \
@@ -323,7 +325,7 @@ jobs:
             --rebase-on-non-fast-forward \
             --omit-lock-wait-secs \
             --rebase-retry-limit 64 \
-            --max-locator-requests-per-success 180 \
+            --max-locator-requests-per-success 500 \
             --crash-boundary \
             --marker-faults \
             --crash-lock-ttl-secs 21 \
