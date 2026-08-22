@@ -6,6 +6,7 @@ import {
   GitBranch,
   Layers,
   MailIcon,
+  RefreshCw,
   Workflow,
 } from "lucide-react"
 
@@ -112,6 +113,13 @@ const featureCards: ReadonlyArray<{
     description:
       "Version datasets, weights, and checkpoints alongside code. Lazy checkout pulls only the chunks each pipeline stage actually needs.",
     href: "/use-cases",
+  },
+  {
+    icon: RefreshCw,
+    title: "Git LFS Compatible",
+    description:
+      "Keep existing LFS pointers, hooks, transfers, and file locks — or convert large-file history to Crab-managed storage when you're ready.",
+    href: "/docs/cli/guides/migrating-from-lfs",
   },
 ]
 
