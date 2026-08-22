@@ -2075,7 +2075,7 @@ data:
 "#;
         fs::write(root.join("params.yaml"), params_yaml).unwrap();
 
-        let canary = "canary contents\n".to_owned();
+        let canary = "canary contents".to_owned();
         fs::write(root.join("canary.txt"), &canary).unwrap();
 
         run_git(root, &["add", "."]);

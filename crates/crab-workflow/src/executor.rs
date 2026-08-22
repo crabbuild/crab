@@ -2725,11 +2725,7 @@ mod tests {
     fn copy_cmd(src: &Path, dest: &Path) -> Cmd {
         #[cfg(windows)]
         {
-            Cmd::Shell(format!(
-                "copy /Y \"{}\" \"{}\"",
-                src.display(),
-                dest.display()
-            ))
+            Cmd::Shell(format!("type {} > {}", src.display(), dest.display()))
         }
         #[cfg(not(windows))]
         {
@@ -2745,7 +2741,7 @@ mod tests {
         #[cfg(windows)]
         {
             Cmd::Shell(format!(
-                "copy /Y \"{}\" \"{}\" && echo run>>\"{}\"",
+                "type {} > {} && echo run>>{}",
                 src.display(),
                 dest.display(),
                 marker.display()
