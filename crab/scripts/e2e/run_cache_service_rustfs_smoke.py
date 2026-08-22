@@ -1304,8 +1304,21 @@ class CacheServiceRustfsSmoke:
             {"cache_server_bin": self.args.cache_server_bin},
         )
 
+        helper_bin = self.run_root / "bin" / "git-remote-crab"
+        helper_bin.parent.mkdir(parents=True, exist_ok=True)
+        if helper_bin.exists() or helper_bin.is_symlink():
+            helper_bin.unlink()
+        try:
+            helper_bin.symlink_to(Path(self.crab_bin))
+        except (NotImplementedError, OSError):
+            shutil.copy2(self.crab_bin, helper_bin)
+        self.env["PATH"] = str(helper_bin.parent) + os.pathsep + self.env.get("PATH", "")
         helper = shutil.which("git-remote-crab", path=self.env.get("PATH"))
-        self.check("git-remote-crab-available", helper is not None)
+        self.check(
+            "git-remote-crab-available",
+            helper is not None,
+            {"helper": helper, "crab_bin": self.crab_bin},
+        )
 
         try:
             with urllib.request.urlopen(self.args.endpoint_url, timeout=5) as response:
