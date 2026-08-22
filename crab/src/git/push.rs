@@ -47,11 +47,11 @@ use crate::metadata::manifest::{
 use crate::replication::{ActiveActivePushPlan, ReplicationConfig};
 use crate::storage::StoreLayout;
 use crate::storage::store::{StagedWrite, Store};
-use crab_coordination::PushLock;
 use crab_coordination::write_coordinator::{
     CommitOutcome, CoordinatedRefUpdate, PushTransactionState, WriteCoordinator,
     commit_uploaded_push_refs,
 };
+use crab_coordination::{PushLock, PushLockAcquireContext};
 use crab_metadata::chunk_index::ChunkIndex;
 use crab_metadata::commit_graph::CommitEntry;
 use crab_metadata::pack_metadata::PackMetadata;
@@ -4632,6 +4632,7 @@ pub(crate) async fn acquire_push_lock_leases(
     let deadline = (!config.lock_wait.is_zero()).then(|| Instant::now() + config.lock_wait);
     let mut wait_attempt = 0;
     let mut checked_committed_holders = HashSet::new();
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
 
     loop {
         let mut leases = Vec::with_capacity(refs.len().max(1));
@@ -4647,17 +4648,19 @@ pub(crate) async fn acquire_push_lock_leases(
             let (target, acquired) = match ref_name {
                 Some(ref_name) => (
                     ref_name.as_str(),
-                    PushLock::acquire_ref(store.inner(), prefix, ref_name, config.lock_ttl).await,
+                    acquire_context
+                        .acquire_ref(prefix, ref_name, config.lock_ttl)
+                        .await,
                 ),
                 None => (
                     crab_coordination::BATCH_RESOURCE,
-                    PushLock::acquire_internal(
-                        store.inner(),
-                        prefix,
-                        crab_coordination::BATCH_RESOURCE,
-                        config.lock_ttl,
-                    )
-                    .await,
+                    acquire_context
+                        .acquire_internal(
+                            prefix,
+                            crab_coordination::BATCH_RESOURCE,
+                            config.lock_ttl,
+                        )
+                        .await,
                 ),
             };
             let acquired = acquired.map_err(CrabError::from);
@@ -4821,6 +4824,7 @@ async fn acquire_ref_journal_compaction_lock(
     let deadline =
         Instant::now() + ttl.saturating_mul(REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER);
     let mut attempt = 0;
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
     loop {
         if !crate::metadata::manifest::ref_journal_transaction_is_active(
             store,
@@ -4832,14 +4836,14 @@ async fn acquire_ref_journal_compaction_lock(
             return Ok(None);
         }
         check_cancelled(cancel)?;
-        match PushLock::acquire_internal(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            ttl,
-        )
-        .await
-        .map_err(CrabError::from)
+        match acquire_context
+            .acquire_internal(
+                router.repo_prefix(),
+                crab_coordination::GIT_MANIFEST_RESOURCE,
+                ttl,
+            )
+            .await
+            .map_err(CrabError::from)
         {
             Ok(lock) => return Ok(Some(lock)),
             Err(error @ CrabError::PushLockHeld { .. }) => {
@@ -5110,6 +5114,7 @@ async fn acquire_current_git_locator_lock(
 ) -> Result<Option<PushLock>> {
     let deadline = Instant::now() + lock_ttl.saturating_mul(GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER);
     let mut attempt = 0;
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
     loop {
         check_cancelled(cancel)?;
         let (current, _) = read_manifest(store, router).await?;
@@ -5118,14 +5123,14 @@ async fn acquire_current_git_locator_lock(
         {
             return Ok(None);
         }
-        match PushLock::acquire_internal(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
-            lock_ttl,
-        )
-        .await
-        .map_err(CrabError::from)
+        match acquire_context
+            .acquire_internal(
+                router.repo_prefix(),
+                crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+                lock_ttl,
+            )
+            .await
+            .map_err(CrabError::from)
         {
             Ok(lock) => return Ok(Some(lock)),
             Err(error @ CrabError::PushLockHeld { .. }) => {

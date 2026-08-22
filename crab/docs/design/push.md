@@ -1368,6 +1368,7 @@ addressed. This section tracks both resolved and open items.
 | B9 | Double rev-parse                                  | `batch_rev_parse` consolidates refs in a single `git rev-parse` invocation |
 | B11 | Lock renewal failure propagation                 | Heartbeat loss, deletion, CAS conflict, fatal error, or failed transient retry cancels the push through its shared token |
 | — | Locator point-read amplification                   | Each read session uses a 16 MiB SST block/metadata cache; concurrent exact lookups coalesce shared provider reads without SlateDB's 640 MiB default |
+| — | Contended lock polling amplification               | One acquisition context remembers existing lock objects and reuses its backend clock sample; repeated live-holder checks need one GET instead of a failed create plus GET, clock PUT, and clock HEAD |
 
 The cache bound is per process: 32 simultaneous fetchers can retain at most
 512 MiB in aggregate. In the 32-agent same-branch RustFS profile it reduced
@@ -1375,6 +1376,14 @@ locator HTTP attempts from 17,065 to 3,806, compacted-SST GETs from 11,222 to
 940, and total HTTP attempts from 25,211 to 12,722. All 32 agent commits were
 present in a fresh protocol-v2 clone and strict Git fsck passed. This is a
 workload comparison, not a provider price claim.
+
+The same 32-agent profile with reusable lock acquisition reduced ref-lock HTTP
+attempts from 2,556 to 947 and total attempts from 12,722 to 11,117, or 347.41
+per successful push. A four-agent comparison reduced ref-lock attempts from 80
+to 34 and total attempts from 1,275 to 1,076. Both runs integrated every commit,
+served an exact protocol-v2 clone, and passed strict Git fsck. Retry scheduling
+and SlateDB compaction are nondeterministic, so the request budget—not one run's
+wall time—is the regression signal.
 
 #### Partially Resolved
 

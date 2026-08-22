@@ -247,6 +247,14 @@ from 25,211 to 12,722 and provider 5xx responses from 1,040 to zero. Apply real
 provider request, storage, and transfer prices before treating those counts as
 a team cost estimate.
 
+The retained 32-agent follow-up for reusable lock acquisition measured 947
+`locks/refs/*` attempts, down from 2,556, and 11,117 total attempts, down from
+12,722. That is 347.41 total HTTP attempts per successful push. Its locator
+count was 3,901, or 121.91 per push, within the same 180-request budget. The
+four-agent comparison reduced ref-lock attempts from 80 to 34 and total
+attempts from 1,275 to 1,076. Use these paired profiles to detect request
+amplification; do not use their wall time as a deterministic performance gate.
+
 Add `--crash-boundary --crash-lock-ttl-secs 21` to SIGKILL one push after its
 prepared ref head and another after its active marker. The first ref must stay
 invisible and its immediate retry must honor the structured lease-expiry hint;

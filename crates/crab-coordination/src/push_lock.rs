@@ -1,7 +1,8 @@
 //! Storage-backed short-TTL lease for serializing repository mutations.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -162,6 +163,106 @@ pub struct PushLock {
     released: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct BackendClock {
+    sample: Option<(i64, Instant)>,
+}
+
+impl BackendClock {
+    pub(crate) async fn now(&mut self, store: &Arc<dyn ObjectStore>, anchor: &Path) -> Result<i64> {
+        // Backend time anchors lease age; monotonic elapsed avoids trusting the
+        // client's wall clock while a bounded acquisition owner is alive.
+        if let Some((sample, sampled_at)) = self.sample {
+            return Ok(sample.saturating_add(
+                i64::try_from(sampled_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+            ));
+        }
+        let sample = backend_unix_time(store, anchor).await?;
+        self.sample = Some((sample, Instant::now()));
+        Ok(sample)
+    }
+}
+
+/// Reusable state for repeated lock acquisitions against one object store.
+///
+/// The context remembers paths that already exist and one backend clock
+/// sample. Reuse it only with the store supplied to [`Self::new`].
+pub struct PushLockAcquireContext {
+    store: Arc<dyn ObjectStore>,
+    known_paths: HashSet<String>,
+    backend_clock: BackendClock,
+}
+
+impl PushLockAcquireContext {
+    /// Creates an acquisition context scoped to one object store.
+    #[must_use]
+    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            store,
+            known_paths: HashSet::new(),
+            backend_clock: BackendClock::default(),
+        }
+    }
+
+    /// Acquires the lease protecting a full Git ref.
+    ///
+    /// Returns an error when the ref is invalid, another holder owns the
+    /// lease, or the object store cannot complete the conditional operation.
+    pub async fn acquire_ref(
+        &mut self,
+        prefix: &str,
+        ref_name: &str,
+        ttl: Duration,
+    ) -> Result<PushLock> {
+        let path = push_lock_path(prefix, ref_name)?;
+        self.acquire_path(ref_name, path, ttl).await
+    }
+
+    /// Acquires the lease protecting an internal repository resource.
+    ///
+    /// Returns an error when the resource is invalid, another holder owns the
+    /// lease, or the object store cannot complete the conditional operation.
+    pub async fn acquire_internal(
+        &mut self,
+        prefix: &str,
+        resource: &str,
+        ttl: Duration,
+    ) -> Result<PushLock> {
+        let path = internal_lock_path(prefix, resource)?;
+        self.acquire_path(resource, path, ttl).await
+    }
+
+    async fn acquire_path(
+        &mut self,
+        target: &str,
+        path: String,
+        ttl: Duration,
+    ) -> Result<PushLock> {
+        let holder = generate_holder_id();
+        let expires_at = unix_now() + ttl.as_secs();
+        let known_existing = !self.known_paths.insert(path.clone());
+        let etag = acquire_one(
+            &self.store,
+            &path,
+            target,
+            &holder,
+            expires_at,
+            ttl,
+            known_existing,
+            &mut self.backend_clock,
+        )
+        .await?;
+        Ok(PushLock {
+            store: Arc::clone(&self.store),
+            path,
+            ttl,
+            holder,
+            etag: Some(etag),
+            released: false,
+        })
+    }
+}
+
 impl PushLock {
     /// Acquires the lease protecting a full Git ref.
     pub async fn acquire_ref(
@@ -191,17 +292,9 @@ impl PushLock {
         path: String,
         ttl: Duration,
     ) -> Result<Self> {
-        let holder = generate_holder_id();
-        let expires_at = unix_now() + ttl.as_secs();
-        let etag = acquire_one(store, &path, target, &holder, expires_at, ttl).await?;
-        Ok(Self {
-            store: Arc::clone(store),
-            path,
-            ttl,
-            holder,
-            etag: Some(etag),
-            released: false,
-        })
+        PushLockAcquireContext::new(Arc::clone(store))
+            .acquire_path(target, path, ttl)
+            .await
     }
 
     /// Acquires the lease protecting a full Git ref with the default TTL.
@@ -332,31 +425,39 @@ async fn acquire_one(
     holder: &str,
     expires_at: u64,
     ttl: Duration,
+    known_existing: bool,
+    backend_clock: &mut BackendClock,
 ) -> Result<UpdateVersion> {
     let object_path = Path::from(path);
     let body = serialize_payload(
         path,
         &PushLockPayload::new(holder, expires_at, ttl.as_secs()),
     )?;
-    let etag = match create_strict(store, &object_path, body.clone()).await {
-        Ok(etag) => etag,
-        Err(object_store::Error::AlreadyExists { .. })
-        | Err(object_store::Error::Precondition { .. }) => {
-            match acquire_contended(store, &object_path, target, body).await? {
-                ContendedAcquire::Acquired(etag) => etag,
-                ContendedAcquire::Held {
+    let created = if known_existing {
+        None
+    } else {
+        match create_strict(store, &object_path, body.clone()).await {
+            Ok(etag) => Some(etag),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => None,
+            Err(source) => return Err(store_error(path, source)),
+        }
+    };
+    let etag = match created {
+        Some(etag) => etag,
+        None => match acquire_contended(store, &object_path, target, body, backend_clock).await? {
+            ContendedAcquire::Acquired(etag) => etag,
+            ContendedAcquire::Held {
+                holder,
+                expires_at_unix,
+            } => {
+                return Err(CoordinationError::PushLockHeld {
+                    ref_name: target.to_owned(),
                     holder,
                     expires_at_unix,
-                } => {
-                    return Err(CoordinationError::PushLockHeld {
-                        ref_name: target.to_owned(),
-                        holder,
-                        expires_at_unix,
-                    });
-                }
+                });
             }
-        }
-        Err(source) => return Err(store_error(path, source)),
+        },
     };
     debug!(lock_path = %path, holder, ttl_secs = ttl.as_secs(), "push lock acquired");
     Ok(etag)
@@ -438,6 +539,7 @@ async fn acquire_contended(
     object_path: &Path,
     ref_name: &str,
     body: Bytes,
+    backend_clock: &mut BackendClock,
 ) -> Result<ContendedAcquire> {
     let (existing_body, reclaim_etag, last_modified) =
         match get_with_version_and_modified(store, object_path).await {
@@ -470,7 +572,7 @@ async fn acquire_contended(
         }
     };
     if !existing.is_released() {
-        let now = backend_unix_time(store, object_path).await?;
+        let now = backend_clock.now(store, object_path).await?;
         if !lease_expired(&existing, last_modified, now) {
             let expires_at_unix = authoritative_expiry(&existing, last_modified);
             return Ok(ContendedAcquire::Held {
@@ -697,12 +799,90 @@ pub fn unix_now() -> u64 {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+    use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    };
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn memory_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
+    }
+
+    #[derive(Debug)]
+    struct RequestCountingStore {
+        inner: Arc<InMemory>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl std::fmt::Display for RequestCountingStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("request-counting-store")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for RequestCountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     #[tokio::test]
@@ -827,6 +1007,42 @@ mod tests {
             contender,
             Err(CoordinationError::PushLockHeld { holder, .. }) if holder == "live-holder"
         ));
+    }
+
+    #[tokio::test]
+    async fn repeated_contender_reuses_existing_path_and_backend_clock() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store: Arc<dyn ObjectStore> = inner.clone();
+        let blocker = PushLock::acquire_ref_default(&setup_store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        let lock_path = Path::from(blocker.path());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+        });
+        let mut context = PushLockAcquireContext::new(metered_store);
+
+        for _ in 0..2 {
+            assert!(matches!(
+                context
+                    .acquire_ref("org/repo", "refs/heads/main", Duration::from_secs(60),)
+                    .await,
+                Err(CoordinationError::PushLockHeld { .. })
+            ));
+        }
+
+        assert_eq!(requests.load(Ordering::Relaxed), 5);
+        blocker.release().await.unwrap();
+        setup_store.delete(&lock_path).await.unwrap();
+        context
+            .acquire_ref("org/repo", "refs/heads/main", Duration::from_secs(60))
+            .await
+            .expect("known path may disappear between attempts")
+            .release()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

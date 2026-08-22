@@ -1,7 +1,7 @@
 //! Bounded object-store admission for repository push pipelines.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use object_store::path::Path;
 use object_store::{ObjectStore, UpdateVersion};
@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::error::{CoordinationError, Result};
 use crate::push_lock::{
-    PushLockPayload, backend_unix_time, create_strict, deserialize_payload,
+    BackendClock, PushLockPayload, create_strict, deserialize_payload,
     get_with_version_and_modified, push_locks_prefix, serialize_payload, store_error, unix_now,
     update,
 };
@@ -23,7 +23,7 @@ pub struct PushAdmissionTicket {
     lease_ttl: Duration,
     attempt: usize,
     occupied_slots: usize,
-    backend_clock: Option<(i64, Instant)>,
+    backend_clock: BackendClock,
     path: Option<String>,
     etag: Option<UpdateVersion>,
     released: bool,
@@ -53,7 +53,7 @@ impl PushAdmissionTicket {
             lease_ttl,
             attempt: 0,
             occupied_slots: 0,
-            backend_clock: None,
+            backend_clock: BackendClock::default(),
             path: None,
             etag: None,
             released: false,
@@ -194,14 +194,9 @@ impl PushAdmissionTicket {
     }
 
     async fn backend_now(&mut self) -> Result<i64> {
-        if let Some((sample, sampled_at)) = self.backend_clock {
-            return Ok(sample.saturating_add(
-                i64::try_from(sampled_at.elapsed().as_secs()).unwrap_or(i64::MAX),
-            ));
-        }
-        let sample = backend_unix_time(&self.store, &Path::from(self.prefix.as_str())).await?;
-        self.backend_clock = Some((sample, Instant::now()));
-        Ok(sample)
+        self.backend_clock
+            .now(&self.store, &Path::from(self.prefix.as_str()))
+            .await
     }
 }
 
