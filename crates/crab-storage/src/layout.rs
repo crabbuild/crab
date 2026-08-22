@@ -268,6 +268,14 @@ impl<S> StoreLayout<S> {
         ))
     }
 
+    /// Path to immutable ref-update visibility evidence.
+    #[must_use]
+    pub fn git_visibility_edit_path(&self, evidence_hash: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility-edits/{evidence_hash}.json"
+        ))
+    }
+
     /// Convenience: bucket-level ref-registry path.
     #[must_use]
     pub fn ref_registry_path(&self) -> ObjectPath {

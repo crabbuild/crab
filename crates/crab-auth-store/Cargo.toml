@@ -21,6 +21,7 @@ refreshing-store = [
     "dep:tokio",
     "dep:tracing",
     "dep:url",
+    "dep:uuid",
 ]
 managed-service = [
     "refreshing-store",

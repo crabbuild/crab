@@ -92,7 +92,6 @@ Cache/index hits are candidates only; they never replace origin proof.
         - [B10: Progress Reporting](#b10-progress-reporting)
       - [Open](#open)
         - [B3: Sequential Staging Reads](#b3-sequential-staging-reads)
-        - [B11: Lock Renewal Failure Handling](#b11-lock-renewal-failure-handling)
         - [B12: Adaptive Xorb Sizing Feedback Latency](#b12-adaptive-xorb-sizing-feedback-latency)
     - [Bottleneck Priority Matrix](#bottleneck-priority-matrix)
   - [11. Hardening Roadmap](#11-hardening-roadmap)
@@ -1150,8 +1149,9 @@ and retries the full lock set until the wait budget expires.
 
 ### Lock Expiry and Reclamation
 
-If a pusher crashes without releasing the lock, the lock expires after
-the TTL. The next pusher detects the expired lock and reclaims it:
+If a pusher crashes before its ref-journal active marker, the ref stays
+invisible and the lock expires after the TTL. The next pusher detects the
+expired lock, reclaims it, and replaces the abandoned prepared head:
 
 ```
 1. GET lock → { holder: "A", expires_at: T-60 }  (expired)
@@ -1162,6 +1162,18 @@ Cleanup never unconditionally deletes the lock pointer in the hot path.
 Without conditional delete support, release marks the holder expired and the
 next acquirer reuses the same object via CAS. This prevents a stale owner from
 deleting a fresh holder's lock after TTL expiry.
+
+If the active marker is already visible, its immutable edit binds the exact
+lock holder that crossed the final ref-critical boundary. A contender may
+release that holder immediately with a holder-checked CAS. Prepared
+transactions and mismatched holders cannot take this path, and the final CAS
+cannot clear a lock that has already been acquired by a successor.
+
+An object-store failure before the active-marker write returns a structured,
+retryable `transient` outcome and runs the normal holder-checked release path;
+the ref remains invisible. If the immutable marker was stored but its success
+response was lost, the exact-byte create retry observes the existing marker
+and reconciles the write as success instead of reporting an ambiguous push.
 
 ### Heartbeat
 
@@ -1290,9 +1302,10 @@ after the grace period has elapsed.
    but never delete or modify staged chunks. If the push fails, the same
    data is available for retry.
 
-3. **Lock always released or expired.** The `on_failure` path always stops
-   the heartbeat and releases the lock with a holder-checked CAS update. If
-   the process crashes, the lock expires via TTL.
+3. **Lock always released or recoverable.** The `on_failure` path always stops
+   the heartbeat and releases the lock with a holder-checked CAS update. A
+   pre-marker process crash waits for TTL; a visible transaction lets the next
+   pusher release only its committed holder immediately.
 
 4. **CAS prevents lost updates.** Concurrent pushers cannot silently
    overwrite each other's ref updates. The CAS loop detects conflicts
@@ -1353,6 +1366,7 @@ addressed. This section tracks both resolved and open items.
 | B7 | Full pack generation                              | `compute_remote_objects` + `git pack-objects --not` for incremental packs |
 | B8 | Late lock acquisition                             | Lock now acquired between step 4 and step 5 — no wasted uploads from lock losers |
 | B9 | Double rev-parse                                  | `batch_rev_parse` consolidates refs in a single `git rev-parse` invocation |
+| B11 | Lock renewal failure propagation                 | Heartbeat loss, deletion, CAS conflict, fatal error, or failed transient retry cancels the push through its shared token |
 
 #### Partially Resolved
 
@@ -1405,22 +1419,6 @@ straddle many segments, this becomes N batch reads in series.
 segment fds. Staging already maintains a pool sized via `fd_pool_size`;
 `get_chunks_batch` just needs to fan out reads across it.
 
-##### B11: Lock Renewal Failure Handling
-
-**Problem:** The push lock heartbeat runs in a background task. If the
-heartbeat fails repeatedly (network flake), the lock may expire before
-the main task notices, and a second pusher could steal it.
-
-**Impact:** Low in practice (TTL is 5 minutes, heartbeats every 60s
-under default config), but non-zero correctness risk.
-
-**Proposed fix:** Surface heartbeat failures via a channel consumed by
-`execute_inner`; on repeated failure, cancel the push before any
-further S3 writes.
-
-**Source:** `crab/src/coordination/heartbeat.rs`,
-`crates/crab-coordination/src/push_lock.rs`.
-
 ##### B12: Adaptive Xorb Sizing Feedback Latency
 
 **Problem:** `ThroughputMonitor` in the streaming packer observes
@@ -1443,7 +1441,7 @@ Impact ▲
        │
   Med  │  B1 (tree walk breadth)  B3 (staging reads)
        │
-  Low  │  B11 (heartbeat failure)  B12 (xorb size feedback)
+  Low  │  B12 (xorb size feedback)
        │
   UX   │  B10 (remote-helper sideband)
        │
@@ -1454,13 +1452,14 @@ Impact ▲
 
 ## 11. Hardening Roadmap
 
-### Phase 1: Remaining Correctness
+### Phase 1: Remaining Qualification and UX
 
 | Item | Description | Bottleneck | Effort |
 |------|-------------|------------|--------|
-| 1.1  | Surface heartbeat failures and cancel push on repeated errors | B11 | M |
-| 1.2  | Progress sideband via remote-helper protocol | B10 | S |
-| 1.3  | Stabilize adaptive xorb-size EMA feedback | B12 | S |
+| 1.1  | Coalesce exact-locator publication or replace per-generation SlateDB sessions; 32 same-branch writers currently amplify locator reads as integration retries accumulate | locator publication | L |
+| 1.2  | Qualify request-timeout recovery and provider-specific transient errors | B11 | S |
+| 1.3  | Progress sideband via remote-helper protocol | B10 | S |
+| 1.4  | Stabilize adaptive xorb-size EMA feedback | B12 | S |
 
 ### Phase 2: Walk and Read Performance
 

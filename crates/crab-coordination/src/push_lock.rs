@@ -249,8 +249,9 @@ impl PushLock {
     }
 
     /// Extends the lease using a holder-checked compare-and-swap update.
-    pub async fn renew(&self) -> Result<()> {
-        renew_one(&self.store, &self.path, &self.holder, self.ttl).await
+    pub async fn renew(&mut self) -> Result<()> {
+        self.etag = Some(renew_one(&self.store, &self.path, &self.holder, self.ttl).await?);
+        Ok(())
     }
 
     /// Marks every expired lease beneath `prefix` released.
@@ -292,6 +293,17 @@ impl PushLock {
         let object_path = Path::from(key);
         let now = backend_unix_time(store, &object_path).await?;
         expire_stale_lock_at(store, &Path::from(key), key, now).await
+    }
+
+    /// Release one ref lease only while its stored holder still matches.
+    pub async fn release_ref_if_holder(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        ref_name: &str,
+        holder: &str,
+    ) -> Result<bool> {
+        let path = push_lock_path(prefix, ref_name)?;
+        release_if_holder_checked(store, &path, holder).await
     }
 }
 
@@ -355,7 +367,7 @@ async fn renew_one(
     path: &str,
     holder: &str,
     ttl: Duration,
-) -> Result<()> {
+) -> Result<UpdateVersion> {
     let object_path = Path::from(path);
     let (body, etag) = get_with_version(store, &object_path)
         .await
@@ -374,8 +386,7 @@ async fn renew_one(
     )?;
     update(store, &object_path, body, etag)
         .await
-        .map_err(|source| store_error(path, source))?;
-    Ok(())
+        .map_err(|source| store_error(path, source))
 }
 
 enum ContendedAcquire {
@@ -458,16 +469,20 @@ async fn acquire_contended(
             });
         }
     };
-    let now = backend_unix_time(store, object_path).await?;
-    if !existing.is_released() && !lease_expired(&existing, last_modified, now) {
-        let expires_at_unix = authoritative_expiry(&existing, last_modified);
-        return Ok(ContendedAcquire::Held {
-            holder: existing.holder,
-            expires_at_unix,
-        });
+    if !existing.is_released() {
+        let now = backend_unix_time(store, object_path).await?;
+        if !lease_expired(&existing, last_modified, now) {
+            let expires_at_unix = authoritative_expiry(&existing, last_modified);
+            return Ok(ContendedAcquire::Held {
+                holder: existing.holder,
+                expires_at_unix,
+            });
+        }
     }
 
-    debug!(ref_name, expired_holder = %existing.holder, "reclaiming expired push lock");
+    // An explicit release is already authoritative. Sampling backend time is
+    // only required before reclaiming a live lease whose age could be skewed.
+    debug!(ref_name, prior_holder = %existing.holder, "reclaiming available push lock");
     match update(store, object_path, body, reclaim_etag).await {
         Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
         Err(object_store::Error::AlreadyExists { .. })
@@ -502,7 +517,7 @@ async fn lock_holder_snapshot(
     }
 }
 
-async fn release_with_known_etag(
+pub(crate) async fn release_with_known_etag(
     store: &Arc<dyn ObjectStore>,
     path: &str,
     holder: &str,
@@ -531,22 +546,31 @@ pub(crate) async fn release_if_holder(
     path: &str,
     holder: &str,
 ) -> Result<()> {
+    release_if_holder_checked(store, path, holder)
+        .await
+        .map(|_| ())
+}
+
+async fn release_if_holder_checked(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+) -> Result<bool> {
     let object_path = Path::from(path);
     let (body, etag) = match get_with_version(store, &object_path).await {
         Ok(lock) => lock,
-        Err(object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(object_store::Error::NotFound { .. }) => return Ok(true),
         Err(source) => return Err(store_error(path, source)),
     };
     let payload = deserialize_payload(path, &body)?;
     if payload.holder != holder {
-        return Ok(());
+        return Ok(false);
     }
     let body = serialize_payload(path, &PushLockPayload::released(holder))?;
     match update(store, &object_path, body, etag).await {
-        Ok(_)
-        | Err(object_store::Error::NotFound { .. })
-        | Err(object_store::Error::AlreadyExists { .. })
-        | Err(object_store::Error::Precondition { .. }) => Ok(()),
+        Ok(_) | Err(object_store::Error::NotFound { .. }) => Ok(true),
+        Err(object_store::Error::AlreadyExists { .. })
+        | Err(object_store::Error::Precondition { .. }) => Ok(false),
         Err(source) => Err(store_error(path, source)),
     }
 }
@@ -727,19 +751,64 @@ mod tests {
             .unwrap();
         let stale_holder = first.holder().to_owned();
         let path = first.path().to_owned();
-        first.release().await.unwrap();
+        release_if_holder(&store, &path, &stale_holder)
+            .await
+            .unwrap();
 
         let second = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
-        release_if_holder(&store, &path, &stale_holder)
-            .await
-            .unwrap();
+        first.release().await.unwrap();
 
         let (body, _) = get_with_version(&store, &Path::from(path)).await.unwrap();
         let payload: PushLockPayload = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.holder, second.holder());
         assert!(!payload.is_released());
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_ref_release_requires_current_holder() {
+        let store = memory_store();
+        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+
+        assert!(
+            !PushLock::release_ref_if_holder(
+                &store,
+                "org/repo",
+                "refs/heads/main",
+                "different-holder",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            PushLock::release_ref_if_holder(&store, "org/repo", "refs/heads/main", lock.holder(),)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn released_tombstone_reacquire_skips_backend_clock_probe() {
+        let store = memory_store();
+        let first = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        let lock_path = first.path().to_owned();
+        first.release().await.unwrap();
+
+        let second = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+
+        let clock_path = Path::from(format!("{lock_path}/clock"));
+        assert!(matches!(
+            store.head(&clock_path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
         second.release().await.unwrap();
     }
 
@@ -916,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn ref_lock_writes_renews_and_releases_only_canonical_key() {
         let store = memory_store();
-        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+        let mut lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
         let path = lock.path().to_owned();

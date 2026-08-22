@@ -44,6 +44,15 @@ pub struct RepositorySnapshot {
     pub journal: RefJournalSnapshot,
 }
 
+/// Durable outputs published by one ref-journal compaction pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefJournalCompaction {
+    /// Compacted manifest committed by compare-and-swap.
+    pub manifest: Manifest,
+    /// Whether complete generation-bound Git visibility was published before the manifest.
+    pub git_visibility_published: bool,
+}
+
 impl RepositorySnapshot {
     /// Return the current journal-projected manifest with a matching validation digest.
     #[must_use]
@@ -293,7 +302,7 @@ pub async fn compact_ref_journal(
     created_at: String,
     pusher: Option<String>,
     session_id: String,
-) -> Result<Option<Manifest>> {
+) -> Result<Option<RefJournalCompaction>> {
     let snapshot = read_repository_snapshot(store, router).await?;
     if snapshot.journal.transactions.is_empty() {
         return Ok(None);
@@ -316,6 +325,26 @@ pub async fn compact_ref_journal(
     )
     .await?;
 
+    // Complete evidence publishes authorization before the compacted manifest;
+    // otherwise no proof is written and upload-pack withholds protocol v2.
+    let git_visibility_published = if let Some(visibility) =
+        crate::git_visibility::compact_journal_edits(
+            store,
+            router,
+            &snapshot.manifest,
+            &snapshot.journal.ordered_edits,
+            generation,
+            &pack_index_hash,
+            &snapshot.journal.refs,
+        )
+        .await?
+    {
+        crate::git_visibility::upload_if_absent(store, router, &visibility).await?;
+        true
+    } else {
+        false
+    };
+
     let compacted_transactions = snapshot.journal.transactions.clone();
     let mut manifest = snapshot.manifest;
     manifest.generation = generation;
@@ -333,7 +362,10 @@ pub async fn compact_ref_journal(
     write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads).await?;
     write_manifest_cas(store, router, &manifest, &snapshot.manifest_etag).await?;
     cleanup_compacted_transactions(store, router, &compacted_transactions).await;
-    Ok(Some(manifest))
+    Ok(Some(RefJournalCompaction {
+        manifest,
+        git_visibility_published,
+    }))
 }
 
 /// Read the segmented shard-index object and parse it into shard hashes.
@@ -532,7 +564,7 @@ pub async fn materialize_active_active_manifest_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1019,15 +1051,22 @@ mod tests {
                 old_oid: Some("a".repeat(40)),
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &router, &transaction, &[head])
+        let committed = commit_ref_transaction(&store, &router, &transaction, &[head])
             .await
             .unwrap();
+        assert!(
+            crate::ref_journal::transaction_is_active(&store, &router, &committed.transaction_id,)
+                .await
+                .unwrap()
+        );
 
         let compacted = compact_ref_journal(
             &store,
@@ -1041,9 +1080,15 @@ mod tests {
         .expect("one journal transaction should compact");
         let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
 
-        assert_eq!(compacted.refs["refs/heads/main"], "b".repeat(40));
+        assert!(!compacted.git_visibility_published);
+        assert_eq!(compacted.manifest.refs["refs/heads/main"], "b".repeat(40));
         assert!(snapshot.journal.transactions.is_empty());
         assert_eq!(snapshot.journal.refs["refs/heads/main"], "b".repeat(40));
+        assert!(
+            !crate::ref_journal::transaction_is_active(&store, &router, &committed.transaction_id,)
+                .await
+                .unwrap()
+        );
         assert!(
             crate::ref_journal::list_active_transactions(&store, &router)
                 .await
@@ -1052,7 +1097,7 @@ mod tests {
         );
 
         let (_, etag) = read_manifest(&store, &router).await.unwrap();
-        let rewritten = next_manifest(&compacted);
+        let rewritten = next_manifest(&compacted.manifest);
         write_manifest_cas(&store, &router, &rewritten, &etag)
             .await
             .unwrap();
@@ -1069,6 +1114,8 @@ mod tests {
                 old_oid: Some("b".repeat(40)),
                 new_oid: Some("c".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),
@@ -1092,6 +1139,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn journal_compaction_reports_published_git_visibility() {
+        let store = memory_store();
+        let router = test_layout(store.clone());
+        let base = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &base).await.unwrap();
+        let head = read_ref_head(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let tip = "b".repeat(40);
+        let evidence = crate::git_visibility::GitVisibilityEdit::replacement(
+            None,
+            tip.clone(),
+            &BTreeSet::from([tip.clone()]),
+        );
+        let evidence_hash = crate::git_visibility::upload_edit(&store, &router, &evidence)
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some(tip.clone()),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(evidence_hash),
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        commit_ref_transaction(&store, &router, &transaction, &[head])
+            .await
+            .unwrap();
+
+        let compacted = compact_ref_journal(
+            &store,
+            &router,
+            "2026-08-20T00:00:00Z".to_owned(),
+            Some("test".to_owned()),
+            "compact-visibility".to_owned(),
+        )
+        .await
+        .unwrap()
+        .expect("journal transaction should compact");
+        let proof = crate::git_visibility::read(
+            &store,
+            &router,
+            compacted.manifest.generation,
+            &compacted.manifest.pack_index_hash,
+        )
+        .await
+        .unwrap();
+
+        assert!(compacted.git_visibility_published);
+        assert!(proof.contains_for_refs(["refs/heads/main"], &tip));
+    }
+
+    #[tokio::test]
     async fn materialized_manifest_reseals_journal_projected_refs() {
         let store = memory_store();
         let router = test_layout(store.clone());
@@ -1110,6 +1217,8 @@ mod tests {
                 old_oid: None,
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
             }],
             None,
             Vec::new(),

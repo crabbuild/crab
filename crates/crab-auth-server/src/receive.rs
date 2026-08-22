@@ -1020,7 +1020,7 @@ pub async fn commit_service_metadata(
 }
 
 async fn while_renewing_git_locator_lock<T>(
-    lock: &crab_coordination::PushLock,
+    lock: &mut crab_coordination::PushLock,
     operation: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
     let renewal_interval = (lock.ttl() / 3).max(std::time::Duration::from_secs(1));
@@ -1284,13 +1284,13 @@ pub async fn commit_service_git_locators(
         });
     }
 
-    let lock = crab_coordination::PushLock::acquire_internal_default(
+    let mut lock = crab_coordination::PushLock::acquire_internal_default(
         store.inner(),
         router.repo_prefix(),
         crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
     )
     .await?;
-    let write_result = while_renewing_git_locator_lock(&lock, async {
+    let write_result = while_renewing_git_locator_lock(&mut lock, async {
         let (current, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         if current.generation != manifest.generation
             || current.pack_index_hash != manifest.pack_index_hash

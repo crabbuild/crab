@@ -4331,6 +4331,31 @@ mod tests {
     }
 
     #[test]
+    fn format_push_response_preserves_transient_tag() {
+        use crate::git::push::{PushRejectReason, PushResult, RefPushOutcome};
+        use std::collections::HashMap;
+
+        let specs = vec![PushSpec {
+            force: false,
+            src: "refs/heads/main".into(),
+            dst: "refs/heads/main".into(),
+        }];
+        let outcomes = HashMap::from([(
+            "refs/heads/main".to_owned(),
+            RefPushOutcome::Rejected(PushRejectReason::Throttled {
+                retry_after_secs: Some(3),
+            }),
+        )]);
+
+        let response = format_push_response(&PushResult::new(outcomes), &specs);
+
+        assert_eq!(
+            response,
+            "error refs/heads/main transient (storage throttled; retry after 3s)\n\n"
+        );
+    }
+
+    #[test]
     fn format_push_response_preserves_spec_order() {
         use crate::git::push::{PushResult, RefPushOutcome};
         use std::collections::HashMap;

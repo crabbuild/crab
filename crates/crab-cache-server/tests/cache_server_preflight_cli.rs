@@ -493,6 +493,8 @@ fn release_workflow_requires_cache_service_smoke_evidence() {
         "cache-service-release-evidence-doctor.txt",
         "cache-service-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}",
         "if-no-files-found: ignore",
+        "cache-service-enterprise-gate",
+        "needs: [prepare, workflow-release-gate, workflow-native-release-gate, replica-enterprise-gate, cache-service-enterprise-gate, nfs-native-evidence-gate, nfs-feature-gate]",
     ] {
         assert!(body.contains(needle), "{needle}");
     }

@@ -20,6 +20,7 @@ on:
       - "crab/src/replication/**"
       - "crab/src/metadata/**"
       - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
@@ -51,6 +52,7 @@ on:
       - "crab/src/replication/**"
       - "crab/src/metadata/**"
       - "crab/src/storage/**"
+      - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
@@ -306,6 +308,28 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"
 
+      - name: Run concurrent-push visibility and crash-recovery lifecycle
+        run: |
+          python3 crab/scripts/e2e/run_concurrent_push_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}-concurrent" \
+            --agents 8 \
+            --same-branch-agents 4 \
+            --max-parallel-pushes 8 \
+            --upload-concurrency 2 \
+            --rebase-on-non-fast-forward \
+            --omit-lock-wait-secs \
+            --rebase-retry-limit 64 \
+            --max-locator-requests-per-success 180 \
+            --crash-boundary \
+            --marker-faults \
+            --crash-lock-ttl-secs 21 \
+            --lock-wait-secs 30 \
+            --manifest-cas-retries 64
+
       - name: Capture RustFS logs
         if: always()
         run: |
@@ -321,6 +345,8 @@ jobs:
           path: |
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-concurrent/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-concurrent/logs/**
             ${{ env.CRAB_E2E_ROOT }}/rustfs.log
           if-no-files-found: warn
           retention-days: 14

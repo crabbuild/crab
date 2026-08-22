@@ -4,8 +4,10 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::config::{
-    CheckpointOptions, CheckpointScope, CompressionCodec, Settings, WriteOptions,
+    CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
+    GarbageCollectorOptions, Settings, WriteOptions,
 };
+use tracing::{debug, warn};
 
 use super::format::{
     LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation,
@@ -22,6 +24,9 @@ use crate::error::{MetadataError, Result};
 const DB_LABEL: &str = "git_locator_db";
 const MAX_BATCH_ROWS: usize = 25_000;
 const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
+// Amortize one directory scan over a normal fan-out while bounding the number
+// of superseded locator generations. This cadence is cost policy, not safety.
+const GC_GENERATION_INTERVAL: u64 = 32;
 
 /// Counts produced by one stale-locator sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -54,9 +59,11 @@ pub struct GitObjectLocatorWriter {
     db: slatedb::Db,
     path: String,
     store: Arc<dyn ObjectStore>,
+    initial_coverage: Option<GitLocatorCoverage>,
     metadata: LocatorMetadata,
     bindings: HashMap<u64, GitPackLocatorRecord>,
     stats: LocatorWriteStats,
+    writes_durable: bool,
 }
 
 impl GitObjectLocatorWriter {
@@ -148,9 +155,11 @@ impl GitObjectLocatorWriter {
             db,
             path,
             store,
+            initial_coverage: metadata.coverage,
             metadata,
             bindings,
             stats: LocatorWriteStats::default(),
+            writes_durable: true,
         })
     }
 
@@ -229,6 +238,7 @@ impl GitObjectLocatorWriter {
 
         self.metadata = new_metadata;
         self.stats.flushes = self.stats.flushes.saturating_add(1);
+        self.writes_durable = true;
         for binding in additions {
             self.bindings.insert(binding.pack_slot, binding.record);
         }
@@ -282,8 +292,12 @@ impl GitObjectLocatorWriter {
 
     /// Make all submitted object rows durable in object storage.
     pub async fn flush_objects(&mut self) -> Result<()> {
+        if self.writes_durable {
+            return Ok(());
+        }
         flush(&self.db).await?;
         self.stats.flushes = self.stats.flushes.saturating_add(1);
+        self.writes_durable = true;
         Ok(())
     }
 
@@ -328,6 +342,7 @@ impl GitObjectLocatorWriter {
                 stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
                 if delete_count == MAX_BATCH_ROWS {
                     write_batch(&self.db, deletes, "sweep compact locator objects").await?;
+                    self.writes_durable = false;
                     deletes = slatedb::WriteBatch::new();
                     delete_count = 0;
                 }
@@ -335,6 +350,7 @@ impl GitObjectLocatorWriter {
         }
         if delete_count != 0 {
             write_batch(&self.db, deletes, "sweep compact locator objects").await?;
+            self.writes_durable = false;
         }
 
         let mut pack_rows = self
@@ -356,6 +372,7 @@ impl GitObjectLocatorWriter {
                 stats.pack_rows_deleted = stats.pack_rows_deleted.saturating_add(1);
                 if delete_count == MAX_BATCH_ROWS {
                     write_batch(&self.db, deletes, "sweep compact locator packs").await?;
+                    self.writes_durable = false;
                     deletes = slatedb::WriteBatch::new();
                     delete_count = 0;
                 }
@@ -363,9 +380,9 @@ impl GitObjectLocatorWriter {
         }
         if delete_count != 0 {
             write_batch(&self.db, deletes, "sweep compact locator packs").await?;
+            self.writes_durable = false;
         }
-        flush(&self.db).await?;
-        self.stats.flushes = self.stats.flushes.saturating_add(1);
+        self.flush_objects().await?;
         for slot in removed_slots {
             self.bindings.remove(&slot);
         }
@@ -390,8 +407,8 @@ impl GitObjectLocatorWriter {
             "write compact locator coverage",
         )
         .await?;
-        flush(&self.db).await?;
-        self.stats.flushes = self.stats.flushes.saturating_add(1);
+        self.writes_durable = false;
+        self.flush_objects().await?;
         self.metadata = metadata;
         self.stats.coverage_updated = true;
         Ok(())
@@ -403,9 +420,12 @@ impl GitObjectLocatorWriter {
             db,
             path,
             store,
+            initial_coverage,
+            metadata,
             stats,
             ..
         } = self;
+        let collect_garbage = locator_gc_due(initial_coverage, metadata.coverage);
         let checkpoint = db
             .create_checkpoint(
                 CheckpointScope::All,
@@ -436,11 +456,18 @@ impl GitObjectLocatorWriter {
                 source,
             });
         }
-        remove_old_reader_checkpoints(&path, store, &checkpoint).await?;
+        remove_old_reader_checkpoints(&path, Arc::clone(&store), &checkpoint).await?;
+        if collect_garbage {
+            match run_locator_gc(&path, store).await {
+                Ok(()) => debug!("Git locator garbage collection completed"),
+                Err(error) => warn!(%error, "Git locator garbage collection requires retry"),
+            }
+        }
         Ok(stats)
     }
 
     fn record_object_batch(&mut self, rows: usize, bytes: usize) {
+        self.writes_durable = false;
         self.stats.object_rows_written = self.stats.object_rows_written.saturating_add(rows as u64);
         self.stats.logical_bytes_written = self
             .stats
@@ -477,7 +504,46 @@ async fn remove_old_reader_checkpoints(
     Ok(())
 }
 
+fn locator_gc_due(
+    initial: Option<GitLocatorCoverage>,
+    published: Option<GitLocatorCoverage>,
+) -> bool {
+    let initial_band = initial
+        .map(|coverage| coverage.generation / GC_GENERATION_INTERVAL)
+        .unwrap_or(0);
+    published.is_some_and(|coverage| coverage.generation / GC_GENERATION_INTERVAL > initial_band)
+}
+
+async fn run_locator_gc(path: &str, store: Arc<dyn ObjectStore>) -> Result<()> {
+    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    admin
+        .run_gc_once(locator_gc_options())
+        .await
+        .map_err(|source| MetadataError::SlateDbWrite {
+            db: DB_LABEL.to_owned(),
+            source,
+        })
+}
+
+fn locator_gc_options() -> GarbageCollectorOptions {
+    GarbageCollectorOptions {
+        // Locator WALs contain only a permanent fencing object; there are no
+        // clone parents. Collect only directories that publication supersedes.
+        wal_options: None,
+        wal_fence_options: None,
+        detach_options: None,
+        ..GarbageCollectorOptions::default()
+    }
+}
+
 fn locator_settings() -> Settings {
+    let mut compactor = CompactorOptions {
+        commit_compacted_interval: std::time::Duration::from_millis(500),
+        ..CompactorOptions::default()
+    };
+    if let Some(worker) = &mut compactor.worker {
+        worker.compactions_poll_interval = std::time::Duration::from_millis(500);
+    }
     Settings {
         flush_interval: None,
         wal_enabled: false,
@@ -487,6 +553,12 @@ fn locator_settings() -> Settings {
         l0_sst_size_bytes: 64 * 1024 * 1024,
         max_unflushed_bytes: 96 * 1024 * 1024,
         l0_flush_parallelism: 1,
+        // Locator writers are short-lived. The multi-second defaults can leave
+        // small compactions unclaimed until the next push hits L0 backpressure.
+        compactor_options: Some(compactor),
+        // SlateDB tickers fire immediately, so default background GC runs its
+        // full directory scan on every short-lived publication session.
+        garbage_collector_options: None,
         compression_codec: Some(CompressionCodec::Zstd),
         ..Settings::default()
     }
@@ -636,6 +708,55 @@ mod tests {
         assert_eq!(settings.l0_sst_size_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.max_unflushed_bytes, 96 * 1024 * 1024);
         assert_eq!(settings.l0_flush_parallelism, 1);
+        assert!(settings.garbage_collector_options.is_none());
+        let compactor = settings
+            .compactor_options
+            .expect("locator compactor enabled");
+        assert_eq!(
+            compactor.poll_interval,
+            CompactorOptions::default().poll_interval
+        );
+        assert_eq!(
+            compactor.commit_compacted_interval,
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            compactor
+                .worker
+                .expect("locator compaction worker")
+                .compactions_poll_interval,
+            std::time::Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn locator_gc_is_due_only_when_exact_coverage_crosses_a_generation_band() {
+        let coverage = |generation| {
+            Some(GitLocatorCoverage {
+                generation,
+                pack_index_hash: hash(generation),
+            })
+        };
+
+        assert!(!locator_gc_due(None, None));
+        assert!(!locator_gc_due(None, coverage(1)));
+        assert!(!locator_gc_due(coverage(1), coverage(31)));
+        assert!(locator_gc_due(coverage(31), coverage(32)));
+        assert!(!locator_gc_due(coverage(32), coverage(63)));
+        assert!(locator_gc_due(coverage(32), coverage(64)));
+        assert!(!locator_gc_due(coverage(64), coverage(64)));
+    }
+
+    #[test]
+    fn locator_gc_collects_only_superseded_publication_state() {
+        let options = locator_gc_options();
+
+        assert!(options.manifest_options.is_some());
+        assert!(options.compacted_options.is_some());
+        assert!(options.compactions_options.is_some());
+        assert!(options.wal_options.is_none());
+        assert!(options.wal_fence_options.is_none());
+        assert!(options.detach_options.is_none());
     }
 
     #[tokio::test]
@@ -794,5 +915,32 @@ mod tests {
             .expect("reopen writer");
         assert_eq!(reopened.coverage(), Some(coverage));
         reopened.close().await.expect("close reopened writer");
+    }
+
+    #[tokio::test]
+    async fn clean_object_flush_is_not_repeated_before_coverage() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(store, "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack(1)]).await.expect("bind pack")[0];
+        writer
+            .write_locations(binding, &[entry(1)])
+            .await
+            .expect("write location");
+        writer.flush_objects().await.expect("flush objects");
+        let durable_flushes = writer.stats.flushes;
+
+        writer.flush_objects().await.expect("repeat clean flush");
+        assert_eq!(writer.stats.flushes, durable_flushes);
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 3,
+                pack_index_hash: hash(9),
+            })
+            .await
+            .expect("publish coverage");
+        assert_eq!(writer.stats.flushes, durable_flushes + 1);
+        writer.close().await.expect("close writer");
     }
 }
