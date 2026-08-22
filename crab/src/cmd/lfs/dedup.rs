@@ -746,8 +746,7 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test::git_repo::GIT_DIR_MUTEX;
 
     fn temp_git_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -762,7 +761,9 @@ mod tests {
 
     #[test]
     fn dedup_without_local_objects_is_noop() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = temp_git_repo();
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -795,7 +796,9 @@ mod tests {
 
     #[test]
     fn collect_crab_pointers_includes_index() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = temp_git_repo();
         let data = b"indexed crab pointer";
         let pointer = Pointer {
@@ -817,7 +820,9 @@ mod tests {
 
     #[test]
     fn head_blob_refs_parses_nul_separated_ls_tree_records() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = temp_git_repo();
         Command::new("git")
             .args(["config", "user.email", "test@example.com"])

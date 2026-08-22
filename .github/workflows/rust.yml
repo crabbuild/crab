@@ -128,6 +128,11 @@ jobs:
           -A unfulfilled_lint_expectations
 
       - name: Run tests
+        env:
+          # The Linux test runner's default worker stack is too small for
+          # the largest async protocol fixtures; keep the test harness from
+          # converting valid coverage into a stack-overflow false negative.
+          RUST_MIN_STACK: "8388608"
         run: cargo test --workspace --locked
 
       - name: Check managed OpenAPI contract
