@@ -11,7 +11,8 @@ use super::{
     publish_materialized_git_visibility, source_ref_updates_from_prepare,
     validate_candidate_manifest_shape, validate_candidate_metadata,
     validate_protected_dependency_receipt, validate_protected_shard_set_receipt,
-    validate_push_plan_shape, write_service_generation_index_receipt,
+    validate_push_plan_shape, validate_staged_object_shapes,
+    write_service_generation_index_receipt,
 };
 use crate::error::Result;
 
@@ -101,7 +102,10 @@ pub async fn commit_receive(
         &plan.ref_updates,
     )?;
     validate_candidate_manifest_shape(&plan, ctx.repo_prefix())?;
-    ctx.validate_staged_objects(&plan).await?;
+    // Promotion re-reads and hashes every staged body immediately before its
+    // canonical write. Validate paths here, but do not download all candidate
+    // packs once more before that integrity boundary.
+    validate_staged_object_shapes(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_candidate_metadata(ctx.store(), ctx.router(), &plan).await?;
     promote_staged_objects(ctx.store(), &plan).await?;
     validate_protected_shard_set_receipt(ctx.store(), ctx.router(), &plan).await?;
@@ -683,6 +687,34 @@ mod tests {
             AuthServerError::CasConflict { path, expected_etag: None }
                 if path == "source manifest changed after verification"
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_unreferenced_staged_object_before_body_download() -> Result<()> {
+        let ctx = context();
+        let mut plan = push_plan();
+        plan.candidate_manifest.seal_git_validation();
+        let missing_body = b"candidate pack body";
+        let pack_id = blake3_hex(missing_body);
+        plan.staged_objects = vec![staged_object(
+            format!("org/repo/packs/pack-{pack_id}.pack"),
+            missing_body,
+        )];
+        write_plan(&ctx, &plan).await?;
+        prepare_receive(&ctx, plan.ref_updates.clone(), None).await?;
+        let digest = ctx.verified_plan_digest(&plan, None)?;
+
+        let error = commit_receive(&ctx, "crab://bucket/org/repo", &digest, None)
+            .await
+            .expect_err("unreferenced staged object must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("staged object is not referenced by candidate metadata"),
+            "finalization downloaded the missing body before rejecting its metadata: {error}",
+        );
         Ok(())
     }
 

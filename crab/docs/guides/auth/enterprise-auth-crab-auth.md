@@ -152,6 +152,9 @@ Push uses a receive-pack-style flow. The CLI first asks for a staging prefix,
 uploads immutable push data under that prefix, then asks crab-auth to finalize.
 The service verifies changed paths server-side and commits `{repo}/manifest`
 with service-owned cloud credentials.
+Verification hashes every staged object. Finalization validates the staged
+layout again, then re-hashes each body at its canonical promotion boundary;
+it does not perform a separate full-candidate download immediately beforehand.
 Path-scoped push rules require at least one server-verified changed path; use a
 non-path-scoped push rule for intentional ref-only or metadata-only updates.
 Protected push accepts branch ref updates only. The receive helper rejects
