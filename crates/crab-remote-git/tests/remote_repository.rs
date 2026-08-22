@@ -1951,13 +1951,10 @@ async fn rejects_oversized_blob_before_allocating_its_result() {
     let error = read_target(&fixture)
         .await
         .expect_err("oversized decoded blob must fail");
-    assert!(matches!(
-        error,
-        Error::LimitExceeded {
-            limit: "decoded object bytes",
-            ..
-        }
-    ));
+    assert!(
+        contains_limit_exceeded(&error, "decoded object bytes"),
+        "unexpected oversized decoded blob error: {error:?}"
+    );
 
     let cancellation = CancellationToken::new();
     let operation = fixture
