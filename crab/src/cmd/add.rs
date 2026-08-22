@@ -3115,6 +3115,11 @@ fn publish_git_index_entries_with_tracking(
     let index_path = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)
         .map_err(GitIndexWriteError::BeforeIndexMutation)?
         .index_path();
+    let latest_worktree_mtime_secs = entries
+        .iter()
+        .map(|entry| entry.index_stat.stat.mtime.secs)
+        .max();
+    wait_for_index_timestamp_after_worktree(latest_worktree_mtime_secs);
     let lock = gix_lock::File::acquire_to_update_resource(
         &index_path,
         gix_lock::acquire::Fail::Immediately,
@@ -3305,6 +3310,26 @@ fn publish_git_index_entries_with_tracking(
         )))
     })?;
     Ok(())
+}
+
+fn wait_for_index_timestamp_after_worktree(latest_worktree_mtime_secs: Option<u32>) {
+    let Some(latest_worktree_mtime_secs) = latest_worktree_mtime_secs else {
+        return;
+    };
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    if now.as_secs() != u64::from(latest_worktree_mtime_secs) {
+        return;
+    }
+
+    // Git treats entries from the same second as the index timestamp as racy and re-reads them.
+    // Pointer entries intentionally differ from raw worktree bytes, so commit in the next
+    // second to keep a freshly staged file clean without hiding later edits.
+    let remaining = std::time::Duration::from_nanos(u64::from(
+        1_000_000_000_u32.saturating_sub(now.subsec_nanos()),
+    ));
+    std::thread::sleep(remaining);
 }
 
 fn git_honors_filemode(repo_root: &Path) -> bool {
