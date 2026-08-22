@@ -204,7 +204,8 @@ exit 0
     let yaml = format!(
         r#"stages:
   oom_stage:
-    cmd: "{script}"
+    cmd:
+      argv: ["{script}"]
     deps:
       - input.txt
     outs:

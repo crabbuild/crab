@@ -1104,24 +1104,18 @@ class ProtocolV2PartialCloneSmoke:
                 row,
             )
 
-            large_missing = self.run_git(
-                clone,
-                ["cat-file", "-e", large_oid],
-                name=f"filter matrix {label} large omission",
-                check=False,
-                extra_env={"GIT_NO_LAZY_FETCH": "1"},
-            )
+            large_present = self.object_present_in_odb(clone, large_oid)
             if expect_large:
                 self.check(
                     f"filter-matrix-{label}-retains-large-before-lazy-fetch",
-                    large_missing["exit_code"] == 0,
-                    {"exit_code": large_missing["exit_code"]},
+                    large_present,
+                    {"present": large_present},
                 )
             else:
                 self.check(
                     f"filter-matrix-{label}-omits-large-before-lazy-fetch",
-                    large_missing["exit_code"] != 0,
-                    {"exit_code": large_missing["exit_code"]},
+                    not large_present,
+                    {"present": large_present},
                 )
 
                 lazy_output = self.artifacts / f"filter-matrix-{label}-lazy.bin"
@@ -1139,17 +1133,11 @@ class ProtocolV2PartialCloneSmoke:
                 )
 
             if object_probe is not None:
-                probe = self.run_git(
-                    clone,
-                    ["cat-file", "-e", object_probe],
-                    name=f"filter matrix {label} object selection",
-                    check=False,
-                    extra_env={"GIT_NO_LAZY_FETCH": "1"},
-                )
+                probe_present = self.object_present_in_odb(clone, object_probe)
                 self.check(
                     f"filter-matrix-{label}-object-selection",
-                    probe["exit_code"] == 0,
-                    {"oid": object_probe, "exit_code": probe["exit_code"]},
+                    probe_present,
+                    {"oid": object_probe, "present": probe_present},
                 )
             repack = self.run_git(
                 clone,
@@ -1182,36 +1170,24 @@ class ProtocolV2PartialCloneSmoke:
             )
 
             if label == "blob-limit":
-                small = self.run_git(
-                    clone,
-                    ["cat-file", "-e", small_oid],
-                    name="filter matrix blob-limit small retention",
-                    check=False,
-                    extra_env={"GIT_NO_LAZY_FETCH": "1"},
-                )
+                small_present = self.object_present_in_odb(clone, small_oid)
                 self.check(
                     "filter-matrix-blob-limit-selects-by-size",
-                    large_missing["exit_code"] != 0 and small["exit_code"] == 0,
+                    not large_present and small_present,
                     {
-                        "large_exit_code": large_missing["exit_code"],
-                        "small_exit_code": small["exit_code"],
+                        "large_present": large_present,
+                        "small_present": small_present,
                     },
                 )
 
             if label == "sparse":
-                nested = self.run_git(
-                    clone,
-                    ["cat-file", "-e", nested_oid],
-                    name="filter matrix sparse selected blob",
-                    check=False,
-                    extra_env={"GIT_NO_LAZY_FETCH": "1"},
-                )
+                nested_present = self.object_present_in_odb(clone, nested_oid)
                 self.check(
                     "filter-matrix-sparse-path-selection",
-                    large_missing["exit_code"] != 0 and nested["exit_code"] == 0,
+                    not large_present and nested_present,
                     {
-                        "excluded_root_blob_exit_code": large_missing["exit_code"],
-                        "selected_nested_blob_exit_code": nested["exit_code"],
+                        "excluded_root_blob_present": large_present,
+                        "selected_nested_blob_present": nested_present,
                     },
                 )
 
@@ -1261,13 +1237,7 @@ class ProtocolV2PartialCloneSmoke:
             ],
             name="LFS pointer filtered clone",
         )
-        lfs_present = self.run_git(
-            self.run_root / "lfs-pointer-filtered",
-            ["cat-file", "-e", lfs_oid],
-            name="prove LFS pointer retained",
-            check=False,
-            extra_env={"GIT_NO_LAZY_FETCH": "1"},
-        )
+        lfs_present = self.object_present_in_odb(self.run_root / "lfs-pointer-filtered", lfs_oid)
         lfs_output = self.artifacts / "lfs-pointer-fixture.bin"
         lfs_record = self.run_binary(
             "read LFS pointer fixture",
@@ -1285,13 +1255,13 @@ class ProtocolV2PartialCloneSmoke:
             crab_record["exit_code"] == 0
             and crab_output.read_bytes() == self.crab_pointer_bytes
             and lfs_clone["exit_code"] == 0
-            and lfs_present["exit_code"] == 0
+            and lfs_present
             and lfs_record["exit_code"] == 0
             and lfs_output.read_bytes() == self.lfs_pointer_bytes,
             {
                 "crab_exit_code": crab_record["exit_code"],
                 "lfs_clone_exit_code": lfs_clone["exit_code"],
-                "lfs_present_exit_code": lfs_present["exit_code"],
+                "lfs_present": lfs_present,
                 "lfs_read_exit_code": lfs_record["exit_code"],
             },
         )
@@ -1654,24 +1624,12 @@ class ProtocolV2PartialCloneSmoke:
             {"tags": sorted(tag_lines)},
         )
 
-        large_missing = self.run_git(
-            self.filtered,
-            ["cat-file", "-e", large_oid],
-            name="prove large blob absent",
-            check=False,
-            extra_env={"GIT_NO_LAZY_FETCH": "1"},
-        )
-        small_missing = self.run_git(
-            self.filtered,
-            ["cat-file", "-e", small_oid],
-            name="prove small blob absent",
-            check=False,
-            extra_env={"GIT_NO_LAZY_FETCH": "1"},
-        )
+        large_present = self.object_present_in_odb(self.filtered, large_oid)
+        small_present = self.object_present_in_odb(self.filtered, small_oid)
         self.check(
             "initial-ordinary-blobs-absent",
-            large_missing["exit_code"] != 0 and small_missing["exit_code"] != 0,
-            {"large_exit": large_missing["exit_code"], "small_exit": small_missing["exit_code"]},
+            not large_present and not small_present,
+            {"large_present": large_present, "small_present": small_present},
         )
 
         self.concurrent_lazy_fetch_check(large_oid)
@@ -1938,23 +1896,17 @@ class ProtocolV2PartialCloneSmoke:
             ["rev-parse", "refs/remotes/origin/main"],
             name="verify incremental fetched commit",
         )
-        missing = self.run_git(
-            self.filtered,
-            ["cat-file", "-e", new_blob],
-            name="prove incremental blob remains promised",
-            check=False,
-            extra_env={"GIT_NO_LAZY_FETCH": "1"},
-        )
+        new_blob_present = self.object_present_in_odb(self.filtered, new_blob)
         self.check(
             "filtered-incremental-fetch",
             fetch["exit_code"] == 0
             and fetched_commit == new_commit
-            and missing["exit_code"] != 0,
+            and not new_blob_present,
             {
                 "fetch_exit": fetch["exit_code"],
                 "fetched_commit": fetched_commit,
                 "expected_commit": new_commit,
-                "blob_absent": missing["exit_code"] != 0,
+                "blob_absent": not new_blob_present,
                 "telemetry": telemetry,
             },
         )
@@ -2059,6 +2011,28 @@ class ProtocolV2PartialCloneSmoke:
 
     def pack_files(self, repo: Path) -> list[Path]:
         return sorted((repo / ".git" / "objects" / "pack").glob("*.pack"))
+
+    def object_present_in_odb(self, repo: Path, oid: str) -> bool:
+        """Check the local object database without allowing a promisor fetch."""
+        objects = repo / ".git" / "objects"
+        if (objects / oid[:2] / oid[2:]).is_file():
+            return True
+        for index in sorted((objects / "pack").glob("*.idx")):
+            result = subprocess.run(
+                [str(self.git_bin), "verify-pack", "-v", str(index)],
+                cwd=repo,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or f"exit {result.returncode}"
+                raise SmokeError(f"cannot inspect pack index {index}: {detail}")
+            if any(line.startswith(f"{oid} ") for line in result.stdout.splitlines()):
+                return True
+        return False
 
     def odb_bytes(self, repo: Path) -> int:
         root = repo / ".git" / "objects"
