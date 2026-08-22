@@ -18,6 +18,8 @@ pub const DEFAULT_PUSH_LOCK_TTL: Duration = Duration::from_secs(300);
 
 /// Internal resource serializing Git object-locator publication.
 pub const GIT_OBJECT_LOCATOR_RESOURCE: &str = "git-object-locator";
+/// Internal resource electing one long-lived Git generation repair owner.
+pub const GIT_GENERATION_OWNER_RESOURCE: &str = "git-generation-owner";
 /// Internal resource serializing unified manifest publication.
 pub const GIT_MANIFEST_RESOURCE: &str = "git-manifest";
 /// Internal resource serializing repository repacks.
@@ -410,13 +412,27 @@ impl PushLock {
         ref_name: &str,
     ) -> Result<bool> {
         let path = push_lock_path(prefix, ref_name)?;
+        lease_is_claimed(store, &path).await
+    }
+
+    /// Return whether an internal lease is active by its diagnostic expiry.
+    ///
+    /// This one-read hint may disagree under client clock skew; callers may use
+    /// it only to hand derived work to an owner, never to decide correctness.
+    pub async fn internal_lease_is_active(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        resource: &str,
+    ) -> Result<bool> {
+        let path = internal_lock_path(prefix, resource)?;
         let object_path = Path::from(path.as_str());
         let (body, _) = match get_with_version(store, &object_path).await {
             Ok(lock) => lock,
             Err(object_store::Error::NotFound { .. }) => return Ok(false),
             Err(source) => return Err(store_error(&path, source)),
         };
-        deserialize_payload(&path, &body).map(|payload| !payload.is_released())
+        deserialize_payload(&path, &body)
+            .map(|payload| !payload.is_released() && !payload.is_expired_at(unix_now()))
     }
 
     /// Record that a contender observed `predecessor_holder` on a ref lease.
@@ -685,6 +701,16 @@ async fn lock_holder_snapshot(
         },
         Err(_) => (String::new(), None),
     }
+}
+
+async fn lease_is_claimed(store: &Arc<dyn ObjectStore>, path: &str) -> Result<bool> {
+    let object_path = Path::from(path);
+    let (body, _) = match get_with_version(store, &object_path).await {
+        Ok(lock) => lock,
+        Err(object_store::Error::NotFound { .. }) => return Ok(false),
+        Err(source) => return Err(store_error(path, source)),
+    };
+    deserialize_payload(path, &body).map(|payload| !payload.is_released())
 }
 
 pub(crate) async fn release_with_known_etag(
@@ -1060,6 +1086,46 @@ mod tests {
         lock.release().await.unwrap();
         assert!(
             !PushLock::ref_lease_is_claimed(&store, "org/repo", "refs/heads/main")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_active_probe_tracks_generation_owner_lease() {
+        let store = memory_store();
+
+        assert!(
+            !PushLock::internal_lease_is_active(&store, "org/repo", GIT_GENERATION_OWNER_RESOURCE,)
+                .await
+                .unwrap()
+        );
+        let lock =
+            PushLock::acquire_internal_default(&store, "org/repo", GIT_GENERATION_OWNER_RESOURCE)
+                .await
+                .unwrap();
+        assert!(
+            PushLock::internal_lease_is_active(&store, "org/repo", GIT_GENERATION_OWNER_RESOURCE,)
+                .await
+                .unwrap()
+        );
+
+        lock.release().await.unwrap();
+        assert!(
+            !PushLock::internal_lease_is_active(&store, "org/repo", GIT_GENERATION_OWNER_RESOURCE,)
+                .await
+                .unwrap()
+        );
+
+        let path = internal_lock_path("org/repo", GIT_GENERATION_OWNER_RESOURCE).unwrap();
+        let expired = serialize_payload(
+            &path,
+            &PushLockPayload::new("expired-owner", unix_now().saturating_sub(1), 60),
+        )
+        .unwrap();
+        store.put(&Path::from(path), expired.into()).await.unwrap();
+        assert!(
+            !PushLock::internal_lease_is_active(&store, "org/repo", GIT_GENERATION_OWNER_RESOURCE,)
                 .await
                 .unwrap()
         );

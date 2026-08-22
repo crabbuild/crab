@@ -3991,7 +3991,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         }) => run_repack_command(dry_run, json, jsonl, &cancel).await,
         Some(Cmd::Optimize(sub)) => run_optimize_command(sub, &cancel).await,
         Some(Cmd::Tier(sub)) => run_tier_command(sub, &cancel).await,
-        Some(Cmd::Metadb(sub)) => run_metadb_command(sub).await,
+        Some(Cmd::Metadb(sub)) => run_metadb_command(sub, &cancel).await,
         Some(Cmd::Cache(sub)) => run_cache_command(sub).await,
         Some(Cmd::Config(sub)) => {
             let _span = tracing::info_span!("config").entered();
@@ -5228,25 +5228,34 @@ async fn run_optimize_command(
         },
         OptimizeCmd::Indexes(command) => match command {
             OptimizeIndexesCmd::Diagnose { db, json, deep } => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Diagnose { db, json, deep })
-                    .await
+                run_metadb_command(
+                    crab::cmd::metadb::MetadbCommand::Diagnose { db, json, deep },
+                    cancel,
+                )
+                .await
             }
             OptimizeIndexesCmd::Rebuild { db, json } => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Rebuild { db, json }).await
+                run_metadb_command(
+                    crab::cmd::metadb::MetadbCommand::Rebuild { db, json },
+                    cancel,
+                )
+                .await
             }
             OptimizeIndexesCmd::Compact { db } => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Compact { db }).await
+                run_metadb_command(crab::cmd::metadb::MetadbCommand::Compact { db }, cancel).await
             }
             OptimizeIndexesCmd::CacheStats => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Cache(
-                    crab::cmd::metadb::CacheCommand::Stats,
-                ))
+                run_metadb_command(
+                    crab::cmd::metadb::MetadbCommand::Cache(crab::cmd::metadb::CacheCommand::Stats),
+                    cancel,
+                )
                 .await
             }
             OptimizeIndexesCmd::CacheClear => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Cache(
-                    crab::cmd::metadb::CacheCommand::Clear,
-                ))
+                run_metadb_command(
+                    crab::cmd::metadb::MetadbCommand::Cache(crab::cmd::metadb::CacheCommand::Clear),
+                    cancel,
+                )
                 .await
             }
             OptimizeIndexesCmd::Warm {
@@ -5571,9 +5580,12 @@ async fn run_tier_command(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_metadb_command(sub: crab::cmd::metadb::MetadbCommand) -> Result<ExitCode> {
+async fn run_metadb_command(
+    sub: crab::cmd::metadb::MetadbCommand,
+    cancel: &CancellationToken,
+) -> Result<ExitCode> {
     let _span = tracing::info_span!("metadb").entered();
-    crab::cmd::metadb::run_metadb(sub, OutputMode::Text).await?;
+    crab::cmd::metadb::run_metadb(sub, OutputMode::Text, cancel).await?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -6660,6 +6672,30 @@ mod tests {
     fn top_level_restripe_is_removed() {
         parse_cli_on_large_stack(|| {
             assert!(Cli::try_parse_from(["crab", "restripe", "--dry-run"]).is_err());
+        });
+    }
+
+    #[test]
+    fn metadb_generation_owner_parses_runtime_controls() {
+        parse_cli_on_large_stack(|| {
+            let cli = Cli::try_parse_from([
+                "crab",
+                "metadb",
+                "owner",
+                "--once",
+                "--interval",
+                "7",
+                "--jsonl",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.cmd,
+                Some(Cmd::Metadb(crab::cmd::metadb::MetadbCommand::Owner {
+                    once: true,
+                    interval: 7,
+                    jsonl: true,
+                }))
+            ));
         });
     }
 

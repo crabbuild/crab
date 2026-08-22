@@ -23,6 +23,7 @@ Architecture detail lives in
 ```
 crab metadb diagnose [--db file_index|chunk_index|both] [--json]
 crab metadb rebuild  --db  file_index|chunk_index|both  [--json]
+crab metadb owner    [--once] [--interval SECONDS] [--jsonl]
 crab metadb compact  [--db file_index|chunk_index|both]
 crab metadb cache    stats
 crab metadb cache    clear
@@ -80,6 +81,40 @@ scenarios.
 `crab doctor --metadb` reports the generation receipt, repo/bucket registry
 completeness, and Git locator availability, and names the applicable repair
 command.
+
+### `crab metadb owner`
+
+Run one durable derived-index owner for a repository. The owner holds the Git
+locator writer lease, reuses one SlateDB writer across manifest generations,
+publishes immutable reader checkpoints, and repairs the generation-bound Git
+visibility proof. Push and upload-pack clients detect its repository lease and
+leave locator repair to it; complete-pack fetch remains the safe fallback while
+a newly committed generation is being indexed.
+
+```bash
+crab metadb owner
+crab metadb owner --interval 60 --jsonl
+crab metadb owner --once
+```
+
+Run the continuous form under a process supervisor with the same repository
+configuration and object-store credentials as `crab push`. Exactly one owner
+may run per repository. A second process exits because it cannot acquire the
+owner lease. SIGINT/SIGTERM closes SlateDB and releases both leases before exit;
+expired leases remain reclaimable after a process or host failure.
+
+The default 30-second poll bounds normal locator lag to roughly one interval.
+An unchanged repository costs one manifest read per poll, or 2,880 reads/day.
+The owner revalidates immutable visibility evidence every ten minutes and
+renews two object-store leases every one-third of the configured push-lock TTL.
+Actual repair work occurs only when the manifest generation changes or evidence
+is missing. Choose a longer interval for low-traffic repositories; choose a
+shorter interval only when lower protocol-v2 availability lag justifies the
+additional object-store requests.
+
+`--once` is an operator repair/check, not a daemon mode. `--jsonl` emits one
+bounded record per sample with generation, locator advancement, visibility
+result, supersession, and elapsed time.
 
 ### `crab metadb compact`
 

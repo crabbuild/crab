@@ -88,13 +88,19 @@ pub async fn snapshot_available(
             let repair_store = crate::storage::Store::from_storage(store.clone());
             let repair_layout =
                 crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-            match super::push::repair_git_visibility_if_current(
+            if matches!(
+                super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+                Ok(true)
+            ) {
+                return false;
+            }
+            match Box::pin(super::push::repair_git_visibility_if_current(
                 &repair_store,
                 &repair_layout,
                 repository.generation(),
                 LOCATOR_READ_REPAIR_LOCK_TTL,
                 cancellation,
-            )
+            ))
             .await
             {
                 Ok(Some(super::push::GitVisibilityPublication::Published)) => {
@@ -318,6 +324,15 @@ pub(crate) async fn open_repository(
     // an active ref-journal transaction, which must remain unavailable.
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+    if matches!(
+        super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+        Ok(true)
+    ) {
+        return Err(remote_error(RemoteGitError::RepositoryIndexing {
+            observed: observed_generation,
+            required: required_generation,
+        }));
+    }
     let repaired = super::push::repair_git_object_locator_if_current(
         &repair_store,
         &repair_layout,

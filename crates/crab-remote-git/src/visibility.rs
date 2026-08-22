@@ -52,7 +52,7 @@ async fn rebuild_with_operation(
     pack_index_hash: String,
     operation: &OperationContext,
 ) -> Result<GitVisibilityIndex> {
-    let maximum = crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS;
+    let maximum = operation.max_logical_objects();
     let mut cache = HashMap::<ObjectId, ObjectLinks>::new();
     let mut total = 0u64;
     let mut refs = BTreeMap::new();

@@ -1,6 +1,6 @@
 ---
 title: "crab metadb"
-description: "Diagnose, rebuild, compact, and inspect Crab metadata databases."
+description: "Diagnose, rebuild, own, compact, and inspect Crab metadata databases."
 ---
 
 # crab metadb
@@ -20,6 +20,7 @@ crab metadb <SUBCOMMAND> [OPTIONS]
 | --- | --- |
 | `diagnose` | Print `sys:*` key snapshots for one or both databases |
 | `rebuild` | Rebuild databases from durable shards under `.crab/shards/` |
+| `owner` | Continuously publish Git locator checkpoints and visibility proofs |
 | `compact` | Request immediate database compaction |
 | `cache` | Inspect or wipe the local chunk-index cache |
 
@@ -29,6 +30,19 @@ first and keep a backup of the durable remote data.
 
 ```bash
 crab metadb diagnose
+crab metadb owner --once
 crab metadb cache stats
 crab metadb compact
 ```
+
+For a team repository, run one continuous owner from a supervised checkout:
+
+```bash
+crab metadb owner --interval 30 --jsonl
+```
+
+Push clients then hand generation-bound Git locator publication to that owner.
+The default idle polling cost is 2,880 manifest reads per repository per day,
+plus two renewable object-store leases and a ten-minute visibility-evidence
+revalidation. Increase `--interval` when storage request cost matters more than
+the delay before protocol-v2 fetch becomes available for a new generation.

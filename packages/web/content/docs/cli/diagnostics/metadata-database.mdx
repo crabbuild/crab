@@ -47,6 +47,21 @@ crab metadb cache stats
 
 Shows the SQLite file path, on-disk size, entry count, installed shard count, and GC generation cursor.
 
+### Run a durable Git index owner
+
+For concurrent team pushes, keep one repository-scoped owner under a process
+supervisor:
+
+```bash
+crab metadb owner --interval 30 --jsonl
+```
+
+It reuses one exclusive locator writer across generations and publishes
+immutable read checkpoints before visibility repair. Push clients only pay an
+owner-lease probe and do not each rebuild the shared locator. If the owner is
+between generations or unavailable, complete-pack fetch remains available and
+a client can resume the canonical repair path after the lease expires.
+
 ## Rebuilding from Shards
 
 When a database is corrupted (unreadable manifest, damaged WAL, or accidental deletion), rebuild it from the source shards:

@@ -199,15 +199,22 @@ impl GitObjectLocatorWriter {
         self.metadata.coverage
     }
 
-    /// Return whether this binding's object rows belong to the initial exact coverage.
+    /// Return whether this session crossed the bounded garbage-collection cadence.
+    #[must_use]
+    pub fn maintenance_due(&self) -> bool {
+        locator_gc_due(self.initial_coverage, self.metadata.coverage)
+    }
+
+    /// Return whether this binding's object rows belong to exact published coverage.
     ///
     /// Bindings created by an interrupted newer publication remain durable, but
-    /// their rows must be rebuilt until a later session advances coverage.
+    /// their rows must be rebuilt until this writer advances coverage.
     #[must_use]
     pub fn binding_has_covered_objects(&self, binding: GitPackLocatorBinding) -> bool {
         self.bindings.get(&binding.pack_slot) == Some(&binding.record)
             && self
-                .initial_coverage
+                .metadata
+                .coverage
                 .is_some_and(|coverage| binding.record.committed_generation <= coverage.generation)
     }
 
@@ -456,8 +463,35 @@ impl GitObjectLocatorWriter {
         Ok(())
     }
 
+    /// Publish a read-only checkpoint without closing this writer.
+    ///
+    /// All submitted rows and coverage are flushed before the checkpoint. A
+    /// long-lived exclusive owner can then serve multiple manifest generations
+    /// from one SlateDB session while readers open only immutable checkpoints.
+    pub async fn publish_checkpoint(&mut self) -> Result<()> {
+        let checkpoint = self
+            .db
+            .create_checkpoint(
+                CheckpointScope::All,
+                &CheckpointOptions {
+                    name: Some(super::READER_CHECKPOINT_NAME.to_owned()),
+                    ..CheckpointOptions::default()
+                },
+            )
+            .await
+            .map_err(|source| MetadataError::SlateDbWrite {
+                db: DB_LABEL.to_owned(),
+                source,
+            })?;
+        self.stats.flushes = self.stats.flushes.saturating_add(1);
+        remove_old_reader_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint).await
+    }
+
     /// Flush and close the SlateDB writer.
-    pub async fn close(self) -> Result<LocatorWriteStats> {
+    pub async fn close(mut self) -> Result<LocatorWriteStats> {
+        if let Err(operation) = self.publish_checkpoint().await {
+            return close_after_error(self.db, operation).await;
+        }
         let Self {
             db,
             path,
@@ -468,37 +502,12 @@ impl GitObjectLocatorWriter {
             ..
         } = self;
         let collect_garbage = locator_gc_due(initial_coverage, metadata.coverage);
-        let checkpoint = db
-            .create_checkpoint(
-                CheckpointScope::All,
-                &CheckpointOptions {
-                    name: Some(super::READER_CHECKPOINT_NAME.to_owned()),
-                    ..CheckpointOptions::default()
-                },
-            )
-            .await;
-        let checkpoint = match checkpoint {
-            Ok(checkpoint) => checkpoint,
-            Err(source) => {
-                return close_after_error(
-                    db,
-                    MetadataError::SlateDbWrite {
-                        db: DB_LABEL.to_owned(),
-                        source,
-                    },
-                )
-                .await;
-            }
-        };
-        let mut stats = stats;
-        stats.flushes = stats.flushes.saturating_add(1);
         if let Err(source) = db.close().await {
             return Err(MetadataError::SlateDbClose {
                 db: DB_LABEL.to_owned(),
                 source,
             });
         }
-        remove_old_reader_checkpoints(&path, Arc::clone(&store), &checkpoint).await?;
         if collect_garbage {
             match run_locator_gc(&path, store).await {
                 Ok(()) => debug!("Git locator garbage collection completed"),
@@ -901,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_coverage_distinguishes_retained_rows_from_interrupted_bindings() {
+    async fn published_coverage_distinguishes_retained_rows_from_interrupted_bindings() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut initial = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
             .await
@@ -918,6 +927,7 @@ mod tests {
             })
             .await
             .expect("set initial coverage");
+        assert!(initial.binding_has_covered_objects(covered));
         initial.close().await.expect("close initial writer");
 
         let mut interrupted = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
@@ -941,6 +951,66 @@ mod tests {
         assert!(reopened.binding_has_covered_objects(retained));
         assert!(!reopened.binding_has_covered_objects(uncovered));
         reopened.close().await.expect("close reopened writer");
+    }
+
+    #[tokio::test]
+    async fn checkpoints_publish_multiple_generations_without_closing_writer() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let first = writer.bind_packs(&[pack(1)]).await.expect("bind first")[0];
+        writer
+            .write_locations(first, &[entry(1)])
+            .await
+            .expect("write first");
+        let first_coverage = GitLocatorCoverage {
+            generation: 1,
+            pack_index_hash: hash(100),
+        };
+        writer
+            .set_coverage(first_coverage)
+            .await
+            .expect("cover first generation");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish first checkpoint");
+
+        let first_reader =
+            super::super::GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+                .await
+                .expect("open first reader");
+        assert_eq!(first_reader.coverage(), Some(first_coverage));
+        first_reader.close().await.expect("close first reader");
+
+        let second = writer.bind_packs(&[pack(2)]).await.expect("bind second")[0];
+        writer
+            .write_locations(second, &[entry(2)])
+            .await
+            .expect("write second");
+        let second_coverage = GitLocatorCoverage {
+            generation: 2,
+            pack_index_hash: hash(200),
+        };
+        writer
+            .set_coverage(second_coverage)
+            .await
+            .expect("cover second generation");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish second checkpoint");
+        assert!(writer.binding_has_covered_objects(first));
+        assert!(writer.binding_has_covered_objects(second));
+
+        let second_reader =
+            super::super::GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+                .await
+                .expect("open second reader");
+        assert_eq!(second_reader.coverage(), Some(second_coverage));
+        second_reader.close().await.expect("close second reader");
+        writer.close().await.expect("close writer");
     }
 
     #[tokio::test]
