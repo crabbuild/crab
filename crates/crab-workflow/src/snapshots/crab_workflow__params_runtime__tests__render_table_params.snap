@@ -1,0 +1,18 @@
+---
+source: crates/crab-workflow/src/params_runtime.rs
+expression: out
+---
+=== Added ===
+key         value
+----------  -----
+batch_size  64   
+
+=== Removed ===
+key      value
+-------  -----
+dropout  0.5  
+
+=== Changed ===
+key       old   new 
+--------  ----  ----
+model.lr  0.01  0.02
