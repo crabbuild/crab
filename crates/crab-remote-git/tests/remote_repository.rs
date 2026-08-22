@@ -64,6 +64,8 @@ struct PackFixture {
     target: gix_hash::ObjectId,
     target_path: String,
     expected: Vec<u8>,
+    base_path: String,
+    base_expected: Vec<u8>,
     blob_paths: Vec<(String, Vec<u8>)>,
     shared_paths: Option<[(String, Vec<u8>); 2]>,
 }
@@ -504,11 +506,38 @@ impl PackFixture {
                 requested.then_some(location.oid)
             })
             .expect("fixture must contain the requested delta kind");
+        let base = PackLocationIter::open(
+            &index,
+            &reverse,
+            fs::metadata(&pack).expect("pack metadata").len(),
+        )
+        .expect("open pack locations")
+        .filter_map(|location| location.ok())
+        .find_map(|location| {
+            if !blobs.iter().any(|(_, oid, _)| *oid == location.oid) {
+                return None;
+            }
+            let start = location.pack_offset as usize;
+            let end = start + location.entry_len as usize;
+            let entry = gix_pack::data::Entry::from_bytes(
+                &pack_bytes[start..end],
+                location.pack_offset,
+                20,
+            )
+            .ok()?;
+            matches!(entry.header, Header::Blob).then_some(location.oid)
+        })
+        .expect("fixture must contain a base blob");
         let (target_path, _, expected) = blobs
             .iter()
             .find(|(_, oid, _)| *oid == target)
             .cloned()
             .expect("target blob metadata");
+        let (base_path, _, base_expected) = blobs
+            .iter()
+            .find(|(_, oid, _)| *oid == base)
+            .cloned()
+            .expect("base blob metadata");
         let blob_paths = blobs
             .iter()
             .map(|(path, _, data)| (path.clone(), data.clone()))
@@ -575,6 +604,8 @@ impl PackFixture {
             target,
             target_path,
             expected,
+            base_path,
+            base_expected,
             blob_paths,
             shared_paths,
         }
@@ -591,6 +622,8 @@ struct PublishedFixture {
     layout: StoreLayout<Store>,
     target_path: GitPath,
     expected: Vec<u8>,
+    base_path: GitPath,
+    base_expected: Vec<u8>,
     root_commit: gix_hash::ObjectId,
     side_commit: gix_hash::ObjectId,
     semantic_base_commit: gix_hash::ObjectId,
@@ -821,6 +854,8 @@ async fn publish_with_runtime_and_summary(
         layout,
         target_path: GitPath::new(Bytes::from(fixture.target_path)).expect("target path"),
         expected: fixture.expected,
+        base_path: GitPath::new(Bytes::from(fixture.base_path)).expect("base path"),
+        base_expected: fixture.base_expected,
         root_commit: fixture.root_commit,
         side_commit: fixture.side_commit,
         semantic_base_commit: fixture.semantic_base_commit,
@@ -1285,8 +1320,14 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
         .snapshot(&Revision::Reference("main".to_owned()), &setup_operation)
         .await
         .expect("snapshot");
+    snapshot
+        .entry(&fixture.base_path, &setup_operation)
+        .await
+        .expect("warm base path");
     setup_operation.finish(Ok(())).await.expect("finish setup");
 
+    // A verified base blob isolates packed-entry single-flight. Delta reads
+    // finish reconstruction after the shared packed entry is released.
     let mut operations = Vec::new();
     for _ in 0..16 {
         operations.push(
@@ -1299,10 +1340,12 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
     }
     fixture.backend.reset_pack_gets();
     let concurrent_snapshot = snapshot.clone();
-    let concurrent_path = fixture.target_path.clone();
+    let concurrent_path = fixture.base_path.clone();
+    let concurrent_expected = fixture.base_expected.clone();
+    let reads_path = concurrent_path.clone();
     let reads = operations.into_iter().map(move |operation| {
         let snapshot = concurrent_snapshot.clone();
-        let path = concurrent_path.clone();
+        let path = reads_path.clone();
         async move {
             let result = snapshot
                 .read_blob(&path, &operation)
@@ -1319,7 +1362,10 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
     fixture.backend.release_blocked_pack_get();
     let results = reads_task.await.expect("concurrent reads join");
     for result in results {
-        assert_eq!(result.expect("concurrent read").as_ref(), fixture.expected);
+        assert_eq!(
+            result.expect("concurrent read").as_ref(),
+            concurrent_expected
+        );
     }
     let cold_reads = fixture.backend.pack_gets();
     assert!(cold_reads > 0);
@@ -1332,13 +1378,14 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
         .operation(OperationKind::Repository, &cancellation)
         .await
         .expect("warm operation");
+    let warm_path = concurrent_path.clone();
     let warm = snapshot
-        .read_blob(&fixture.target_path, &operation)
+        .read_blob(&warm_path, &operation)
         .await
         .map(|blob| blob.bytes);
     assert_eq!(
         operation.finish(warm).await.expect("warm read").as_ref(),
-        fixture.expected
+        concurrent_expected
     );
     assert_eq!(fixture.backend.pack_gets(), 0);
     fixture.runtime.shutdown().await;
