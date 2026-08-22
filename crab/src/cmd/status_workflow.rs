@@ -650,7 +650,8 @@ fn build_entry(
         };
     }
 
-    let Ok(current_hash) = resolve_current_hash(stage, param_files, repo_root, remote_aliases)
+    let Ok((current_hash, current_deps)) =
+        resolve_current_inputs(stage, param_files, repo_root, remote_aliases)
     else {
         return StageStatusEntry {
             stage: name_str,
@@ -703,8 +704,14 @@ fn build_entry(
 
     // Stale: find the first differing input so the text-mode caller
     // can show an actionable reason without dumping every diff.
-    let (reason, changed_key) =
-        classify_stale(stage, param_files, locked, repo_root, remote_aliases);
+    let (reason, changed_key) = classify_stale(
+        stage,
+        param_files,
+        locked,
+        repo_root,
+        remote_aliases,
+        Some(&current_deps),
+    );
     StageStatusEntry {
         stage: name_str,
         state: "stale".to_owned(),
@@ -840,6 +847,15 @@ fn resolve_current_hash(
     repo_root: &Path,
     remote_aliases: &BTreeMap<String, String>,
 ) -> Result<StageHash> {
+    resolve_current_inputs(stage, param_files, repo_root, remote_aliases).map(|(hash, _)| hash)
+}
+
+fn resolve_current_inputs(
+    stage: &Stage,
+    param_files: &[PathBuf],
+    repo_root: &Path,
+    remote_aliases: &BTreeMap<String, String>,
+) -> Result<(StageHash, BTreeMap<String, [u8; 32]>)> {
     let dep_hashes = resolve_path_dep_hashes(stage, repo_root, remote_aliases)?;
     let params = resolve_stage_param_values_with_wdir(
         repo_root,
@@ -850,13 +866,13 @@ fn resolve_current_hash(
     )?;
     let resolved = ResolvedStage {
         stage: stage.clone(),
-        dep_hashes,
+        dep_hashes: dep_hashes.clone(),
         params,
         env: stage.env.clone(),
         cmd: stage.cmd.clone(),
         outs: stage.outs.clone(),
     };
-    Ok(compute_stage_hash(&resolved))
+    Ok((compute_stage_hash(&resolved), dep_hashes))
 }
 
 /// Single-stage read-only dep resolver for the status command.
@@ -968,11 +984,16 @@ fn classify_stale(
     locked: &LockedStage,
     repo_root: &Path,
     remote_aliases: &BTreeMap<String, String>,
+    current_deps: Option<&BTreeMap<String, [u8; 32]>>,
 ) -> (String, Option<String>) {
     // Deps: recompute hashes for every path dep and compare against
     // the lockfile. A dep that's recorded but now missing, or a new
     // dep added to yaml, surfaces here.
-    match resolve_path_dep_hashes(stage, repo_root, remote_aliases) {
+    let resolved_deps = current_deps
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| resolve_path_dep_hashes(stage, repo_root, remote_aliases));
+    match resolved_deps {
         Ok(current_deps) => {
             let locked_deps: BTreeMap<String, [u8; 32]> = locked
                 .deps
@@ -2036,7 +2057,8 @@ mod tests {
         let locked = lockfile.get(&stage_with.name).unwrap();
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("params.yaml"), b"model:\n  lr: 0.01\n").unwrap();
-        let (reason, key) = classify_stale(&stage_with, &[], locked, tmp.path(), &BTreeMap::new());
+        let (reason, key) =
+            classify_stale(&stage_with, &[], locked, tmp.path(), &BTreeMap::new(), None);
         assert_eq!(reason, "param");
         assert_eq!(key.as_deref(), Some("model.lr"));
     }

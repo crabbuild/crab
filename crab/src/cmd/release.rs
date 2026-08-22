@@ -1540,8 +1540,10 @@ mod tests {
         };
         let mut create = create_payload(&args, repo.path())?;
         let rng = SystemRandom::new();
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())?;
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|_| std::io::Error::other("failed to generate Ed25519 test key"))?;
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|_| std::io::Error::other("failed to parse Ed25519 test key"))?;
         let identity_bytes = create.manifest.unsigned_identity().canonical_bytes()?;
         let signature = key_pair.sign(&identity_bytes);
         let public_key = key_pair.public_key().as_ref();

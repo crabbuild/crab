@@ -15,10 +15,12 @@ from pathlib import Path
 OBJECT_STORE_IMPLEMENTATION_FEATURES = {
     "crab": {"aws", "gcp", "azure", "fs"},
     "crab-storage": {"aws", "gcp", "azure", "fs"},
+    "crab-workflow": {"aws", "gcp", "azure", "fs", "http"},
 }
 XET_OWNER_PACKAGE = "crab-xet"
 XET_FORBIDDEN_PATTERNS = ("xet_core_structures", "xet-core-structures")
 XET_MODULE_REQUIRED_NORMAL_PACKAGES = {
+    "blake3",
     "bytes",
     "rayon",
     "thiserror",
@@ -219,6 +221,7 @@ COORDINATION_OBJECT_STORE_LOCK_PACKAGES = {
     "futures-util",
     "object_store",
     "tracing",
+    "uuid",
 }
 COORDINATION_MODULE_REQUIRED_NORMAL_PACKAGES = {
     "async-trait",
@@ -446,7 +449,6 @@ CACHE_STORE_DIRECT_FORBIDDEN_PACKAGES = {
     "reqwest",
     "rusqlite",
     "slatedb",
-    "tokio",
     "xet-client",
     "xet-core-structures",
     "xet-data",
@@ -543,7 +545,6 @@ CACHE_STORE_SOURCE_FORBIDDEN_PATTERNS = {
     "std::io::stdin",
     "std::io::stdout",
     "std::process",
-    "tokio::",
     "token_cache",
     "xet-client",
     "xet-core-structures",
@@ -577,18 +578,18 @@ AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES = {
     "object_store",
 }
 AUTH_CLIENT_FEATURE_DEFINITIONS = {
-    "aws-oidc-client": ["dep:sha2", "dep:tokio", "dep:url", "oidc-client"],
+    "aws-oidc-client": ["dep:sha2", "dep:tokio", "oidc-client"],
     "azure-entra-client": ["dep:tokio", "oidc-client"],
     "crab-auth-client": ["dep:tokio", "oidc-client"],
-    "gcp-workload-identity-client": ["dep:tokio", "dep:url", "oidc-client"],
-    "oidc-client": ["dep:reqwest"],
+    "gcp-workload-identity-client": ["dep:tokio", "oidc-client"],
+    "oidc-client": ["dep:reqwest", "dep:tokio"],
 }
 AUTH_CLIENT_FEATURE_REQUIRED_PACKAGES = {
-    "aws-oidc-client": {"reqwest", "sha2", "tokio", "url"},
+    "aws-oidc-client": {"reqwest", "sha2", "tokio"},
     "azure-entra-client": {"reqwest", "tokio"},
     "crab-auth-client": {"reqwest", "tokio"},
-    "gcp-workload-identity-client": {"reqwest", "tokio", "url"},
-    "oidc-client": {"reqwest"},
+    "gcp-workload-identity-client": {"reqwest", "tokio"},
+    "oidc-client": {"reqwest", "tokio"},
 }
 AUTH_MODULE_DIRECT_FORBIDDEN_PACKAGES = {
     "aws-config",
@@ -611,7 +612,6 @@ AUTH_MODULE_DIRECT_FORBIDDEN_PACKAGES = {
     "crab-cache-server",
     "crab-cache-store",
     "crab-diff",
-    "crab-git",
     "crab-lfs",
     "crab-metadata",
     "crab-read",
@@ -655,7 +655,6 @@ AUTH_MODULE_SOURCE_FORBIDDEN_PATTERNS = {
     "crab-cache",
     "crab-coordination::dynamodb",
     "crab-diff",
-    "crab-git",
     "crab-lfs",
     "crab-metadata",
     "crab-read",
@@ -669,7 +668,6 @@ AUTH_MODULE_SOURCE_FORBIDDEN_PATTERNS = {
     "crab_cache",
     "crab_coordination::dynamodb",
     "crab_diff",
-    "crab_git",
     "crab_lfs",
     "crab_metadata",
     "crab_read",
@@ -775,6 +773,7 @@ AUTH_STORE_FEATURE_DEFINITIONS = {
     "default": [],
     "refreshing-store": [
         "dep:async-trait",
+        "dep:blake3",
         "dep:futures-util",
         "dep:object_store",
         "dep:reqwest",
@@ -785,6 +784,7 @@ AUTH_STORE_FEATURE_DEFINITIONS = {
 }
 AUTH_STORE_REFRESHING_REQUIRED_PACKAGES = {
     "async-trait",
+    "blake3",
     "futures-util",
     "object_store",
     "reqwest",
@@ -809,7 +809,6 @@ AUTH_STORE_SOURCE_FORBIDDEN_PATTERNS = {
     "GoogleCloudStorageBuilder",
     "MicrosoftAzureBuilder",
     "ProviderClient",
-    "TokenCache",
     "aws-config",
     "aws-sdk",
     "aws_config",
@@ -826,8 +825,6 @@ AUTH_STORE_SOURCE_FORBIDDEN_PATTERNS = {
     "object_store::aws",
     "object_store::azure",
     "object_store::gcp",
-    "reqwest::Client",
-    "token_cache",
 }
 AUTH_STORE_SCAN_PATHS = (
     "crates/crab-auth-store/Cargo.toml",
@@ -1114,7 +1111,6 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
 )
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
-    "crab/src/git/push_native.rs": ("repo_pack_path(", "repo_pack_metadata_path("),
     "crab/src/git/remote_helper.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/read/mod.rs": ("pack_path(",),
     "crab/src/cmd/gc/mod.rs": ("pack_path(", "pack_metadata_path("),
@@ -1506,7 +1502,6 @@ METADATA_MODULE_FORBIDDEN_PATTERNS = {
     "crab-cache-store",
     "crab-coordination",
     "crab-diff",
-    "crab-git",
     "crab-lfs",
     "crab-read",
     "crab-workflow",
@@ -1570,14 +1565,33 @@ DELETED_METADATA_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "use crab::metadata::file_index_lookup",
 }
 WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
+    "blake3",
+    "bytes",
+    "crab-storage",
     "crab-types",
+    "futures-util",
+    "gix",
+    "gix-discover",
+    "gix-hash",
+    "gix-object",
+    "gix-odb",
+    "globset",
+    "libc",
+    "md-5",
+    "nix",
+    "notify",
+    "object_store",
     "petgraph",
+    "reqwest",
+    "rusqlite",
     "serde",
     "serde_json",
     "serde_yaml",
     "tempfile",
     "thiserror",
     "toml",
+    "tokio",
+    "tokio-util",
     "tracing",
     "unicode-normalization",
     "url",
@@ -1589,7 +1603,6 @@ WORKFLOW_MODULE_FORBIDDEN_PATTERNS = {
     "AuthServerError",
     "BuiltObjectStore",
     "CacheServerConfig",
-    "CrabError",
     "CredentialProvider",
     "GoogleCloudStorageBuilder",
     "MicrosoftAzureBuilder",
@@ -1617,38 +1630,26 @@ WORKFLOW_MODULE_FORBIDDEN_PATTERNS = {
     "crab-lfs",
     "crab-metadata",
     "crab-read",
-    "crab-storage",
     "crab-xet",
     "crab::",
     "crab_auth",
     "crab_auth_server",
     "crab_auth_store",
-    "crab_cache",
     "crab_coordination",
     "crab_diff",
     "crab_git",
     "crab_lfs",
     "crab_metadata",
     "crab_read",
-    "crab_storage",
     "crab_xet",
-    "eprintln!",
     "git2::",
-    "gix::",
     "google-cloud",
     "google_cloud",
     "hyper::",
-    "object_store",
     "object_store_options_from_env",
-    "parse_url_opts",
-    "println!",
-    "reqwest",
-    "rusqlite",
     "slatedb",
     "std::io::stdin",
     "std::io::stdout",
-    "std::process",
-    "tokio::",
     "xet-client",
     "xet-core-structures",
     "xet-data",
@@ -1761,15 +1762,17 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-lfs",
             "crab-metadata",
             "crab-read",
+            "crab-remote-git",
             "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-workflow",
             "crab-xet",
+            "crab-vfs",
         },
-        "dev": {"crab-cache-server"},
+        "dev": {"crab-cache-server", "crab-workflow"},
     },
-    "crab-auth": {"normal": {"crab-coordination", "crab-types"}},
+    "crab-auth": {"normal": {"crab-coordination", "crab-git", "crab-types"}},
     "crab-auth-server": {
         "normal": {
             "crab-auth",
@@ -1780,14 +1783,14 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-lfs",
             "crab-metadata",
             "crab-read",
+            "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-xet",
         },
     },
     "crab-auth-store": {
-        "normal": {"crab-auth", "crab-storage"},
-        "dev": {"crab-types"},
+        "normal": {"crab-auth", "crab-git", "crab-storage", "crab-types"},
     },
     "crab-cache": {"normal": {"crab-types", "crab-xet"}},
     "crab-cache-server": {
@@ -1809,15 +1812,32 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-cache-store",
             "crab-diff",
             "crab-metadata",
+            "crab-remote-git",
             "crab-storage",
             "crab-types",
             "crab-xet",
         },
     },
-    "crab-staging": {"normal": {"crab-xet"}},
+    "crab-remote-git": {
+        "normal": {"crab-git", "crab-metadata", "crab-storage", "crab-xet"},
+        "dev": {"crab-metadata"},
+    },
+    "crab-staging": {"normal": {"crab-diff", "crab-xet"}},
     "crab-storage": {"normal": {"crab-types"}},
     "crab-types": {},
-    "crab-workflow": {"normal": {"crab-types"}},
+    "crab-vfs": {
+        "normal": {
+            "crab-cache",
+            "crab-cache-store",
+            "crab-git",
+            "crab-read",
+            "crab-staging",
+            "crab-storage",
+            "crab-types",
+            "crab-xet",
+        },
+    },
+    "crab-workflow": {"normal": {"crab-storage", "crab-types"}},
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
@@ -1833,17 +1853,19 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-lfs": "crates/crab-lfs",
     "crab-metadata": "crates/crab-metadata",
     "crab-read": "crates/crab-read",
+    "crab-remote-git": "crates/crab-remote-git",
     "crab-staging": "crates/crab-staging",
     "crab-storage": "crates/crab-storage",
     "crab-types": "crates/crab-types",
+    "crab-vfs": "crates/crab-vfs",
     "crab-workflow": "crates/crab-workflow",
     "crab-xet": "crates/crab-xet",
 }
 WORKSPACE_XET_DEPENDENCY_VERSIONS = {
-    "xet-client": "1.5.2",
-    "xet-core-structures": "1.5.2",
-    "xet-data": "1.5.2",
-    "xet-runtime": "1.5.2",
+    "xet-client": "1.6.0",
+    "xet-core-structures": "1.6.0",
+    "xet-data": "1.6.0",
+    "xet-runtime": "1.6.0",
 }
 WORKSPACE_GITOXIDE_DEPENDENCIES = {
     "gix": "0.83.0",
@@ -1902,7 +1924,7 @@ WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
     "blake3": "1.8",
     "bytes": "1.11",
     "futures-util": "0.3",
-    "object_store": {"version": "0.12", "default-features": False},
+    "object_store": {"version": "0.14.1", "default-features": False},
     "reqwest": {"version": "0.12", "default-features": False},
     "rusqlite": {"version": "0.34", "features": ["bundled"]},
     "schemars": "0.8",
@@ -2676,7 +2698,9 @@ def check_coordination_feature_budget(root: Path, cargo: str, metadata: dict) ->
                 "dep:futures-util",
                 "dep:object_store",
                 "dep:tracing",
+                "dep:uuid",
                 "tokio/rt",
+                "tokio/time",
             ],
             "coordinator-cosmosdb": [
                 "dep:azure_core",
@@ -2844,7 +2868,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             "active-probe": ["dep:reqwest"],
             "local-cache": ["dep:filetime", "dep:rusqlite", "dep:tokio"],
             "remote-client": ["active-probe", "dep:tokio"],
-            "xet-chunk-cache": ["dep:tokio", "dep:xet-client"],
+            "xet-chunk-cache": ["dep:tokio", "dep:xet-client", "dep:xet-runtime"],
         },
     )
 
@@ -3107,10 +3131,11 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
                 "dep:object_store",
                 "dep:slatedb",
                 "dep:tokio",
+                "storage",
             ],
             "local-index": ["dep:rusqlite"],
-            "remote-index": ["dep:object_store", "dep:slatedb"],
-            "storage": ["dep:crab-storage", "dep:object_store"],
+            "remote-index": ["dep:futures-util", "dep:object_store", "dep:slatedb"],
+            "storage": ["dep:crab-storage", "dep:futures-util", "dep:object_store"],
         },
     )
 
@@ -3238,7 +3263,7 @@ def check_auth_client_feature_budget(root: Path, cargo: str, metadata: dict) -> 
     package = package_by_name(metadata, "crab-auth")
     violations = check_feature_definitions(package, AUTH_CLIENT_FEATURE_DEFINITIONS)
 
-    for name in ("reqwest", "sha2", "tokio", "url"):
+    for name in ("reqwest", "sha2", "tokio"):
         dependency = normal_dependency(package, name)
         if dependency is None or not dependency["optional"]:
             violations.append(f"crab-auth: {name} must stay optional")

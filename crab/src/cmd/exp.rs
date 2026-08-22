@@ -1369,7 +1369,7 @@ pub(crate) async fn run_exp_run_with_id(
             })?;
         let source_state = checkpoint_state_dir(repo_root, &source_id);
         let target_state = checkpoint_state_dir(repo_root, &exp_id);
-        copy_checkpoint_state(&source_state, &target_state)?;
+        copy_checkpoint_state(&source_state, &target_state, repo_root)?;
         apply_checkpoint_record_to(&target_state, &tmpdir_path, record)?;
     }
     let _active_queue_run = if is_queued_run {
@@ -1757,7 +1757,7 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
                 state_root.display()
             ),
         })?;
-    ensure_checkpoint_parent_not_symlink(state_parent)?;
+    ensure_checkpoint_parent_not_symlink(state_parent, repo_root)?;
     fs::create_dir_all(state_parent).map_err(CrabError::Io)?;
     let paths = checkpoint_lineage_paths(&state_root)?;
     let selected = args
@@ -1827,9 +1827,9 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
             "reset_stages": reset_stages,
             "created_at": crab_types::time::now_rfc3339_millis(),
         });
-        write_checkpoint_reset_decision(&temporary, &decision)?;
+        write_checkpoint_reset_decision(&temporary, &decision, repo_root)?;
         validate_checkpoint_state(&temporary)?;
-        commit_checkpoint_state_reset(&temporary, &state_root)
+        commit_checkpoint_state_reset(&temporary, &state_root, repo_root)
     })();
     if let Err(error) = result {
         let _ = remove_existing_path(&temporary);
@@ -1844,7 +1844,11 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
     Ok(payload)
 }
 
-fn commit_checkpoint_state_reset(temporary: &Path, state_root: &Path) -> Result<()> {
+fn commit_checkpoint_state_reset(
+    temporary: &Path,
+    state_root: &Path,
+    repo_root: &Path,
+) -> Result<()> {
     let parent = state_root
         .parent()
         .ok_or_else(|| CrabError::Configuration {
@@ -1854,7 +1858,7 @@ fn commit_checkpoint_state_reset(temporary: &Path, state_root: &Path) -> Result<
                 state_root.display()
             ),
         })?;
-    ensure_checkpoint_parent_not_symlink(parent)?;
+    ensure_checkpoint_parent_not_symlink(parent, repo_root)?;
     let backup = parent.join(format!(
         ".{}.reset-backup-{}",
         state_root
@@ -1895,7 +1899,7 @@ fn checkpoint_state_dir(repo_root: &Path, exp_id: &ExperimentId) -> PathBuf {
         .join(exp_id.to_string())
 }
 
-fn copy_checkpoint_state(source: &Path, destination: &Path) -> Result<()> {
+fn copy_checkpoint_state(source: &Path, destination: &Path, repo_root: &Path) -> Result<()> {
     let source_metadata = fs::symlink_metadata(source).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             CrabError::Configuration {
@@ -1924,7 +1928,7 @@ fn copy_checkpoint_state(source: &Path, destination: &Path) -> Result<()> {
             key: "workflow checkpoint state path invalid".to_owned(),
             origin: destination.display().to_string(),
         })?;
-    ensure_checkpoint_parent_not_symlink(parent)?;
+    ensure_checkpoint_parent_not_symlink(parent, repo_root)?;
     fs::create_dir_all(parent).map_err(CrabError::Io)?;
     let temporary = parent.join(format!(
         ".{}.resume-{}",
@@ -1944,11 +1948,30 @@ fn copy_checkpoint_state(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_checkpoint_parent_not_symlink(parent: &Path) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in parent.components() {
+fn ensure_checkpoint_parent_not_symlink(parent: &Path, trusted_root: &Path) -> Result<()> {
+    let root_metadata = fs::symlink_metadata(trusted_root).map_err(CrabError::Io)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(CrabError::Configuration {
+            key: "workflow checkpoint state root invalid".to_owned(),
+            origin: trusted_root.display().to_string(),
+        });
+    }
+    let relative = parent
+        .strip_prefix(trusted_root)
+        .map_err(|_| CrabError::Configuration {
+            key: "workflow checkpoint state parent outside repository".to_owned(),
+            origin: parent.display().to_string(),
+        })?;
+    let mut current = trusted_root.to_owned();
+    for component in relative.components() {
         if matches!(component, Component::CurDir) {
             continue;
+        }
+        if !matches!(component, Component::Normal(_)) {
+            return Err(CrabError::Configuration {
+                key: "workflow checkpoint state parent invalid".to_owned(),
+                origin: parent.display().to_string(),
+            });
         }
         current.push(component.as_os_str());
         if let Ok(metadata) = fs::symlink_metadata(&current)
@@ -2326,8 +2349,12 @@ fn checkpoint_payload_hash(path: &Path) -> Result<String> {
     Ok(blake3::Hash::from(hash).to_hex().to_string())
 }
 
-fn write_checkpoint_reset_decision(state_root: &Path, decision: &serde_json::Value) -> Result<()> {
-    ensure_checkpoint_parent_not_symlink(state_root)?;
+fn write_checkpoint_reset_decision(
+    state_root: &Path,
+    decision: &serde_json::Value,
+    repo_root: &Path,
+) -> Result<()> {
+    ensure_checkpoint_parent_not_symlink(state_root, repo_root)?;
     fs::create_dir_all(state_root).map_err(CrabError::Io)?;
     let path = state_root.join("reset.json");
     let temporary = state_root.join(format!(
@@ -6835,7 +6862,7 @@ mod tests {
         .save_atomic(&source.join("train.json"))
         .unwrap();
 
-        copy_checkpoint_state(&source, &destination).unwrap();
+        copy_checkpoint_state(&source, &destination, temp.path()).unwrap();
         assert!(!destination.join("train.lock").exists());
         let copied = CheckpointLineage::load(&destination.join("train.json")).unwrap();
         assert_eq!(copied.records, vec![record]);

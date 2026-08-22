@@ -21,6 +21,7 @@ use crab::workflow::cache::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_VERSION, StageCacheEntry, TreeManifestEntry, push_all_local,
     push_remote, read_local_xorb, store_local_xorbs, write_local,
 };
+use crab::workflow::hasher::{TreeEntry, TreeEntryKind, hash_tree_entries};
 use crab::workflow::stage::OutKind;
 use crab::workflow::{WorkflowError, WorkflowStore};
 use crab_types::workflow::StageHash;
@@ -51,8 +52,7 @@ fn sample_entry(stage_hash: StageHash, out_path: &str) -> StageCacheEntry {
             kind: OutKind::File,
             push: true,
             remote: None,
-            file_hash: "b3_deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
-                .to_owned(),
+            file_hash: format!("b3:{}", "00".repeat(32)),
             size: 42,
             mode: 0o644,
             tree_manifest: None,
@@ -70,6 +70,44 @@ fn sample_entry(stage_hash: StageHash, out_path: &str) -> StageCacheEntry {
 fn set_first_out_content(entry: &mut StageCacheEntry, content: &[u8]) {
     entry.outs[0].file_hash = format!("b3:{}", blake3::hash(content).to_hex());
     entry.outs[0].size = content.len() as u64;
+}
+
+fn set_directory_out_metadata(entry: &mut StageCacheEntry) {
+    let out = &mut entry.outs[0];
+    let manifest = out.tree_manifest.as_ref().unwrap();
+    let tree_entries = manifest
+        .iter()
+        .map(|item| TreeEntry {
+            path: PathBuf::from(&item.path),
+            kind: match item.kind.as_str() {
+                "file" => TreeEntryKind::File,
+                "dir" => TreeEntryKind::Directory,
+                other => panic!("unexpected directory manifest kind: {other}"),
+            },
+            file_hash: if item.kind == "file" {
+                parse_b3_hash(&item.hash)
+            } else {
+                [0; 32]
+            },
+            size: item.size,
+            mode: item.mode,
+        })
+        .collect::<Vec<_>>();
+    out.file_hash = format!(
+        "b3:{}",
+        blake3::Hash::from_bytes(hash_tree_entries(&tree_entries)).to_hex()
+    );
+    out.size = manifest.iter().map(|item| item.size).sum();
+}
+
+fn parse_b3_hash(value: &str) -> [u8; 32] {
+    let hex = value.strip_prefix("b3:").unwrap();
+    assert_eq!(hex.len(), 64);
+    let mut bytes = [0u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+    }
+    bytes
 }
 
 #[tokio::test]
@@ -274,8 +312,8 @@ async fn pull_remote_materializes_outputs_from_remote() {
     let hash = sample_hash();
     let mut entry = sample_entry(hash, "model.bin");
     // Use the real blake3 hash of the content so verification passes.
-    let real_hash = format!("b3:{}", blake3::hash(out_content).to_hex());
-    entry.outs[0].file_hash = real_hash.clone();
+    set_first_out_content(&mut entry, out_content);
+    let real_hash = entry.outs[0].file_hash.clone();
 
     // Push from machine A.
     let pushed = push_remote(&store, prefix, &entry, &cache_root_a)
@@ -365,6 +403,7 @@ async fn push_pull_directory_remote_fills_local_xorb_cache() {
             },
         ]),
     };
+    set_directory_out_metadata(&mut entry);
 
     let store = memory_store();
     let prefix = "org/repo";
@@ -513,8 +552,8 @@ async fn pull_remote_round_trip_byte_identical() {
     let hash = StageHash([0x42u8; 32]);
     let mut entry = sample_entry(hash, "output.dat");
     // Update the file_hash to match the actual content hash.
-    let file_hash = format!("b3:{}", blake3::hash(&out_content).to_hex());
-    entry.outs[0].file_hash = file_hash.clone();
+    set_first_out_content(&mut entry, &out_content);
+    let file_hash = entry.outs[0].file_hash.clone();
 
     // Push from machine A.
     push_remote(&store, prefix, &entry, &cache_root_a)

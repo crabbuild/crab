@@ -1,0 +1,22 @@
+---
+source: crab/src/import/coordinator.rs
+expression: json
+---
+{
+  "source_url": "s3://src-bucket/data",
+  "target_url": "crab://dst-bucket/repo",
+  "versioning": "flat",
+  "files_imported": 3,
+  "versions_imported": 3,
+  "commits_created": 1,
+  "files_skipped": 0,
+  "files_failed": 0,
+  "bytes_source": 56320,
+  "bytes_staged": 56320,
+  "bytes_uploaded": 8192,
+  "same_bucket": false,
+  "duration_ms": 1234,
+  "first_commit_oid": "abc123def456",
+  "head_commit_oid": "abc123def456",
+  "branch": "main"
+}

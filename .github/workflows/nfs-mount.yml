@@ -151,7 +151,6 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      CRAB_NFS_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-smoke
       CRAB_NFS_SMOKE_RUN_ID: mount-nfs-macos-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -169,11 +168,15 @@ jobs:
 
       - name: Run native macOS NFS smoke
         working-directory: crab
+        env:
+          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         run: make mount-nfs-macos-smoke
 
       - name: Upload macOS NFS smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
+        env:
+          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         with:
           name: nfs-smoke-macos-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
@@ -187,7 +190,6 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     env:
-      CRAB_NFS_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-smoke
       CRAB_NFS_SMOKE_RUN_ID: mount-nfs-windows-${{ github.run_id }}-${{ github.run_attempt }}
       CRAB_NFS_SMOKE_DRIVE: "Z:"
 
@@ -222,11 +224,15 @@ jobs:
       - name: Run native Windows NFS smoke
         shell: pwsh
         working-directory: crab
+        env:
+          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         run: ./scripts/run-mount-nfs-windows-smoke.ps1
 
       - name: Upload Windows NFS smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
+        env:
+          CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
         with:
           name: nfs-smoke-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}

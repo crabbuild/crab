@@ -354,8 +354,8 @@ function Cleanup-Mount {
     }
 }
 
-$isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-if (-not $isWindows) {
+$nativeWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+if (-not $nativeWindows) {
     Die "native Windows NFS smoke must run on Windows"
 }
 

@@ -109,6 +109,9 @@ apt-get install -y --no-install-recommends \
     ca-certificates git make nfs-common pkg-config procps python3 util-linux \
     >/e2e/logs/apt-install.log
 
+# The checkout is bind-mounted from the host and may have a different owner.
+# Mark this exact path trusted so Git can read the revision used in evidence.
+git config --global --add safe.directory /src
 GIT_COMMIT="$(git -C /src rev-parse HEAD)"
 export GIT_COMMIT
 

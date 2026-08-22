@@ -1,0 +1,18 @@
+---
+source: crab/src/tier/provider/s3.rs
+expression: xml
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule>
+    <ID>crab-xorbs-to-ia</ID>
+    <Filter>
+      <Prefix>.crab/xorbs/</Prefix>
+    </Filter>
+    <Status>Enabled</Status>
+    <Transition>
+      <Days>30</Days>
+      <StorageClass>STANDARD_IA</StorageClass>
+    </Transition>
+  </Rule>
+</LifecycleConfiguration>

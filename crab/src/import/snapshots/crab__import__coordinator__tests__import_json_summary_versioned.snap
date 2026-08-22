@@ -1,0 +1,26 @@
+---
+source: crab/src/import/coordinator.rs
+expression: json
+---
+{
+  "source_url": "s3://src-bucket/prod",
+  "target_url": "s3://dst-bucket/prod",
+  "versioning": "versioned",
+  "files_imported": 5,
+  "versions_imported": 12,
+  "commits_created": 4,
+  "files_skipped": 1,
+  "files_failed": 0,
+  "bytes_source": 123456,
+  "bytes_staged": 120000,
+  "bytes_uploaded": 45678,
+  "same_bucket": true,
+  "duration_ms": 5678,
+  "first_commit_oid": "111222333444",
+  "head_commit_oid": "fedcba987654",
+  "branch": "main",
+  "history_range": {
+    "since": "2025-01-01T00:00:00Z",
+    "until": "2025-06-01T00:00:00Z"
+  }
+}

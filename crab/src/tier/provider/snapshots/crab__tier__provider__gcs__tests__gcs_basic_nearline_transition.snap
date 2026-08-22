@@ -1,0 +1,22 @@
+---
+source: crab/src/tier/provider/gcs.rs
+expression: json
+---
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": {
+          "type": "SetStorageClass",
+          "storageClass": "NEARLINE"
+        },
+        "condition": {
+          "age": 30,
+          "matchesPrefix": [
+            ".crab/xorbs/"
+          ]
+        }
+      }
+    ]
+  }
+}

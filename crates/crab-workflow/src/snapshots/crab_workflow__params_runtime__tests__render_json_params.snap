@@ -1,0 +1,22 @@
+---
+source: crates/crab-workflow/src/params_runtime.rs
+expression: out
+---
+{
+  "added": {
+    "batch_size": 64
+  },
+  "removed": {
+    "dropout": 0.5
+  },
+  "changed": {
+    "model.lr": [
+      0.01,
+      0.02
+    ]
+  },
+  "unchanged": {
+    "dataset": "train",
+    "model.epochs": 5
+  }
+}

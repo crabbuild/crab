@@ -1589,6 +1589,15 @@ class ProtocolV2PartialCloneSmoke:
         )
         initial_sidecars = self.promisor_sidecars(self.filtered)
         self.check("initial-promisor-sidecar", bool(initial_sidecars), {"count": len(initial_sidecars)})
+
+        # Lazy fetches from older Git clients use the remote-helper batch path
+        # instead of terminal protocol v2. Opt this fixture into reachable
+        # object admission before any raw-object probe so both paths exercise
+        # the same repository policy without changing the production default.
+        (self.filtered / ".crab.toml").write_text(
+            "[uploadpack]\nallowReachableSHA1InWant = true\n",
+            encoding="utf-8",
+        )
         tags = self.run_git(
             self.filtered,
             ["tag", "--list", "v1", "v2"],

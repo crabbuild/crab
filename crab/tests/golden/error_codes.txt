@@ -58,6 +58,7 @@ CRAB-E0132: Unadopt chunks missing from staging
 CRAB-E0133: Nothing to undo
 CRAB-E0134: Invalid config key
 CRAB-E0135: Unsupported shell for completions
+CRAB-E0140: Managed repository request failed
 CRAB-E0239: Stage on_cache_hit hook failed
 CRAB-E0240: Remote cache entry corrupt
 CRAB-E0241: Remote cache entry hash mismatch

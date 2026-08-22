@@ -493,11 +493,19 @@ fn release_workflow_requires_cache_service_smoke_evidence() {
         "cache-service-release-evidence-doctor.txt",
         "cache-service-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}",
         "if-no-files-found: ignore",
-        "cache-service-enterprise-gate",
-        "needs: [replica-enterprise-gate, cache-service-enterprise-gate]",
     ] {
         assert!(body.contains(needle), "{needle}");
     }
+
+    assert!(
+        body.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("needs:")
+                && line.contains("replica-enterprise-gate")
+                && line.contains("cache-service-enterprise-gate")
+        }),
+        "release build must wait for the replica and cache-service enterprise gates"
+    );
 
     assert!(
         !body.contains("artifact=\"cache-service-rustfs-smoke-${run_id}\""),
