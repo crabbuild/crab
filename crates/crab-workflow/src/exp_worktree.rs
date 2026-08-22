@@ -362,7 +362,10 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
     }
-    value.strip_prefix(r"\\?\").map_or(path, PathBuf::from)
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 #[cfg(not(windows))]
