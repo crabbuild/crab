@@ -4441,10 +4441,10 @@ mod tests {
             "stderr: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        assert!(
-            status.stdout.is_empty(),
-            "stat cache must be populated for literal path bytes, got {:?}",
-            status.stdout
+        assert_eq!(
+            status.stdout,
+            [b"A  ".as_slice(), raw_name.as_slice(), b"\0"].concat(),
+            "stat cache must avoid an unstaged change for literal path bytes"
         );
     }
 
