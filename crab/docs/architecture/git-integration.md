@@ -276,6 +276,13 @@ validates misses through that snapshot's canonical `.idx` files. Rebuild
 streams every pinned pack, removes stale slots, and advances coverage only
 after the full inventory is durable.
 
+Locator writers disable SlateDB's periodic background garbage collector because
+each helper is short-lived and SlateDB's first timer tick runs immediately.
+After exact coverage crosses each 32-generation boundary, that publication runs
+one foreground collection for superseded manifest and compaction objects. The
+collector keeps SlateDB's five-minute minimum age, so it cannot race freshly
+published locator state.
+
 Source: `crates/crab-metadata/src/git_object_locator/`,
 `crates/crab-git/src/pack_locator.rs`
 

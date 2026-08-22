@@ -293,9 +293,12 @@ minimum object sizes, and transfer rates are topology-specific.
   `Git visibility proof unavailable` from `crab doctor --metadb` as
   repair-required, then run `crab metadb rebuild`. Do not use `fsck` success
   alone as proof that these accelerators are current.
-- Short-lived Git helper processes do not remain alive for SlateDB's periodic
-  garbage collector. Track metadb object growth and schedule a supported
-  cleanup workflow before high-volume production use.
+- Git locator writers suppress SlateDB's immediate background garbage-collector
+  scan and run one foreground collection pass when exact coverage crosses
+  each 32-generation boundary. Continue tracking metadb object growth: the
+  dependency still performs boundary reads during normal manifest and
+  compaction transactions, and collection retains objects younger than five
+  minutes.
 - Client-side mirror hooks are bypassable and GitHub/GitLab and Crab ref
   updates are not one transaction. Enforce pointer availability in CI and
   alert on ref divergence.

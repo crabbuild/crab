@@ -4,8 +4,10 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::config::{
-    CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec, Settings, WriteOptions,
+    CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
+    GarbageCollectorOptions, Settings, WriteOptions,
 };
+use tracing::{debug, warn};
 
 use super::format::{
     LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation,
@@ -22,6 +24,9 @@ use crate::error::{MetadataError, Result};
 const DB_LABEL: &str = "git_locator_db";
 const MAX_BATCH_ROWS: usize = 25_000;
 const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
+// Amortize one directory scan over a normal fan-out while bounding the number
+// of superseded locator generations. This cadence is cost policy, not safety.
+const GC_GENERATION_INTERVAL: u64 = 32;
 
 /// Counts produced by one stale-locator sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -54,6 +59,7 @@ pub struct GitObjectLocatorWriter {
     db: slatedb::Db,
     path: String,
     store: Arc<dyn ObjectStore>,
+    initial_coverage: Option<GitLocatorCoverage>,
     metadata: LocatorMetadata,
     bindings: HashMap<u64, GitPackLocatorRecord>,
     stats: LocatorWriteStats,
@@ -149,6 +155,7 @@ impl GitObjectLocatorWriter {
             db,
             path,
             store,
+            initial_coverage: metadata.coverage,
             metadata,
             bindings,
             stats: LocatorWriteStats::default(),
@@ -413,9 +420,12 @@ impl GitObjectLocatorWriter {
             db,
             path,
             store,
+            initial_coverage,
+            metadata,
             stats,
             ..
         } = self;
+        let collect_garbage = locator_gc_due(initial_coverage, metadata.coverage);
         let checkpoint = db
             .create_checkpoint(
                 CheckpointScope::All,
@@ -446,7 +456,13 @@ impl GitObjectLocatorWriter {
                 source,
             });
         }
-        remove_old_reader_checkpoints(&path, store, &checkpoint).await?;
+        remove_old_reader_checkpoints(&path, Arc::clone(&store), &checkpoint).await?;
+        if collect_garbage {
+            match run_locator_gc(&path, store).await {
+                Ok(()) => debug!("Git locator garbage collection completed"),
+                Err(error) => warn!(%error, "Git locator garbage collection requires retry"),
+            }
+        }
         Ok(stats)
     }
 
@@ -488,6 +504,38 @@ async fn remove_old_reader_checkpoints(
     Ok(())
 }
 
+fn locator_gc_due(
+    initial: Option<GitLocatorCoverage>,
+    published: Option<GitLocatorCoverage>,
+) -> bool {
+    let initial_band = initial
+        .map(|coverage| coverage.generation / GC_GENERATION_INTERVAL)
+        .unwrap_or(0);
+    published.is_some_and(|coverage| coverage.generation / GC_GENERATION_INTERVAL > initial_band)
+}
+
+async fn run_locator_gc(path: &str, store: Arc<dyn ObjectStore>) -> Result<()> {
+    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    admin
+        .run_gc_once(locator_gc_options())
+        .await
+        .map_err(|source| MetadataError::SlateDbWrite {
+            db: DB_LABEL.to_owned(),
+            source,
+        })
+}
+
+fn locator_gc_options() -> GarbageCollectorOptions {
+    GarbageCollectorOptions {
+        // Locator WALs contain only a permanent fencing object; there are no
+        // clone parents. Collect only directories that publication supersedes.
+        wal_options: None,
+        wal_fence_options: None,
+        detach_options: None,
+        ..GarbageCollectorOptions::default()
+    }
+}
+
 fn locator_settings() -> Settings {
     let mut compactor = CompactorOptions {
         commit_compacted_interval: std::time::Duration::from_millis(100),
@@ -508,6 +556,9 @@ fn locator_settings() -> Settings {
         // Locator writers are short-lived. The multi-second defaults can leave
         // small compactions unclaimed until the next push hits L0 backpressure.
         compactor_options: Some(compactor),
+        // SlateDB tickers fire immediately, so default background GC runs its
+        // full directory scan on every short-lived publication session.
+        garbage_collector_options: None,
         compression_codec: Some(CompressionCodec::Zstd),
         ..Settings::default()
     }
@@ -657,6 +708,7 @@ mod tests {
         assert_eq!(settings.l0_sst_size_bytes, 64 * 1024 * 1024);
         assert_eq!(settings.max_unflushed_bytes, 96 * 1024 * 1024);
         assert_eq!(settings.l0_flush_parallelism, 1);
+        assert!(settings.garbage_collector_options.is_none());
         let compactor = settings
             .compactor_options
             .expect("locator compactor enabled");
@@ -675,6 +727,36 @@ mod tests {
                 .compactions_poll_interval,
             std::time::Duration::from_millis(100)
         );
+    }
+
+    #[test]
+    fn locator_gc_is_due_only_when_exact_coverage_crosses_a_generation_band() {
+        let coverage = |generation| {
+            Some(GitLocatorCoverage {
+                generation,
+                pack_index_hash: hash(generation),
+            })
+        };
+
+        assert!(!locator_gc_due(None, None));
+        assert!(!locator_gc_due(None, coverage(1)));
+        assert!(!locator_gc_due(coverage(1), coverage(31)));
+        assert!(locator_gc_due(coverage(31), coverage(32)));
+        assert!(!locator_gc_due(coverage(32), coverage(63)));
+        assert!(locator_gc_due(coverage(32), coverage(64)));
+        assert!(!locator_gc_due(coverage(64), coverage(64)));
+    }
+
+    #[test]
+    fn locator_gc_collects_only_superseded_publication_state() {
+        let options = locator_gc_options();
+
+        assert!(options.manifest_options.is_some());
+        assert!(options.compacted_options.is_some());
+        assert!(options.compactions_options.is_some());
+        assert!(options.wal_options.is_none());
+        assert!(options.wal_fence_options.is_none());
+        assert!(options.detach_options.is_none());
     }
 
     #[tokio::test]
