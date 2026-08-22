@@ -16212,20 +16212,34 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct CancelAfterManifestPutStore {
+    struct CancelAfterPutStore {
         inner: object_store::memory::InMemory,
         cancel: CancellationToken,
         armed: Arc<AtomicBool>,
+        exact_path: Option<String>,
+        path_prefix: Option<String>,
     }
 
-    impl std::fmt::Display for CancelAfterManifestPutStore {
+    impl CancelAfterPutStore {
+        fn matches(&self, location: &Path) -> bool {
+            self.exact_path
+                .as_deref()
+                .is_some_and(|path| location.as_ref() == path)
+                || self
+                    .path_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| location.as_ref().starts_with(prefix))
+        }
+    }
+
+    impl std::fmt::Display for CancelAfterPutStore {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "CancelAfterManifestPutStore")
+            write!(f, "CancelAfterPutStore")
         }
     }
 
     #[async_trait::async_trait]
-    impl ObjectStore for CancelAfterManifestPutStore {
+    impl ObjectStore for CancelAfterPutStore {
         async fn put_opts(
             &self,
             location: &Path,
@@ -16233,10 +16247,7 @@ mod tests {
             opts: PutOptions,
         ) -> object_store::Result<PutResult> {
             let result = self.inner.put_opts(location, payload, opts).await;
-            if result.is_ok()
-                && self.armed.load(Ordering::SeqCst)
-                && location.as_ref().ends_with("/manifest")
-            {
+            if result.is_ok() && self.armed.load(Ordering::SeqCst) && self.matches(location) {
                 self.cancel.cancel();
             }
             result
@@ -17663,10 +17674,13 @@ mod tests {
         let _guard = GitDirGuard::new();
         let cancel = CancellationToken::new();
         let armed = Arc::new(AtomicBool::new(false));
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(CancelAfterManifestPutStore {
+        let manifest_path = "cancel-after-cas/manifest".to_owned();
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(CancelAfterPutStore {
             inner: object_store::memory::InMemory::new(),
             cancel: cancel.clone(),
             armed: Arc::clone(&armed),
+            exact_path: Some(manifest_path),
+            path_prefix: None,
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "cancel-after-cas".to_owned());
@@ -17702,6 +17716,106 @@ mod tests {
         assert_eq!(
             committed.refs.get("refs/heads/main"),
             Some(&crate::test::git_repo::TEST_GIT_REPO.commit_sha)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn next_writer_repairs_publication_cancelled_at_active_marker() {
+        let _guard = GitDirGuard::new();
+        let cancel = CancellationToken::new();
+        let armed = Arc::new(AtomicBool::new(false));
+        let repo_prefix = "cancel-after-active-marker";
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(CancelAfterPutStore {
+            inner: object_store::memory::InMemory::new(),
+            cancel: cancel.clone(),
+            armed: Arc::clone(&armed),
+            exact_path: None,
+            path_prefix: Some(format!("{repo_prefix}/refs/journal/active/")),
+        });
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        armed.store(true, Ordering::SeqCst);
+
+        let interrupted = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            cancel.clone(),
+            None,
+        )
+        .execute()
+        .await;
+
+        assert!(
+            cancel.is_cancelled(),
+            "store fault must cancel at the marker"
+        );
+        assert_eq!(
+            interrupted.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok),
+            "the durable active marker is the successful ref boundary"
+        );
+        let interrupted_snapshot =
+            crate::metadata::manifest::read_repository_snapshot(&store, &router)
+                .await
+                .expect("read interrupted journal state");
+        assert_eq!(
+            interrupted_snapshot.journal.refs.get("refs/heads/main"),
+            Some(&crate::test::git_repo::TEST_GIT_REPO.commit_sha)
+        );
+        assert_eq!(interrupted_snapshot.journal.transactions.len(), 1);
+        assert!(
+            !crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "protocol v2 must stay withheld while exact derived coverage is incomplete"
+        );
+
+        let restarted = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/dev")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        )
+        .execute()
+        .await;
+
+        assert_eq!(
+            restarted.outcomes.get("refs/heads/dev"),
+            Some(&RefPushOutcome::Ok)
+        );
+        let repaired = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read repaired repository state");
+        assert!(repaired.journal.transactions.is_empty());
+        assert!(repaired.manifest.refs.contains_key("refs/heads/main"));
+        assert!(repaired.manifest.refs.contains_key("refs/heads/dev"));
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "the next writer must recover visibility and exact locator coverage"
         );
     }
 
