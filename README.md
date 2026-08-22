@@ -1,245 +1,148 @@
-# Crab
+<p align="center">
+  <img src="packages/web/public/crab.optimized.svg" alt="Crab logo" width="112">
+</p>
 
-**Serverless Git remotes for large files.**
+<h1 align="center">Crab</h1>
 
-Crab is a Rust command-line tool and Git remote helper for repositories that
-contain models, datasets, media, game assets, build artifacts, and other files
-that are too expensive or inconvenient to keep as ordinary Git blobs.
+<p align="center">Serverless Git for large files.</p>
 
-Crab keeps Git's commits, branches, tags, merges, and review workflow while
-storing selected file contents in object storage that you control. Git stores
-small, content-addressed pointer blobs; Crab stores the original bytes as
-deduplicated chunks and reconstructs them only when a working tree or job needs
-them.
+<p align="center">
+  <a href="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml"><img src="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/crabbuild/crab-release/releases/latest"><img src="https://img.shields.io/github/v/release/crabbuild/crab-release?display_name=tag" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/crabbuild/crab-oss" alt="Apache 2.0 license"></a>
+</p>
 
-In direct-storage mode, Crab does not require a Crab data server or database.
-The repository lives in your S3, Google Cloud Storage, Azure Blob Storage, or
-S3-compatible bucket, and your normal cloud credential chain authorizes access.
+<p align="center">
+  <a href="https://crab.build">Website</a> ·
+  <a href="https://crab.build/docs/cli">Documentation</a> ·
+  <a href="https://crab.build/blog/crab-vs-git-lfs">Crab vs. Git LFS</a>
+</p>
 
-[Website](https://crab.build) ·
-[CLI documentation](https://crab.build/docs/cli) ·
-[GitHub repository](https://github.com/crabbuild/crab-oss) ·
-[Apache-2.0 license](LICENSE)
+Crab keeps models, datasets, media, game assets, and build artifacts out of ordinary Git blobs. Git stores small pointer files while Crab stores the original content as deduplicated chunks in object storage you control.
 
-## Why Crab
+In direct-storage mode, each developer connects to Amazon S3, Google Cloud Storage, Azure Blob Storage, or an S3-compatible bucket. There is no Crab data server or database to deploy.
 
-- **Bring your own storage.** Keep repository data in a bucket or container
-  owned and governed by your organization.
-- **Keep using Git.** Clone, branch, commit, merge, push, fetch, and review
-  with Git. Crab integrates through Git's remote-helper and filter protocols.
-- **Upload less data.** Content-defined chunking and content-addressed
-  deduplication avoid re-uploading unchanged pieces of large files.
-- **Clone lazily.** A clone can install lightweight pointer files and defer
-  large payload downloads until they are needed.
-- **Work selectively.** Hydrate a few files, a glob, a manifest, or a named
-  prefetch profile instead of materializing an entire repository.
-- **Recover disk space safely.** Dehydrate clean, materialized files back to
-  pointers without losing their remote copy.
-- **Automate reliably.** Long-running commands support structured JSON and
-  JSONL output, stable error codes, progress events, and cancellation.
+## Install Crab
 
-## How Crab fits around Git
+Install the latest release on macOS or Linux with Homebrew:
 
-Crab has two distinct Git integrations:
-
-1. **Remote helper.** When Git sees a remote such as
-   `crab://bucket/project`, it starts `git-remote-crab`. The helper handles
-   ref discovery, fetch, push, branch updates, tags, deletes, shallow depth
-   operations, and Git pack transfer.
-2. **Filter driver.** Files selected in `.gitattributes` pass through Crab's
-   clean/smudge filter. Clean converts large working-tree files into small
-   pointer blobs and stages their content locally. Smudge either leaves a
-   pointer in place for a lazy checkout or reconstructs the full file.
-
-Everything else remains ordinary Git: commits and refs are still Git objects,
-and Git remains the interface for code history and collaboration.
-
-## Core data flow
-
-~~~text
-                         Git commands
-                              │
-                ┌─────────────┴─────────────┐
-                │                           │
-       clean/smudge filter           remote helper
-        working tree ↔ pointer       fetch/push refs
-                │                           │
-                └─────────────┬─────────────┘
-                              │
-                 Crab engine, indexes, and cache
-                  │                         │
-          .crab/staging/              local cache
-          chunks awaiting push       ~/.cache/crab/
-                              │
-                              ▼
-       S3 / S3-compatible storage / Google Cloud Storage /
-                         Azure Blob Storage
-
-       Git objects, manifests, metadata, shards, and content-addressed xorbs
-       are uploaded only after the required local data is ready.
-~~~
-
-### What happens to a large file?
-
-When a tracked file is added:
-
-1. Crab hashes the file with BLAKE3 while performing content-defined
-   chunking. The file is streamed; it is not required to fit in memory.
-2. Chunks already present locally or remotely are reused. New chunks are
-   written to the local staging area.
-3. Git receives a small pointer blob containing the file hash and size.
-4. On push, Crab packs new chunks into compressed, immutable **xorbs** and
-   uploads the xorbs together with reconstruction metadata and Git packs.
-5. Crab publishes the mutable manifest/ref state only after the immutable data
-   is durable. A failed push can leave unreferenced immutable data for garbage
-   collection, but it does not publish a dangling ref.
-6. On hydration, Crab resolves the pointer to reconstruction terms, reads the
-   required ranges, decompresses and verifies the chunks, and atomically
-   writes the original file.
-
-The pointer format is intentionally small and stable:
-
-~~~text
-version https://crab.dev/spec/v1
-file-hash <64-character-blake3-hash>
-size <bytes>
-shard-hint <optional-metadata-hash>
-~~~
-
-## Supported storage backends
-
-| Backend | Repository URL | Credential examples |
-| --- | --- | --- |
-| Amazon S3 or an S3-compatible service | `crab://bucket/repository` | Web identity, ECS/EC2 role, or access-key environment variables; shared AWS profiles are not read |
-| Google Cloud Storage | `crab://bucket/repository` | Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS` |
-| Azure Blob Storage | `crab://container/repository` | Workload/managed identity, connection string, account key, or SAS credentials |
-
-The `crab://` scheme is used for Git remotes regardless of the backing
-provider. During initialization, provider-prefixed URLs such as `s3://`,
-`gs://`, `gcs://`, or `azure://` may be accepted as a convenience, but
-Crab persists the canonical Git remote as `crab://...` so Git invokes the
-Crab helper.
-
-Choose the provider explicitly when configuring a repository that must be
-portable across machines:
-
-~~~bash
-crab configure crab://my-bucket/my-project --provider s3
-crab configure crab://my-gcs-bucket/my-project --provider gcs
-crab configure crab://my-container/my-project --provider azure
-~~~
-
-For local S3-compatible development, set the standard AWS variables and an
-endpoint:
-
-~~~bash
-export AWS_ACCESS_KEY_ID=crab
-export AWS_SECRET_ACCESS_KEY=crab
-export AWS_REGION=us-east-1
-export AWS_ENDPOINT_URL=http://127.0.0.1:9000
-~~~
-
-See the [RustFS local development guide](crab/docs/guides/local-dev-rustfs.md)
-for a complete local object-store setup. Never commit cloud credentials or
-place secret values in `.crab.toml`.
-
-## Installation
-
-### Release binaries
-
-On macOS or Linux, install the latest release with Homebrew:
-
-~~~bash
+```bash
 brew install crabbuild/tap/crab
-~~~
+```
 
-Or use the checksum-verifying installer:
+You can also use the checksum-verifying installer on macOS or Linux:
 
-~~~bash
+```bash
 curl -fsSL https://crab.build/install.sh | bash
-~~~
+```
 
 On Windows, run the PowerShell installer:
 
-~~~powershell
+```powershell
 irm https://crab.build/install.ps1 | iex
-~~~
+```
 
-The release archive includes the `crab` executable and the
-`git-remote-crab` helper. Unix releases also include the optional mount
-helpers when available. Verify the installation with:
+Verify that Crab and its Git remote helper are available:
 
-~~~bash
+```bash
 crab version
 crab --help
-~~~
+```
 
-The installer supports `CRAB_VERSION` for pinning a release and
-`CRAB_INSTALL_DIR` for selecting an installation directory.
+The release includes `crab`, `git-remote-crab`, and the available mount helpers. The shell installer supports `CRAB_VERSION` for release pinning and `CRAB_INSTALL_DIR` for a custom destination. See the [installation guide](https://crab.build/docs/cli/getting-started/installation) for platform details.
 
-### Build from source
+If you work with several Crab repositories, register the Git drivers once with `crab install --global`. `crab configure` and `crab clone` configure the current repository automatically.
 
-The CLI is part of the Rust workspace and the supported local install path is
-the Makefile in `crab/`:
+## Create and ship a repository
 
-~~~bash
-git clone https://github.com/crabbuild/crab-oss.git
-cd crab-oss/crab
-make install
-~~~
+Start with a directory, a cloud bucket, and credentials that can write to it:
 
-This builds the CLI, the Git remote-helper link, and the platform mount
-helpers. The default build enables the feature set used by the supported
-platforms. FUSE/NFS builds may require the corresponding operating-system
-development packages; a minimal CLI build can disable platform-specific
-features when needed.
-
-## Quick start
-
-The following example creates a new Crab-backed repository in an S3 bucket.
-The same workflow works with `gcs` and `azure` after configuring the
-matching credentials.
-
-~~~bash
+```bash
 mkdir my-project
 cd my-project
 
-# Select storage, discover credentials, initialize Git, and track large files.
 crab configure s3://my-bucket/my-project
+crab ship . -m "Initial commit"
+```
 
-# Review the generated tracking rules and repository state.
-git status
-crab status
+`crab configure` selects the storage provider, discovers credentials, initializes Git, installs the filter driver, and detects large files. `crab ship` stages, commits, and pushes in one command.
 
-# Stage, commit, and push in one operation.
-crab ship -m "Initial commit"
-~~~
+Use the same flow with Google Cloud Storage or Azure Blob Storage:
 
-`crab setup` auto-detects files above the large-file threshold and common
-binary formats. Review the generated `.gitattributes` rules; use explicit
-patterns when automatic detection is not appropriate:
+```bash
+crab configure gs://my-bucket/my-project
+crab configure azure://my-container/my-project
+```
 
-~~~bash
-crab setup --no-auto-track
+Pass explicit tracking rules when you do not want automatic detection:
+
+```bash
+crab configure s3://my-bucket/my-project --no-auto-track
 crab track '*.safetensors'
 crab track 'datasets/**'
-crab ship -m "Track model and dataset files"
-~~~
+crab ship . -m "Track model and dataset files"
+```
 
-If you prefer separate Git steps:
+For separate Git steps, use Crab for large-file staging, then push through Crab's concurrent pipeline:
 
-~~~bash
+```bash
 crab add .
 git commit -m "Add project data"
 crab push
-~~~
+```
 
-`crab push` uses Crab's native concurrent pipeline. A normal `git push`
-also works when the configured Git remote is a `crab://` remote because Git
-starts `git-remote-crab`.
+A normal `git push` also works because Git invokes `git-remote-crab` for a `crab://` remote.
 
-Run `crab ship --dry-run -m "preview"` before a large operation to preview
-the files and work that would be staged, committed, and pushed.
+Preview a large operation with `crab ship . --dry-run -m "Preview"`.
+
+## Why Crab
+
+- **Own your storage:** Keep repository data in a bucket governed by your organization
+- **Keep Git:** Clone, branch, commit, merge, push, fetch, and review with familiar commands
+- **Upload changed chunks:** Content-defined chunking and content-addressed deduplication reuse content across file versions
+- **Download on demand:** Lazy clones keep pointer files until you hydrate the files your workspace needs
+- **Recover disk space:** Dehydrate clean files back to pointers without deleting their remote content
+- **Automate with stable output:** Long-running commands support JSON, JSON Lines (JSONL), error codes, progress events, and cancellation
+
+## How Crab works
+
+Crab integrates with Git at two boundaries:
+
+1. The filter driver converts files selected by `.gitattributes` into small pointer blobs and stages their content locally.
+2. The `git-remote-crab` helper transfers Git objects, refs, and Crab-managed content for `crab://` remotes.
+
+```text
+working tree ── clean/smudge filter ── pointer blobs ── Git history
+                       │
+                       └── deduplicated chunks ── object storage
+```
+
+When you push, Crab uploads immutable chunks and reconstruction metadata before it publishes mutable ref state. When you hydrate, Crab verifies the chunks and reconstructs the original bytes.
+
+## Supported storage backends
+
+Crab accepts provider-prefixed URLs during setup, then records a canonical `crab://` Git remote:
+
+| Backend | Configure with | Common credential sources |
+| --- | --- | --- |
+| Amazon S3 | `crab configure s3://bucket/repository` | Web identity, ECS or EC2 role, access-key environment variables |
+| S3-compatible storage | `crab configure crab://bucket/repository --provider s3` | Access-key environment variables and `AWS_ENDPOINT_URL` |
+| Google Cloud Storage | `crab configure gs://bucket/repository` | Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS` |
+| Azure Blob Storage | `crab configure azure://container/repository` | Workload or managed identity, connection string, account key, Shared Access Signature (SAS) credentials |
+
+Never commit cloud credentials or place secret values in `.crab.toml`. Read the [authentication guide](https://crab.build/docs/cli/authentication/configuration) for provider-specific setup.
+
+## Build from source
+
+Clone the workspace and use its supported installer:
+
+```bash
+git clone https://github.com/crabbuild/crab-oss.git
+cd crab-oss/crab
+make install
+```
+
+This builds the CLI, Git remote helper, and platform mount helpers. Filesystem in Userspace (FUSE) and Network File System (NFS) builds may require operating-system development packages.
 
 ## Clone and hydrate
 
