@@ -3319,16 +3319,21 @@ fn wait_for_index_timestamp_after_worktree(latest_worktree_mtime_secs: Option<u3
     let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
         return;
     };
-    if now.as_secs() != u64::from(latest_worktree_mtime_secs) {
+    let target_secs = u64::from(latest_worktree_mtime_secs).saturating_add(1);
+    let wait_secs = target_secs.saturating_sub(now.as_secs());
+    if wait_secs == 0 || wait_secs > 2 {
         return;
     }
 
     // Git treats entries from the same second as the index timestamp as racy and re-reads them.
-    // Pointer entries intentionally differ from raw worktree bytes, so commit in the next
-    // second to keep a freshly staged file clean without hiding later edits.
-    let remaining = std::time::Duration::from_nanos(u64::from(
-        1_000_000_000_u32.saturating_sub(now.subsec_nanos()),
-    ));
+    // Pointer entries intentionally differ from raw worktree bytes, so commit just after the
+    // next second to keep a freshly staged file clean without hiding later edits. Leave a small
+    // margin for filesystem timestamp rounding and scheduler wake-up jitter.
+    let remaining = std::time::Duration::from_secs(wait_secs)
+        .saturating_sub(std::time::Duration::from_nanos(u64::from(
+            now.subsec_nanos(),
+        )))
+        .saturating_add(std::time::Duration::from_millis(100));
     std::thread::sleep(remaining);
 }
 
