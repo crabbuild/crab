@@ -14,7 +14,32 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_concurrent_push_smoke import RequestCountingProxy, store_category
+from run_concurrent_push_smoke import (
+    RequestCountingProxy,
+    locator_requests_per_success,
+    store_category,
+)
+
+
+class LocatorRequestBudgetTest(unittest.TestCase):
+    def test_counts_only_locator_categories_per_success(self) -> None:
+        snapshot = {
+            "successful_pushes": 4,
+            "categories": {
+                "git_locator_db/manifest": 80,
+                "git_locator_db/compacted": 20,
+                "packs": 400,
+            },
+        }
+
+        self.assertEqual(locator_requests_per_success(snapshot), 25.0)
+
+    def test_requires_a_successful_push(self) -> None:
+        self.assertIsNone(
+            locator_requests_per_success(
+                {"successful_pushes": 0, "categories": {"git_locator_db/wal": 1}}
+            )
+        )
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):

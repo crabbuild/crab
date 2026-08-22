@@ -1456,9 +1456,10 @@ Impact ▲
 
 | Item | Description | Bottleneck | Effort |
 |------|-------------|------------|--------|
-| 1.1  | Qualify request-timeout recovery and provider-specific transient errors | B11 | S |
-| 1.2  | Progress sideband via remote-helper protocol | B10 | S |
-| 1.3  | Stabilize adaptive xorb-size EMA feedback | B12 | S |
+| 1.1  | Coalesce exact-locator publication or replace per-generation SlateDB sessions; 32 same-branch writers currently amplify locator reads as integration retries accumulate | locator publication | L |
+| 1.2  | Qualify request-timeout recovery and provider-specific transient errors | B11 | S |
+| 1.3  | Progress sideband via remote-helper protocol | B10 | S |
+| 1.4  | Stabilize adaptive xorb-size EMA feedback | B12 | S |
 
 ### Phase 2: Walk and Read Performance
 

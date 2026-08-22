@@ -320,6 +320,10 @@ jobs:
             --same-branch-agents 4 \
             --max-parallel-pushes 8 \
             --upload-concurrency 2 \
+            --rebase-on-non-fast-forward \
+            --omit-lock-wait-secs \
+            --rebase-retry-limit 64 \
+            --max-locator-requests-per-success 180 \
             --crash-boundary \
             --marker-faults \
             --crash-lock-ttl-secs 21 \

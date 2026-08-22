@@ -28,6 +28,7 @@ import concurrent.futures
 import http.client
 import http.server
 import json
+import math
 import os
 import signal
 import shutil
@@ -528,6 +529,18 @@ def store_category(relative_key: str) -> str:
     return parts[0] or "repository-root"
 
 
+def locator_requests_per_success(snapshot: dict[str, Any]) -> float | None:
+    successful_pushes = int(snapshot.get("successful_pushes", 0))
+    if successful_pushes == 0:
+        return None
+    locator_requests = sum(
+        int(count)
+        for category, count in snapshot.get("categories", {}).items()
+        if category.startswith("git_locator_db/")
+    )
+    return locator_requests / successful_pushes
+
+
 def redact_env(env: dict[str, str]) -> dict[str, str]:
     redacted: dict[str, str] = {}
     for key, value in sorted(env.items()):
@@ -907,9 +920,9 @@ class ConcurrentPushSmoke:
         *,
         attempted_pushes: int,
         successful_pushes: int,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if self.request_proxy is None or before is None:
-            return
+            return None
         delta = RequestCountingProxy.delta(before, self.request_proxy.snapshot())
         snapshot = {
             "label": label,
@@ -941,6 +954,7 @@ class ConcurrentPushSmoke:
         with self.report_lock:
             self.report.request_snapshots.append(snapshot)
             self.write_report()
+        return snapshot
 
     def store_snapshot(
         self,
@@ -1797,7 +1811,7 @@ class ConcurrentPushSmoke:
             self.write_report()
 
         ok = [result for result in results if result.status == "ok" and result.command.exit_code == 0]
-        self.request_snapshot(
+        request_snapshot = self.request_snapshot(
             "same-branch",
             request_before,
             attempted_pushes=len(results),
@@ -1829,6 +1843,22 @@ class ConcurrentPushSmoke:
                     "bad_statuses": [asdict(result) for result in bad],
                 },
             )
+            if self.args.max_locator_requests_per_success is not None:
+                observed = (
+                    locator_requests_per_success(request_snapshot)
+                    if request_snapshot is not None
+                    else None
+                )
+                self.check(
+                    "same-branch-locator-request-budget",
+                    observed is not None
+                    and observed <= self.args.max_locator_requests_per_success,
+                    {
+                        "observed": round(observed, 3) if observed is not None else None,
+                        "maximum": self.args.max_locator_requests_per_success,
+                        "successful_pushes": len(ok),
+                    },
+                )
             self.check_same_branch_files_visible(self.args.same_branch_agents)
             self.store_snapshot(
                 "same-branch-integrated",
@@ -1965,11 +1995,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-same-branch", action="store_true")
     parser.add_argument("--skip-fsck", action="store_true")
     parser.add_argument("--no-request-capture", action="store_true")
+    parser.add_argument("--max-locator-requests-per-success", type=float)
     args = parser.parse_args()
     if (args.crash_boundary or args.marker_faults) and args.no_request_capture:
         parser.error("--crash-boundary and --marker-faults require request capture")
     if args.crash_lock_ttl_secs <= 20:
         parser.error("--crash-lock-ttl-secs must be greater than 20")
+    if (
+        args.max_locator_requests_per_success is not None
+        and (
+            not math.isfinite(args.max_locator_requests_per_success)
+            or args.max_locator_requests_per_success <= 0
+        )
+    ):
+        parser.error("--max-locator-requests-per-success must be finite and greater than zero")
+    if args.max_locator_requests_per_success is not None and args.no_request_capture:
+        parser.error("--max-locator-requests-per-success requires request capture")
+    if args.max_locator_requests_per_success is not None and not args.rebase_on_non_fast_forward:
+        parser.error(
+            "--max-locator-requests-per-success requires --rebase-on-non-fast-forward"
+        )
     args.crab_bin = resolve_executable(args.crab_bin)
     args.git_bin = resolve_executable(args.git_bin)
     return args

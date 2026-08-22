@@ -234,6 +234,14 @@ The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.
 
+Use `--max-locator-requests-per-success N` with request capture to make the
+same-branch cohort fail when `git_locator_db/*` HTTP attempts divided by
+successful pushes exceed `N`. This is a workload-specific regression budget,
+not a provider bill: record the agent count, integration mode, and parallelism
+with the result. The CI four-agent integration profile uses 180; larger swarms
+can exceed that while repeatedly waiting, fetching, and rebasing against one
+serialized branch tip.
+
 Add `--crash-boundary --crash-lock-ttl-secs 21` to SIGKILL one push after its
 prepared ref head and another after its active marker. The first ref must stay
 invisible and its immediate retry must honor the structured lease-expiry hint;
@@ -262,8 +270,9 @@ crab/scripts/e2e/run_concurrent_push_smoke.py \
 In that mode every same-branch agent runs `crab push
 --rebase-on-non-fast-forward`; the harness verifies that all pushes eventually
 report `ok` and that a final clone contains every agent file. The command-layer
-loop handles both non-fast-forward rejects and retryable push-lock contention.
-When no explicit lock wait is set, this integration mode waits up to 30 seconds
+loop handles non-fast-forward rejects, retryable push-lock contention, and typed
+transient storage or throttling failures.
+When no explicit lock wait is set, this integration mode waits up to 300 seconds
 inside each push attempt before retrying the whole command; the harness's
 `--omit-lock-wait-secs` flag exercises that default. The rebase pull also uses
 conservative ref-aware pack filtering internally to avoid unrelated pack

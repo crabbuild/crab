@@ -268,6 +268,27 @@ async fn execute_push(
                     tokio::time::sleep(integration_retry_delay(retry_attempts)).await;
                     continue;
                 }
+                if args.rebase_on_non_fast_forward
+                    && retry_attempts < args.rebase_retry_limit
+                    && let Some((branch, retry_after_secs)) =
+                        transient_retry_branch(&failure.specs, &failure.result)
+                    && current_branch().as_deref() == Some(branch)
+                {
+                    retry_attempts += 1;
+                    if !mode.is_machine() {
+                        eprintln!(
+                            "transient push failure for {}; retrying ({}/{})...",
+                            branch, retry_attempts, args.rebase_retry_limit
+                        );
+                    }
+                    let delay = integration_retry_delay(retry_attempts).max(
+                        retry_after_secs
+                            .map(Duration::from_secs)
+                            .unwrap_or_default(),
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
 
                 if emit_terminal || mode == OutputMode::Text {
                     emit_push_failure(&failure, mode);
@@ -872,6 +893,23 @@ fn lock_retry_branch<'a>(specs: &'a [PushSpec], result: &PushResult) -> Option<&
     }
 
     Some(branch)
+}
+
+fn transient_retry_branch<'a>(
+    specs: &'a [PushSpec],
+    result: &PushResult,
+) -> Option<(&'a str, Option<u64>)> {
+    let branch = current_head_push_branch(specs)?;
+    let [spec] = specs else {
+        return None;
+    };
+    let reason = match result.outcomes.get(&spec.dst)? {
+        RefPushOutcome::Rejected(reason @ PushRejectReason::NetworkTransient(_))
+        | RefPushOutcome::Rejected(reason @ PushRejectReason::Throttled { .. }) => reason,
+        _ => return None,
+    };
+
+    Some((branch, reason.retry_after_secs()))
 }
 
 fn push_result_from_error(specs: &[PushSpec], error: &CrabError) -> PushResult {
@@ -1692,6 +1730,36 @@ mod tests {
         let result = PushResult::new(outcomes);
 
         assert_eq!(lock_retry_branch(&[spec], &result), Some("main"));
+    }
+
+    #[test]
+    fn transient_retry_branch_accepts_current_branch_transport_failures() {
+        use std::collections::HashMap;
+
+        let spec = PushSpec {
+            force: false,
+            src: "HEAD".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        };
+        for (reason, expected_retry_after) in [
+            (PushRejectReason::NetworkTransient("reset".to_owned()), None),
+            (
+                PushRejectReason::Throttled {
+                    retry_after_secs: Some(3),
+                },
+                Some(3),
+            ),
+        ] {
+            let result = PushResult::new(HashMap::from([(
+                spec.dst.clone(),
+                RefPushOutcome::Rejected(reason),
+            )]));
+
+            assert_eq!(
+                transient_retry_branch(std::slice::from_ref(&spec), &result),
+                Some(("main", expected_retry_after))
+            );
+        }
     }
 
     #[test]

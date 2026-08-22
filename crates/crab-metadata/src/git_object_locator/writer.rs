@@ -538,11 +538,11 @@ fn locator_gc_options() -> GarbageCollectorOptions {
 
 fn locator_settings() -> Settings {
     let mut compactor = CompactorOptions {
-        commit_compacted_interval: std::time::Duration::from_millis(100),
+        commit_compacted_interval: std::time::Duration::from_millis(500),
         ..CompactorOptions::default()
     };
     if let Some(worker) = &mut compactor.worker {
-        worker.compactions_poll_interval = std::time::Duration::from_millis(100);
+        worker.compactions_poll_interval = std::time::Duration::from_millis(500);
     }
     Settings {
         flush_interval: None,
@@ -718,14 +718,14 @@ mod tests {
         );
         assert_eq!(
             compactor.commit_compacted_interval,
-            std::time::Duration::from_millis(100)
+            std::time::Duration::from_millis(500)
         );
         assert_eq!(
             compactor
                 .worker
                 .expect("locator compaction worker")
                 .compactions_poll_interval,
-            std::time::Duration::from_millis(100)
+            std::time::Duration::from_millis(500)
         );
     }
 
