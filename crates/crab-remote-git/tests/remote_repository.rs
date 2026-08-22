@@ -1298,9 +1298,11 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
         );
     }
     fixture.backend.reset_pack_gets();
-    let reads = operations.into_iter().map(|operation| {
-        let snapshot = snapshot.clone();
-        let path = fixture.target_path.clone();
+    let concurrent_snapshot = snapshot.clone();
+    let concurrent_path = fixture.target_path.clone();
+    let reads = operations.into_iter().map(move |operation| {
+        let snapshot = concurrent_snapshot.clone();
+        let path = concurrent_path.clone();
         async move {
             let result = snapshot
                 .read_blob(&path, &operation)
@@ -1309,7 +1311,13 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
             operation.finish(result).await
         }
     });
-    let results = futures_util::future::join_all(reads).await;
+    // Hold the first origin read open so every waiter observes the same
+    // in-flight entry instead of relying on scheduler timing for coalescing.
+    fixture.backend.block_next_pack_get();
+    let reads_task = tokio::spawn(async move { futures_util::future::join_all(reads).await });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    fixture.backend.release_blocked_pack_get();
+    let results = reads_task.await.expect("concurrent reads join");
     for result in results {
         assert_eq!(result.expect("concurrent read").as_ref(), fixture.expected);
     }
