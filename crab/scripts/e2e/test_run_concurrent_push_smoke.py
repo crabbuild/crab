@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_concurrent_push_smoke import RequestCountingProxy
+from run_concurrent_push_smoke import RequestCountingProxy, store_category
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
@@ -79,6 +79,11 @@ class RequestCountingProxyTest(unittest.TestCase):
             content_length = response.headers["Content-Length"]
 
         self.assertEqual(content_length, "123")
+
+    def test_internal_lock_category_retains_only_bounded_resource(self) -> None:
+        category = store_category("locks/internal/git-manifest/lock/clock")
+
+        self.assertEqual(category, "locks/internal/git-manifest")
 
 
 if __name__ == "__main__":

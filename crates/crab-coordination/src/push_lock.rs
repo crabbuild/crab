@@ -249,8 +249,9 @@ impl PushLock {
     }
 
     /// Extends the lease using a holder-checked compare-and-swap update.
-    pub async fn renew(&self) -> Result<()> {
-        renew_one(&self.store, &self.path, &self.holder, self.ttl).await
+    pub async fn renew(&mut self) -> Result<()> {
+        self.etag = Some(renew_one(&self.store, &self.path, &self.holder, self.ttl).await?);
+        Ok(())
     }
 
     /// Marks every expired lease beneath `prefix` released.
@@ -355,7 +356,7 @@ async fn renew_one(
     path: &str,
     holder: &str,
     ttl: Duration,
-) -> Result<()> {
+) -> Result<UpdateVersion> {
     let object_path = Path::from(path);
     let (body, etag) = get_with_version(store, &object_path)
         .await
@@ -374,8 +375,7 @@ async fn renew_one(
     )?;
     update(store, &object_path, body, etag)
         .await
-        .map_err(|source| store_error(path, source))?;
-    Ok(())
+        .map_err(|source| store_error(path, source))
 }
 
 enum ContendedAcquire {
@@ -506,7 +506,7 @@ async fn lock_holder_snapshot(
     }
 }
 
-async fn release_with_known_etag(
+pub(crate) async fn release_with_known_etag(
     store: &Arc<dyn ObjectStore>,
     path: &str,
     holder: &str,
@@ -731,14 +731,14 @@ mod tests {
             .unwrap();
         let stale_holder = first.holder().to_owned();
         let path = first.path().to_owned();
-        first.release().await.unwrap();
+        release_if_holder(&store, &path, &stale_holder)
+            .await
+            .unwrap();
 
         let second = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
-        release_if_holder(&store, &path, &stale_holder)
-            .await
-            .unwrap();
+        first.release().await.unwrap();
 
         let (body, _) = get_with_version(&store, &Path::from(path)).await.unwrap();
         let payload: PushLockPayload = serde_json::from_slice(&body).unwrap();
@@ -941,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn ref_lock_writes_renews_and_releases_only_canonical_key() {
         let store = memory_store();
-        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+        let mut lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
             .await
             .unwrap();
         let path = lock.path().to_owned();

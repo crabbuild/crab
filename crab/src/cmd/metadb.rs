@@ -1431,13 +1431,13 @@ async fn rebuild_git_object_locators(
         ));
     }
 
-    let lock = crab_coordination::PushLock::acquire_internal_default(
+    let mut lock = crab_coordination::PushLock::acquire_internal_default(
         store.inner(),
         router.repo_prefix(),
         crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
     )
     .await?;
-    let write_result = crate::git::push::while_renewing_internal_lock(&lock, async {
+    let write_result = crate::git::push::while_renewing_internal_lock(&mut lock, async {
         let (current, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         if current.generation != manifest.generation
             || current.pack_index_hash != manifest.pack_index_hash

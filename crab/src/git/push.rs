@@ -4822,7 +4822,7 @@ pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
 }
 
 pub(crate) async fn while_renewing_internal_lock<T>(
-    lock: &PushLock,
+    lock: &mut PushLock,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
@@ -4851,7 +4851,7 @@ pub(crate) async fn while_renewing_internal_lock<T>(
 }
 
 async fn while_admitted_until_commit<T>(
-    permit: crab_coordination::PushAdmissionTicket,
+    mut permit: crab_coordination::PushAdmissionTicket,
     operation: impl Future<Output = Result<T>>,
     mut committed: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<T> {
@@ -5100,13 +5100,13 @@ pub(crate) async fn publish_committed_pack_locators(
         }
     }
 
-    let Some(lock) =
+    let Some(mut lock) =
         acquire_current_git_locator_lock(store, router, anchor, lock_ttl, cancel).await?
     else {
         return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
     };
     let publication_started = Instant::now();
-    let write_result = Box::pin(while_renewing_internal_lock(&lock, async {
+    let write_result = Box::pin(while_renewing_internal_lock(&mut lock, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != anchor.generation
             || current.pack_index_hash != anchor.pack_index_hash.hex()
@@ -7088,7 +7088,7 @@ impl PushPipeline {
         // Compaction is derived state. It runs after ref visibility and after
         // scarce push admission is released, while one repository writer
         // folds every transaction currently visible at its snapshot.
-        let manifest_lock = match acquire_ref_journal_compaction_lock(
+        let mut manifest_lock = match acquire_ref_journal_compaction_lock(
             store,
             &self.router,
             &committed.transaction_id,
@@ -7118,7 +7118,7 @@ impl PushPipeline {
             }
         };
         let compacted = while_renewing_internal_lock(
-            &manifest_lock,
+            &mut manifest_lock,
             compact_ref_journal_until_idle(store, &self.router, manifest.pusher.clone()),
         )
         .await;

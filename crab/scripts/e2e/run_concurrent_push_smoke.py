@@ -354,6 +354,8 @@ def store_category(relative_key: str) -> str:
     parts = relative_key.split("/")
     if len(parts) > 2 and parts[0] == "metadata" and parts[1] in {"pack", "shard"}:
         return "/".join(parts[:3])
+    if len(parts) > 2 and parts[:2] == ["locks", "internal"]:
+        return "/".join(parts[:3])
     if len(parts) > 1 and parts[0] in {
         "git_locator_db",
         "git-visibility",
