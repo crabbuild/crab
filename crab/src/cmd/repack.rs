@@ -263,6 +263,7 @@ async fn run_repack_locked(
             git_sha1: &generated.git_sha1,
         }],
         anchor,
+        Some(std::slice::from_ref(&replacement)),
         config.lock_ttl,
         cancel,
     )

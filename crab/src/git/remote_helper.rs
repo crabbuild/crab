@@ -5038,6 +5038,17 @@ mod tests {
         assert!(!caps.contains("filter"));
     }
 
+    #[test]
+    fn protocol_v2_capability_preserves_complete_pack_fetch() {
+        let caps = format_capabilities_with_v2(false, true);
+
+        assert!(caps.lines().any(|capability| capability == "fetch"));
+        assert!(
+            caps.lines()
+                .any(|capability| capability == "stateless-connect")
+        );
+    }
+
     // --- validate_fetch_entries_with_manifest ---
 
     /// Build a minimal manifest carrying just the supplied refs. All

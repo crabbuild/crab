@@ -69,14 +69,17 @@ struct FetchRequest {
     filter: UploadPackFilter,
 }
 
-/// Ensure the repository has the complete proof required to advertise
-/// protocol-v2 upload-pack, repairing current derived locator lag when possible.
+/// Check whether the repository has the complete proof required to advertise
+/// protocol-v2 upload-pack without rebuilding lagging locator coverage.
 pub async fn snapshot_available(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> bool {
-    let Ok(repository) = open_repository(store, prefix, cancellation).await else {
+    // If exact locator coverage lags, omit v2 and let Git use the
+    // already-advertised complete-pack fetch path. Rebuilding it here makes
+    // every dependent hot-ref generation pay the full locator publication cost.
+    let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
         return false;
     };
     match repository.visibility_index(cancellation).await {
@@ -95,7 +98,9 @@ pub async fn snapshot_available(
             .await
             {
                 Ok(Some(super::push::GitVisibilityPublication::Published)) => {
-                    let Ok(repository) = open_repository(store, prefix, cancellation).await else {
+                    let Ok(repository) =
+                        open_repository_snapshot(store, prefix, cancellation).await
+                    else {
                         return false;
                     };
                     repository.visibility_index(cancellation).await.is_ok()
@@ -302,20 +307,7 @@ pub(crate) async fn open_repository(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<RemoteGitRepository> {
-    let bucket = store.bucket_identity();
-    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
-    let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
-    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-    let runtime = Arc::new(RemoteGitRuntime::default());
-    let open = RemoteGitRepository::open(
-        store.clone(),
-        layout.clone(),
-        identity.clone(),
-        Arc::clone(&runtime),
-        RepositoryOptions::default(),
-        cancellation,
-    )
-    .await;
+    let open = open_repository_snapshot(store, prefix, cancellation).await;
     let (observed_generation, required_generation) = match open {
         Ok(repository) => return Ok(repository),
         Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
@@ -325,8 +317,7 @@ pub(crate) async fn open_repository(
     // The manifest generation check distinguishes derived publication lag from
     // an active ref-journal transaction, which must remain unavailable.
     let repair_store = crate::storage::Store::from_storage(store.clone());
-    let repair_layout =
-        crate::storage::StoreLayout::new(repair_store.clone(), layout.repo_prefix().to_owned());
+    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let repaired = super::push::repair_git_object_locator_if_current(
         &repair_store,
         &repair_layout,
@@ -347,6 +338,21 @@ pub(crate) async fn open_repository(
         "repaired current Git locator before upload-pack admission"
     );
 
+    open_repository_snapshot(store, prefix, cancellation)
+        .await
+        .map_err(remote_error)
+}
+
+async fn open_repository_snapshot(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<RemoteGitRepository> {
+    let bucket = store.bucket_identity();
+    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+    let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1)?;
+    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+    let runtime = Arc::new(RemoteGitRuntime::default());
     RemoteGitRepository::open(
         store.clone(),
         layout,
@@ -356,7 +362,6 @@ pub(crate) async fn open_repository(
         cancellation,
     )
     .await
-    .map_err(remote_error)
 }
 
 pub(crate) fn visible_ref_names(

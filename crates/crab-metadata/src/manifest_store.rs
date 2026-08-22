@@ -1,5 +1,7 @@
 //! Storage-backed manifest pointer and segmented metadata helpers.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
@@ -49,6 +51,12 @@ pub struct RepositorySnapshot {
 pub struct RefJournalCompaction {
     /// Compacted manifest committed by compare-and-swap.
     pub manifest: Manifest,
+    /// Exact immutable pack inventory used to build the committed pack index.
+    pub packs: Vec<PackManifestEntry>,
+    /// Distinct refs changed by the transaction wave folded into this generation.
+    pub edited_refs: Vec<String>,
+    /// Last ref-lock holder folded for each edited ref, when journal evidence includes it.
+    pub edited_ref_lock_holders: BTreeMap<String, String>,
     /// Whether complete generation-bound Git visibility was published before the manifest.
     pub git_visibility_published: bool,
 }
@@ -340,6 +348,25 @@ pub async fn compact_ref_journal(
     // The old summary does not cover journal-only ref advances.
     manifest.commit_graph_hash = None;
     manifest.seal_git_validation();
+    let mut edited_refs = snapshot
+        .journal
+        .ordered_edits
+        .iter()
+        .map(|edit| edit.ref_name.clone())
+        .collect::<Vec<_>>();
+    edited_refs.sort_unstable();
+    edited_refs.dedup();
+    let mut edited_ref_lock_holders = BTreeMap::new();
+    for edit in &snapshot.journal.ordered_edits {
+        match &edit.lock_holder {
+            Some(holder) => {
+                edited_ref_lock_holders.insert(edit.ref_name.clone(), holder.clone());
+            }
+            None => {
+                edited_ref_lock_holders.remove(&edit.ref_name);
+            }
+        }
+    }
 
     // Complete evidence publishes authorization before the compacted manifest;
     // otherwise no proof is written and upload-pack withholds protocol v2.
@@ -368,6 +395,9 @@ pub async fn compact_ref_journal(
     cleanup_compacted_transactions(store, router, &compacted_transactions).await;
     Ok(Some(RefJournalCompaction {
         manifest,
+        packs: snapshot.journal.packs,
+        edited_refs,
+        edited_ref_lock_holders,
         git_visibility_published,
     }))
 }
@@ -1086,6 +1116,7 @@ mod tests {
 
         assert!(!compacted.git_visibility_published);
         assert_eq!(compacted.manifest.refs["refs/heads/main"], "b".repeat(40));
+        assert_eq!(compacted.edited_refs, ["refs/heads/main"]);
         assert!(snapshot.journal.transactions.is_empty());
         assert_eq!(snapshot.journal.refs["refs/heads/main"], "b".repeat(40));
         assert!(

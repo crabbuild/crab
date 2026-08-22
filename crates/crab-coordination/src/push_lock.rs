@@ -398,6 +398,74 @@ impl PushLock {
         let path = push_lock_path(prefix, ref_name)?;
         release_if_holder_checked(store, &path, holder).await
     }
+
+    /// Return whether a ref lease currently carries a non-released claim.
+    ///
+    /// This is an immediate handoff signal, not an acquisition decision: it
+    /// deliberately avoids a backend-clock probe and may conservatively report
+    /// an expired claimant until the next acquirer reclaims it.
+    pub async fn ref_lease_is_claimed(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        ref_name: &str,
+    ) -> Result<bool> {
+        let path = push_lock_path(prefix, ref_name)?;
+        let object_path = Path::from(path.as_str());
+        let (body, _) = match get_with_version(store, &object_path).await {
+            Ok(lock) => lock,
+            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(source) => return Err(store_error(&path, source)),
+        };
+        deserialize_payload(&path, &body).map(|payload| !payload.is_released())
+    }
+
+    /// Record that a contender observed `predecessor_holder` on a ref lease.
+    ///
+    /// One fixed object per ref is overwritten across handoffs. The marker is
+    /// advisory and carries the predecessor identity so stale handoffs cannot
+    /// suppress publication by a later owner.
+    pub async fn announce_ref_successor(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        ref_name: &str,
+        predecessor_holder: &str,
+    ) -> Result<()> {
+        if predecessor_holder.is_empty() {
+            return Err(CoordinationError::Configuration {
+                key: predecessor_holder.to_owned(),
+                origin: "push successor predecessor holder must not be empty".to_owned(),
+            });
+        }
+        let path = format!("{}.successor", push_lock_path(prefix, ref_name)?);
+        store
+            .put(
+                &Path::from(path.as_str()),
+                Bytes::copy_from_slice(predecessor_holder.as_bytes()).into(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|source| store_error(&path, source))
+    }
+
+    /// Return whether a contender announced a handoff from this exact holder.
+    pub async fn ref_successor_was_announced(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        ref_name: &str,
+        predecessor_holder: &str,
+    ) -> Result<bool> {
+        let path = format!("{}.successor", push_lock_path(prefix, ref_name)?);
+        let result = match store.get(&Path::from(path.as_str())).await {
+            Ok(result) => result,
+            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(source) => return Err(store_error(&path, source)),
+        };
+        result
+            .bytes()
+            .await
+            .map(|body| body.as_ref() == predecessor_holder.as_bytes())
+            .map_err(|source| store_error(&path, source))
+    }
 }
 
 impl Drop for PushLock {
@@ -968,6 +1036,61 @@ mod tests {
             PushLock::release_ref_if_holder(&store, "org/repo", "refs/heads/main", lock.holder(),)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn ref_claim_probe_tracks_acquire_and_release_without_creating_a_lock() {
+        let store = memory_store();
+
+        assert!(
+            !PushLock::ref_lease_is_claimed(&store, "org/repo", "refs/heads/main")
+                .await
+                .unwrap()
+        );
+        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        assert!(
+            PushLock::ref_lease_is_claimed(&store, "org/repo", "refs/heads/main")
+                .await
+                .unwrap()
+        );
+
+        lock.release().await.unwrap();
+        assert!(
+            !PushLock::ref_lease_is_claimed(&store, "org/repo", "refs/heads/main")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn ref_successor_marker_is_scoped_to_the_observed_predecessor() {
+        let store = memory_store();
+        PushLock::announce_ref_successor(&store, "org/repo", "refs/heads/main", "holder-a")
+            .await
+            .unwrap();
+
+        assert!(
+            PushLock::ref_successor_was_announced(
+                &store,
+                "org/repo",
+                "refs/heads/main",
+                "holder-a",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !PushLock::ref_successor_was_announced(
+                &store,
+                "org/repo",
+                "refs/heads/main",
+                "holder-b",
+            )
+            .await
+            .unwrap()
         );
     }
 

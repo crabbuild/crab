@@ -2532,6 +2532,9 @@ const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
+/// Cap after a same-ref contender has published its successor signal.
+const PUSH_LOCK_SUCCESSOR_POLL_CAP: Duration = Duration::from_millis(250);
+
 // Operational cap, not a correctness constant. With the product's default
 // eight upload workers, five pushes bound one repository to 40 upload tasks.
 const PUSH_ADMISSION_SLOTS: usize = 5;
@@ -3104,9 +3107,13 @@ pub fn lock_ttl_remaining(expires_at_unix: Option<u64>) -> u64 {
 }
 
 fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
+    push_lock_wait_delay_with_cap(attempt, remaining, PUSH_LOCK_WAIT_BACKOFF_CAP)
+}
+
+fn push_lock_wait_delay_with_cap(attempt: u32, remaining: Duration, cap: Duration) -> Duration {
     let shift = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let exp = PUSH_LOCK_WAIT_BACKOFF_BASE.saturating_mul(shift);
-    let bound = exp.min(PUSH_LOCK_WAIT_BACKOFF_CAP).min(remaining);
+    let bound = exp.min(cap).min(remaining);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
     if bound_nanos == 0 {
         return Duration::ZERO;
@@ -3950,6 +3957,12 @@ pub struct PushPipeline {
     manifest_etag: tokio::sync::Mutex<Option<String>>,
     /// Generation and shard-index hash returned by a successful manifest CAS.
     committed_manifest_anchor: tokio::sync::Mutex<Option<CommittedManifestAnchor>>,
+    /// Exact pack inventory already materialized by this pipeline's journal compaction.
+    /// Publication reuses it instead of downloading the immutable segments again.
+    committed_pack_inventory: tokio::sync::Mutex<Option<Vec<PackManifestEntry>>>,
+    /// A same-ref successor owns the next mutation, so it also owns publishing
+    /// the next useful locator generation.
+    locator_publication_deferred: std::sync::atomic::AtomicBool,
     /// Whether this generation has the complete bounded visibility proof that
     /// protocol-v2 admission requires alongside exact locator coverage.
     git_visibility_published: std::sync::atomic::AtomicBool,
@@ -4979,6 +4992,7 @@ pub(crate) async fn acquire_push_lock_leases(
     let deadline = (!config.lock_wait.is_zero()).then(|| Instant::now() + config.lock_wait);
     let mut wait_attempt = 0;
     let mut checked_committed_holders = HashSet::new();
+    let mut announced_successor = false;
     let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
 
     loop {
@@ -5016,6 +5030,26 @@ pub(crate) async fn acquire_push_lock_leases(
             {
                 let holder_key = (ref_name.to_owned(), holder.to_owned());
                 if checked_committed_holders.insert(holder_key) {
+                    if !holder.is_empty() {
+                        match PushLock::announce_ref_successor(
+                            store.inner(),
+                            prefix,
+                            ref_name,
+                            holder,
+                        )
+                        .await
+                        {
+                            Ok(()) => announced_successor = true,
+                            Err(error) => {
+                                warn!(
+                                    %ref_name,
+                                    %holder,
+                                    %error,
+                                    "could not announce queued ref-lock successor"
+                                );
+                            }
+                        }
+                    }
                     match release_lock_committed_by_visible_transaction(
                         store, prefix, ref_name, holder,
                     )
@@ -5088,7 +5122,12 @@ pub(crate) async fn acquire_push_lock_leases(
             return Err(err);
         }
 
-        let delay = push_lock_wait_delay(wait_attempt, deadline.saturating_duration_since(now));
+        let remaining = deadline.saturating_duration_since(now);
+        let delay = if announced_successor {
+            push_lock_wait_delay_with_cap(wait_attempt, remaining, PUSH_LOCK_SUCCESSOR_POLL_CAP)
+        } else {
+            push_lock_wait_delay(wait_attempt, remaining)
+        };
         wait_attempt = wait_attempt.saturating_add(1);
         debug!(
             attempt = wait_attempt,
@@ -5251,6 +5290,35 @@ async fn compact_ref_journal_until_idle(
         "ref journal compactor reached its bounded drain limit"
     );
     Ok(latest)
+}
+
+async fn ref_successor_is_claimed(
+    store: &Store,
+    prefix: &str,
+    ref_names: &[String],
+    predecessor_holders: &BTreeMap<String, String>,
+) -> Result<bool> {
+    use futures_util::StreamExt;
+
+    let mut claims = futures_util::stream::iter(ref_names.iter().map(|ref_name| async move {
+        if let Some(holder) = predecessor_holders.get(ref_name)
+            && PushLock::ref_successor_was_announced(store.inner(), prefix, ref_name, holder)
+                .await
+                .map_err(CrabError::from)?
+        {
+            return Ok(true);
+        }
+        PushLock::ref_lease_is_claimed(store.inner(), prefix, ref_name)
+            .await
+            .map_err(CrabError::from)
+    }))
+    .buffer_unordered(DEFAULT_HEAD_CHECK_CONCURRENCY);
+    while let Some(claimed) = claims.next().await {
+        if claimed? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
@@ -5508,6 +5576,7 @@ pub(crate) async fn publish_committed_pack_locators(
     router: &StoreLayout,
     packs: &[CommittedPackIndex<'_>],
     anchor: CommittedManifestAnchor,
+    pinned_inventory: Option<&[PackManifestEntry]>,
     lock_ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
@@ -5558,7 +5627,20 @@ pub(crate) async fn publish_committed_pack_locators(
         {
             return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
         }
-        let current_packs = read_bulk_pack_list(store, router, &current.pack_index_hash).await?;
+        let loaded_inventory;
+        let current_packs = if let Some(pinned) = pinned_inventory {
+            let (pinned_hash, _, _) =
+                crate::metadata::manifest::compact_pack_index(anchor.generation, pinned)?;
+            if pinned_hash != current.pack_index_hash {
+                return Err(CrabError::Internal(
+                    "pinned locator inventory does not match its committed manifest".to_owned(),
+                ));
+            }
+            pinned
+        } else {
+            loaded_inventory = read_bulk_pack_list(store, router, &current.pack_index_hash).await?;
+            &loaded_inventory
+        };
 
         let planned_object_rows = current_packs
             .iter()
@@ -5571,18 +5653,8 @@ pub(crate) async fn publish_committed_pack_locators(
             )
             .await?;
         let operation = async {
-            let prior_coverage = writer.coverage();
-            let covered_packs = if let Some(coverage) = prior_coverage {
-                read_bulk_pack_list(store, router, &coverage.pack_index_hash.hex()).await?
-            } else {
-                Vec::new()
-            };
-            let covered = covered_packs
-                .iter()
-                .map(|pack| (pack.pack_id.as_str(), (pack.object_count, pack.size)))
-                .collect::<HashMap<_, _>>();
             let mut pack_records = Vec::with_capacity(current_packs.len());
-            for pack in &current_packs {
+            for pack in current_packs {
                 let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
                     CrabError::Internal(format!(
                         "committed pack id is invalid for locator publication: {error}"
@@ -5597,6 +5669,11 @@ pub(crate) async fn publish_committed_pack_locators(
                 });
             }
             let bindings = writer.bind_packs(&pack_records).await?;
+            let covered = bindings
+                .iter()
+                .filter(|binding| writer.binding_has_covered_objects(**binding))
+                .map(|binding| binding.record.pack_id)
+                .collect::<HashSet<_>>();
             let retained_slots = bindings
                 .iter()
                 .map(|binding| binding.pack_slot)
@@ -5604,17 +5681,15 @@ pub(crate) async fn publish_committed_pack_locators(
             let sweep = writer.sweep_unreferenced(&retained_slots).await?;
             let rebuild_all = sweep.pack_rows_deleted != 0;
             let mut evidence = Vec::new();
-            for pack in &current_packs {
-                if !rebuild_all
-                    && covered.get(pack.pack_id.as_str()) == Some(&(pack.object_count, pack.size))
-                {
-                    continue;
-                }
+            for pack in current_packs {
                 let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
                     CrabError::Internal(format!(
                         "committed pack id is invalid for locator publication: {error}"
                     ))
                 })?;
+                if !rebuild_all && covered.contains(&pack_id) {
+                    continue;
+                }
                 let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
                     validate_locator_pack_evidence(
                         pack,
@@ -5736,7 +5811,7 @@ pub(crate) async fn repair_git_object_locator_if_current(
         return Ok(false);
     };
     let stats =
-        publish_committed_pack_locators(store, router, &[], anchor, lock_ttl, cancel).await?;
+        publish_committed_pack_locators(store, router, &[], anchor, None, lock_ttl, cancel).await?;
     Ok(stats.coverage_updated)
 }
 
@@ -6032,6 +6107,7 @@ async fn publish_uploaded_pack_locators(
     router: &StoreLayout,
     packs: &[UploadedGitPack],
     anchor: CommittedManifestAnchor,
+    pinned_inventory: Option<&[PackManifestEntry]>,
     lock_ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
@@ -6044,7 +6120,16 @@ async fn publish_uploaded_pack_locators(
             git_sha1: &uploaded.git_sha1,
         })
         .collect::<Vec<_>>();
-    publish_committed_pack_locators(store, router, &committed, anchor, lock_ttl, cancel).await
+    publish_committed_pack_locators(
+        store,
+        router,
+        &committed,
+        anchor,
+        pinned_inventory,
+        lock_ttl,
+        cancel,
+    )
+    .await
 }
 
 /// Pre-computed pointer walk produced by the native push orchestrator.
@@ -6146,6 +6231,8 @@ impl PushPipeline {
             base_commit_graph_loaded: tokio::sync::Mutex::new(false),
             manifest_etag: tokio::sync::Mutex::new(None),
             committed_manifest_anchor: tokio::sync::Mutex::new(None),
+            committed_pack_inventory: tokio::sync::Mutex::new(None),
+            locator_publication_deferred: std::sync::atomic::AtomicBool::new(false),
             git_visibility_published: std::sync::atomic::AtomicBool::new(false),
             failure_stage: std::sync::OnceLock::new(),
             push_commit_receipt: tokio::sync::Mutex::new(None),
@@ -7936,6 +8023,27 @@ impl PushPipeline {
             compact_ref_journal_until_idle(store, &self.router, manifest.pusher.clone()),
         )
         .await;
+        let successor_claimed = if let Ok(Some(compaction)) = &compacted {
+            match ref_successor_is_claimed(
+                store,
+                &self.prefix,
+                &compaction.edited_refs,
+                &compaction.edited_ref_lock_holders,
+            )
+            .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "could not inspect ref-lock handoff; publishing this locator generation"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
         if let Err(error) = manifest_lock.release().await {
             warn!(%error, "ref journal committed; compaction lock release requires repair");
         }
@@ -7943,7 +8051,19 @@ impl PushPipeline {
             Ok(Some(compaction)) => {
                 let compacted_manifest = compaction.manifest;
                 match committed_manifest_anchor(&compacted_manifest) {
-                    Ok(anchor) => *self.committed_manifest_anchor.lock().await = anchor,
+                    Ok(anchor) => {
+                        *self.committed_manifest_anchor.lock().await = anchor;
+                        if successor_claimed {
+                            self.locator_publication_deferred
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            debug!(
+                                generation = compacted_manifest.generation,
+                                "same-ref successor will publish the next locator generation"
+                            );
+                        } else if anchor.is_some() {
+                            *self.committed_pack_inventory.lock().await = Some(compaction.packs);
+                        }
+                    }
                     Err(error) => {
                         warn!(%error, "ref journal committed; compacted anchor requires repair")
                     }
@@ -15001,6 +15121,10 @@ impl PushPipeline {
             let file_index_plan = self.pending_file_index_plan.lock().await.clone();
             let shard_hashes = self.uploaded_shard_hashes.lock().await.clone();
             let anchor = *self.committed_manifest_anchor.lock().await;
+            let pack_inventory = self.committed_pack_inventory.lock().await.clone();
+            let locator_deferred = self
+                .locator_publication_deferred
+                .load(std::sync::atomic::Ordering::Relaxed);
             let needs_metadb_write = !file_index_plan.is_empty()
                 || !self.pending_legacy_chunk_tombstones.lock().await.is_empty()
                 || !self
@@ -15051,12 +15175,15 @@ impl PushPipeline {
                     "Git visibility proof requires repair; publishing exact locators independently"
                 );
             }
-            if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
+            if locator_deferred {
+                git_indexed = false;
+            } else if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
                 match publish_uploaded_pack_locators(
                     store,
                     &self.router,
                     &uploaded_packs,
                     anchor,
+                    pack_inventory.as_deref(),
                     self.config.lock_ttl,
                     &self.cancel,
                 )
@@ -18227,6 +18354,17 @@ mod tests {
         assert!(bounded <= Duration::from_secs(1));
     }
 
+    #[test]
+    fn announced_successor_poll_stays_inside_handoff_window() {
+        let delay = push_lock_wait_delay_with_cap(
+            32,
+            Duration::from_secs(30),
+            PUSH_LOCK_SUCCESSOR_POLL_CAP,
+        );
+
+        assert!(delay <= PUSH_LOCK_SUCCESSOR_POLL_CAP);
+    }
+
     #[tokio::test]
     async fn prepopulated_walk_is_reusable_for_manifest_cas_replan() {
         let mut config = PushConfig::default();
@@ -18719,12 +18857,16 @@ mod tests {
             .apply_decisions_with_sha_map(&decisions, false, &sha_map)
             .await
             .expect("build candidate");
+        upload_segmented_bulk(&store, &router, &bulk)
+            .await
+            .expect("publish concurrent pack inventory");
 
         let (mut concurrent, etag) = read_manifest(&store, &router)
             .await
             .expect("read concurrent base");
-        let concurrent_main = "f".repeat(40);
+        let concurrent_main = crate::test::git_repo::TEST_GIT_REPO.commit_sha.clone();
         concurrent.generation += 1;
+        concurrent.pack_index_hash = candidate.pack_index_hash.clone();
         concurrent
             .refs
             .insert("refs/heads/main".to_owned(), concurrent_main.clone());
@@ -18852,6 +18994,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn compactor_defers_locator_publication_to_claimed_same_ref_successor() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("journal-locator-successor");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create initial manifest");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.expect("read base");
+        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .expect("evaluate refs");
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .expect("build candidate");
+        let leases = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &[make_spec("refs/heads/main")],
+            &PushConfig::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("acquire predecessor ref lock");
+        let predecessor_holder = leases[0].lock.holder().to_owned();
+        PushLock::announce_ref_successor(
+            store.inner(),
+            router.repo_prefix(),
+            "refs/heads/main",
+            &predecessor_holder,
+        )
+        .await
+        .expect("announce queued successor");
+        pipeline.install_locks(leases).await;
+        let mut admission_commit = None;
+
+        pipeline
+            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
+            .await
+            .expect("commit and compact journal");
+
+        assert!(pipeline.committed_manifest_anchor.lock().await.is_some());
+        assert!(pipeline.committed_pack_inventory.lock().await.is_none());
+        assert!(
+            pipeline
+                .locator_publication_deferred
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_after_manifest_cas_reports_committed_success() {
         let _guard = GitDirGuard::new();
         let cancel = CancellationToken::new();
@@ -18969,7 +19182,7 @@ mod tests {
             .expect("create initial manifest");
         armed.store(true, Ordering::SeqCst);
 
-        let interrupted = PushPipeline::new(
+        let interrupted_pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/main")],
             Some(store.clone()),
@@ -18980,9 +19193,8 @@ mod tests {
             None,
             cancel.clone(),
             None,
-        )
-        .execute()
-        .await;
+        );
+        let interrupted = Box::pin(interrupted_pipeline.execute()).await;
 
         assert!(
             cancel.is_cancelled(),
@@ -19012,7 +19224,7 @@ mod tests {
             "protocol v2 must stay withheld while exact derived coverage is incomplete"
         );
 
-        let restarted = PushPipeline::new(
+        let restarted_pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/dev")],
             Some(store.clone()),
@@ -19023,9 +19235,8 @@ mod tests {
             None,
             CancellationToken::new(),
             None,
-        )
-        .execute()
-        .await;
+        );
+        let restarted = Box::pin(restarted_pipeline.execute()).await;
 
         assert_eq!(
             restarted.outcomes.get("refs/heads/dev"),
@@ -19121,6 +19332,38 @@ mod tests {
             Some(covered_generation)
         );
         stale.close().await.expect("close stale locator session");
+
+        let capability_store = store.as_storage().clone();
+        let capability_prefix = repo_prefix.to_owned();
+        let v2_ready = tokio::spawn(async move {
+            crate::git::upload_pack_wire::snapshot_available(
+                &capability_store,
+                &capability_prefix,
+                &CancellationToken::new(),
+            )
+            .await
+        })
+        .await
+        .expect("join capability discovery");
+        assert!(
+            !v2_ready,
+            "capability discovery must use complete-pack fetch while locator coverage lags"
+        );
+        let still_stale = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            repo_prefix,
+        )
+        .await
+        .expect("reopen stale locator session");
+        assert_eq!(
+            still_stale.coverage().map(|coverage| coverage.generation),
+            Some(covered_generation),
+            "capability discovery must not rebuild the locator"
+        );
+        still_stale
+            .close()
+            .await
+            .expect("close unchanged locator session");
 
         let repository = crate::git::upload_pack_wire::open_repository(
             store.as_storage(),
@@ -19497,6 +19740,16 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(CrabError::PushLockHeld { .. })));
+        assert!(
+            PushLock::ref_successor_was_announced(
+                store.inner(),
+                router.repo_prefix(),
+                "refs/heads/main",
+                held[0].lock.holder(),
+            )
+            .await
+            .unwrap()
+        );
         release_push_lock_leases(held).await;
     }
 
@@ -20675,6 +20928,7 @@ mod tests {
                 git_sha1: &git_sha1,
             }],
             anchor,
+            None,
             Duration::from_secs(60),
             &CancellationToken::new(),
         )
@@ -20758,6 +21012,7 @@ mod tests {
             &router,
             &[],
             anchor,
+            None,
             Duration::from_secs(60),
             &CancellationToken::new(),
         )
@@ -20936,6 +21191,7 @@ mod tests {
                 git_sha1: &second_git_sha1,
             }],
             anchor,
+            Some(&current_packs),
             Duration::from_secs(60),
             &CancellationToken::new(),
         )

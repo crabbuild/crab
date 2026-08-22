@@ -199,6 +199,18 @@ impl GitObjectLocatorWriter {
         self.metadata.coverage
     }
 
+    /// Return whether this binding's object rows belong to the initial exact coverage.
+    ///
+    /// Bindings created by an interrupted newer publication remain durable, but
+    /// their rows must be rebuilt until a later session advances coverage.
+    #[must_use]
+    pub fn binding_has_covered_objects(&self, binding: GitPackLocatorBinding) -> bool {
+        self.bindings.get(&binding.pack_slot) == Some(&binding.record)
+            && self
+                .initial_coverage
+                .is_some_and(|coverage| binding.record.committed_generation <= coverage.generation)
+    }
+
     /// Durably bind immutable packs to monotonic non-zero slots.
     pub async fn bind_packs(
         &mut self,
@@ -885,6 +897,49 @@ mod tests {
             .expect("reuse retained pack")[0];
 
         assert_eq!(retained_binding, original_binding);
+        reopened.close().await.expect("close reopened writer");
+    }
+
+    #[tokio::test]
+    async fn initial_coverage_distinguishes_retained_rows_from_interrupted_bindings() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut initial = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open initial writer");
+        let covered = initial.bind_packs(&[pack(1)]).await.expect("bind covered")[0];
+        initial
+            .write_locations(covered, &[entry(1)])
+            .await
+            .expect("write covered location");
+        initial
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("set initial coverage");
+        initial.close().await.expect("close initial writer");
+
+        let mut interrupted = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open interrupted writer");
+        let retained = interrupted
+            .bind_packs(&[pack(1)])
+            .await
+            .expect("bind retained")[0];
+        let uncovered = interrupted
+            .bind_packs(&[pack(2)])
+            .await
+            .expect("bind uncovered")[0];
+        assert!(interrupted.binding_has_covered_objects(retained));
+        assert!(!interrupted.binding_has_covered_objects(uncovered));
+        interrupted.close().await.expect("close interrupted writer");
+
+        let reopened = GitObjectLocatorWriter::open(store, "org/repo")
+            .await
+            .expect("reopen writer");
+        assert!(reopened.binding_has_covered_objects(retained));
+        assert!(!reopened.binding_has_covered_objects(uncovered));
         reopened.close().await.expect("close reopened writer");
     }
 
