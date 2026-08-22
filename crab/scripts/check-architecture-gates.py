@@ -3139,11 +3139,24 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
             ],
             "local-index": ["dep:rusqlite"],
             "remote-index": ["dep:futures-util", "dep:object_store", "dep:slatedb"],
-            "storage": ["dep:crab-storage", "dep:futures-util", "dep:object_store"],
+            "storage": [
+                "dep:base64",
+                "dep:crab-storage",
+                "dep:futures-util",
+                "dep:object_store",
+            ],
         },
     )
 
-    for name in ("crab-storage", "futures-util", "object_store", "rusqlite", "slatedb", "tokio"):
+    for name in (
+        "base64",
+        "crab-storage",
+        "futures-util",
+        "object_store",
+        "rusqlite",
+        "slatedb",
+        "tokio",
+    ):
         dependency = normal_dependency(package, name)
         if dependency is None or not dependency["optional"]:
             violations.append(f"crab-metadata: {name} must stay optional")
