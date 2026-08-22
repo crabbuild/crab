@@ -136,11 +136,14 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y \
             curl \
-            libfuse3-dev \
-            pipx
-          pipx install awscli
+            libfuse3-dev
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get install -y pipx
+            pipx install awscli
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/aws" --version
+          aws --version
 
       - name: Start RustFS
         run: |
