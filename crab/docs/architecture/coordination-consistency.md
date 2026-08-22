@@ -65,6 +65,12 @@ and ignored after the hard cutover.
    Before the ref-journal active marker, the lock expires after TTL.
    After that marker, the visible journal edit proves the holder finished its
    ref-critical work; the next pusher releases that exact holder by CAS.
+
+5. Marker write ambiguity:
+   A failure before storage commit leaves the ref invisible and releases the
+   holder on the normal failure path. If the immutable marker was stored but
+   the response was lost, an exact-byte create retry treats the matching
+   object as success; a different object remains a conflict.
 ```
 
 ### Lock TTL

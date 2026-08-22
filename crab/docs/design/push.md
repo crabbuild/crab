@@ -1169,6 +1169,12 @@ release that holder immediately with a holder-checked CAS. Prepared
 transactions and mismatched holders cannot take this path, and the final CAS
 cannot clear a lock that has already been acquired by a successor.
 
+An object-store failure before the active-marker write returns a structured,
+retryable `transient` outcome and runs the normal holder-checked release path;
+the ref remains invisible. If the immutable marker was stored but its success
+response was lost, the exact-byte create retry observes the existing marker
+and reconciles the write as success instead of reporting an ambiguous push.
+
 ### Heartbeat
 
 When configured, a background task renews the lock at regular intervals:
@@ -1450,7 +1456,7 @@ Impact ▲
 
 | Item | Description | Bottleneck | Effort |
 |------|-------------|------------|--------|
-| 1.1  | Qualify heartbeat cancellation under injected timeout and 5xx failures | B11 | S |
+| 1.1  | Qualify request-timeout recovery and provider-specific transient errors | B11 | S |
 | 1.2  | Progress sideband via remote-helper protocol | B10 | S |
 | 1.3  | Stabilize adaptive xorb-size EMA feedback | B12 | S |
 

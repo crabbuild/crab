@@ -242,6 +242,12 @@ must be readable immediately, and its first successor must release the exact
 committed holder before TTL. Both paths finish with a protocol-v2 clone,
 byte-content comparison, and strict Git fsck.
 
+Add `--marker-faults` to inject active-marker failures on both sides of the
+object-store commit boundary. A repeated pre-commit 503 must leave the ref
+invisible, return structured retryable status, and allow a clean retry before
+lock TTL. A lost response after the immutable marker is stored must reconcile
+as success. Both cases verify the exact ref and content through protocol v2.
+
 To exercise the opt-in same-branch agent integration loop, add:
 
 ```bash

@@ -51,6 +51,7 @@ REF_JOURNAL_GATE_PATHS = {
     "prepared-head": "/refs/journal/heads/",
     "active-marker": "/refs/journal/active/",
 }
+REF_JOURNAL_FAULT_PHASES = {"before-upstream", "after-upstream"}
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object"}
 
@@ -82,6 +83,8 @@ class RequestCountingProxy:
         self.ref_journal_gate: str | None = None
         self.ref_journal_gate_reached = threading.Event()
         self.ref_journal_gate_release = threading.Event()
+        self.ref_journal_fault: tuple[str, str, int | None] | None = None
+        self.ref_journal_fault_reached = threading.Event()
 
     @property
     def url(self) -> str:
@@ -138,6 +141,21 @@ class RequestCountingProxy:
                 )
                 recorded = False
                 try:
+                    if proxy.consume_ref_journal_fault(
+                        self.command, self.path, "before-upstream"
+                    ):
+                        message = b"injected object-store service unavailable"
+                        proxy.record(
+                            self.command,
+                            self.path,
+                            self.headers,
+                            length,
+                            len(message),
+                            503,
+                        )
+                        recorded = True
+                        self.send_error_response(503, message)
+                        return
                     connection.request(self.command, upstream_path, body=body, headers=headers)
                     response = connection.getresponse()
                     response_body = response.read()
@@ -152,6 +170,13 @@ class RequestCountingProxy:
                         status,
                     )
                     recorded = True
+                    if proxy.consume_ref_journal_fault(
+                        self.command, self.path, "after-upstream", status=status
+                    ):
+                        self.send_error_response(
+                            503, b"injected response loss after upstream commit"
+                        )
+                        return
                     proxy.gate_ref_journal_response(self.command, self.path, status)
                     self.send_response_only(status, response.reason)
                     original_content_length = None
@@ -207,6 +232,15 @@ class RequestCountingProxy:
                     connection.close()
                     self.close_connection = True
 
+            def send_error_response(self, status: int, message: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(message)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(message)
+
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(
@@ -218,6 +252,7 @@ class RequestCountingProxy:
 
     def close(self) -> None:
         self.release_ref_journal_gate()
+        self.clear_ref_journal_fault()
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
@@ -256,6 +291,64 @@ class RequestCountingProxy:
 
     def release_ref_journal_gate(self) -> None:
         self.ref_journal_gate_release.set()
+
+    def arm_ref_journal_fault(
+        self,
+        boundary: str,
+        phase: str,
+        *,
+        attempts: int | None,
+    ) -> None:
+        if boundary not in REF_JOURNAL_GATE_PATHS:
+            raise SmokeError(f"unsupported ref-journal fault boundary: {boundary}")
+        if phase not in REF_JOURNAL_FAULT_PHASES:
+            raise SmokeError(f"unsupported ref-journal fault phase: {phase}")
+        if attempts is not None and attempts <= 0:
+            raise SmokeError("ref-journal fault attempts must be positive")
+        with self.lock:
+            if self.ref_journal_fault is not None:
+                raise SmokeError("ref-journal fault is already armed")
+            self.ref_journal_fault = (boundary, phase, attempts)
+            self.ref_journal_fault_reached.clear()
+
+    def consume_ref_journal_fault(
+        self,
+        method: str,
+        path: str,
+        phase: str,
+        *,
+        status: int | None = None,
+    ) -> bool:
+        decoded_path = urllib.parse.unquote(urllib.parse.urlsplit(path).path)
+        with self.lock:
+            fault = self.ref_journal_fault
+            if fault is None:
+                return False
+            boundary, configured_phase, remaining = fault
+            if (
+                method != "PUT"
+                or phase != configured_phase
+                or (
+                    phase == "after-upstream"
+                    and (status is None or not 200 <= status < 300)
+                )
+                or REF_JOURNAL_GATE_PATHS[boundary] not in decoded_path
+            ):
+                return False
+            if remaining is not None:
+                remaining -= 1
+                self.ref_journal_fault = (
+                    None if remaining == 0 else (boundary, configured_phase, remaining)
+                )
+            self.ref_journal_fault_reached.set()
+            return True
+
+    def wait_for_ref_journal_fault(self, timeout: float) -> bool:
+        return self.ref_journal_fault_reached.wait(timeout=timeout)
+
+    def clear_ref_journal_fault(self) -> None:
+        with self.lock:
+            self.ref_journal_fault = None
 
     def record(
         self,
@@ -394,6 +487,8 @@ class SmokeReport:
     same_branch_read: dict[str, Any] = field(default_factory=dict)
     pre_marker_crash: dict[str, Any] = field(default_factory=dict)
     post_marker_crash: dict[str, Any] = field(default_factory=dict)
+    marker_write_failure: dict[str, Any] = field(default_factory=dict)
+    marker_response_loss: dict[str, Any] = field(default_factory=dict)
     request_snapshots: list[dict[str, Any]] = field(default_factory=list)
     store_snapshots: list[dict[str, Any]] = field(default_factory=list)
     cost_model: dict[str, Any] = field(default_factory=dict)
@@ -474,6 +569,10 @@ class ConcurrentPushSmoke:
         self.pre_marker_reader = self.run_root / "pre-marker-reader"
         self.post_marker_agent = self.run_root / "post-marker-agent"
         self.post_marker_reader = self.run_root / "post-marker-reader"
+        self.marker_write_failure_agent = self.run_root / "marker-write-failure-agent"
+        self.marker_write_failure_reader = self.run_root / "marker-write-failure-reader"
+        self.marker_response_loss_agent = self.run_root / "marker-response-loss-agent"
+        self.marker_response_loss_reader = self.run_root / "marker-response-loss-reader"
         self.remote_url = f"crab://{args.bucket}/{REMOTE_PREFIX}/{self.run_id}"
         self.request_proxy: RequestCountingProxy | None = None
         self.env = self.build_env()
@@ -483,7 +582,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.5",
+            version="1.6",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -1025,7 +1124,7 @@ class ConcurrentPushSmoke:
         )
         self.store_snapshot("seed", attempted_pushes=1, successful_pushes=1)
 
-    def prepare_crash_agent(self, target: Path, name: str) -> None:
+    def prepare_boundary_agent(self, target: Path, name: str) -> None:
         self.run_cmd(
             f"crab clone {name}",
             [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
@@ -1046,7 +1145,7 @@ class ConcurrentPushSmoke:
     def run_pre_marker_crash(self) -> None:
         if self.request_proxy is None:
             raise SmokeError("--crash-boundary requires HTTP request capture")
-        self.prepare_crash_agent(self.pre_marker_agent, "pre-marker-agent")
+        self.prepare_boundary_agent(self.pre_marker_agent, "pre-marker-agent")
         branch = "pre-marker-crash"
         remote_ref = f"refs/heads/{branch}"
         refspec = f"HEAD:{remote_ref}"
@@ -1193,7 +1292,7 @@ class ConcurrentPushSmoke:
     def run_post_marker_crash(self) -> None:
         if self.request_proxy is None:
             raise SmokeError("--crash-boundary requires HTTP request capture")
-        self.prepare_crash_agent(self.post_marker_agent, "post-marker-agent")
+        self.prepare_boundary_agent(self.post_marker_agent, "post-marker-agent")
         branch = "post-marker-crash"
         remote_ref = f"refs/heads/{branch}"
         refspec = f"HEAD:{remote_ref}"
@@ -1315,6 +1414,215 @@ class ConcurrentPushSmoke:
         self.store_snapshot(
             "post-marker-crash",
             attempted_pushes=1 + len(attempts),
+            successful_pushes=1,
+        )
+
+    def prepare_marker_fault_commit(
+        self,
+        target: Path,
+        name: str,
+        branch: str,
+        filename: str,
+        content: str,
+    ) -> tuple[str, str, str, Path]:
+        self.prepare_boundary_agent(target, name)
+        remote_ref = f"refs/heads/{branch}"
+        self.run_git(target, ["checkout", "-b", branch])
+        payload = target / filename
+        payload.write_text(content, encoding="utf-8")
+        self.run_git(target, ["add", payload.name])
+        self.run_git(target, ["commit", "-m", f"{name} commit"])
+        tip_record = self.run_git(
+            target,
+            ["rev-parse", "HEAD"],
+            name=f"resolve {name} tip",
+        )
+        tip = Path(tip_record.stdout_log).read_text(encoding="utf-8").strip()
+        return remote_ref, f"HEAD:{remote_ref}", tip, payload
+
+    def run_marker_write_failure(self) -> None:
+        proxy = self.request_proxy
+        if proxy is None:
+            raise SmokeError("--marker-faults requires HTTP request capture")
+        content = f"active marker rejected before commit\nrun_id {self.run_id}\n"
+        remote_ref, refspec, tip, payload = self.prepare_marker_fault_commit(
+            self.marker_write_failure_agent,
+            "marker-write-failure-agent",
+            "marker-write-failure",
+            "marker-write-failure.txt",
+            content,
+        )
+        request_before = proxy.snapshot()
+        proxy.arm_ref_journal_fault(
+            "active-marker", "before-upstream", attempts=None
+        )
+        try:
+            failed = self.run_push_job(
+                "marker-write-failure",
+                remote_ref,
+                self.marker_write_failure_agent,
+                refspec,
+                lock_wait_secs=0,
+            )
+        finally:
+            proxy.clear_ref_journal_fault()
+        fault_reached = proxy.wait_for_ref_journal_fault(0)
+        advertised = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, remote_ref],
+            name="git ls-remote after active-marker write failure",
+        )
+        advertised_lines = Path(advertised.stdout_log).read_text(encoding="utf-8").splitlines()
+        recovery_started = time.monotonic()
+        recovered = self.run_push_job(
+            "marker-write-recovery",
+            remote_ref,
+            self.marker_write_failure_agent,
+            refspec,
+            lock_wait_secs=0,
+        )
+        recovery_ms = int((time.monotonic() - recovery_started) * 1000)
+        visible = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, remote_ref],
+            name="git ls-remote after active-marker write recovery",
+        )
+        visible_lines = Path(visible.stdout_log).read_text(encoding="utf-8").splitlines()
+        clone = self.protocol_v2_clone(
+            "marker-write-failure",
+            self.marker_write_failure_reader,
+            "protocol v2 clone after active-marker write recovery",
+        )
+        actual = (self.marker_write_failure_reader / payload.name).read_text(encoding="utf-8")
+        with self.report_lock:
+            self.report.marker_write_failure = {
+                "failed_attempt": asdict(failed),
+                "recovery_attempt": asdict(recovered),
+                "recovery_ms": recovery_ms,
+                "ref": remote_ref,
+                "tip": tip,
+                "clone": clone,
+            }
+            self.write_report()
+        self.check(
+            "marker-write-failure-withholds-ref",
+            fault_reached and failed.command.exit_code != 0 and not advertised_lines,
+            {
+                "fault_reached": fault_reached,
+                "exit_code": failed.command.exit_code,
+                "status": failed.status,
+                "unexpected_lines": advertised_lines,
+            },
+        )
+        self.check(
+            "marker-write-failure-recovers-before-ttl",
+            recovered.command.exit_code == 0
+            and recovered.status == "ok"
+            and recovery_ms < self.args.crash_lock_ttl_secs * 1000
+            and f"{tip}\t{remote_ref}" in visible_lines,
+            {
+                "status": recovered.status,
+                "exit_code": recovered.command.exit_code,
+                "recovery_ms": recovery_ms,
+                "lock_ttl_ms": self.args.crash_lock_ttl_secs * 1000,
+            },
+        )
+        self.check(
+            "marker-write-failure-restores-v2-and-content",
+            clone["protocol_v2"] and actual == content,
+            {"protocol_v2": clone["protocol_v2"], "content_visible": actual == content},
+        )
+        self.check(
+            "marker-write-failure-is-structured-retryable",
+            failed.status == "transient" and failed.retryable is True,
+            {"status": failed.status, "retryable": failed.retryable},
+        )
+        self.request_snapshot(
+            "marker-write-failure",
+            request_before,
+            attempted_pushes=2,
+            successful_pushes=1,
+        )
+        self.store_snapshot(
+            "marker-write-failure",
+            attempted_pushes=2,
+            successful_pushes=1,
+        )
+
+    def run_marker_response_loss(self) -> None:
+        proxy = self.request_proxy
+        if proxy is None:
+            raise SmokeError("--marker-faults requires HTTP request capture")
+        content = f"active marker committed before response loss\nrun_id {self.run_id}\n"
+        remote_ref, refspec, tip, payload = self.prepare_marker_fault_commit(
+            self.marker_response_loss_agent,
+            "marker-response-loss-agent",
+            "marker-response-loss",
+            "marker-response-loss.txt",
+            content,
+        )
+        request_before = proxy.snapshot()
+        proxy.arm_ref_journal_fault(
+            "active-marker", "after-upstream", attempts=1
+        )
+        try:
+            pushed = self.run_push_job(
+                "marker-response-loss",
+                remote_ref,
+                self.marker_response_loss_agent,
+                refspec,
+                lock_wait_secs=0,
+            )
+        finally:
+            proxy.clear_ref_journal_fault()
+        fault_reached = proxy.wait_for_ref_journal_fault(0)
+        advertised = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, remote_ref],
+            name="git ls-remote after active-marker response loss",
+        )
+        advertised_lines = Path(advertised.stdout_log).read_text(encoding="utf-8").splitlines()
+        clone = self.protocol_v2_clone(
+            "marker-response-loss",
+            self.marker_response_loss_reader,
+            "protocol v2 clone after active-marker response loss",
+        )
+        actual = (self.marker_response_loss_reader / payload.name).read_text(encoding="utf-8")
+        with self.report_lock:
+            self.report.marker_response_loss = {
+                "push": asdict(pushed),
+                "ref": remote_ref,
+                "tip": tip,
+                "clone": clone,
+            }
+            self.write_report()
+        self.check(
+            "marker-response-loss-reconciles-committed-write",
+            fault_reached
+            and pushed.command.exit_code == 0
+            and pushed.status == "ok"
+            and f"{tip}\t{remote_ref}" in advertised_lines,
+            {
+                "fault_reached": fault_reached,
+                "status": pushed.status,
+                "exit_code": pushed.command.exit_code,
+                "ref_visible": f"{tip}\t{remote_ref}" in advertised_lines,
+            },
+        )
+        self.check(
+            "marker-response-loss-preserves-v2-and-content",
+            clone["protocol_v2"] and actual == content,
+            {"protocol_v2": clone["protocol_v2"], "content_visible": actual == content},
+        )
+        self.request_snapshot(
+            "marker-response-loss",
+            request_before,
+            attempted_pushes=1,
+            successful_pushes=1,
+        )
+        self.store_snapshot(
+            "marker-response-loss",
+            attempted_pushes=1,
             successful_pushes=1,
         )
 
@@ -1591,6 +1899,9 @@ class ConcurrentPushSmoke:
             if self.args.crash_boundary:
                 self.run_pre_marker_crash()
                 self.run_post_marker_crash()
+            if self.args.marker_faults:
+                self.run_marker_write_failure()
+                self.run_marker_response_loss()
             if not self.args.skip_branch_fanout:
                 self.run_branch_fanout()
             if not self.args.skip_same_branch:
@@ -1648,14 +1959,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--push-timeout", type=int, default=300)
     parser.add_argument("--crash-boundary", action="store_true")
+    parser.add_argument("--marker-faults", action="store_true")
     parser.add_argument("--crash-lock-ttl-secs", type=int, default=21)
     parser.add_argument("--skip-branch-fanout", action="store_true")
     parser.add_argument("--skip-same-branch", action="store_true")
     parser.add_argument("--skip-fsck", action="store_true")
     parser.add_argument("--no-request-capture", action="store_true")
     args = parser.parse_args()
-    if args.crash_boundary and args.no_request_capture:
-        parser.error("--crash-boundary requires request capture")
+    if (args.crash_boundary or args.marker_faults) and args.no_request_capture:
+        parser.error("--crash-boundary and --marker-faults require request capture")
     if args.crash_lock_ttl_secs <= 20:
         parser.error("--crash-lock-ttl-secs must be greater than 20")
     args.crab_bin = resolve_executable(args.crab_bin)

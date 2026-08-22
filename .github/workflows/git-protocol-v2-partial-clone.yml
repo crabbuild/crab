@@ -321,6 +321,7 @@ jobs:
             --max-parallel-pushes 8 \
             --upload-concurrency 2 \
             --crash-boundary \
+            --marker-faults \
             --crash-lock-ttl-secs 21 \
             --lock-wait-secs 30 \
             --manifest-cas-retries 64

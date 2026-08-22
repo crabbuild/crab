@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,9 @@ from run_concurrent_push_smoke import RequestCountingProxy, store_category
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
+    put_bodies: list[bytes] = []
+    put_status = 200
+
     def do_GET(self) -> None:
         self.send_response(200)
         self.send_header("Content-Length", "0")
@@ -29,7 +33,8 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        self.send_response(200)
+        self.put_bodies.append(body)
+        self.send_response(self.put_status)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -40,6 +45,8 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 
 class RequestCountingProxyTest(unittest.TestCase):
     def setUp(self) -> None:
+        UpstreamHandler.put_bodies.clear()
+        UpstreamHandler.put_status = 200
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
         self.upstream.daemon_threads = True
         self.upstream_thread = threading.Thread(
@@ -139,6 +146,46 @@ class RequestCountingProxyTest(unittest.TestCase):
             "prepared-head",
             "/crab/e2e-concurrent-push/run/refs/journal/heads/abc.json",
         )
+
+    def assert_active_marker_fault(self, phase: str, forwarded: bool) -> None:
+        self.proxy.arm_ref_journal_fault("active-marker", phase, attempts=1)
+        request = urllib.request.Request(
+            self.proxy.url
+            + "/crab/e2e-concurrent-push/run/refs/journal/active/abc.json",
+            data=b"active-marker",
+            method="PUT",
+        )
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+
+        self.assertEqual(raised.exception.code, 503)
+        raised.exception.close()
+        self.assertTrue(self.proxy.wait_for_ref_journal_fault(2))
+        self.assertEqual(UpstreamHandler.put_bodies, [b"active-marker"] if forwarded else [])
+
+    def test_active_marker_fault_before_upstream_does_not_commit(self) -> None:
+        self.assert_active_marker_fault("before-upstream", forwarded=False)
+
+    def test_active_marker_fault_after_upstream_loses_committed_response(self) -> None:
+        self.assert_active_marker_fault("after-upstream", forwarded=True)
+
+    def test_after_upstream_fault_does_not_mask_rejected_write(self) -> None:
+        UpstreamHandler.put_status = 412
+        self.proxy.arm_ref_journal_fault("active-marker", "after-upstream", attempts=1)
+        request = urllib.request.Request(
+            self.proxy.url
+            + "/crab/e2e-concurrent-push/run/refs/journal/active/abc.json",
+            data=b"conflicting-marker",
+            method="PUT",
+        )
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+
+        self.assertEqual(raised.exception.code, 412)
+        raised.exception.close()
+        self.assertFalse(self.proxy.wait_for_ref_journal_fault(0))
 
     def test_internal_lock_category_retains_only_bounded_resource(self) -> None:
         category = store_category("locks/internal/git-manifest/lock/clock")
