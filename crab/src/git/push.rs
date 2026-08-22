@@ -1985,6 +1985,8 @@ pub enum RefUpdateDecision {
     Reject(PushRejectReason),
 }
 
+type PushPreflight = Option<(HashMap<String, String>, HashMap<String, RefUpdateDecision>)>;
+
 /// Convert a decision map into the per-ref outcome map the remote
 /// helper expects. `Proceed` → [`RefPushOutcome::Ok`], `Reject(r)` →
 /// [`RefPushOutcome::Rejected(r)`]. Used by the atomic-abort branch
@@ -14914,36 +14916,7 @@ impl PushPipeline {
     /// level. Ref-level errors (non-fast-forward, connectivity
     /// missing) are already surfaced per-ref during their own steps.
     async fn execute(&self) -> PushResult {
-        let admission_lock = if self.config.active_active_replication.is_none() {
-            match self.store.as_ref() {
-                Some(store) => acquire_push_admission_lock(
-                    store,
-                    self.router.repo_prefix(),
-                    self.config.lock_ttl,
-                    &self.cancel,
-                )
-                .await
-                .map(Some),
-                None => Ok(None),
-            }
-        } else {
-            Ok(None)
-        };
-        let admission_lock = self.at_stage(PushFailureStage::Admission, admission_lock);
-        let result = match admission_lock {
-            Ok(Some(lock)) => {
-                let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
-                let result = while_admitted_until_commit(
-                    lock,
-                    self.execute_inner(Some(committed_tx)),
-                    committed_rx,
-                )
-                .await;
-                self.at_stage(PushFailureStage::Admission, result)
-            }
-            Ok(None) => Box::pin(self.execute_inner(None)).await,
-            Err(error) => Err(error),
-        };
+        let result = Box::pin(self.execute_inner()).await;
 
         // Close the MetaDb guard before returning on either path.
         // On the happy path, step 9b already committed every SlateDB
@@ -15004,10 +14977,7 @@ impl PushPipeline {
         (bytes, pointers.len() as u64)
     }
 
-    async fn execute_inner(
-        &self,
-        mut admission_commit: Option<tokio::sync::oneshot::Sender<()>>,
-    ) -> Result<PushResult> {
+    async fn execute_inner(&self) -> Result<PushResult> {
         // Cancellation wins over configuration or remote preflight errors so
         // callers receive the stable cancellation contract even when no
         // network operation has started yet.
@@ -15115,6 +15085,50 @@ impl PushPipeline {
             }
         }
 
+        // Ref ownership and the under-lock no-op recheck come before
+        // repository-wide admission. Same-ref waiters cannot perform upload
+        // work, so making them scan admission slots only amplifies contention.
+        let admission_lock = if self.config.active_active_replication.is_none() {
+            match self.store.as_ref() {
+                Some(store) => Some(
+                    self.at_stage(
+                        PushFailureStage::Admission,
+                        acquire_push_admission_lock(
+                            store,
+                            self.router.repo_prefix(),
+                            self.config.lock_ttl,
+                            &self.cancel,
+                        )
+                        .await,
+                    )?,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
+        match admission_lock {
+            Some(lock) => {
+                let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+                self.at_stage(
+                    PushFailureStage::Admission,
+                    while_admitted_until_commit(
+                        lock,
+                        Box::pin(self.execute_admitted(preflight, Some(committed_tx))),
+                        committed_rx,
+                    )
+                    .await,
+                )
+            }
+            None => Box::pin(self.execute_admitted(preflight, None)).await,
+        }
+    }
+
+    async fn execute_admitted(
+        &self,
+        preflight: PushPreflight,
+        mut admission_commit: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<PushResult> {
         // Step 5-7: one bounded read -> pack -> resume-proof -> upload DAG.
         // Git reachability/locator preparation is independent and joins
         // the same lifecycle. `join!` (not `try_join!`) ensures every stage
@@ -15292,9 +15306,14 @@ impl PushPipeline {
                 )?;
                 decisions
             } else {
-                let commit_result = self
-                    .commit_ref_journal(manifest, bulk, &sha_map, decisions, &mut admission_commit)
-                    .await;
+                let commit_result = Box::pin(self.commit_ref_journal(
+                    manifest,
+                    bulk,
+                    &sha_map,
+                    decisions,
+                    &mut admission_commit,
+                ))
+                .await;
                 self.at_stage(PushFailureStage::RefCommit, commit_result)?
             };
             self.emit_perf_phase(manifest_phase.finish(0, manifest_bytes_out, manifest_item_count));
@@ -16151,7 +16170,7 @@ mod tests {
     use super::*;
     use crate::core::metrics::Metrics;
     use crab_coordination::write_coordinator::PushTransactionState;
-    use futures_util::stream::BoxStream;
+    use futures_util::stream::{BoxStream, StreamExt};
     use object_store::path::Path;
     use object_store::{
         GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -20113,6 +20132,55 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(50));
         lock.release().await.unwrap();
         release.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_ref_waiter_does_not_touch_repository_admission() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("admission-after-ref-owner");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create initial manifest");
+        let blocker = PushLock::acquire_ref(
+            store.inner(),
+            router.repo_prefix(),
+            "refs/heads/main",
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("acquire competing ref owner");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+
+        let result = Box::pin(pipeline.execute()).await;
+
+        let admission_objects = store
+            .inner()
+            .list(Some(&Path::from(
+                crab_coordination::push_admission_prefix(router.repo_prefix()).unwrap(),
+            )))
+            .count()
+            .await;
+        assert_eq!(
+            (result.failure_stage, admission_objects),
+            (Some(PushFailureStage::Lock), 0),
+            "same-ref contention must fail at its owner without reserving admission",
+        );
+        blocker.release().await.unwrap();
     }
 
     #[tokio::test]

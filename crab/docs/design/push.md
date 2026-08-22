@@ -1147,6 +1147,12 @@ including delete refspecs. If `push.lock_wait_secs` or `--lock-wait-secs` is
 nonzero, contention releases any partially-acquired locks, waits with jitter,
 and retries the full lock set until the wait budget expires.
 
+Repository-wide upload admission begins only after that ref owner refreshes
+the manifest and rules out an under-lock no-op. A same-ref waiter therefore
+polls only the ref handoff and never scans or reserves admission slots. Owners
+of distinct refs may wait for admission while retaining their renewable ref
+leases; once admitted, the existing bounded pack/upload lifecycle applies.
+
 ### Lock Expiry and Reclamation
 
 If a pusher crashes before its ref-journal active marker, the ref stays
