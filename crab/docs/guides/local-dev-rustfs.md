@@ -234,6 +234,14 @@ The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.
 
+Add `--crash-boundary --crash-lock-ttl-secs 21` to SIGKILL one push after its
+prepared ref head and another after its active marker. The first ref must stay
+invisible and its immediate retry must honor the structured lease-expiry hint;
+the retry then replaces abandoned prepared state after TTL. The second ref
+must be readable immediately, and its first successor must release the exact
+committed holder before TTL. Both paths finish with a protocol-v2 clone,
+byte-content comparison, and strict Git fsck.
+
 To exercise the opt-in same-branch agent integration loop, add:
 
 ```bash

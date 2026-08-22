@@ -61,16 +61,18 @@ and ignored after the hard cutover.
    CAS-update locks/refs/heads/main/lock to { holder, expires_at: 0 }
    only if the holder still matches
    
-4. Expiry:
-   If holder crashes without releasing, the lock expires after TTL.
-   Next pusher detects the expired lock and reclaims it.
+4. Crash recovery:
+   Before the ref-journal active marker, the lock expires after TTL.
+   After that marker, the visible journal edit proves the holder finished its
+   ref-critical work; the next pusher releases that exact holder by CAS.
 ```
 
 ### Lock TTL
 
 Default: `operation_timeout` from config (typically 5 minutes). The TTL must
-be long enough to cover the upload phase but short enough that a crashed
-pusher's lock doesn't block others for too long.
+be long enough to cover the upload phase but short enough to bound recovery
+from a crash before ref visibility. A crash after visibility does not wait for
+TTL because the committed transaction carries holder-specific release proof.
 
 Source: `crates/crab-coordination/src/push_lock.rs`
 

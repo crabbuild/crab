@@ -1150,8 +1150,9 @@ and retries the full lock set until the wait budget expires.
 
 ### Lock Expiry and Reclamation
 
-If a pusher crashes without releasing the lock, the lock expires after
-the TTL. The next pusher detects the expired lock and reclaims it:
+If a pusher crashes before its ref-journal active marker, the ref stays
+invisible and the lock expires after the TTL. The next pusher detects the
+expired lock, reclaims it, and replaces the abandoned prepared head:
 
 ```
 1. GET lock → { holder: "A", expires_at: T-60 }  (expired)
@@ -1162,6 +1163,12 @@ Cleanup never unconditionally deletes the lock pointer in the hot path.
 Without conditional delete support, release marks the holder expired and the
 next acquirer reuses the same object via CAS. This prevents a stale owner from
 deleting a fresh holder's lock after TTL expiry.
+
+If the active marker is already visible, its immutable edit binds the exact
+lock holder that crossed the final ref-critical boundary. A contender may
+release that holder immediately with a holder-checked CAS. Prepared
+transactions and mismatched holders cannot take this path, and the final CAS
+cannot clear a lock that has already been acquired by a successor.
 
 ### Heartbeat
 
@@ -1290,9 +1297,10 @@ after the grace period has elapsed.
    but never delete or modify staged chunks. If the push fails, the same
    data is available for retry.
 
-3. **Lock always released or expired.** The `on_failure` path always stops
-   the heartbeat and releases the lock with a holder-checked CAS update. If
-   the process crashes, the lock expires via TTL.
+3. **Lock always released or recoverable.** The `on_failure` path always stops
+   the heartbeat and releases the lock with a holder-checked CAS update. A
+   pre-marker process crash waits for TTL; a visible transaction lets the next
+   pusher release only its committed holder immediately.
 
 4. **CAS prevents lost updates.** Concurrent pushers cannot silently
    overwrite each other's ref updates. The CAS loop detects conflicts

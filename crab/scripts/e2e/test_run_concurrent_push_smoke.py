@@ -81,29 +81,44 @@ class RequestCountingProxyTest(unittest.TestCase):
 
         self.assertEqual(content_length, "123")
 
-    def test_active_marker_gate_waits_after_upstream_commit(self) -> None:
-        self.proxy.arm_active_marker_gate()
+    def assert_ref_journal_gate_waits(
+        self,
+        boundary: str,
+        path: str,
+    ) -> None:
+        self.proxy.arm_ref_journal_gate(boundary)
         result: list[bytes] = []
 
-        def put_marker() -> None:
+        def put_ref_journal_object() -> None:
             request = urllib.request.Request(
-                self.proxy.url
-                + "/crab/e2e-concurrent-push/run/refs/journal/active/abc.json",
-                data=b"marker",
+                self.proxy.url + path,
+                data=b"journal-object",
                 method="PUT",
             )
             with urllib.request.urlopen(request) as response:
                 result.append(response.read())
 
-        request = threading.Thread(target=put_marker)
+        request = threading.Thread(target=put_ref_journal_object)
         request.start()
 
-        self.assertTrue(self.proxy.wait_for_active_marker(2))
+        self.assertTrue(self.proxy.wait_for_ref_journal_gate(2))
         time.sleep(0.05)
         self.assertTrue(request.is_alive())
-        self.proxy.release_active_marker_gate()
+        self.proxy.release_ref_journal_gate()
         request.join(timeout=2)
-        self.assertEqual(result, [b"marker"])
+        self.assertEqual(result, [b"journal-object"])
+
+    def test_active_marker_gate_waits_after_upstream_commit(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "active-marker",
+            "/crab/e2e-concurrent-push/run/refs/journal/active/abc.json",
+        )
+
+    def test_prepared_head_gate_waits_after_upstream_write(self) -> None:
+        self.assert_ref_journal_gate_waits(
+            "prepared-head",
+            "/crab/e2e-concurrent-push/run/refs/journal/heads/abc.json",
+        )
 
     def test_internal_lock_category_retains_only_bounded_resource(self) -> None:
         category = store_category("locks/internal/git-manifest/lock/clock")
