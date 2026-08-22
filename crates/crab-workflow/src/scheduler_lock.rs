@@ -8,11 +8,11 @@
 //! [`CrabError::WorkflowLockTimeout { held_by, waited_ms }`] that
 //! points at the process to kill or wait on.
 //!
-//! This is a thin cousin of the staging-area flock at
-//! `crab-staging` — same `libc::flock` primitive, same PID
-//! on-disk diagnostic — but simpler: there's a single exclusive
-//! holder, there's no reader/writer split, and the lifetime of the
-//! lock matches the lifetime of a `crab run` invocation.
+//! This is a thin cousin of the staging-area lock at `crab-staging`:
+//! same PID on-disk diagnostic, but simpler: there's a single
+//! exclusive holder, there's no reader/writer split, and the
+//! lifetime of the lock matches the lifetime of a `crab run`
+//! invocation.
 //!
 //! The lock file itself lives at `{workflow_root}/.lock`, where
 //! `workflow_root` is `{repo_root}/.crab/workflow`. The parent
@@ -33,8 +33,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use fs4::fs_std::FileExt as LockFileExt;
 
 use tracing::{debug, warn};
 
@@ -255,32 +254,15 @@ fn read_holder_pid(path: &Path) -> Option<u32> {
     buf.trim().parse().ok()
 }
 
-/// Attempt a non-blocking exclusive flock on `file`. Returns
-/// `Ok(())` on success, `Err(WouldBlock)` on contention, or any
-/// other `io::Error` on unexpected failure.
-#[cfg(unix)]
+/// Attempt a non-blocking exclusive file lock on `file`. The `fs4`
+/// adapter uses `flock` on Unix and `LockFileEx` on Windows, keeping
+/// the scheduler lock contract identical across native runners.
 fn try_flock_exclusive(file: &File) -> std::io::Result<()> {
-    // SAFETY: `flock` is a POSIX advisory lock. The fd is valid
-    // because we just opened it. `LOCK_NB` makes it non-blocking;
-    // `EWOULDBLOCK` maps to `ErrorKind::WouldBlock`.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
+    if LockFileExt::try_lock_exclusive(file)? {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error())
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
     }
-}
-
-#[cfg(not(unix))]
-fn try_flock_exclusive(_file: &File) -> std::io::Result<()> {
-    // Windows support would use `LockFileEx` with
-    // `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`. The
-    // rest of crab is unix-only today, so this branch is dead
-    // code we keep compilable.
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "workflow scheduler lock is only supported on unix",
-    ))
 }
 
 fn is_would_block(err: &std::io::Error) -> bool {

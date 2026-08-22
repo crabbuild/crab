@@ -23,6 +23,7 @@ md-5 = { workspace = true }
 bytes = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
+fs4 = "0.13"
 futures-util = { workspace = true }
 gix-discover = { workspace = true }
 gix = { workspace = true, optional = true }
