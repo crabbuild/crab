@@ -46,12 +46,15 @@ committing twice.
 
 Unconfigured non-`crab.build` authorities retain the existing direct BYOC push
 path. Direct pushes use five reusable repository-scoped admission objects,
-weighted by configured worker width and the estimated xorb memory window, to
-bound concurrent upload pressure. These slots provide repository workload
-fairness within one cloud-credential trust domain; they do not identify or
-enforce quotas for separate teams. Use a managed authority when authenticated
-organization-level admission is required. Crab does not switch between managed
-and direct behavior after a failure.
+weighted by configured worker width and the estimated xorb plus newly reachable
+Git payload, to bound concurrent CPU, memory, and object-store pressure. A
+single large push can reserve up to four payload slots, leaving one slot for
+small work; an xorb client configured above 32 upload workers can reserve all
+five. These slots provide repository workload fairness within one
+cloud-credential trust domain; they do not identify or enforce quotas for
+separate teams. Use a managed authority when authenticated organization-level
+admission is required. Crab does not switch between managed and direct behavior
+after a failure.
 
 ## Options
 

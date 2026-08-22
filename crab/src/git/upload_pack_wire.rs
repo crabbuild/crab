@@ -84,7 +84,7 @@ pub async fn snapshot_available(
     };
     match repository.visibility_index(cancellation).await {
         Ok(_) => true,
-        Err(error) if visibility_index_is_missing(&error) => {
+        Err(error) if visibility_index_needs_repair(&error) => {
             let repair_store = crate::storage::Store::from_storage(store.clone());
             let repair_layout =
                 crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
@@ -124,12 +124,14 @@ pub async fn snapshot_available(
     }
 }
 
-fn visibility_index_is_missing(error: &RemoteGitError) -> bool {
+fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
     matches!(
         error,
         RemoteGitError::Metadata(crab_metadata::error::MetadataError::Storage {
             source: crab_storage::StorageError::NotFound { .. },
-        })
+        }) | RemoteGitError::RepositoryState {
+            reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
+        }
     )
 }
 
@@ -1105,6 +1107,15 @@ mod tests {
         assert!(parse_oid(&"a".repeat(40)).is_ok());
         assert!(parse_oid(&"a".repeat(39)).is_err());
         assert!(parse_oid(&format!("{}z", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn visibility_mismatch_enters_the_bounded_repair_path() {
+        let error = RemoteGitError::RepositoryState {
+            reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
+        };
+
+        assert!(visibility_index_needs_repair(&error));
     }
 
     #[test]

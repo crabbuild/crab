@@ -282,16 +282,19 @@ impl StoreChecker {
         }
         let storage_router =
             crab_storage::StoreLayout::new(self.store.as_storage().clone(), self.prefix.clone());
-        let index = match crab_metadata::git_visibility::read(
+        let index = match crab_metadata::git_visibility::read_for_manifest(
             self.store.as_storage(),
             &storage_router,
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
+            manifest,
         )
         .await
         {
-            Ok(index) => index,
+            Ok(Some(read)) => read.index,
+            Ok(None) => {
+                return Ok(vec![issue(
+                    "digest-bound Git visibility proof is missing".to_owned(),
+                )]);
+            }
             Err(error) => {
                 return Ok(vec![issue(error.to_string())]);
             }

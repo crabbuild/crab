@@ -1667,6 +1667,19 @@ fn git_object_set_proof_from_indices(paths: &[PathBuf]) -> Result<GitObjectSetPr
 const MAX_GIT_OBJECT_CANDIDATES: usize = 2_000_000;
 const MAX_GIT_OBJECT_ENUM_BYTES: usize = 256 * 1024 * 1024;
 
+async fn estimate_git_pack_pressure_bytes(
+    git_dir: Option<PathBuf>,
+    tips: Vec<String>,
+    excluded_tips: Vec<String>,
+) -> Result<u64> {
+    tokio::task::spawn_blocking(move || {
+        pack::estimate_reachable_object_bytes(None, git_dir.as_deref(), &tips, &excluded_tips)
+            .map(|(bytes, _)| bytes)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git pack estimate join failed: {error}")))?
+}
+
 async fn enumerate_git_object_candidates(
     git_dir: Option<PathBuf>,
     tips: Vec<String>,
@@ -2537,9 +2550,9 @@ const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 /// Cap after a same-ref contender has published its successor signal.
 const PUSH_LOCK_SUCCESSOR_POLL_CAP: Duration = Duration::from_millis(250);
 
-// Five reusable objects bound every admission probe. Xorb pushes reserve one
-// slot per eight configured upload workers, so ordinary pushes retain five-way
-// concurrency while a wider client consumes proportionally more capacity.
+// Five reusable objects bound every admission probe. Pushes reserve capacity
+// for xorb worker width and estimated xorb plus Git payload, so ordinary
+// pushes retain five-way concurrency while heavier clients consume more slots.
 const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT: usize = 8;
 const PUSH_ADMISSION_MEMORY_SLOTS: usize = PUSH_ADMISSION_SLOTS - 1;
@@ -3150,17 +3163,27 @@ fn push_admission_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     Duration::from_nanos(pick)
 }
 
-fn push_admission_required_slots(upload_concurrency: usize, planned_xorb_bytes: u64) -> usize {
-    if planned_xorb_bytes == 0 {
+fn push_admission_required_slots(
+    upload_concurrency: usize,
+    planned_xorb_bytes: u64,
+    planned_git_bytes: u64,
+) -> usize {
+    if planned_xorb_bytes == 0 && planned_git_bytes == 0 {
         return 1;
     }
-    let worker_slots = upload_concurrency
-        .max(1)
-        .div_ceil(PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT)
-        .clamp(1, PUSH_ADMISSION_SLOTS);
+    let worker_slots = if planned_xorb_bytes == 0 {
+        1
+    } else {
+        upload_concurrency
+            .max(1)
+            .div_ceil(PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT)
+            .clamp(1, PUSH_ADMISSION_SLOTS)
+    };
     let upload_memory_limit = u64::try_from(XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT)
         .unwrap_or(PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT);
-    let memory_bytes = planned_xorb_bytes.min(upload_memory_limit);
+    let memory_bytes = planned_xorb_bytes
+        .saturating_add(planned_git_bytes)
+        .min(upload_memory_limit);
     let memory_slots = memory_bytes
         .div_ceil(PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT)
         .clamp(1, PUSH_ADMISSION_MEMORY_SLOTS as u64) as usize;
@@ -3937,6 +3960,9 @@ pub struct PushPipeline {
     /// Estimated bytes that can enter the xorb pack/upload memory window.
     /// Classification owns this value; repository admission reads it once.
     planned_xorb_bytes: std::sync::atomic::AtomicU64,
+    /// Uncompressed size of newly reachable Git objects used as conservative
+    /// pack pressure. Ref planning owns it; admission reads it once.
+    planned_git_bytes: std::sync::atomic::AtomicU64,
     /// Xorb payloads retained until `post_success_cleanup` can warm
     /// local and remote caches. Large payloads stay temp-file backed
     /// here so a successful upload does not pin all pushed bytes until
@@ -4788,7 +4814,7 @@ async fn warm_uploaded_xorb_cache(
     let remote_needs_warm = caching_store
         .as_ref()
         .is_some_and(|cs| cs.should_warm_remote_object(&path, bytes));
-    let Some(payload) = uploaded_xorb.payload.as_ref() else {
+    if uploaded_xorb.payload.is_none() {
         if !remote_needs_warm {
             return stats;
         }
@@ -4825,7 +4851,7 @@ async fn warm_uploaded_xorb_cache(
             }
         }
         return stats;
-    };
+    }
     if !cache_needs_write && let Err(e) = cache.index_xorb_if_present(&hash).await {
         warn!(
             xorb = %hash.hex(),
@@ -6279,17 +6305,9 @@ async fn git_visibility_index_exists_for_manifest(
     let storage = store.as_storage();
     let storage_router =
         crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-    match crab_metadata::git_visibility::read_with_format(
-        storage,
-        &storage_router,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        &manifest.git_validation_digest,
-    )
-    .await
+    match crab_metadata::git_visibility::read_for_manifest(storage, &storage_router, manifest).await
     {
-        Ok(read) => {
-            ensure_git_visibility_matches_manifest(&read.index, manifest, router)?;
+        Ok(Some(read)) => {
             if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
                 crab_metadata::git_visibility::upload_if_absent(
                     storage,
@@ -6301,28 +6319,9 @@ async fn git_visibility_index_exists_for_manifest(
             }
             Ok(true)
         }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: StorageError::NotFound { .. },
-        }) => Ok(false),
+        Ok(None) => Ok(false),
         Err(error) => Err(CrabError::from(error)),
     }
-}
-
-fn ensure_git_visibility_matches_manifest(
-    index: &crab_metadata::git_visibility::GitVisibilityIndex,
-    manifest: &Manifest,
-    router: &StoreLayout,
-) -> Result<()> {
-    if index.matches_manifest(manifest) {
-        return Ok(());
-    }
-    Err(CrabError::CorruptObject {
-        path: router
-            .git_visibility_path(&manifest.git_validation_digest)
-            .as_ref()
-            .to_owned(),
-        reason: "Git visibility proof does not match its manifest refs".to_owned(),
-    })
 }
 
 fn remote_git_visibility_error(error: crab_remote_git::Error) -> CrabError {
@@ -6460,6 +6459,7 @@ impl PushPipeline {
             uploaded_shard_hashes: tokio::sync::Mutex::new(Vec::new()),
             new_chunk_hashes: tokio::sync::Mutex::new(None),
             planned_xorb_bytes: std::sync::atomic::AtomicU64::new(0),
+            planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
             uploaded_xorbs: tokio::sync::Mutex::new(Vec::new()),
             chunk_cache: tokio::sync::Mutex::new(HashMap::new()),
             add_push_plans: tokio::sync::Mutex::new(HashMap::new()),
@@ -8367,22 +8367,15 @@ impl PushPipeline {
         let compacted_visibility = if compacted.refs.is_empty() {
             None
         } else {
-            match crab_metadata::git_visibility::read(
+            match crab_metadata::git_visibility::read_for_manifest(
                 storage,
                 &storage_router,
-                compacted.generation,
-                &compacted.pack_index_hash,
-                &compacted.git_validation_digest,
+                compacted,
             )
             .await
             {
-                Ok(visibility) => {
-                    ensure_git_visibility_matches_manifest(&visibility, compacted, &self.router)?;
-                    Some(visibility)
-                }
-                Err(crab_metadata::error::MetadataError::Storage {
-                    source: StorageError::NotFound { .. },
-                }) => None,
+                Ok(Some(read)) => Some(read.index),
+                Ok(None) => None,
                 Err(error) => return Err(CrabError::from(error)),
             }
         };
@@ -11960,15 +11953,10 @@ impl PushPipeline {
         Ok(())
     }
 
-    /// Prepare the read-only Git pack dependency basis.
-    ///
-    /// This work is independent of staged chunk reads and performs no remote
-    /// mutation, so the canonical executor overlaps it with xorb packing.
-    async fn prepare_git_pack(&self) -> Result<()> {
+    async fn planned_git_ref_updates(&self) -> Result<Vec<RefUpdate>> {
         let sha_map = self.resolve_src_ref_map()?;
         let proceeding = self.proceeding_destinations().await;
-        let refs: Vec<RefUpdate> = self
-            .specs
+        self.specs
             .iter()
             .filter(|spec| {
                 !spec.src.is_empty()
@@ -11990,7 +11978,30 @@ impl PushPipeline {
                     force: spec.force,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect()
+    }
+
+    async fn estimate_git_pack_pressure(&self) -> Result<()> {
+        let refs = self.planned_git_ref_updates().await?;
+        let tip_shas = refs.iter().map(|update| update.new_sha.clone()).collect();
+        let excluded_tips = {
+            let base = self.base_manifest.lock().await;
+            manifest_connectivity_frontier(base.as_ref(), &self.objects_dir()?)
+        };
+        let bytes =
+            estimate_git_pack_pressure_bytes(self.config.git_dir.clone(), tip_shas, excluded_tips)
+                .await?;
+        self.planned_git_bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Prepare the read-only Git pack dependency basis.
+    ///
+    /// This work is independent of staged chunk reads and performs no remote
+    /// mutation, so the canonical executor overlaps it with xorb packing.
+    async fn prepare_git_pack(&self) -> Result<()> {
+        let refs = self.planned_git_ref_updates().await?;
         if refs.is_empty() {
             *self.git_object_candidates.lock().await = Vec::new();
             *self.prepared_git_pack.lock().await = Some(PreparedGitPack {
@@ -15051,6 +15062,8 @@ impl PushPipeline {
             self.config.upload_concurrency,
             self.planned_xorb_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
+            self.planned_git_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
@@ -15165,14 +15178,21 @@ impl PushPipeline {
         // Ref ownership and the under-lock no-op recheck come before
         // repository-wide admission. Same-ref waiters cannot perform upload
         // work, so making them scan admission slots only amplifies contention.
+        let object_store_admission = uses_object_store_push_admission(
+            self.config.protected_push.is_some(),
+            self.config.active_active_replication.is_some(),
+        );
+        if object_store_admission {
+            self.at_stage(
+                PushFailureStage::GitPackPrepare,
+                self.estimate_git_pack_pressure().await,
+            )?;
+        }
         let required_admission_slots = self.push_admission_required_slots();
         // Protected pushes are admitted by the authenticated service before it
         // grants a session-private staging store. Coordination objects written
         // through that store cannot provide repository-wide mutual exclusion.
-        let admission_lock = if uses_object_store_push_admission(
-            self.config.protected_push.is_some(),
-            self.config.active_active_replication.is_some(),
-        ) {
+        let admission_lock = if object_store_admission {
             match self.store.as_ref() {
                 Some(store) => Some(
                     self.at_stage(
@@ -16473,10 +16493,25 @@ mod tests {
         .await
         .expect("enumerate relative objects")
         .expect("relative enumeration within cap");
-        let full = enumerate_git_object_candidates(Some(git_dir), vec![new_commit], Vec::new())
-            .await
-            .expect("enumerate full objects")
-            .expect("full enumeration within cap");
+        let full = enumerate_git_object_candidates(
+            Some(git_dir.clone()),
+            vec![new_commit.clone()],
+            Vec::new(),
+        )
+        .await
+        .expect("enumerate full objects")
+        .expect("full enumeration within cap");
+        let relative_bytes = estimate_git_pack_pressure_bytes(
+            Some(git_dir.clone()),
+            vec![new_commit.clone()],
+            vec![base_commit.clone()],
+        )
+        .await
+        .expect("estimate relative pack pressure");
+        let full_bytes =
+            estimate_git_pack_pressure_bytes(Some(git_dir), vec![new_commit], Vec::new())
+                .await
+                .expect("estimate full pack pressure");
         let base_commit =
             gix_hash::ObjectId::from_hex(base_commit.as_bytes()).expect("base commit object ID");
         let base_tree =
@@ -16486,6 +16521,8 @@ mod tests {
 
         assert_eq!(relative.len(), 3);
         assert!(relative.len() < full.len());
+        assert!(relative_bytes > 0);
+        assert!(relative_bytes < full_bytes);
         assert!(!relative.contains(&base_commit));
         assert!(!relative.contains(&base_tree));
         assert!(!relative.contains(&base_blob));
@@ -18010,31 +18047,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn git_visibility_must_match_manifest_refs() {
-        let (_, router) = test_store_router("visibility-manifest-match");
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 3;
-        manifest.pack_index_hash = "a".repeat(64);
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "1".repeat(40));
-        manifest.seal_git_validation();
-        let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
-            manifest.generation,
-            manifest.pack_index_hash.clone(),
-            manifest.git_validation_digest.clone(),
-            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
-        );
-
-        assert!(matches!(
-            ensure_git_visibility_matches_manifest(&index, &manifest, &router),
-            Err(CrabError::CorruptObject { .. })
-        ));
-    }
-
     #[tokio::test]
-    async fn mismatched_v1_visibility_is_rejected_without_v2_backfill() {
+    async fn mismatched_v1_visibility_is_absent_for_v2_rebuild() {
         let (store, router) = test_store_router("visibility-v1-mismatch");
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest.generation = 3;
@@ -18061,10 +18075,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            git_visibility_index_exists_for_manifest(&store, &router, &manifest).await,
-            Err(CrabError::CorruptObject { .. })
-        ));
+        assert!(
+            !git_visibility_index_exists_for_manifest(&store, &router, &manifest)
+                .await
+                .unwrap()
+        );
         assert!(matches!(
             storage
                 .head(&storage_router.git_visibility_path(&manifest.git_validation_digest),)
@@ -18668,20 +18683,22 @@ mod tests {
     }
 
     #[test]
-    fn push_admission_charges_xorb_worker_width_and_memory() {
+    fn push_admission_charges_worker_width_and_payload_pressure() {
         let upload_memory_limit =
             u64::try_from(XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT).expect("memory limit fits u64");
         let slots = [
-            push_admission_required_slots(64, 0),
-            push_admission_required_slots(1, 1),
-            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT),
-            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT + 1),
-            push_admission_required_slots(8, upload_memory_limit),
-            push_admission_required_slots(40, 1),
-            push_admission_required_slots(64, 1),
+            push_admission_required_slots(64, 0, 0),
+            push_admission_required_slots(1, 1, 0),
+            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT, 0),
+            push_admission_required_slots(8, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT + 1, 0),
+            push_admission_required_slots(8, upload_memory_limit, 0),
+            push_admission_required_slots(40, 1, 0),
+            push_admission_required_slots(64, 1, 0),
+            push_admission_required_slots(64, 0, PUSH_ADMISSION_MEMORY_BYTES_PER_SLOT + 1),
+            push_admission_required_slots(64, 0, upload_memory_limit),
         ];
 
-        assert_eq!(slots, [1, 1, 1, 2, 4, 5, 5]);
+        assert_eq!(slots, [1, 1, 1, 2, 4, 5, 5, 2, 4]);
     }
 
     #[test]

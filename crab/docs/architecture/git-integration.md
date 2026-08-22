@@ -242,7 +242,9 @@ bodies store one sorted object-ID dictionary plus adaptive sparse-position or
 bitmap closures per ref.
 Crab 1.0.15's generation-and-pack-index key remains readable and GC-rooted only
 as a shipped data migration; the next write or explicit metadata repair
-backfills the digest-bound proof.
+backfills the digest-bound proof. A valid legacy object that describes a
+different abandoned ref-only candidate is treated as inapplicable, not as
+damage to the current manifest, so it cannot block that backfill.
 
 Source: `crab/src/git/push.rs`, `crab/src/git/push_manifest.rs`,
 `crates/crab-git/src/push_state.rs`

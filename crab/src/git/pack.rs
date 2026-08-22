@@ -5,7 +5,9 @@
 //! Supports thin packs when configured.
 
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,6 +99,110 @@ impl RemotePackExclusions<'_> {
             Self::RefTips(tips) => tips.to_vec(),
         }
     }
+}
+
+/// Estimate newly reachable object bytes and count without retaining object IDs.
+pub(crate) fn estimate_reachable_object_bytes(
+    current_dir: Option<&Path>,
+    git_dir: Option<&Path>,
+    tips: &[String],
+    excluded_tips: &[String],
+) -> Result<(u64, u64)> {
+    if tips.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut rev_list = Command::new("git");
+    if let Some(current_dir) = current_dir {
+        rev_list.current_dir(current_dir);
+    }
+    if let Some(git_dir) = git_dir {
+        rev_list.arg("--git-dir").arg(git_dir);
+    }
+    rev_list
+        .args(["rev-list", "--objects", "--no-object-names"])
+        .args(tips);
+    if !excluded_tips.is_empty() {
+        rev_list.arg("--not").args(excluded_tips);
+    }
+    let mut rev_list = rev_list
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(CrabError::Io)?;
+    let rev_list_stdout = rev_list.stdout.take().ok_or_else(|| {
+        CrabError::Internal("git rev-list admission estimator omitted stdout".to_owned())
+    })?;
+    let rev_list_stderr = rev_list.stderr.take().ok_or_else(|| {
+        CrabError::Internal("git rev-list admission estimator omitted stderr".to_owned())
+    })?;
+    let rev_list_error = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = BufReader::new(rev_list_stderr)
+            .take(1024 * 1024)
+            .read_to_end(&mut bytes);
+        bytes
+    });
+
+    let mut cat_file = Command::new("git");
+    if let Some(current_dir) = current_dir {
+        cat_file.current_dir(current_dir);
+    }
+    if let Some(git_dir) = git_dir {
+        cat_file.arg("--git-dir").arg(git_dir);
+    }
+    let mut cat_file = cat_file
+        .args(["cat-file", "--batch-check=%(objectsize)"])
+        .stdin(Stdio::from(rev_list_stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(CrabError::Io)?;
+    let cat_file_stdout = cat_file.stdout.take().ok_or_else(|| {
+        CrabError::Internal("git cat-file admission estimator omitted stdout".to_owned())
+    })?;
+    let cat_file_stderr = cat_file.stderr.take().ok_or_else(|| {
+        CrabError::Internal("git cat-file admission estimator omitted stderr".to_owned())
+    })?;
+    let cat_file_error = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = BufReader::new(cat_file_stderr)
+            .take(1024 * 1024)
+            .read_to_end(&mut bytes);
+        bytes
+    });
+    let estimate = BufReader::new(cat_file_stdout).lines().try_fold(
+        (0u64, 0u64),
+        |(bytes, objects), value| {
+            let value = value.map_err(CrabError::Io)?;
+            let size = value.trim().parse::<u64>().map_err(|_| {
+                CrabError::Internal(format!(
+                    "git cat-file returned an invalid object size during push admission: {value}"
+                ))
+            })?;
+            Ok((bytes.saturating_add(size), objects.saturating_add(1)))
+        },
+    );
+    let cat_file_status = cat_file.wait().map_err(CrabError::Io)?;
+    let rev_list_status = rev_list.wait().map_err(CrabError::Io)?;
+    let rev_list_error = rev_list_error.join().map_err(|_| {
+        CrabError::Internal("git rev-list admission stderr reader panicked".to_owned())
+    })?;
+    let cat_file_error = cat_file_error.join().map_err(|_| {
+        CrabError::Internal("git cat-file admission stderr reader panicked".to_owned())
+    })?;
+    if !rev_list_status.success() {
+        return Err(CrabError::Configuration {
+            key: "git push admission".to_owned(),
+            origin: String::from_utf8_lossy(&rev_list_error).trim().to_owned(),
+        });
+    }
+    if !cat_file_status.success() {
+        return Err(CrabError::Configuration {
+            key: "git push admission".to_owned(),
+            origin: String::from_utf8_lossy(&cat_file_error).trim().to_owned(),
+        });
+    }
+    estimate
 }
 
 /// Compute the set of objects known to exist on the remote.

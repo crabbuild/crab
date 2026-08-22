@@ -1,7 +1,6 @@
 //! Shared Crab Auth protected-push preparation.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -230,78 +229,16 @@ fn estimate_git_object_delta(
     repository: &Path,
     ref_updates: &[PushRefUpdate],
 ) -> Result<(u64, u64)> {
-    let mut rev_list = Command::new("git");
-    rev_list
-        .current_dir(repository)
-        .args(["rev-list", "--objects"]);
-    for update in ref_updates {
-        rev_list.arg(&update.new_oid);
-    }
-    let old_oids = ref_updates
+    let tips = ref_updates
+        .iter()
+        .map(|update| update.new_oid.clone())
+        .collect::<Vec<_>>();
+    let excluded_tips = ref_updates
         .iter()
         .filter_map(|update| update.old_oid.as_deref())
-        .collect::<Vec<_>>();
-    if !old_oids.is_empty() {
-        rev_list.arg("--not").args(old_oids);
-    }
-    let output = rev_list.output().map_err(CrabError::Io)?;
-    if !output.status.success() {
-        return Err(git_estimate_error("rev-list", &output.stderr));
-    }
-    let object_ids = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_ascii_whitespace().next())
-        .filter(|oid| !oid.is_empty())
         .map(str::to_owned)
-        .collect::<HashSet<_>>();
-    if object_ids.is_empty() {
-        return Ok((0, 0));
-    }
-
-    let mut child = Command::new("git")
-        .current_dir(repository)
-        .args(["cat-file", "--batch-check=%(objectsize)"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(CrabError::Io)?;
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            CrabError::Internal("git cat-file admission estimator omitted stdin".to_owned())
-        })?;
-        for oid in &object_ids {
-            writeln!(stdin, "{oid}").map_err(CrabError::Io)?;
-        }
-    }
-    let output = child.wait_with_output().map_err(CrabError::Io)?;
-    if !output.status.success() {
-        return Err(git_estimate_error("cat-file", &output.stderr));
-    }
-    let mut bytes = 0u64;
-    let mut objects = 0u64;
-    for value in String::from_utf8_lossy(&output.stdout).lines() {
-        let size = value.trim().parse::<u64>().map_err(|_| {
-            CrabError::Internal(format!(
-                "git cat-file returned an invalid object size during push admission: {value}"
-            ))
-        })?;
-        bytes = bytes.saturating_add(size);
-        objects = objects.saturating_add(1);
-    }
-    if objects != object_ids.len() as u64 {
-        return Err(CrabError::Internal(
-            "git cat-file omitted objects during push admission".to_owned(),
-        ));
-    }
-    Ok((bytes, objects))
-}
-
-fn git_estimate_error(operation: &str, stderr: &[u8]) -> CrabError {
-    CrabError::Configuration {
-        key: format!("managed push {operation}"),
-        origin: String::from_utf8_lossy(stderr).trim().to_owned(),
-    }
+        .collect::<Vec<_>>();
+    super::pack::estimate_reachable_object_bytes(Some(repository), None, &tips, &excluded_tips)
 }
 
 fn protected_push_active_active_context(

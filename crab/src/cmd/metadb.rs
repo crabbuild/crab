@@ -2547,29 +2547,19 @@ async fn diagnose_acceleration_health(
         );
         (false, None, None, false)
     } else {
-        match crab_metadata::git_visibility::read(
-            &storage,
-            &router,
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-        )
-        .await
-        {
-            Ok(index) => {
-                let covers_manifest = index.matches_manifest(&manifest);
-                if !covers_manifest {
-                    notes.push(
-                        "Git visibility proof does not cover the current manifest refs; run `crab metadb rebuild`"
-                            .to_owned(),
-                    );
-                }
+        match crab_metadata::git_visibility::read_for_manifest(&storage, &router, &manifest).await {
+            Ok(Some(read)) => {
+                let index = read.index;
                 (
                     true,
                     Some(index.generation),
                     Some(index.pack_index_hash),
-                    covers_manifest,
+                    true,
                 )
+            }
+            Ok(None) => {
+                notes.push("Git visibility proof is missing; run `crab metadb rebuild`".to_owned());
+                (false, None, None, false)
             }
             Err(error) => {
                 notes.push(format!(
