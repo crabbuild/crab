@@ -27,6 +27,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,16 +62,20 @@ jobs:
           files="$(git diff --name-only "${base}" "${HEAD_SHA}")"
           rust=false
           web=false
+          docs=false
           if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
             rust=true
           fi
-          if grep -Eq '^packages/web/' <<< "${files}"; then
-            web=true
-          fi
-          if [[ "${rust}" == false && "${web}" == false ]]; then
+          while IFS= read -r file; do
+            case "${file}" in
+              packages/web/content/*) docs=true ;;
+              packages/web/*) web=true ;;
+            esac
+          done <<< "${files}"
+          if [[ "${rust}" == false && "${web}" == false && "${docs}" == false ]]; then
             rust=true
           fi
-          printf 'rust=%s\nweb=%s\n' "${rust}" "${web}" >> "${GITHUB_OUTPUT}"
+          printf 'rust=%s\nweb=%s\ndocs=%s\n' "${rust}" "${web}" "${docs}" >> "${GITHUB_OUTPUT}"
 
   actionlint:
     name: Workflow syntax
@@ -180,11 +185,40 @@ jobs:
       - name: Check documentation links
         run: npm run check:links
 
+  docs:
+    name: Documentation quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.docs == 'true'
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build documentation
+        run: npm run build
+
+      - name: Check documentation links
+        run: npm run check:links
+
   status:
     name: Required CI status
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, rust, web]
+    needs: [changes, actionlint, rust, web, docs]
     if: always()
     steps:
       - name: Fail when a selected gate failed
@@ -192,10 +226,12 @@ jobs:
           needs.changes.result != 'success' ||
           needs.actionlint.result != 'success' ||
           (needs.rust.result != 'success' && needs.rust.result != 'skipped') ||
-          (needs.web.result != 'success' && needs.web.result != 'skipped')
+          (needs.web.result != 'success' && needs.web.result != 'skipped') ||
+          (needs.docs.result != 'success' && needs.docs.result != 'skipped')
         run: exit 1
 
       - name: Report selected gates
         run: |
           echo "Rust gate: ${{ needs.rust.result }}"
           echo "Web gate: ${{ needs.web.result }}"
+          echo "Docs gate: ${{ needs.docs.result }}"
