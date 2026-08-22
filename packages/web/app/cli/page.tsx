@@ -110,7 +110,7 @@ const installTabs: InstallTab[] = [
       { text: "" },
       { text: "# Confirm the install", type: "comment" },
       { text: "crab --version", type: "command" },
-      { text: "crab 1.0.14", type: "output" },
+      { text: "crab 1.0.15", type: "output" },
     ],
     note: (
       <>
@@ -131,7 +131,7 @@ const installTabs: InstallTab[] = [
       { text: "" },
       { text: "# Verify the binary is on PATH", type: "comment" },
       { text: "crab --version", type: "command" },
-      { text: "crab 1.0.14", type: "output" },
+      { text: "crab 1.0.15", type: "output" },
     ],
     note: (
       <>
@@ -155,7 +155,7 @@ const installTabs: InstallTab[] = [
       { text: "# Or inside WSL Ubuntu — same one-liner as Linux", type: "comment" },
       { text: "curl -fsSL https://crab.build/install.sh | bash", type: "command" },
       { text: "crab --version", type: "command" },
-      { text: "crab 1.0.14", type: "output" },
+      { text: "crab 1.0.15", type: "output" },
     ],
     note: (
       <>

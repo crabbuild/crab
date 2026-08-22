@@ -192,14 +192,13 @@ def check_release_workflow(root: Path) -> list[str]:
         for needle in (
             "cp target/${{ matrix.target }}/release/crab.exe dist/",
             "cp target/${{ matrix.target }}/release/crab-nfs-mount.exe dist/",
-            '(cd dist && zip -q "crab-${{ matrix.name }}.zip" crab.exe crab-nfs-mount.exe)',
+            "Compress-Archive -LiteralPath 'dist/crab.exe','dist/crab-nfs-mount.exe'",
+            "-DestinationPath 'dist/${{ matrix.archive }}' -Force",
             "rm dist/crab.exe dist/crab-nfs-mount.exe",
             "cp target/${{ matrix.target }}/release/crab-fuse-mount dist/",
             "(cd dist && ln -sf crab crab-nfs-mount)",
-            "tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount",
-            "rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount",
             "cp target/${{ matrix.target }}/release/crab dist/",
-            "tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount",
+            'tar czf "dist/${{ matrix.archive }}" -C dist crab crab-fuse-mount crab-nfs-mount',
             "rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount",
         ):
             if needle not in package_step:
@@ -219,15 +218,53 @@ def check_release_workflow(root: Path) -> list[str]:
             '--no-default-features --features "$no_fuse_features"',
             "-p crab --bin crab-nfs-mount",
             "ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount",
+            "cargo build --release --locked --target ${{ matrix.target }}",
         ):
             if needle not in build_step:
                 errors.append(f"release.yml Build: expected {needle!r}")
+
+        for forbidden in ("cargo xwin build", "cross build"):
+            if forbidden in build_step:
+                errors.append(f"release.yml Build: unexpected {forbidden!r}")
+
+    try:
+        verify_step = workflow_step_run(text, "Verify archive layout")
+    except ValueError as error:
+        errors.append(f"release.yml: {error}")
+    else:
+        for needle in (
+            "Expand-Archive -LiteralPath 'dist/${{ matrix.archive }}'",
+            '"$extract_dir/crab.exe" version',
+            '"$extract_dir/crab.exe" --help',
+            '"$extract_dir/crab" version',
+            '"$extract_dir/crab" --help',
+            'readlink "$extract_dir/crab-nfs-mount"',
+        ):
+            if needle not in verify_step:
+                errors.append(f"release.yml Verify archive layout: expected {needle!r}")
 
     if 'DIST_DIR="$PWD/dist" crab/scripts/release/update-homebrew.sh --local "$TAG"' not in text:
         errors.append("release.yml: Homebrew publishing must use crab/scripts/release/update-homebrew.sh")
 
     for needle in (
-        "path: dist/crab-${{ matrix.name }}.*",
+        "os: macos-15",
+        "os: macos-15-intel",
+        "os: ubuntu-24.04",
+        "os: ubuntu-24.04-arm",
+        "os: windows-2025",
+        "os: windows-11-arm",
+        "archive: crab-darwin-aarch64.tar.gz",
+        "archive: crab-darwin-x86_64.tar.gz",
+        "archive: crab-linux-x86_64.tar.gz",
+        "archive: crab-linux-aarch64.tar.gz",
+        "archive: crab-windows-x86_64.zip",
+        "archive: crab-windows-aarch64.zip",
+        "attestations: write",
+        "id-token: write",
+        "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3",
+        "subject-path: dist/${{ matrix.archive }}",
+        "path: dist/${{ matrix.archive }}",
+        "if-no-files-found: error",
         "sha256sum crab-*.* > SHA256SUMS.txt",
         "FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)",
         "require_nfs_evidence:",
@@ -254,6 +291,16 @@ def check_release_workflow(root: Path) -> list[str]:
     ):
         if needle not in text:
             errors.append(f"release.yml: expected {needle!r}")
+
+    for forbidden in (
+        "os: macos-13",
+        "cargo install cross",
+        "cargo install cargo-xwin",
+        "cargo xwin build",
+        "cross build",
+    ):
+        if forbidden in text:
+            errors.append(f"release.yml: unexpected {forbidden!r}")
 
     return errors
 

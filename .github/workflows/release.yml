@@ -71,7 +71,7 @@ jobs:
       source_sha: ${{ steps.release.outputs.source_sha }}
       source_short_sha: ${{ steps.release.outputs.source_short_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -130,10 +130,10 @@ jobs:
       WORKFLOW_RUSTFS_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
       WORKFLOW_RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
       - name: Install workflow smoke dependencies
         run: |
           sudo apt-get update -y
@@ -194,7 +194,7 @@ jobs:
           docker rm -f crab-workflow-rustfs >/dev/null 2>&1 || true
       - name: Upload workflow evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: workflow-rustfs-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -211,16 +211,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ". -> target"
 
@@ -340,16 +340,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ". -> target"
 
@@ -465,7 +465,7 @@ jobs:
 
           exit "$gate_status"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: cache-service-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}
@@ -483,7 +483,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -584,7 +584,7 @@ jobs:
             --append \
             --allow-missing
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: nfs-release-evidence-gate-${{ github.run_id }}-${{ github.run_attempt }}
@@ -598,16 +598,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-nfs-feature-gate
 
@@ -625,12 +625,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-15, windows-2022]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
 
       - name: Run workflow contract tests
         run: cargo test -p crab-workflow --locked
@@ -708,7 +708,7 @@ jobs:
             "$(git rev-parse HEAD)" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${RUNNER_OS}" "${{ job.status }}" \
             > "native-workflow-evidence/${RUNNER_OS}.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: workflow-native-release-evidence-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -721,6 +721,10 @@ jobs:
     if: ${{ always() && needs.prepare.result == 'success' && needs.workflow-release-gate.result == 'success' && needs.workflow-native-release-gate.result == 'success' && needs.nfs-feature-gate.result == 'success' && (needs.nfs-native-evidence-gate.result == 'success' || needs.nfs-native-evidence-gate.result == 'skipped') && (needs.replica-enterprise-gate.result == 'success' || needs.replica-enterprise-gate.result == 'skipped') && (needs.cache-service-enterprise-gate.result == 'success' || needs.cache-service-enterprise-gate.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       CRAB_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
       GIT_SHA: ${{ needs.prepare.outputs.source_short_sha }}
@@ -731,56 +735,53 @@ jobs:
           - name: darwin-aarch64
             target: aarch64-apple-darwin
             os: macos-15
+            windows: false
+            archive: crab-darwin-aarch64.tar.gz
           - name: darwin-x86_64
             target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
+            windows: false
+            archive: crab-darwin-x86_64.tar.gz
           - name: linux-x86_64
             target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
+            windows: false
+            archive: crab-linux-x86_64.tar.gz
           - name: linux-aarch64
             target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_cross: true
+            os: ubuntu-24.04-arm
+            windows: false
+            archive: crab-linux-aarch64.tar.gz
           - name: windows-x86_64
             target: x86_64-pc-windows-msvc
-            os: macos-15
+            os: windows-2025
             windows: true
+            archive: crab-windows-x86_64.zip
           - name: windows-aarch64
             target: aarch64-pc-windows-msvc
-            os: macos-15
+            os: windows-11-arm
             windows: true
+            archive: crab-windows-aarch64.zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --locked
-
-      - name: Install cargo-xwin
-        if: matrix.windows
-        run: cargo install cargo-xwin --locked
-
-      - name: Install LLVM tools for cargo-xwin
-        if: matrix.windows && runner.os == 'macOS'
-        run: brew install llvm
-
-      - name: Install FUSE dev headers (Linux native)
-        if: runner.os == 'Linux' && !matrix.use_cross
+      - name: Install FUSE dev headers (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
 
       - name: Install macFUSE (macOS)
-        if: runner.os == 'macOS' && !matrix.windows
+        if: runner.os == 'macOS'
         run: brew install --cask macfuse
 
       - name: Build
@@ -790,37 +791,10 @@ jobs:
           no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"
           with_fuse_features="${no_fuse_features},fuse"
           if [ "${{ matrix.windows }}" = "true" ]; then
-            export PATH="/opt/homebrew/opt/llvm/bin:/usr/local/opt/llvm/bin:$PATH"
-            wrapper_dir=""
-            if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
-              clang_cl="$(command -v clang-cl)"
-              wrapper_dir="$(mktemp -d)"
-              trap 'rm -rf "$wrapper_dir"' EXIT
-              {
-                printf '#!/usr/bin/env bash\n'
-                printf 'exec "%s" "$@"\n' "$clang_cl"
-              } > "$wrapper_dir/clang"
-              chmod +x "$wrapper_dir/clang"
-              export PATH="$wrapper_dir:$PATH"
-            fi
-            cargo xwin build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
               --no-default-features --features simd-accel,tier,watch,nfs
-            cargo xwin build --release --locked --target ${{ matrix.target }} -p crab --bin crab-nfs-mount \
+            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab-nfs-mount \
               --no-default-features
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
-              --no-default-features --features "$with_fuse_features"
-            cp target/${{ matrix.target }}/release/crab target/${{ matrix.target }}/release/crab-fuse-mount
-            cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
-              --no-default-features --features "$no_fuse_features"
-            ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount
-          elif [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
-              --no-default-features --features "$with_fuse_features"
-            cp target/${{ matrix.target }}/release/crab target/${{ matrix.target }}/release/crab-fuse-mount
-            cross build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
-              --no-default-features --features "$no_fuse_features"
-            ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount
           else
             cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
               --no-default-features --features "$with_fuse_features"
@@ -838,19 +812,14 @@ jobs:
           if [ "${{ matrix.windows }}" = "true" ]; then
             cp target/${{ matrix.target }}/release/crab.exe dist/
             cp target/${{ matrix.target }}/release/crab-nfs-mount.exe dist/
-            (cd dist && zip -q "crab-${{ matrix.name }}.zip" crab.exe crab-nfs-mount.exe)
+            powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+              "Compress-Archive -LiteralPath 'dist/crab.exe','dist/crab-nfs-mount.exe' -DestinationPath 'dist/${{ matrix.archive }}' -Force"
             rm dist/crab.exe dist/crab-nfs-mount.exe
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            cp target/${{ matrix.target }}/release/crab dist/
-            cp target/${{ matrix.target }}/release/crab-fuse-mount dist/
-            (cd dist && ln -sf crab crab-nfs-mount)
-            tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount
-            rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount
           else
             cp target/${{ matrix.target }}/release/crab dist/
             cp target/${{ matrix.target }}/release/crab-fuse-mount dist/
             (cd dist && ln -sf crab crab-nfs-mount)
-            tar czf dist/crab-${{ matrix.name }}.tar.gz -C dist crab crab-fuse-mount crab-nfs-mount
+            tar czf "dist/${{ matrix.archive }}" -C dist crab crab-fuse-mount crab-nfs-mount
             rm dist/crab dist/crab-fuse-mount dist/crab-nfs-mount
           fi
 
@@ -858,49 +827,51 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="dist/crab-${{ matrix.name }}.${{ matrix.windows && 'zip' || 'tar.gz' }}"
+          asset="dist/${{ matrix.archive }}"
 
           if [ ! -s "$asset" ]; then
             echo "::error::Release archive is missing or empty: $asset"
             exit 1
           fi
 
+          extract_dir="dist/verify"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
           if [ "${{ matrix.windows }}" = "true" ]; then
-            entries="$(unzip -Z1 "$asset" | sort | tr '\n' ' ')"
+            powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+              "Expand-Archive -LiteralPath 'dist/${{ matrix.archive }}' -DestinationPath 'dist/verify' -Force"
+            entries="$(cd "$extract_dir" && printf '%s\n' * | sort | tr '\n' ' ')"
             if [ "$entries" != "crab-nfs-mount.exe crab.exe " ]; then
               echo "::error::Unexpected Windows archive layout: $entries"
               exit 1
             fi
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
-            if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
-              echo "::error::Unexpected macOS archive layout: $entries"
-              exit 1
-            fi
-            extract_dir="$(mktemp -d)"
-            tar -xzf "$asset" -C "$extract_dir"
-            if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
-              echo "::error::macOS archive crab-nfs-mount must be a symlink to crab"
-              exit 1
-            fi
+            "$extract_dir/crab.exe" version
+            "$extract_dir/crab.exe" --help >/dev/null
           else
             entries="$(tar -tzf "$asset" | sort | tr '\n' ' ')"
             if [ "$entries" != "crab crab-fuse-mount crab-nfs-mount " ]; then
-              echo "::error::Unexpected Linux archive layout: $entries"
+              echo "::error::Unexpected Unix archive layout: $entries"
               exit 1
             fi
-            extract_dir="$(mktemp -d)"
             tar -xzf "$asset" -C "$extract_dir"
             if [ ! -L "$extract_dir/crab-nfs-mount" ] || [ "$(readlink "$extract_dir/crab-nfs-mount")" != "crab" ]; then
-              echo "::error::Linux archive crab-nfs-mount must be a symlink to crab"
+              echo "::error::Unix archive crab-nfs-mount must be a symlink to crab"
               exit 1
             fi
+            "$extract_dir/crab" version
+            "$extract_dir/crab" --help >/dev/null
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/${{ matrix.archive }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: crab-${{ matrix.name }}
-          path: dist/crab-${{ matrix.name }}.*
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
 
   protocol-v2-release-gate:
     name: Protocol v2 partial-clone release gate
@@ -918,7 +889,7 @@ jobs:
       AWS_ENDPOINT_URL: http://127.0.0.1:9000
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
@@ -931,7 +902,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download exact Linux release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
           path: release-dist
@@ -984,7 +955,7 @@ jobs:
 
       - name: Upload protocol release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protocol-v2-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1022,7 +993,7 @@ jobs:
       AWS_ENDPOINT_URL: http://127.0.0.1:9000
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
@@ -1038,7 +1009,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download exact Linux release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
           path: release-dist
@@ -1119,7 +1090,7 @@ jobs:
 
       - name: Upload Git compatibility release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protocol-v2-release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1145,7 +1116,7 @@ jobs:
       AWS_ENDPOINT_URL: http://127.0.0.1:9000
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
@@ -1161,7 +1132,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download exact Linux release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
           path: release-dist
@@ -1245,7 +1216,7 @@ jobs:
 
       - name: Upload rollback protocol release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protocol-v2-rollback-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1271,7 +1242,7 @@ jobs:
       AWS_REGION: ${{ vars.CRAB_PROTOCOL_V2_AWS_REGION }}
       AWS_ENDPOINT_URL: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
@@ -1295,7 +1266,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download exact Linux release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
           path: release-dist
@@ -1322,7 +1293,7 @@ jobs:
 
       - name: Upload AWS protocol release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protocol-v2-aws-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1359,7 +1330,7 @@ jobs:
       AWS_REGION: ${{ vars.CRAB_PROTOCOL_V2_AWS_REGION }}
       AWS_ENDPOINT_URL: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
@@ -1394,7 +1365,7 @@ jobs:
           py -3 --version
 
       - name: Download exact packaged platform artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: ${{ matrix.artifact }}
           path: release-dist
@@ -1441,7 +1412,7 @@ jobs:
 
       - name: Upload platform protocol release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protocol-v2-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1459,11 +1430,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: crab-*
           path: dist
@@ -1562,6 +1533,9 @@ jobs:
             echo
             echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${TAG}"
             echo "Commit: ${SOURCE_SHA}"
+            echo
+            echo 'Verify an archive with:'
+            echo "\`gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}\`"
           } > "$notes_file"
 
           if gh release view "$TAG" --repo "$RELEASE_REPO" &>/dev/null; then

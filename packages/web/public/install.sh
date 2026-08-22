@@ -5,7 +5,7 @@
 #   curl -fsSL https://crab.build/install.sh | bash
 #
 # Environment variables:
-#   CRAB_VERSION     - install a specific version (e.g. "v1.0.14"). Default: latest.
+#   CRAB_VERSION     - install a specific version (e.g. "v1.0.15"). Default: latest.
 #   CRAB_INSTALL_DIR - installation directory. Default: ~/.crab/bin.
 #
 # Installs the `crab` binary, mount helpers, and `git-remote-crab` symlink.
