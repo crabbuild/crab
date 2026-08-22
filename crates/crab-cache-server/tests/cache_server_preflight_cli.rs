@@ -563,7 +563,7 @@ fn evidence_release_verify_accepts_evidence_dir_and_writes_outputs() {
     assert_eq!(summary["run_id"], EvidenceFixture::RUN_ID);
     assert_eq!(
         summary["dedup"]["cacheable_origin_gets_delta"].as_i64(),
-        Some(0)
+        Some(2)
     );
 }
 
@@ -594,7 +594,7 @@ fn evidence_gate_accepts_evidence_dir_and_writes_release_artifacts() {
     assert_eq!(summary["status"], "passed");
     assert_eq!(
         summary["dedup"]["cacheable_origin_gets_delta"].as_i64(),
-        Some(0)
+        Some(2)
     );
     assert!(!doctor_path.exists());
     assert!(!doctor_text_path.exists());
@@ -724,7 +724,7 @@ fn evidence_doctor_classifies_dedup_origin_regression() {
     assert_doctor_category(
         &report,
         "cache_dedup_traffic",
-        "cli-dedup-only-manifest-cas-origin-read",
+        "cli-dedup-manifest-cas-origin-read",
     );
 }
 
@@ -1150,8 +1150,8 @@ fn evidence_verify_accepts_manifest_bundle_without_config() {
         true,
     );
     assert_check_ok(&report, "retained-cache_server_config-secret-free", true);
-    assert_check_ok(&report, "cli-dedup-cacheable-origin-get-zero", true);
-    assert_check_ok(&report, "cli-dedup-only-manifest-cas-origin-read", true);
+    assert_check_ok(&report, "cli-dedup-cacheable-origin-proof", true);
+    assert_check_ok(&report, "cli-dedup-manifest-cas-origin-read", true);
 }
 
 #[test]
@@ -1172,7 +1172,7 @@ fn evidence_verify_and_summarize_accept_relocated_manifest_bundle() {
     assert_eq!(summary["status"], "passed");
     assert_eq!(
         summary["dedup"]["cacheable_origin_gets_delta"].as_i64(),
-        Some(0)
+        Some(2)
     );
 }
 
@@ -1232,7 +1232,7 @@ fn evidence_verify_rejects_extra_dedup_origin_read_even_when_hash_matches() {
     let report: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["status"], "failed");
     assert_check_ok(&report, "evidence-manifest-report-sha256", true);
-    assert_check_ok(&report, "cli-dedup-only-manifest-cas-origin-read", false);
+    assert_check_ok(&report, "cli-dedup-manifest-cas-origin-read", false);
 }
 
 #[test]
@@ -1464,7 +1464,7 @@ fn evidence_summarize_reports_customer_proof_without_config() {
     );
     assert_eq!(
         summary["dedup"]["cacheable_origin_gets_delta"].as_i64(),
-        Some(0)
+        Some(2)
     );
     assert_eq!(summary["dedup"]["xorb_puts_delta"].as_i64(), Some(0));
 
@@ -1820,7 +1820,18 @@ impl EvidenceFixture {
 
         let manifest_key = format!("e2e-cache-service/{}/cli-dedup/manifest", Self::RUN_ID);
         let mut manifest_delta = serde_json::Map::new();
-        manifest_delta.insert(manifest_key, Value::from(1));
+        manifest_delta.insert(manifest_key.clone(), Value::from(1));
+        let xorb_key =
+            ".crab/xorbs/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let shard_key =
+            ".crab/shards/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut origin_delta = manifest_delta.clone();
+        origin_delta.insert(xorb_key.to_owned(), Value::from(1));
+        origin_delta.insert(shard_key.to_owned(), Value::from(1));
+        let cacheable_origin_delta = serde_json::Map::from_iter([
+            (xorb_key.to_owned(), Value::from(1)),
+            (shard_key.to_owned(), Value::from(1)),
+        ]);
 
         let report = serde_json::json!({
             "status": "passed",
@@ -1865,14 +1876,15 @@ impl EvidenceFixture {
                     "name": "cli-dedup-push",
                     "dedup_queries_delta": 1,
                     "dedup_known_chunks_delta": 3,
+                    "dedup_unknown_chunks_delta": 0,
                     "xorb_puts_delta": 0,
-                    "xorb_gets_delta": 0,
-                    "shard_gets_delta": 0,
-                    "metadata_gets_delta": 0,
-                    "cacheable_origin_gets_delta": 0,
-                    "cacheable_origin_get_key_delta": {},
-                    "origin_get_key_delta": manifest_delta.clone(),
-                    "origin_gets_delta": 1,
+                    "xorb_gets_delta": 1,
+                    "shard_gets_delta": 1,
+                    "metadata_gets_delta": 1,
+                    "cacheable_origin_gets_delta": 2,
+                    "cacheable_origin_get_key_delta": cacheable_origin_delta,
+                    "origin_get_key_delta": origin_delta,
+                    "origin_gets_delta": 3,
                     "mutable_origin_get_key_delta": manifest_delta,
                     "mutable_origin_gets_delta": 1,
                     "mutable_read_rejections_delta": 0,

@@ -3115,6 +3115,11 @@ fn publish_git_index_entries_with_tracking(
     let index_path = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)
         .map_err(GitIndexWriteError::BeforeIndexMutation)?
         .index_path();
+    let latest_worktree_mtime_secs = entries
+        .iter()
+        .map(|entry| entry.index_stat.stat.mtime.secs)
+        .max();
+    wait_for_index_timestamp_after_worktree(latest_worktree_mtime_secs);
     let lock = gix_lock::File::acquire_to_update_resource(
         &index_path,
         gix_lock::acquire::Fail::Immediately,
@@ -3305,6 +3310,31 @@ fn publish_git_index_entries_with_tracking(
         )))
     })?;
     Ok(())
+}
+
+fn wait_for_index_timestamp_after_worktree(latest_worktree_mtime_secs: Option<u32>) {
+    let Some(latest_worktree_mtime_secs) = latest_worktree_mtime_secs else {
+        return;
+    };
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let target_secs = u64::from(latest_worktree_mtime_secs).saturating_add(1);
+    let wait_secs = target_secs.saturating_sub(now.as_secs());
+    if wait_secs == 0 || wait_secs > 2 {
+        return;
+    }
+
+    // Git treats entries from the same second as the index timestamp as racy and re-reads them.
+    // Pointer entries intentionally differ from raw worktree bytes, so commit just after the
+    // next second to keep a freshly staged file clean without hiding later edits. Leave a small
+    // margin for filesystem timestamp rounding and scheduler wake-up jitter.
+    let remaining = std::time::Duration::from_secs(wait_secs)
+        .saturating_sub(std::time::Duration::from_nanos(u64::from(
+            now.subsec_nanos(),
+        )))
+        .saturating_add(std::time::Duration::from_millis(100));
+    std::thread::sleep(remaining);
 }
 
 fn git_honors_filemode(repo_root: &Path) -> bool {
@@ -4411,10 +4441,10 @@ mod tests {
             "stderr: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        assert!(
-            status.stdout.is_empty(),
-            "stat cache must be populated for literal path bytes, got {:?}",
-            status.stdout
+        assert_eq!(
+            status.stdout,
+            [b"A  ".as_slice(), raw_name.as_slice(), b"\0"].concat(),
+            "stat cache must avoid an unstaged change for literal path bytes"
         );
     }
 

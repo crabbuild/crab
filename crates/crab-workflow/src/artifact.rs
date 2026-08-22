@@ -1692,9 +1692,9 @@ pub fn snapshot_payload(source: &Path, destination: &Path) -> Result<()> {
         fs::create_dir_all(parent).map_err(WorkflowError::Io)?;
         let temporary = temporary_snapshot_path(destination);
         if let Err(error) = fs::copy(source, &temporary)
+            .and_then(|_| sync_file(&temporary))
             .and_then(|_| fs::metadata(source))
             .and_then(|metadata| fs::set_permissions(&temporary, metadata.permissions()))
-            .and_then(|_| File::open(&temporary).and_then(|file| file.sync_all()))
             .and_then(|_| fs::rename(&temporary, destination))
         {
             let _ = fs::remove_file(&temporary);
@@ -1922,13 +1922,11 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
             fs::set_permissions(&target_path, permissions).map_err(WorkflowError::Io)?;
         } else if file_type.is_file() {
             fs::copy(&source_path, &target_path).map_err(WorkflowError::Io)?;
+            sync_file(&target_path).map_err(WorkflowError::Io)?;
             let permissions = fs::metadata(&source_path)
                 .map_err(WorkflowError::Io)?
                 .permissions();
             fs::set_permissions(&target_path, permissions).map_err(WorkflowError::Io)?;
-            File::open(&target_path)
-                .and_then(|file| file.sync_all())
-                .map_err(WorkflowError::Io)?;
         } else {
             return Err(invalid(
                 "artifact_snapshot_type_unsupported",
@@ -1937,6 +1935,21 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?
+            .sync_all()
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path)?.sync_all()
+    }
 }
 
 fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {

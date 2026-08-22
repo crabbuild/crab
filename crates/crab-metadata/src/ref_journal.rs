@@ -635,6 +635,8 @@ async fn prepare_head(
     })
 }
 
+// Preserve the ref name alongside storage failures for rollback diagnostics.
+#[allow(clippy::result_large_err)]
 async fn promote_head(
     store: &Store,
     router: &StoreLayout<Store>,

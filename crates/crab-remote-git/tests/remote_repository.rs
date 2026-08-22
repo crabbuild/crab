@@ -121,7 +121,7 @@ impl CountingStore {
     }
 
     fn release_blocked_pack_get(&self) {
-        self.release_pack_get.notify_waiters();
+        self.release_pack_get.notify_one();
     }
 
     fn slow_pack_gets(&self) {
@@ -856,6 +856,17 @@ async fn read_target(fixture: &PublishedFixture) -> crab_remote_git::Result<Byte
     operation.finish(result).await
 }
 
+fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
+    match error {
+        Error::LimitExceeded { limit, .. } => *limit == expected_limit,
+        Error::SharedRead { source } => contains_limit_exceeded(source, expected_limit),
+        Error::CloseAfterFailure { operation, .. } => {
+            contains_limit_exceeded(operation, expected_limit)
+        }
+        _ => false,
+    }
+}
+
 async fn assert_runtime_is_within_configured_bounds(
     runtime: &RemoteGitRuntime,
     options: RuntimeOptions,
@@ -1287,9 +1298,11 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
         );
     }
     fixture.backend.reset_pack_gets();
-    let reads = operations.into_iter().map(|operation| {
-        let snapshot = snapshot.clone();
-        let path = fixture.target_path.clone();
+    let concurrent_snapshot = snapshot.clone();
+    let concurrent_path = fixture.target_path.clone();
+    let reads = operations.into_iter().map(move |operation| {
+        let snapshot = concurrent_snapshot.clone();
+        let path = concurrent_path.clone();
         async move {
             let result = snapshot
                 .read_blob(&path, &operation)
@@ -1298,7 +1311,13 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
             operation.finish(result).await
         }
     });
-    let results = futures_util::future::join_all(reads).await;
+    // Hold the first origin read open so every waiter observes the same
+    // in-flight entry instead of relying on scheduler timing for coalescing.
+    fixture.backend.block_next_pack_get();
+    let reads_task = tokio::spawn(async move { futures_util::future::join_all(reads).await });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    fixture.backend.release_blocked_pack_get();
+    let results = reads_task.await.expect("concurrent reads join");
     for result in results {
         assert_eq!(result.expect("concurrent read").as_ref(), fixture.expected);
     }
@@ -1839,25 +1858,19 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
     let first = read_target(&fixture)
         .await
         .expect_err("aggregate inflated bytes must fail");
-    assert!(matches!(
-        first,
-        Error::LimitExceeded {
-            limit: "inflated bytes",
-            ..
-        }
-    ));
+    assert!(
+        contains_limit_exceeded(&first, "inflated bytes"),
+        "unexpected first error: {first:?}"
+    );
 
     fixture.backend.reset_pack_gets();
     let second = read_target(&fixture)
         .await
         .expect_err("failed decode must not become a cache hit");
-    assert!(matches!(
-        second,
-        Error::LimitExceeded {
-            limit: "inflated bytes",
-            ..
-        }
-    ));
+    assert!(
+        contains_limit_exceeded(&second, "inflated bytes"),
+        "unexpected second error: {second:?}"
+    );
     assert!(fixture.backend.pack_gets() > 0);
 }
 

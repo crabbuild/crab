@@ -328,27 +328,12 @@ impl StoreClient {
         result.map_err(CrabError::from)
     }
 
-    /// Fetch a shard via the `LocalCache`, falling back to the object
-    /// store on miss. Hash verification happens inside `LocalCache`.
+    /// Fetch a shard through the cache-aware store. Immutable reads use the
+    /// local cache, remote cache service, and origin fallback in that order.
     async fn load_shard(&self, shard_hash: &MerkleHash) -> crate::core::error::Result<ShardReader> {
-        let key = CacheKey::Shard(*shard_hash);
-        let origin = self.store.origin().clone();
         let path = self.router.shard_path(shard_hash);
-        let hash = *shard_hash;
-
-        let data = self
-            .store
-            .local_cache()
-            .get_or_fetch_with(&key, || {
-                let origin = origin;
-                let path = path;
-                async move {
-                    debug!(shard_hash = %hash.hex(), "store_client: downloading shard");
-                    let (data, _) = origin.get_with_etag(&path).await?;
-                    Ok::<_, CrabError>(data)
-                }
-            })
-            .await?;
+        debug!(shard_hash = %shard_hash.hex(), "store_client: downloading shard");
+        let (data, _) = self.store.get_with_etag(&path).await?;
 
         Ok(ShardReader::from_bytes(data, *shard_hash))
     }

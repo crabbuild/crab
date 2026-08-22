@@ -976,7 +976,9 @@ fn resolve_join(args: &str, root: &Value, path: &[String]) -> Result<String> {
         let value = resolve_resolver_arg(&part, root, path)?;
         joined.push(value);
     }
-    Ok(joined.display().to_string())
+    // Resolver values are serialized into portable YAML, so use `/` even
+    // when composition runs on Windows.
+    Ok(joined.to_string_lossy().replace('\\', "/"))
 }
 
 fn resolve_oc_env(args: &str, root: &Value, path: &[String]) -> Result<Value> {

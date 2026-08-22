@@ -60,7 +60,7 @@ impl Out {
     /// Ordinary cached stage outs are repo-relative. Absolute paths and
     /// external URLs are accepted only for uncached external outputs.
     pub fn validate(&self, stage_name: &StageName) -> Result<()> {
-        if self.path.is_absolute() && self.cache {
+        if self.path.has_root() && self.cache {
             return Err(WorkflowError::StageOutMalformed {
                 stage: stage_name.as_str().to_owned(),
                 path: self.path.clone(),
@@ -169,7 +169,7 @@ pub fn is_external_url_out(value: &str) -> bool {
 
 /// Validate a `wdir` value: must be relative, no `..` traversal.
 pub fn validate_wdir(wdir: &Path, stage_name: &StageName) -> Result<()> {
-    if wdir.is_absolute() {
+    if wdir.has_root() {
         return Err(WorkflowError::WdirInvalid {
             stage: stage_name.as_str().to_owned(),
             path: wdir.to_path_buf(),

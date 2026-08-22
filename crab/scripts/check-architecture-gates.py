@@ -780,6 +780,7 @@ AUTH_STORE_FEATURE_DEFINITIONS = {
         "dep:tokio",
         "dep:tracing",
         "dep:url",
+        "dep:uuid",
     ],
 }
 AUTH_STORE_REFRESHING_REQUIRED_PACKAGES = {
@@ -791,6 +792,7 @@ AUTH_STORE_REFRESHING_REQUIRED_PACKAGES = {
     "tokio",
     "tracing",
     "url",
+    "uuid",
 }
 AUTH_STORE_DIRECT_FORBIDDEN_PACKAGES = {
     "crab",
@@ -1570,6 +1572,7 @@ WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
     "crab-storage",
     "crab-types",
     "futures-util",
+    "fs4",
     "gix",
     "gix-discover",
     "gix-hash",
@@ -2479,7 +2482,8 @@ def check_workspace_third_party_dependency_sources(root: Path, metadata: dict) -
 
 
 def cargo_tree_lines(root: Path, cargo: str, args: list[str]) -> list[str]:
-    result = run([cargo, "tree", *args], root)
+    # Keep Cargo's download/progress chatter out of the machine-parsed tree.
+    result = run([cargo, "tree", "--quiet", *args], root)
     if result.returncode != 0:
         raise RuntimeError(result.stdout)
     return [

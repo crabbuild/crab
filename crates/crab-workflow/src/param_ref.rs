@@ -173,7 +173,9 @@ mod tests {
 
     #[test]
     fn param_file_rejects_absolute_or_parent_paths() {
-        let absolute = ParamRef::all_in_file(PathBuf::from("/tmp/params.yaml")).unwrap_err();
+        let absolute =
+            ParamRef::all_in_file(std::env::temp_dir().join("crab-workflow-params.yaml"))
+                .unwrap_err();
         assert!(matches!(absolute, WorkflowError::ParamRefInvalid { .. }));
 
         let parent = ParamRef::all_in_file(PathBuf::from("../params.yaml")).unwrap_err();

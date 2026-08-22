@@ -1114,12 +1114,11 @@ class TestConfig:
         .unwrap();
 
         assert_eq!(values.get("model.lr").map(String::as_str), Some("0.01"));
-        assert_eq!(
-            values
-                .get("training/custom.yaml:epochs")
-                .map(String::as_str),
-            Some("5")
+        let custom_key = format!(
+            "{}:epochs",
+            Path::new("training").join("custom.yaml").display()
         );
+        assert_eq!(values.get(&custom_key).map(String::as_str), Some("5"));
     }
 
     #[test]
