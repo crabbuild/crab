@@ -267,7 +267,7 @@ class RequestCountingProxy:
         status: int,
     ) -> None:
         operation = self.operation(method, path, headers)
-        key = urllib.parse.unquote(urllib.parse.urlsplit(path).path).lstrip("/")
+        key = self.request_key(path, operation)
         relative_key = key.removeprefix(self.key_prefix)
         category = (
             store_category(relative_key)
@@ -285,6 +285,19 @@ class RequestCountingProxy:
             self.categories[category] = self.categories.get(category, 0) + 1
             self.classes[request_class] = self.classes.get(request_class, 0) + 1
             self.statuses[status_class] = self.statuses.get(status_class, 0) + 1
+
+    @staticmethod
+    def request_key(path: str, operation: str) -> str:
+        parsed = urllib.parse.urlsplit(path)
+        key = urllib.parse.unquote(parsed.path).lstrip("/")
+        if operation != "list":
+            return key
+        prefix = urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get(
+            "prefix", [""]
+        )[0]
+        if not prefix:
+            return key
+        return f"{key.rstrip('/')}/{prefix.lstrip('/')}"
 
     @staticmethod
     def operation(method: str, path: str, headers: http.client.HTTPMessage) -> str:

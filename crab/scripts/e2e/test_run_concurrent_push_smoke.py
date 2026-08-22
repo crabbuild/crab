@@ -17,6 +17,11 @@ from run_concurrent_push_smoke import RequestCountingProxy, store_category
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_HEAD(self) -> None:
         self.send_response(200)
         self.send_header("Content-Length", "123")
@@ -80,6 +85,21 @@ class RequestCountingProxyTest(unittest.TestCase):
             content_length = response.headers["Content-Length"]
 
         self.assertEqual(content_length, "123")
+
+    def test_list_uses_query_prefix_for_repository_category(self) -> None:
+        request = urllib.request.Request(
+            self.proxy.url
+            + "/crab?list-type=2&prefix=e2e-concurrent-push%2Frun%2Fgit_locator_db%2Fmanifest%2F",
+            method="GET",
+        )
+
+        with urllib.request.urlopen(request):
+            pass
+
+        self.assertEqual(
+            self.proxy.snapshot()["classes"],
+            {"git_locator_db/manifest:list": 1},
+        )
 
     def assert_ref_journal_gate_waits(
         self,
