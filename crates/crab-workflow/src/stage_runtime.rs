@@ -193,6 +193,25 @@ fn join_remote_alias_base(name: &str, base: &str, rel: &str) -> Result<String> {
         });
     }
 
+    // Check filesystem paths before URL parsing. Windows drive paths such
+    // as `C:\\data` are accepted by `url::Url::parse` as a custom-scheme
+    // URL, but remote aliases must treat them as local files.
+    let base_path = Path::new(trimmed);
+    if base_path.has_root() {
+        let joined = if rel.is_empty() {
+            base_path.to_path_buf()
+        } else {
+            base_path.join(rel)
+        };
+        return url::Url::from_file_path(&joined)
+            .map(|url| url.to_string())
+            .map_err(|()| CrabError::Configuration {
+                key: format!("workflow.remotes.{name}.url"),
+                origin: "workflow remote alias local path cannot be represented as file://"
+                    .to_owned(),
+            });
+    }
+
     if let Ok(parsed) = url::Url::parse(trimmed) {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(CrabError::Configuration {
@@ -215,22 +234,6 @@ fn join_remote_alias_base(name: &str, base: &str, rel: &str) -> Result<String> {
             .map_err(|source| CrabError::Configuration {
                 key: format!("workflow.remotes.{name}.url"),
                 origin: format!("workflow remote alias path is invalid: {source}"),
-            });
-    }
-
-    let base_path = Path::new(trimmed);
-    if base_path.is_absolute() {
-        let joined = if rel.is_empty() {
-            base_path.to_path_buf()
-        } else {
-            base_path.join(rel)
-        };
-        return url::Url::from_file_path(&joined)
-            .map(|url| url.to_string())
-            .map_err(|()| CrabError::Configuration {
-                key: format!("workflow.remotes.{name}.url"),
-                origin: "workflow remote alias local path cannot be represented as file://"
-                    .to_owned(),
             });
     }
 

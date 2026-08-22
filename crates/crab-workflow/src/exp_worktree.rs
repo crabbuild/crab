@@ -344,16 +344,30 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
     // been canonicalized yet — `TempDir` paths are already canonical
     // on most platforms, so this is belt-and-suspenders).
     match fs::canonicalize(path) {
-        Ok(p) => Ok(p),
+        Ok(p) => Ok(strip_verbatim_prefix(p)),
         Err(_) => {
             if path.is_absolute() {
-                Ok(path.to_path_buf())
+                Ok(strip_verbatim_prefix(path.to_path_buf()))
             } else {
                 let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-                Ok(cwd.join(path))
+                Ok(strip_verbatim_prefix(cwd.join(path)))
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    value.strip_prefix(r"\\?\").map_or(path, PathBuf::from)
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 /// Resolve the `.git` directory that anchors `repo_root`.

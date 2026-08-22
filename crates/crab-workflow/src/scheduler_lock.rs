@@ -116,7 +116,7 @@ impl SchedulerLock {
             let file = open_lockfile(&path)?;
             match try_flock_exclusive(&file) {
                 Ok(()) => {
-                    write_pid(&file);
+                    write_pid(&file, &path);
                     debug!(
                         path = %path.display(),
                         elapsed_ms = start.elapsed().as_millis() as u64,
@@ -174,7 +174,7 @@ impl SchedulerLock {
         let file = open_lockfile(&path)?;
         match try_flock_exclusive(&file) {
             Ok(()) => {
-                write_pid(&file);
+                write_pid(&file, &path);
                 Ok(Some(Self {
                     file: Some(file),
                     path,
@@ -188,10 +188,16 @@ impl SchedulerLock {
 
 impl Drop for SchedulerLock {
     fn drop(&mut self) {
-        // Close the fd first so the kernel drops the flock before
-        // we touch the filesystem. Otherwise a waiter could see
-        // both the file and the flock vanish in the opposite order,
-        // briefly perceiving an unlocked-but-stale-PID window.
+        // Remove the Windows diagnostic sidecar while this guard still
+        // owns the lock. Removing it after closing the handle could race
+        // with the next holder writing its PID into the same sidecar.
+        #[cfg(windows)]
+        let pid_path = pid_path(&self.path);
+        #[cfg(windows)]
+        remove_pid_sidecar(&pid_path, &self.path);
+
+        // Close the fd so the kernel drops the flock before removing
+        // the lockfile itself.
         self.file.take();
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
@@ -226,7 +232,7 @@ fn open_lockfile(path: &Path) -> Result<File> {
 /// Write `std::process::id()` into the lockfile. Best-effort: the
 /// lock itself is what guarantees mutual exclusion, the PID is
 /// purely for diagnostic messaging on timeout.
-fn write_pid(file: &File) {
+fn write_pid(file: &File, _path: &Path) {
     // `set_len(0)` + seek(0) guarantees a clean rewrite even when
     // the file previously held a longer PID (e.g., 99999 → 42).
     let pid = std::process::id();
@@ -243,15 +249,55 @@ fn write_pid(file: &File) {
     // failures are non-fatal; worst case the reader falls back to
     // `held_by: None`.
     let _ = file.sync_all();
+
+    // Windows denies reads through a second handle while LockFileEx
+    // protects the lockfile. Keep the diagnostic PID in an unlocked
+    // sidecar there so waiters can still report the holder.
+    #[cfg(windows)]
+    {
+        let _ = std::fs::write(pid_path(_path), pid.to_string());
+    }
 }
 
 /// Parse the PID stored in the lockfile. Returns `None` when the
 /// file is missing, unreadable, or doesn't contain a valid u32.
 fn read_holder_pid(path: &Path) -> Option<u32> {
+    #[cfg(windows)]
+    if let Some(pid) = read_pid_file(&pid_path(path)) {
+        return Some(pid);
+    }
+    read_pid_file(path)
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
     let mut file = File::open(path).ok()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
     buf.trim().parse().ok()
+}
+
+#[cfg(windows)]
+fn pid_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("lock");
+    path.with_file_name(format!("{file_name}.pid"))
+}
+
+#[cfg(windows)]
+fn remove_pid_sidecar(path: &Path, lock_path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            debug!(
+                path = %lock_path.display(),
+                error = %e,
+                "best-effort lock PID removal failed"
+            );
+        }
+    }
 }
 
 /// Attempt a non-blocking exclusive file lock on `file`. The `fs4`
@@ -311,6 +357,11 @@ mod tests {
             guard.path().to_path_buf()
         };
         assert!(!path.exists(), "lockfile should be removed after drop");
+        #[cfg(windows)]
+        assert!(
+            !pid_path(&path).exists(),
+            "lock PID sidecar should be removed after drop"
+        );
 
         // Re-acquire: should succeed.
         let _next = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();

@@ -2620,10 +2620,17 @@ fn repo_relative_dep_key(p: &Path, wdir: Option<&Path>) -> String {
     match wdir {
         Some(w) => {
             let joined = w.join(p);
-            joined.to_string_lossy().into_owned()
+            portable_relative_path(&joined)
         }
-        None => p.to_string_lossy().into_owned(),
+        None => portable_relative_path(p),
     }
+}
+
+fn portable_relative_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 // --- Crash-injection harness --------------------------------------
@@ -2715,6 +2722,57 @@ mod tests {
         }
     }
 
+    fn copy_cmd(src: &Path, dest: &Path) -> Cmd {
+        #[cfg(windows)]
+        {
+            Cmd::Shell(format!(
+                "copy /Y \"{}\" \"{}\"",
+                src.display(),
+                dest.display()
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            Cmd::Argv(vec![
+                "/bin/cp".into(),
+                src.to_string_lossy().into_owned(),
+                dest.to_string_lossy().into_owned(),
+            ])
+        }
+    }
+
+    fn copy_and_append_cmd(src: &Path, dest: &Path, marker: &Path) -> Cmd {
+        #[cfg(windows)]
+        {
+            Cmd::Shell(format!(
+                "copy /Y \"{}\" \"{}\" && echo run>>\"{}\"",
+                src.display(),
+                dest.display(),
+                marker.display()
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            Cmd::Shell(format!(
+                "cp '{}' '{}' && printf 'run\\n' >> '{}'",
+                src.display(),
+                dest.display(),
+                marker.display()
+            ))
+        }
+    }
+
+    fn timeout_cmd() -> Cmd {
+        #[cfg(windows)]
+        {
+            Cmd::Shell("ping -n 10 127.0.0.1 > NUL".into())
+        }
+        #[cfg(not(windows))]
+        {
+            Cmd::Shell("trap '' TERM; sleep 30".into())
+        }
+    }
+
     /// Same as [`test_cfg`] but wires in a fresh [`Metrics`] so
     /// counter-assertions can read back the bumped values.
     fn test_cfg_with_metrics(tmp: &TempDir) -> (ExecutorConfig, Arc<Metrics>) {
@@ -2776,14 +2834,7 @@ mod tests {
 
         let stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("copy").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("copy").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved = make_resolved(stage);
         let cfg = test_cfg(&tmp);
@@ -2866,6 +2917,7 @@ mod tests {
         assert!(rows.is_empty(), "Failed is terminal; no rows should remain");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn signal_termination_maps_to_stage_exec_signaled() {
         let tmp = TempDir::new().unwrap();
@@ -2893,10 +2945,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_maps_to_stage_exec_timeout() {
         let tmp = TempDir::new().unwrap();
-        let mut stage = Stage::new(
-            StageName::parse("timeout").unwrap(),
-            Cmd::Shell("trap '' TERM; sleep 30".into()),
-        );
+        let mut stage = Stage::new(StageName::parse("timeout").unwrap(), timeout_cmd());
         stage.timeout = Some(Duration::from_millis(150));
         let resolved = make_resolved(stage);
         let cfg = test_cfg(&tmp);
@@ -2988,14 +3037,7 @@ mod tests {
 
         let stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("cp").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("cp").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved = make_resolved(stage);
         let cfg = test_cfg(&tmp);
@@ -3036,14 +3078,7 @@ mod tests {
 
         let stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("refresh").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("refresh").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved = make_resolved(stage);
         let cfg = test_cfg(&tmp);
@@ -3102,14 +3137,7 @@ mod tests {
 
         let first_stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("hitme").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("hitme").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved_first = make_resolved(first_stage.clone());
         let run_1 = Uuid::now_v7();
@@ -3153,12 +3181,7 @@ mod tests {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
             ..Stage::new(
                 StageName::parse("always").unwrap(),
-                Cmd::Shell(format!(
-                    "cp '{}' '{}' && printf 'run\\n' >> '{}'",
-                    src.display(),
-                    dest.display(),
-                    marker.display()
-                )),
+                copy_and_append_cmd(&src, &dest, &marker),
             )
         };
         stage.nondeterministic = true;
@@ -3177,7 +3200,12 @@ mod tests {
         let second = run_local(&resolved, &cfg, &j2, run_2, 1).await.unwrap();
 
         assert_eq!(first.stage_hash, second.stage_hash);
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run\nrun\n");
+        let expected = if cfg!(windows) {
+            "run\r\nrun\r\n"
+        } else {
+            "run\nrun\n"
+        };
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), expected);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3192,14 +3220,7 @@ mod tests {
         let cfg = test_cfg(&tmp);
         let first_stage = Stage {
             outs: vec![uncached_out],
-            ..Stage::new(
-                StageName::parse("nocache").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("nocache").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved_first = make_resolved(first_stage.clone());
         let run_1 = Uuid::now_v7();
@@ -3438,14 +3459,7 @@ mod tests {
 
         let stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("copy").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("copy").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved = make_resolved(stage);
         let (cfg, metrics) = test_cfg_with_metrics(&tmp);
@@ -3473,14 +3487,7 @@ mod tests {
 
         let first_stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("hitme").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("hitme").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved_first = make_resolved(first_stage.clone());
         let run_1 = Uuid::now_v7();
@@ -3705,14 +3712,7 @@ mod tests {
 
         let stage = Stage {
             outs: vec![Out::new(dest.clone(), OutKind::File)],
-            ..Stage::new(
-                StageName::parse("nomx").unwrap(),
-                Cmd::Argv(vec![
-                    "/bin/cp".into(),
-                    src.to_string_lossy().into(),
-                    dest.to_string_lossy().into(),
-                ]),
-            )
+            ..Stage::new(StageName::parse("nomx").unwrap(), copy_cmd(&src, &dest))
         };
         let resolved = make_resolved(stage);
         let cfg = test_cfg(&tmp); // metrics = None
