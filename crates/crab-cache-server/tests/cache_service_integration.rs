@@ -2205,9 +2205,12 @@ async fn test_valid_psk_succeeds() {
     let server = start_test_server().await;
     let client = test_client(server.addr);
 
-    // GET a non-existent object — should pass auth but may return 404.
-    let path = ".crab/xorbs/nonexistent";
-    let result = client.get(path).await;
+    // GET a canonical but non-existent object — should pass auth but may
+    // return an origin/cache miss. The route parser requires the two-character
+    // partition and the full 64-character content hash even for misses.
+    let hash = format!("de{}", "00".repeat(31));
+    let path = global_path("xorbs", &hash);
+    let result = client.get(&path).await;
 
     // The key assertion: we should NOT get a 401. The request passes auth.
     // It may succeed (200) if the object exists, or fail with a non-auth

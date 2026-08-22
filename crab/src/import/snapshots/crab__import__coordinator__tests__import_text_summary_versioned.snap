@@ -1,0 +1,7 @@
+---
+source: crab/src/import/coordinator.rs
+expression: rendered
+---
+Imported 5 files (123456 bytes source) from s3://src-bucket/prod → s3://dst-bucket/prod.
+  Commits: 4 on main; HEAD fedcba987654; duration 5678 ms; same-bucket: true.
+  Skipped: 1; Failed: 0.

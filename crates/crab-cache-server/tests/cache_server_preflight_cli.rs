@@ -500,6 +500,16 @@ fn release_workflow_requires_cache_service_smoke_evidence() {
     }
 
     assert!(
+        body.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("needs:")
+                && line.contains("replica-enterprise-gate")
+                && line.contains("cache-service-enterprise-gate")
+        }),
+        "release build must wait for the replica and cache-service enterprise gates"
+    );
+
+    assert!(
         !body.contains("artifact=\"cache-service-rustfs-smoke-${run_id}\""),
         "cache-service release evidence must be bound to the workflow run attempt"
     );

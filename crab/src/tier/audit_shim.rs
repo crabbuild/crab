@@ -72,11 +72,16 @@ fn audit_log_path() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-static TEST_AUDIT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_AUDIT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn audit_log_path() -> Option<PathBuf> {
-    TEST_AUDIT_PATH.lock().ok().and_then(|guard| guard.clone())
+    TEST_AUDIT_PATH.with(|path| path.borrow().clone())
 }
 
 #[cfg(test)]
@@ -87,16 +92,13 @@ pub(crate) struct TestAuditPathGuard {
 #[cfg(test)]
 impl Drop for TestAuditPathGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = TEST_AUDIT_PATH.lock() {
-            *guard = self.previous.take();
-        }
+        TEST_AUDIT_PATH.with(|path| *path.borrow_mut() = self.previous.take());
     }
 }
 
 #[cfg(test)]
 pub(crate) fn set_test_audit_path(path: PathBuf) -> TestAuditPathGuard {
-    let mut guard = TEST_AUDIT_PATH.lock().expect("test audit path mutex");
-    let previous = guard.replace(path);
+    let previous = TEST_AUDIT_PATH.with(|current| current.borrow_mut().replace(path));
     TestAuditPathGuard { previous }
 }
 

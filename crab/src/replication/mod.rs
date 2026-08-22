@@ -13343,6 +13343,11 @@ mod tests {
                 reason: "doctor validates credentials and list access for the configured primary remote",
             },
             DirectStoreClassification {
+                call: "src/cmd/doctor.rs::run_cost_report",
+                class: "primary-diagnostic",
+                reason: "cost reporting inventories the configured primary remote rather than a lagging replica",
+            },
+            DirectStoreClassification {
                 call: "src/cmd/du.rs::fetch_remote_size",
                 class: "primary-diagnostic",
                 reason: "remote size reporting must inspect the configured primary remote, not a lagging replica",
@@ -13383,11 +13388,6 @@ mod tests {
                 reason: "protected push ref discovery is part of push admission and cannot trust stale replica refs",
             },
             DirectStoreClassification {
-                call: "src/git/remote_helper.rs::run_remote_helper",
-                class: "primary-write-authority",
-                reason: "remote-helper keeps a primary handle for push and for-push authority while read subpaths select replicas explicitly",
-            },
-            DirectStoreClassification {
                 call: "src/storage/resolver.rs::build_cloud_store",
                 class: "domain-specific",
                 reason: "raw import/export opens user-supplied source and target endpoints outside repository replica read routing",
@@ -13396,11 +13396,6 @@ mod tests {
                 call: "src/main.rs::create_cli_store",
                 class: "primary-maintenance",
                 reason: "bucket-level maintenance commands lack a repo read target and operate on primary storage state",
-            },
-            DirectStoreClassification {
-                call: "src/replication/mod.rs::read_store",
-                class: "canonical-resolver",
-                reason: "read_store constructs the primary baseline before choosing a readiness-gated replica",
             },
             DirectStoreClassification {
                 call: "src/replication/mod.rs::replica_statuses_with_options",

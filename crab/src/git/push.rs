@@ -15288,6 +15288,16 @@ mod tests {
         entries
             .iter()
             .map(|(chunk_hash, xorb_ref)| {
+                let mut origin = crab_metadata::receipts::OriginReceipt::new(
+                    "canonical-origin".to_owned(),
+                    canonical_global_content_path("xorbs", &xorb_ref.xorb_hash.hex()).to_string(),
+                    xorb_ref.xorb_hash.into(),
+                    [9; 32],
+                    1,
+                    Some("test-etag".to_owned()),
+                    None,
+                );
+                origin.proven_at_unix_secs = 1;
                 (
                     *chunk_hash,
                     crab_metadata::receipts::CommittedChunkReceipt {
@@ -15296,16 +15306,7 @@ mod tests {
                         xorb_hash: xorb_ref.xorb_hash.into(),
                         chunk_index: xorb_ref.chunk_index,
                         uncompressed_size: xorb_ref.uncompressed_size,
-                        origin: crab_metadata::receipts::OriginReceipt::new(
-                            "canonical-origin".to_owned(),
-                            canonical_global_content_path("xorbs", &xorb_ref.xorb_hash.hex())
-                                .to_string(),
-                            xorb_ref.xorb_hash.into(),
-                            [9; 32],
-                            1,
-                            Some("test-etag".to_owned()),
-                            None,
-                        ),
+                        origin,
                         source_repo_prefix: "source-repo".to_owned(),
                         source_shard_hash: [0xA5; 32],
                         committed_generation: 1,
@@ -15318,12 +15319,18 @@ mod tests {
     }
 
     fn expected_test_committed_receipt_ops(entries: &[(MerkleHash, XorbRef)]) -> usize {
-        let unique_xorbs = entries
+        let receipts = test_committed_chunk_receipts(entries);
+        let unique_proofs = receipts
             .iter()
-            .map(|(_, xorb_ref)| xorb_ref.xorb_hash)
+            .map(|(_, receipt)| receipt.compact_placement().origin_proof_id)
             .collect::<HashSet<_>>()
             .len();
-        entries.len() * 2 + unique_xorbs + usize::from(!entries.is_empty())
+        let unique_anchors = receipts
+            .iter()
+            .map(|(_, receipt)| receipt.compact_placement().source_anchor_id)
+            .collect::<HashSet<_>>()
+            .len();
+        entries.len() * 2 + unique_proofs + unique_anchors
     }
 
     fn test_push_commit_receipt(
