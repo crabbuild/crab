@@ -580,36 +580,79 @@ async fn run_push_once(
         }));
     }
 
+    let retryable_setup_failure =
+        |error: CrabError, stage: PushFailureStage| -> Result<PushAttempt> {
+            let Some(result) = push_result_from_retryable_error(&specs, &error, stage) else {
+                return Err(error);
+            };
+            let elapsed = start.elapsed();
+            if let Err(err) = record_push_audit_event(
+                &repo_root.join(default_log_path()),
+                Some(&remote_url),
+                &parsed_url.repo_path,
+                &specs,
+                &result,
+                Some(elapsed.as_millis() as u64),
+            ) {
+                warn!(%err, "failed to append push audit event");
+            }
+            Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
+                repo_root: repo_root.clone(),
+                remote_name: remote_name.clone(),
+                remote_url: remote_url.clone(),
+                specs: specs.clone(),
+                result,
+                elapsed,
+                integration: push_integration_summary(args, integration_retries),
+                agent_integration_lock: false,
+            })))
+        };
+
     // Build push config from resolved Config + CLI overrides.
     let mut push_config = PushConfig::from_config(&config);
     apply_push_cli_overrides(args, &mut push_config);
-    configure_active_active_push_coordinator(
+    if let Err(error) = configure_active_active_push_coordinator(
         &config,
         Some(&remote_url),
         &parsed_url.repo_path,
         &mut push_config,
     )
-    .await?;
+    .await
+    {
+        return retryable_setup_failure(error, PushFailureStage::StoreResolve);
+    }
     let (store, router) = if matches!(
         config.auth.provider,
         crate::core::config::AuthProvider::CrabAuth
     ) {
-        let protected = crate::git::protected_push::prepare_crab_auth_push(
+        let protected = match crate::git::protected_push::prepare_crab_auth_push(
             &config,
             &parsed_url,
             &specs,
             cancel,
         )
-        .await?;
+        .await
+        {
+            Ok(protected) => protected,
+            Err(error) => {
+                return retryable_setup_failure(error, PushFailureStage::StoreResolve);
+            }
+        };
         push_config.atomic = true;
         push_config.protected_push = Some(protected.session);
         let store = protected.store;
         let router = StoreLayout::new(store.clone(), parsed_url.repo_path.clone());
         (store, router)
     } else {
-        let selection = StoreResolver::new(&config, &parsed_url, cancel)
+        let selection = match StoreResolver::new(&config, &parsed_url, cancel)
             .write_store("push")
-            .await?;
+            .await
+        {
+            Ok(selection) => selection,
+            Err(error) => {
+                return retryable_setup_failure(error, PushFailureStage::StoreResolve);
+            }
+        };
         (selection.store, selection.router)
     };
     let repo_prefix = router.repo_prefix().to_owned();
@@ -726,7 +769,7 @@ async fn run_push_once(
     native_config.progress = mode == OutputMode::Text;
     native_config.followtags = args.follow_tags;
 
-    let result: PushResult = run_native_push(
+    let native_result = run_native_push(
         &native_config,
         &specs,
         NativePushInputs::new(
@@ -742,7 +785,11 @@ async fn run_push_once(
         )
         .with_pre_acquired_locks(pre_acquired_locks),
     )
-    .await?;
+    .await;
+    let result = match native_result {
+        Ok(result) => result,
+        Err(error) => return retryable_setup_failure(error, PushFailureStage::Discovery),
+    };
 
     if result.all_ok() {
         if let Err(err) = record_push_audit_event(
@@ -917,6 +964,20 @@ fn transient_retry_branch<'a>(
 
 fn push_result_from_error(specs: &[PushSpec], error: &CrabError) -> PushResult {
     push_result_from_reason(specs, PushRejectReason::from_error(error))
+}
+
+fn push_result_from_retryable_error(
+    specs: &[PushSpec],
+    error: &CrabError,
+    stage: PushFailureStage,
+) -> Option<PushResult> {
+    // Legacy protected-push prepare is not idempotent and maps failures to
+    // AuthFailed, so only transport types with an explicit retry contract enter this loop.
+    matches!(
+        error,
+        CrabError::NetworkTransient(_) | CrabError::Throttled { .. }
+    )
+    .then(|| push_result_from_error(specs, error).with_failure_stage(stage))
 }
 
 fn push_result_from_reason(specs: &[PushSpec], reason: PushRejectReason) -> PushResult {
@@ -2140,6 +2201,30 @@ mod tests {
             push_failure_source(std::slice::from_ref(&spec), &network_result),
             CrabError::NetworkTransient(_)
         ));
+
+        let setup_error = CrabError::Throttled {
+            retry_after: Some(std::time::Duration::from_secs(3)),
+        };
+        let setup_result = push_result_from_retryable_error(
+            std::slice::from_ref(&spec),
+            &setup_error,
+            PushFailureStage::StoreResolve,
+        )
+        .expect("transient setup failure");
+        assert_eq!(
+            setup_result.failure_stage,
+            Some(PushFailureStage::StoreResolve)
+        );
+        assert!(
+            push_result_from_retryable_error(
+                std::slice::from_ref(&spec),
+                &CrabError::AuthFailed {
+                    path: "ambiguous protected-push prepare".to_owned(),
+                },
+                PushFailureStage::Discovery,
+            )
+            .is_none()
+        );
     }
 
     #[test]

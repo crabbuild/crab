@@ -3366,6 +3366,10 @@ impl fmt::Display for RefPushOutcome {
 pub enum PushFailureStage {
     /// Repository admission ticket acquisition or renewal.
     Admission,
+    /// Write-store, control-plane, or protected-push setup.
+    StoreResolve,
+    /// Native Git and remote-frontier discovery before pipeline delegation.
+    Discovery,
     /// Canonical manifest or repository snapshot read.
     RemoteState,
     /// Ref policy, ancestry, and base-bound decision planning.
