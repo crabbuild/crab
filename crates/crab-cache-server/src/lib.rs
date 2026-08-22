@@ -1,3 +1,6 @@
+// HTTP helpers return concrete Axum responses so callers can send failures directly.
+#![allow(clippy::result_large_err)]
+
 //! Cache-server runtime contracts for Crab.
 //!
 //! This crate owns server-side configuration, HTTP error semantics, origin
