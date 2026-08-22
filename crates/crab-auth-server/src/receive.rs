@@ -1309,11 +1309,16 @@ pub async fn commit_service_git_locators(
             )
             .await?
         };
-        let mut writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
-            Arc::clone(store.inner()),
-            router.repo_prefix(),
-        )
-        .await?;
+        let planned_object_rows = current_packs
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        let mut writer =
+            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+                planned_object_rows,
+            )
+            .await?;
         let operation = async {
             let prior_coverage = writer.coverage();
             let covered_packs = if let Some(coverage) = prior_coverage {
