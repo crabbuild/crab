@@ -1702,7 +1702,7 @@ fn apply_plan_with_repairs(
     remote_repair: Option<&RemoteRepairResult>,
 ) -> Result<RecoverApplyPayload> {
     admit_restore_root(restore_root)?;
-    let _lock = lock_restore_root(restore_root)?;
+    let lock = lock_restore_root(restore_root)?;
     let shard_states = shard_repair.map(|repair| repair.item_repaired.as_slice());
     let xorb_states = xorb_repair.map(|repair| repair.item_repaired.as_slice());
     let pack_states = pack_repair.map(|repair| repair.item_repaired.as_slice());
@@ -1776,6 +1776,8 @@ fn apply_plan_with_repairs(
             message: apply_message(item, state),
         });
     }
+    // Release the root lock before returning so a sequential apply can reacquire it.
+    LockFileExt::unlock(&lock).map_err(CrabError::Io)?;
     Ok(payload)
 }
 
