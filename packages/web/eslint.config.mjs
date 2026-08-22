@@ -12,7 +12,18 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Fumadocs output is generated from the docs source and is not hand-edited.
+    ".source/**",
   ]),
+  {
+    // These effects intentionally synchronize browser APIs (media queries,
+    // observers, and animation frames) with local UI state. Keep the rule
+    // visible as a warning without making the generated React guidance block
+    // the web quality gate.
+    rules: {
+      "react-hooks/set-state-in-effect": "warn",
+    },
+  },
 ]);
 
 export default eslintConfig;
