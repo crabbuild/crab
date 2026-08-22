@@ -18616,12 +18616,16 @@ mod tests {
             .apply_decisions_with_sha_map(&decisions, false, &sha_map)
             .await
             .expect("build candidate");
+        upload_segmented_bulk(&store, &router, &bulk)
+            .await
+            .expect("publish concurrent pack inventory");
 
         let (mut concurrent, etag) = read_manifest(&store, &router)
             .await
             .expect("read concurrent base");
-        let concurrent_main = "f".repeat(40);
+        let concurrent_main = crate::test::git_repo::TEST_GIT_REPO.commit_sha.clone();
         concurrent.generation += 1;
+        concurrent.pack_index_hash = candidate.pack_index_hash.clone();
         concurrent
             .refs
             .insert("refs/heads/main".to_owned(), concurrent_main.clone());
@@ -18937,7 +18941,7 @@ mod tests {
             .expect("create initial manifest");
         armed.store(true, Ordering::SeqCst);
 
-        let interrupted = PushPipeline::new(
+        let interrupted_pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/main")],
             Some(store.clone()),
@@ -18948,9 +18952,8 @@ mod tests {
             None,
             cancel.clone(),
             None,
-        )
-        .execute()
-        .await;
+        );
+        let interrupted = Box::pin(interrupted_pipeline.execute()).await;
 
         assert!(
             cancel.is_cancelled(),
@@ -18980,7 +18983,7 @@ mod tests {
             "protocol v2 must stay withheld while exact derived coverage is incomplete"
         );
 
-        let restarted = PushPipeline::new(
+        let restarted_pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/dev")],
             Some(store.clone()),
@@ -18991,9 +18994,8 @@ mod tests {
             None,
             CancellationToken::new(),
             None,
-        )
-        .execute()
-        .await;
+        );
+        let restarted = Box::pin(restarted_pipeline.execute()).await;
 
         assert_eq!(
             restarted.outcomes.get("refs/heads/dev"),
