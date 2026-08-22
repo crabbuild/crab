@@ -1367,6 +1367,14 @@ addressed. This section tracks both resolved and open items.
 | B8 | Late lock acquisition                             | Lock now acquired between step 4 and step 5 — no wasted uploads from lock losers |
 | B9 | Double rev-parse                                  | `batch_rev_parse` consolidates refs in a single `git rev-parse` invocation |
 | B11 | Lock renewal failure propagation                 | Heartbeat loss, deletion, CAS conflict, fatal error, or failed transient retry cancels the push through its shared token |
+| — | Locator point-read amplification                   | Each read session uses a 16 MiB SST block/metadata cache; concurrent exact lookups coalesce shared provider reads without SlateDB's 640 MiB default |
+
+The cache bound is per process: 32 simultaneous fetchers can retain at most
+512 MiB in aggregate. In the 32-agent same-branch RustFS profile it reduced
+locator HTTP attempts from 17,065 to 3,806, compacted-SST GETs from 11,222 to
+940, and total HTTP attempts from 25,211 to 12,722. All 32 agent commits were
+present in a fresh protocol-v2 clone and strict Git fsck passed. This is a
+workload comparison, not a provider price claim.
 
 #### Partially Resolved
 
@@ -1456,7 +1464,7 @@ Impact ▲
 
 | Item | Description | Bottleneck | Effort |
 |------|-------------|------------|--------|
-| 1.1  | Coalesce exact-locator publication or replace per-generation SlateDB sessions; 32 same-branch writers currently amplify locator reads as integration retries accumulate | locator publication | L |
+| 1.1  | Qualify bounded locator caching and workload-specific request budgets on S3, GCS, and Azure | locator reads | M |
 | 1.2  | Qualify request-timeout recovery and provider-specific transient errors | B11 | S |
 | 1.3  | Progress sideband via remote-helper protocol | B10 | S |
 | 1.4  | Stabilize adaptive xorb-size EMA feedback | B12 | S |

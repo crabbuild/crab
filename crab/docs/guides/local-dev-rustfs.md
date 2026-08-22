@@ -239,8 +239,13 @@ same-branch cohort fail when `git_locator_db/*` HTTP attempts divided by
 successful pushes exceed `N`. This is a workload-specific regression budget,
 not a provider bill: record the agent count, integration mode, and parallelism
 with the result. The CI four-agent integration profile uses 180; larger swarms
-can exceed that while repeatedly waiting, fetching, and rebasing against one
-serialized branch tip.
+or repositories can exceed it while repeatedly waiting, fetching, and rebasing
+against one serialized branch tip. The retained 32-agent RustFS comparison for
+the bounded locator reader cache measured 3,806 locator attempts, or 118.94 per
+successful push, down from 17,065, or 533.28 per push. Total HTTP attempts fell
+from 25,211 to 12,722 and provider 5xx responses from 1,040 to zero. Apply real
+provider request, storage, and transfer prices before treating those counts as
+a team cost estimate.
 
 Add `--crash-boundary --crash-lock-ttl-secs 21` to SIGKILL one push after its
 prepared ref head and another after its active marker. The first ref must stay
