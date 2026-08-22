@@ -86,6 +86,9 @@ cannot read the prior local closure publishes a complete replacement. The
 single journal-compaction owner applies the ordered evidence and uploads the
 generation proof before advancing the compacted manifest. Concurrent writers
 therefore do not need one another's pack bodies or local Git object databases.
+The RustFS concurrency qualification follows each independent-ref and hot-ref
+write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
+ref visibility alone cannot satisfy the gate.
 
 Git owns the local promisor lifecycle: the Git version in use records the
 remote's promisor/filter configuration and marks received promisor packs with

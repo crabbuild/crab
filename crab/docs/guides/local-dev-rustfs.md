@@ -212,7 +212,11 @@ The smoke creates a scratch remote under
 `crab://crab/e2e-concurrent-push/<run-id>` and workdirs under
 `/Volumes/Workspace/CrabRepos`. It verifies that independent agent branches can
 push concurrently, and that simultaneous divergent pushes to `main` produce one
-winner plus structured loser statuses instead of corrupting the remote.
+winner plus structured loser statuses instead of corrupting the remote. After
+each write swarm, fresh Git protocol-v2 clients clone the resulting branches,
+run strict Git fsck, and compare the checked-out agent files byte-for-byte. The
+retained JSON report also records atomic command evidence and RustFS object-count
+and stored-byte deltas for each phase.
 The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.

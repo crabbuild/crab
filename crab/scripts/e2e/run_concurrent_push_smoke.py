@@ -6,7 +6,8 @@ and local workdirs under ``/Volumes/Workspace/CrabRepos`` by default. It models
 two AI-agent push cases:
 
 * branch fanout: many agents push independent branches at the same time; all
-  pushes must succeed.
+  pushes must succeed, then fresh protocol-v2 clients must clone and fsck every
+  branch with byte-identical content.
 * same-branch contention: many agents push divergent commits to ``main`` at the
   same time; exactly one push may land, and all losers must fail with structured
   push statuses rather than corrupting remote state. With
@@ -14,6 +15,9 @@ two AI-agent push cases:
   integrate and the final clone must contain every agent file. The command loop
   acquires the push lock before refreshing/rebasing, then hands that lock into
   the push pipeline.
+
+The retained report is written atomically across worker threads and includes
+per-phase RustFS object-count and stored-byte deltas for cost analysis.
 """
 
 from __future__ import annotations
@@ -71,6 +75,8 @@ class PushRecord:
 
 @dataclass
 class SmokeReport:
+    schema: str
+    version: str
     run_id: str
     status: str
     remote_url: str
@@ -80,7 +86,10 @@ class SmokeReport:
     commands: list[dict[str, Any]] = field(default_factory=list)
     checks: list[dict[str, Any]] = field(default_factory=list)
     branch_fanout: list[dict[str, Any]] = field(default_factory=list)
+    branch_reads: list[dict[str, Any]] = field(default_factory=list)
     same_branch: list[dict[str, Any]] = field(default_factory=list)
+    same_branch_read: dict[str, Any] = field(default_factory=dict)
+    store_snapshots: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     updated_at: str = ""
 
@@ -129,14 +138,20 @@ class ConcurrentPushSmoke:
         self.run_root = args.root / self.run_id
         self.logs = self.run_root / "logs"
         self.artifacts = self.run_root / "artifacts"
+        self.bin_dir = self.run_root / "bin"
         self.seed = self.run_root / "seed"
         self.branch_agents = self.run_root / "branch-agents"
+        self.branch_readers = self.run_root / "branch-readers"
         self.same_agents = self.run_root / "same-branch-agents"
+        self.same_branch_reader = self.run_root / "same-branch-reader"
         self.remote_url = f"crab://{args.bucket}/{REMOTE_PREFIX}/{self.run_id}"
         self.env = self.build_env()
         self.command_index = 0
         self.command_lock = threading.Lock()
+        self.report_lock = threading.RLock()
         self.report = SmokeReport(
+            schema="crab.concurrent-push-smoke",
+            version="1.1",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -161,26 +176,33 @@ class ConcurrentPushSmoke:
                 "GIT_MERGE_AUTOEDIT": "no",
             }
         )
+        env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
         return env
 
     def write_report(self) -> None:
-        self.artifacts.mkdir(parents=True, exist_ok=True)
-        self.report.updated_at = utc_now()
-        path = self.artifacts / "report.json"
-        payload = asdict(self.report)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        self.report.artifacts["report"] = str(path)
+        with self.report_lock:
+            self.artifacts.mkdir(parents=True, exist_ok=True)
+            self.report.updated_at = utc_now()
+            path = self.artifacts / "report.json"
+            temp_path = self.artifacts / "report.json.tmp"
+            self.report.artifacts["report"] = str(path)
+            payload = asdict(self.report)
+            temp_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            os.replace(temp_path, path)
 
     def check(self, name: str, ok: bool, detail: dict[str, Any] | None = None) -> None:
-        self.report.checks.append(
-            {
-                "name": name,
-                "ok": ok,
-                "detail": detail or {},
-                "timestamp": utc_now(),
-            }
-        )
-        self.write_report()
+        with self.report_lock:
+            self.report.checks.append(
+                {
+                    "name": name,
+                    "ok": ok,
+                    "detail": detail or {},
+                    "timestamp": utc_now(),
+                }
+            )
+            self.write_report()
         if not ok:
             raise SmokeError(f"check failed: {name}")
 
@@ -214,8 +236,9 @@ class ConcurrentPushSmoke:
             stdout_log=str(stdout_log),
             stderr_log=str(stderr_log),
         )
-        self.report.commands.append(asdict(record))
-        self.write_report()
+        with self.report_lock:
+            self.report.commands.append(asdict(record))
+            self.write_report()
         return record
 
     def run_cmd(
@@ -226,12 +249,16 @@ class ConcurrentPushSmoke:
         *,
         check: bool = True,
         timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CommandRecord:
+        env = self.env.copy()
+        if extra_env:
+            env.update(extra_env)
         start = time.monotonic()
         proc = subprocess.run(
             args,
             cwd=cwd,
-            env=self.env,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -254,8 +281,20 @@ class ConcurrentPushSmoke:
             )
         return record
 
-    def run_git(self, repo: Path, args: list[str], *, name: str | None = None) -> CommandRecord:
-        return self.run_cmd(name or "git " + " ".join(args), ["git", *args], repo)
+    def run_git(
+        self,
+        repo: Path,
+        args: list[str],
+        *,
+        name: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> CommandRecord:
+        return self.run_cmd(
+            name or "git " + " ".join(args),
+            [self.args.git_bin, *args],
+            repo,
+            extra_env=extra_env,
+        )
 
     def run_crab(self, repo: Path, args: list[str], *, name: str | None = None) -> CommandRecord:
         return self.run_cmd(name or "crab " + " ".join(args), [self.args.crab_bin, *args], repo)
@@ -271,10 +310,20 @@ class ConcurrentPushSmoke:
             ["config", "set", "push.max_cas_retries", str(self.args.manifest_cas_retries)],
         )
 
+    def install_helper_alias(self) -> None:
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        target = Path(self.args.crab_bin)
+        alias = self.bin_dir / "git-remote-crab"
+        try:
+            alias.symlink_to(target)
+        except (NotImplementedError, OSError):
+            shutil.copy2(target, alias)
+
     def preflight(self) -> None:
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.logs.mkdir(parents=True, exist_ok=True)
         self.artifacts.mkdir(parents=True, exist_ok=True)
+        self.install_helper_alias()
         self.write_report()
 
         try:
@@ -310,15 +359,122 @@ class ConcurrentPushSmoke:
                 {"exit_code": record.exit_code, "already_exists": already_exists},
             )
         else:
-            self.report.checks.append(
-                {
-                    "name": "bucket-create-skipped",
-                    "ok": True,
-                    "detail": {"reason": "aws CLI not found; assuming bucket exists"},
-                    "timestamp": utc_now(),
-                }
-            )
+            with self.report_lock:
+                self.report.checks.append(
+                    {
+                        "name": "bucket-create-skipped",
+                        "ok": True,
+                        "detail": {"reason": "aws CLI not found; assuming bucket exists"},
+                        "timestamp": utc_now(),
+                    }
+                )
+                self.write_report()
+
+    def store_snapshot(self, label: str) -> None:
+        if not shutil.which("aws"):
+            return
+        prefix = f"{REMOTE_PREFIX}/{self.run_id}/"
+        record = self.run_cmd(
+            f"aws store snapshot {label}",
+            [
+                "aws",
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                self.args.bucket,
+                "--prefix",
+                prefix,
+                "--endpoint-url",
+                self.args.endpoint_url,
+                "--output",
+                "json",
+            ],
+            self.run_root,
+        )
+        payload = json.loads(Path(record.stdout_log).read_text(encoding="utf-8"))
+        contents = payload.get("Contents") or []
+        snapshot = {
+            "label": label,
+            "prefix": prefix,
+            "object_count": len(contents),
+            "stored_bytes": sum(int(item.get("Size", 0)) for item in contents),
+            "timestamp": utc_now(),
+        }
+        with self.report_lock:
+            if self.report.store_snapshots:
+                previous = self.report.store_snapshots[-1]
+                snapshot["delta_objects"] = snapshot["object_count"] - previous["object_count"]
+                snapshot["delta_stored_bytes"] = (
+                    snapshot["stored_bytes"] - previous["stored_bytes"]
+                )
+            self.report.store_snapshots.append(snapshot)
             self.write_report()
+
+    def protocol_v2_clone(self, branch: str, target: Path, name: str) -> dict[str, Any]:
+        record = self.run_git(
+            self.run_root,
+            [
+                "-c",
+                "protocol.version=2",
+                "clone",
+                "--single-branch",
+                "--branch",
+                branch,
+                self.remote_url,
+                str(target),
+            ],
+            name=name,
+            extra_env={"GIT_TRACE_PACKET": "1"},
+        )
+        trace = Path(record.stderr_log).read_text(encoding="utf-8", errors="replace")
+        self.run_git(target, ["fsck", "--strict"], name=f"{name} fsck")
+        return {
+            "branch": branch,
+            "clone_duration_ms": record.duration_ms,
+            "protocol_v2": "version 2" in trace and "command=fetch" in trace,
+            "clone_stdout_log": record.stdout_log,
+            "clone_stderr_log": record.stderr_log,
+        }
+
+    def read_branch_tip(self, index: int) -> dict[str, Any]:
+        branch = f"agents/agent-{index:03d}"
+        target = self.branch_readers / f"reader-{index:03d}"
+        result = self.protocol_v2_clone(branch, target, f"protocol v2 clone {branch}")
+        path = target / "agents" / f"agent-{index:03d}.txt"
+        expected = f"branch fanout agent {index}\nrun_id {self.run_id}\n"
+        actual = path.read_text(encoding="utf-8") if path.is_file() else None
+        result.update(
+            {
+                "agent": f"branch-agent-{index:03d}",
+                "content_visible": actual == expected,
+            }
+        )
+        return result
+
+    def verify_branch_tip_reads(self) -> None:
+        self.branch_readers.mkdir(parents=True, exist_ok=True)
+        max_workers = max(1, min(self.args.agents, self.args.max_parallel_pushes))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(self.read_branch_tip, index) for index in range(self.args.agents)]
+            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+        results.sort(key=lambda result: str(result["branch"]))
+        with self.report_lock:
+            self.report.branch_reads = results
+            self.write_report()
+        failed = [
+            result
+            for result in results
+            if not result["protocol_v2"] or not result["content_visible"]
+        ]
+        self.check(
+            "branch-fanout-protocol-v2-objects-visible",
+            not failed and len(results) == self.args.agents,
+            {
+                "readers": len(results),
+                "expected": self.args.agents,
+                "failed": failed,
+            },
+        )
 
     def init_seed(self) -> None:
         self.seed.mkdir(parents=True)
@@ -344,6 +500,7 @@ class ConcurrentPushSmoke:
             ],
             name="crab push seed",
         )
+        self.store_snapshot("seed")
 
     def clone_agent(self, root: Path, index: int, prefix: str) -> Path:
         root.mkdir(parents=True, exist_ok=True)
@@ -459,8 +616,9 @@ class ConcurrentPushSmoke:
             for agent, branch, repo in prepared
         ]
         results = self.push_concurrently(jobs)
-        self.report.branch_fanout = [asdict(result) for result in results]
-        self.write_report()
+        with self.report_lock:
+            self.report.branch_fanout = [asdict(result) for result in results]
+            self.write_report()
 
         statuses = {result.status for result in results}
         self.check(
@@ -483,13 +641,16 @@ class ConcurrentPushSmoke:
             len(visible) >= self.args.agents,
             {"visible": len(visible), "expected": self.args.agents},
         )
+        self.verify_branch_tip_reads()
+        self.store_snapshot("branch-fanout")
 
     def run_same_branch_contention(self) -> None:
         prepared = [self.prepare_same_branch_agent(i) for i in range(self.args.same_branch_agents)]
         jobs = [(agent, branch, repo, "HEAD:refs/heads/main") for agent, branch, repo in prepared]
         results = self.push_concurrently(jobs)
-        self.report.same_branch = [asdict(result) for result in results]
-        self.write_report()
+        with self.report_lock:
+            self.report.same_branch = [asdict(result) for result in results]
+            self.write_report()
 
         ok = [result for result in results if result.status == "ok" and result.command.exit_code == 0]
         rejected = [result for result in results if result.status != "ok"]
@@ -518,7 +679,8 @@ class ConcurrentPushSmoke:
                     "bad_statuses": [asdict(result) for result in bad],
                 },
             )
-            self.check_same_branch_files_visible()
+            self.check_same_branch_files_visible(self.args.same_branch_agents)
+            self.store_snapshot("same-branch-integrated")
             return
 
         self.check(
@@ -534,19 +696,32 @@ class ConcurrentPushSmoke:
                 "bad_statuses": [asdict(result) for result in bad],
             },
         )
+        self.check_same_branch_files_visible(1)
+        self.store_snapshot("same-branch-contention")
 
-    def check_same_branch_files_visible(self) -> None:
-        target = self.run_root / "same-branch-final"
-        self.run_cmd(
-            "crab clone same-branch final",
-            [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
-            self.run_root,
+    def check_same_branch_files_visible(self, expected_count: int) -> None:
+        result = self.protocol_v2_clone(
+            "main", self.same_branch_reader, "protocol v2 clone same-branch final"
         )
-        visible = sorted((target / "same-branch").glob("agent-*.txt"))
+        visible = sorted((self.same_branch_reader / "same-branch").glob("agent-*.txt"))
+        valid_contents = all(
+            path.read_text(encoding="utf-8")
+            == f"same branch agent {int(path.stem.removeprefix('agent-'))}\nrun_id {self.run_id}\n"
+            for path in visible
+        )
+        result.update(
+            {
+                "visible_files": [path.name for path in visible],
+                "content_valid": valid_contents,
+            }
+        )
+        with self.report_lock:
+            self.report.same_branch_read = result
+            self.write_report()
         self.check(
-            "same-branch-integrated-files-visible",
-            len(visible) == self.args.same_branch_agents,
-            {"visible": len(visible), "expected": self.args.same_branch_agents},
+            "same-branch-protocol-v2-objects-visible",
+            result["protocol_v2"] and valid_contents and len(visible) == expected_count,
+            {"visible": len(visible), "expected": expected_count, **result},
         )
 
     def run_fsck(self) -> None:
@@ -569,22 +744,24 @@ class ConcurrentPushSmoke:
                 self.run_same_branch_contention()
             self.run_fsck()
         except Exception as exc:
-            self.report.status = "failed"
-            self.report.checks.append(
-                {
-                    "name": "exception",
-                    "ok": False,
-                    "detail": {"error": str(exc)},
-                    "timestamp": utc_now(),
-                }
-            )
-            self.write_report()
+            with self.report_lock:
+                self.report.status = "failed"
+                self.report.checks.append(
+                    {
+                        "name": "exception",
+                        "ok": False,
+                        "detail": {"error": str(exc)},
+                        "timestamp": utc_now(),
+                    }
+                )
+                self.write_report()
             print(f"FAILED: {exc}")
             print(f"report: {self.report.artifacts.get('report')}")
             return 1
 
-        self.report.status = "ok"
-        self.write_report()
+        with self.report_lock:
+            self.report.status = "ok"
+            self.write_report()
         print("OK")
         print(f"run: {self.run_root}")
         print(f"remote: {self.remote_url}")
@@ -602,6 +779,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--run-id")
     parser.add_argument("--crab-bin", default=shutil.which("crab") or "crab")
+    parser.add_argument("--git-bin", default=shutil.which("git") or "git")
     parser.add_argument("--agents", type=int, default=8)
     parser.add_argument("--same-branch-agents", type=int, default=8)
     parser.add_argument("--max-parallel-pushes", type=int, default=32)
@@ -618,6 +796,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-fsck", action="store_true")
     args = parser.parse_args()
     args.crab_bin = resolve_executable(args.crab_bin)
+    args.git_bin = resolve_executable(args.git_bin)
     return args
 
 

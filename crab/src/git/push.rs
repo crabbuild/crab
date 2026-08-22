@@ -2427,6 +2427,7 @@ const PUSH_ADMISSION_SLOTS: usize = 5;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
+const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
 
@@ -4914,12 +4915,63 @@ async fn download_locator_pack_evidence(
     })
 }
 
+async fn acquire_current_git_locator_lock(
+    store: &Store,
+    router: &StoreLayout,
+    anchor: CommittedManifestAnchor,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<PushLock>> {
+    let deadline = Instant::now() + lock_ttl.saturating_mul(GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER);
+    let mut attempt = 0;
+    loop {
+        check_cancelled(cancel)?;
+        let (current, _) = read_manifest(store, router).await?;
+        if current.generation != anchor.generation
+            || current.pack_index_hash != anchor.pack_index_hash.hex()
+        {
+            return Ok(None);
+        }
+        match PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+            lock_ttl,
+        )
+        .await
+        .map_err(CrabError::from)
+        {
+            Ok(lock) => return Ok(Some(lock)),
+            Err(error @ CrabError::PushLockHeld { .. }) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                let delay = push_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    generation = anchor.generation,
+                    "current Git locator generation is waiting for the derived writer"
+                );
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub(crate) async fn publish_committed_pack_locators(
     store: &Store,
     router: &StoreLayout,
     packs: &[CommittedPackIndex<'_>],
     anchor: CommittedManifestAnchor,
     lock_ttl: Duration,
+    cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
     let mut local_evidence = HashMap::with_capacity(packs.len());
     for published in packs {
@@ -4955,23 +5007,11 @@ pub(crate) async fn publish_committed_pack_locators(
         }
     }
 
-    // Most fanout writers are stale by the time they reach derived indexing.
-    // Reject them before lock traffic or opening SlateDB; the check under the
-    // lock remains authoritative against a concurrent manifest advance.
-    let (current, _) = read_manifest(store, router).await?;
-    if current.generation != anchor.generation
-        || current.pack_index_hash != anchor.pack_index_hash.hex()
-    {
+    let Some(lock) =
+        acquire_current_git_locator_lock(store, router, anchor, lock_ttl, cancel).await?
+    else {
         return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
-    }
-
-    let lock = PushLock::acquire_internal(
-        store.inner(),
-        router.repo_prefix(),
-        crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
-        lock_ttl,
-    )
-    .await?;
+    };
     let publication_started = Instant::now();
     let write_result = Box::pin(while_renewing_internal_lock(&lock, async {
         let (current, _) = read_manifest(store, router).await?;
@@ -5142,6 +5182,7 @@ async fn publish_uploaded_pack_locators(
     packs: &[UploadedGitPack],
     anchor: CommittedManifestAnchor,
     lock_ttl: Duration,
+    cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
     let committed = packs
         .iter()
@@ -5152,7 +5193,7 @@ async fn publish_uploaded_pack_locators(
             git_sha1: &uploaded.git_sha1,
         })
         .collect::<Vec<_>>();
-    publish_committed_pack_locators(store, router, &committed, anchor, lock_ttl).await
+    publish_committed_pack_locators(store, router, &committed, anchor, lock_ttl, cancel).await
 }
 
 /// Pre-computed pointer walk produced by the native push orchestrator.
@@ -13962,6 +14003,7 @@ impl PushPipeline {
                     &uploaded_packs,
                     anchor,
                     self.config.lock_ttl,
+                    &self.cancel,
                 )
                 .await
                 {
@@ -13977,12 +14019,35 @@ impl PushPipeline {
                     }
                     Ok(stats) => {
                         git_indexed = false;
-                        warn!(
-                            generation = anchor.generation,
-                            pack_count = uploaded_packs.len(),
-                            object_rows = stats.object_rows_written,
-                            "post-CAS Git locator rows published without exact coverage; repair is required"
-                        );
+                        let superseded = match read_manifest(store, &self.router).await {
+                            Ok((current, _)) => {
+                                current.generation != anchor.generation
+                                    || current.pack_index_hash != anchor.pack_index_hash.hex()
+                            }
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    generation = anchor.generation,
+                                    "could not verify whether incomplete Git locator publication was superseded"
+                                );
+                                false
+                            }
+                        };
+                        if superseded {
+                            debug!(
+                                generation = anchor.generation,
+                                pack_count = uploaded_packs.len(),
+                                object_rows = stats.object_rows_written,
+                                "Git locator publication was superseded by a newer manifest"
+                            );
+                        } else {
+                            warn!(
+                                generation = anchor.generation,
+                                pack_count = uploaded_packs.len(),
+                                object_rows = stats.object_rows_written,
+                                "post-CAS Git locator rows published without exact coverage; repair is required"
+                            );
+                        }
                     }
                     Err(error) => {
                         git_indexed = false;
@@ -18688,6 +18753,61 @@ mod tests {
         assert_eq!(stored.ref_tips, second.ref_tips);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_git_locator_generation_waits_for_writer_handoff() {
+        let (store, router) = test_store_router("locator-writer-handoff");
+        let pack_index_hash = MerkleHash::from([7_u64, 8, 9, 10]);
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.pack_index_hash = pack_index_hash.hex();
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest)
+            .await
+            .expect("publish current manifest");
+        let blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("acquire first locator writer");
+        let anchor = CommittedManifestAnchor {
+            generation: manifest.generation,
+            shard_index_hash: MerkleHash::default(),
+            pack_index_hash,
+        };
+        let waiting_store = store.clone();
+        let waiting_router = router.clone();
+        let waiting = tokio::spawn(async move {
+            acquire_current_git_locator_lock(
+                &waiting_store,
+                &waiting_router,
+                anchor,
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!waiting.is_finished());
+        blocker
+            .release()
+            .await
+            .expect("release first locator writer");
+        let acquired = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("waiting locator writer should acquire")
+            .expect("locator wait task should complete")
+            .expect("locator wait should succeed")
+            .expect("current generation should still need publication");
+        acquired
+            .release()
+            .await
+            .expect("release waiting locator writer");
+    }
+
     #[tokio::test]
     async fn git_object_locator_cli_publisher_advances_generations_without_new_packs() {
         let (store, router) = test_store_router("locator-publisher");
@@ -18759,6 +18879,7 @@ mod tests {
             }],
             anchor,
             Duration::from_secs(60),
+            &CancellationToken::new(),
         )
         .await
         .expect("publish locators");
@@ -18835,10 +18956,16 @@ mod tests {
         stale_writer.flush_objects().await.expect("flush stale row");
         stale_writer.close().await.expect("close stale writer");
 
-        let repaired =
-            publish_uploaded_pack_locators(&store, &router, &[], anchor, Duration::from_secs(60))
-                .await
-                .expect("repair stale duplicate row");
+        let repaired = publish_uploaded_pack_locators(
+            &store,
+            &router,
+            &[],
+            anchor,
+            Duration::from_secs(60),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("repair stale duplicate row");
         assert_eq!(repaired.object_rows_written, 1);
         let repaired_session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
@@ -18879,6 +19006,7 @@ mod tests {
             &[],
             next_anchor,
             Duration::from_secs(60),
+            &CancellationToken::new(),
         )
         .await
         .expect("advance locator coverage without new packs");
@@ -19002,6 +19130,7 @@ mod tests {
             }],
             anchor,
             Duration::from_secs(60),
+            &CancellationToken::new(),
         )
         .await
         .expect("publish complete concurrent generation");

@@ -264,6 +264,7 @@ async fn run_repack_locked(
         }],
         anchor,
         config.lock_ttl,
+        cancel,
     )
     .await
     {
