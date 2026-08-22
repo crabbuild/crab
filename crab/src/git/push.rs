@@ -9725,11 +9725,9 @@ impl PushPipeline {
             return self.verify_xorb_refs(refs).await;
         };
 
-        // A cache+dedup hit already carries a cache-server proof for the
-        // referenced chunk. Read that immutable body from the cache service
-        // and validate it locally before falling back to canonical-origin
-        // range reads; this keeps a warm duplicate push off the origin read
-        // path while retaining the repair path for a missing origin object.
+        // A cache+dedup hit is useful for planning, so validate its immutable
+        // body before falling back to canonical-origin reads. Do not record a
+        // canonical payload proof here: publication must verify origin bytes.
         let mut refs_by_xorb: HashMap<XorbHash, Vec<(MerkleHash, XorbRef)>> = HashMap::new();
         for (chunk_hash, xorb_ref) in refs {
             refs_by_xorb
@@ -9772,12 +9770,6 @@ impl PushPipeline {
             match origin.head(&path).await {
                 Ok(meta) if meta.size == body_len => {
                     record_remote_xorb_index(cache.local_cache(), &xorb_hash, &meta, &index);
-                    record_remote_xorb_payload_proof(
-                        cache.local_cache(),
-                        &xorb_hash,
-                        &index,
-                        &meta,
-                    );
                     verified.extend(xorb_refs);
                 }
                 Ok(_) => unresolved.extend(xorb_refs),
@@ -11754,9 +11746,12 @@ impl PushPipeline {
             .iter()
             .map(|(shard_hash, path, _)| (*shard_hash, path.clone()))
             .collect();
+        // A cache body plus an origin HEAD is not a canonical payload proof.
+        // Read existing shards from origin before allowing the manifest to
+        // reference them; cache reads remain available to recovery probes.
         let existing_shards = verified_existing_remote_shards_with_cache(
             store,
-            self.caching_store.as_ref(),
+            None,
             &shard_checks,
             self.config.head_check_concurrency,
         )
@@ -12807,9 +12802,7 @@ impl PushPipeline {
             })?;
         let writer = build_push_metadb_guard_with_object_store(
             store,
-            self.caching_store
-                .as_ref()
-                .map(crab_cache_store::CachingStore::object_store),
+            None,
             &self.router,
             self.metrics.clone(),
             &self.config.metadb,

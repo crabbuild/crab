@@ -332,8 +332,7 @@ pub(crate) async fn open_repository(
         // The manifest generation check distinguishes derived publication lag
         // from an active ref-journal transaction, which must remain unavailable.
         let repair_store = crate::storage::Store::from_storage(store.clone());
-        let repair_layout =
-            crab_storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+        let repair_layout = crab_storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
         if matches!(
             super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
             Ok(true)
