@@ -1,6 +1,6 @@
 import { cliSource } from '@/lib/source';
 import { DocsPage, DocsBody } from 'fumadocs-ui/page';
-import { useMDXComponents } from '@/mdx-components';
+import { getMDXComponents } from '@/mdx-components';
 import { notFound, permanentRedirect } from 'next/navigation';
 import type { Metadata } from 'next';
 
@@ -23,7 +23,7 @@ export default async function CliDocPage({
   return (
     <DocsPage toc={page.data.toc} id="main-content">
       <DocsBody>
-        <MDX components={useMDXComponents({})} />
+        <MDX components={getMDXComponents({})} />
       </DocsBody>
     </DocsPage>
   );

@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { createElement } from "react"
 import {
   ArrowUpRight,
   Bot,
@@ -57,7 +58,7 @@ export function IntegrationCard({ integration }: { integration: Integration }) {
           aria-hidden="true"
           className="mb-2 inline-flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary"
         >
-          <Icon size={20} strokeWidth={2} />
+          {createElement(Icon, { size: 20, strokeWidth: 2 })}
         </div>
         <CardTitle>{integration.name}</CardTitle>
         <CardDescription>{integration.description}</CardDescription>
