@@ -54,10 +54,10 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v1"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v2"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
-    ".crab/xorbs/{hash}",
-    ".crab/shards/{hash}",
+    ".crab/xorbs/{first-two-hex}/{hash}",
+    ".crab/shards/{first-two-hex}/{hash}",
     "{repo}/packs/pack-{id}.pack",
     "{repo}/packs/pack-{id}.idx",
     "{repo}/file_index_db/compacted/*.sst",
@@ -3446,7 +3446,7 @@ class CacheServiceRustfsSmoke:
 
     def verify_request_limit_controls(self) -> None:
         state = self.require_proxy_state()
-        key = f".crab/xorbs/{'f' * 64}"
+        key = f".crab/xorbs/{'f' * 2}/{'f' * 64}"
         before_stats = self.cache_admin_stats()
         limits = before_stats.get("limits", {})
         max_object_bytes = limits.get("max_object_bytes") if isinstance(limits, dict) else None
@@ -3696,19 +3696,23 @@ class CacheServiceRustfsSmoke:
 
     def verify_advertised_immutable_route_contract_behavior(self) -> None:
         xorb_key = self.origin_key_matching(
-            ".crab/xorbs/{hash}",
+            ".crab/xorbs/{first-two-hex}/{hash}",
             lambda key: key.startswith(".crab/xorbs/"),
         )
         shard_key = self.origin_key_matching(
-            ".crab/shards/{hash}",
+            ".crab/shards/{first-two-hex}/{hash}",
             lambda key: key.startswith(".crab/shards/"),
         )
         xorb_body = self.get_origin_object(xorb_key)
         shard_body = self.get_origin_object(shard_key)
         synthetic_specs = self.synthetic_immutable_route_specs()
 
-        self.assert_immutable_route_pattern_cached(".crab/xorbs/{hash}", xorb_key)
-        self.assert_immutable_route_pattern_cached(".crab/shards/{hash}", shard_key)
+        self.assert_immutable_route_pattern_cached(
+            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key
+        )
+        self.assert_immutable_route_pattern_cached(
+            ".crab/shards/{first-two-hex}/{hash}", shard_key
+        )
         for pattern, key, data in synthetic_specs:
             self.assert_immutable_route_pattern_cached(pattern, key, data)
         self.check(
@@ -3717,8 +3721,12 @@ class CacheServiceRustfsSmoke:
             == sorted(EXPECTED_IMMUTABLE_ROUTE_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_route_behaviors]},
         )
-        self.assert_immutable_route_pattern_push_warmed(".crab/xorbs/{hash}", xorb_key, xorb_body)
-        self.assert_immutable_route_pattern_push_warmed(".crab/shards/{hash}", shard_key, shard_body)
+        self.assert_immutable_route_pattern_push_warmed(
+            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body
+        )
+        self.assert_immutable_route_pattern_push_warmed(
+            ".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body
+        )
         for pattern, key, data in synthetic_specs:
             self.assert_immutable_route_pattern_push_warmed(pattern, key, data)
         self.check(
@@ -3727,12 +3735,19 @@ class CacheServiceRustfsSmoke:
             == sorted(EXPECTED_IMMUTABLE_ROUTE_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_route_write_behaviors]},
         )
-        self.assert_immutable_route_pattern_rejects_poisoning(".crab/xorbs/{hash}", xorb_key, xorb_body)
-        self.assert_immutable_route_pattern_rejects_poisoning(".crab/shards/{hash}", shard_key, shard_body)
+        self.assert_immutable_route_pattern_rejects_poisoning(
+            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body
+        )
+        self.assert_immutable_route_pattern_rejects_poisoning(
+            ".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body
+        )
         self.check(
             "route-contract-immutable-poisoning-patterns-covered",
             sorted(record["pattern"] for record in self.report.immutable_poisoning_controls)
-            == [".crab/shards/{hash}", ".crab/xorbs/{hash}"],
+            == [
+                ".crab/shards/{first-two-hex}/{hash}",
+                ".crab/xorbs/{first-two-hex}/{hash}",
+            ],
             {"patterns": [record["pattern"] for record in self.report.immutable_poisoning_controls]},
         )
 
@@ -4824,8 +4839,14 @@ class CacheServiceRustfsSmoke:
         state = self.require_proxy_state()
         fixtures: list[dict[str, Any]] = []
         for pattern, predicate in (
-            (".crab/xorbs/{hash}", lambda key: key.startswith(".crab/xorbs/")),
-            (".crab/shards/{hash}", lambda key: key.startswith(".crab/shards/")),
+            (
+                ".crab/xorbs/{first-two-hex}/{hash}",
+                lambda key: key.startswith(".crab/xorbs/"),
+            ),
+            (
+                ".crab/shards/{first-two-hex}/{hash}",
+                lambda key: key.startswith(".crab/shards/"),
+            ),
         ):
             key = self.origin_key_matching(pattern, predicate)
             object_type, cache_file = self.cache_file_for_integrity_key(key)

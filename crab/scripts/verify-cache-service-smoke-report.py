@@ -15,10 +15,10 @@ from typing import Any
 DEFAULT_PSK_BLAKE3 = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
 DEFAULT_FORBIDDEN_SECRETS = ("cache-smoke-psk", DEFAULT_PSK_BLAKE3)
 EVIDENCE_MANIFEST_SCHEMA = "crab-cache-service.evidence-manifest.v1"
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v1"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v2"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
-    ".crab/xorbs/{hash}",
-    ".crab/shards/{hash}",
+    ".crab/xorbs/{first-two-hex}/{hash}",
+    ".crab/shards/{first-two-hex}/{hash}",
     "{repo}/packs/pack-{id}.pack",
     "{repo}/packs/pack-{id}.idx",
     "{repo}/file_index_db/compacted/*.sst",
@@ -31,8 +31,8 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/chunk_index_db/compactions/*.compactions",
 ]
 EXPECTED_IMMUTABLE_POISONING_PATTERNS = [
-    ".crab/xorbs/{hash}",
-    ".crab/shards/{hash}",
+    ".crab/xorbs/{first-two-hex}/{hash}",
+    ".crab/shards/{first-two-hex}/{hash}",
 ]
 EXPECTED_MUTABLE_ROUTE_PATTERNS = [
     "{repo}/refs/heads/*",
