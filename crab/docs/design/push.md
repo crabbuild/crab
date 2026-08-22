@@ -1152,6 +1152,12 @@ the manifest and rules out an under-lock no-op. A same-ref waiter therefore
 polls only the ref handoff and never scans or reserves admission slots. Owners
 of distinct refs may wait for admission while retaining their renewable ref
 leases; once admitted, the existing bounded pack/upload lifecycle applies.
+Admission uses five reusable slot objects to cap every probe and avoid one
+coordination object per contender. A push with xorb work reserves one slot per
+eight configured upload workers, rounded up; the normal eight-worker client
+uses one, while a 32-worker client uses four. A wider client reserves all five,
+so it cannot amplify its own configured pressure with sibling uploads. Pure
+Git pushes reserve one slot because they do not start the xorb upload workers.
 
 ### Lock Expiry and Reclamation
 

@@ -2537,9 +2537,11 @@ const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 /// Cap after a same-ref contender has published its successor signal.
 const PUSH_LOCK_SUCCESSOR_POLL_CAP: Duration = Duration::from_millis(250);
 
-// Operational cap, not a correctness constant. With the product's default
-// eight upload workers, five pushes bound one repository to 40 upload tasks.
+// Five reusable objects bound every admission probe. Xorb pushes reserve one
+// slot per eight configured upload workers, so ordinary pushes retain five-way
+// concurrency while a wider client consumes proportionally more capacity.
 const PUSH_ADMISSION_SLOTS: usize = 5;
+const PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT: usize = 8;
 const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
@@ -3143,6 +3145,16 @@ fn push_admission_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     }
     let pick = rand::rng().random_range(1..=bound_nanos);
     Duration::from_nanos(pick)
+}
+
+fn push_admission_required_slots(upload_concurrency: usize, has_xorb_work: bool) -> usize {
+    if !has_xorb_work {
+        return 1;
+    }
+    upload_concurrency
+        .max(1)
+        .div_ceil(PUSH_ADMISSION_UPLOAD_WORKERS_PER_SLOT)
+        .clamp(1, PUSH_ADMISSION_SLOTS)
 }
 
 /// Structured reject reason for a per-ref push failure.
@@ -5156,16 +5168,18 @@ pub(crate) async fn acquire_push_lock_leases(
 async fn acquire_push_admission_lock(
     store: &Store,
     prefix: &str,
+    required_slots: usize,
     ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<crab_coordination::PushAdmissionTicket> {
     // Admission bounds expensive repository-wide work, while per-ref locks
     // provide correctness. Waiting contenders own no object-store state.
     let deadline = Instant::now() + ttl.saturating_mul(PUSH_ADMISSION_WAIT_TTL_MULTIPLIER);
-    let mut ticket = crab_coordination::PushAdmissionTicket::new(
+    let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted(
         store.inner(),
         prefix,
         PUSH_ADMISSION_SLOTS,
+        required_slots,
         ttl,
     )
     .map_err(CrabError::from)?;
@@ -14977,6 +14991,21 @@ impl PushPipeline {
         (bytes, pointers.len() as u64)
     }
 
+    async fn push_admission_required_slots(&self) -> usize {
+        let classified_xorb_work = self
+            .new_chunk_hashes
+            .lock()
+            .await
+            .as_ref()
+            .map(|chunks| !chunks.is_empty());
+        let prepared_xorb_work = !self.xorbs.lock().await.is_empty();
+        let has_xorb_work = match classified_xorb_work {
+            Some(classified) => classified || prepared_xorb_work,
+            None => prepared_xorb_work || !self.pointers.lock().await.is_empty(),
+        };
+        push_admission_required_slots(self.config.upload_concurrency, has_xorb_work)
+    }
+
     async fn execute_inner(&self) -> Result<PushResult> {
         // Cancellation wins over configuration or remote preflight errors so
         // callers receive the stable cancellation contract even when no
@@ -15088,6 +15117,7 @@ impl PushPipeline {
         // Ref ownership and the under-lock no-op recheck come before
         // repository-wide admission. Same-ref waiters cannot perform upload
         // work, so making them scan admission slots only amplifies contention.
+        let required_admission_slots = self.push_admission_required_slots().await;
         let admission_lock = if self.config.active_active_replication.is_none() {
             match self.store.as_ref() {
                 Some(store) => Some(
@@ -15096,6 +15126,7 @@ impl PushPipeline {
                         acquire_push_admission_lock(
                             store,
                             self.router.repo_prefix(),
+                            required_admission_slots,
                             self.config.lock_ttl,
                             &self.cancel,
                         )
@@ -18583,6 +18614,20 @@ mod tests {
     }
 
     #[test]
+    fn push_admission_charges_xorb_worker_width() {
+        let slots = [
+            push_admission_required_slots(64, false),
+            push_admission_required_slots(1, true),
+            push_admission_required_slots(8, true),
+            push_admission_required_slots(9, true),
+            push_admission_required_slots(40, true),
+            push_admission_required_slots(64, true),
+        ];
+
+        assert_eq!(slots, [1, 1, 1, 2, 5, 5]);
+    }
+
+    #[test]
     fn announced_successor_poll_stays_inside_handoff_window() {
         let delay = push_lock_wait_delay_with_cap(
             32,
@@ -20123,6 +20168,7 @@ mod tests {
         let lock = acquire_push_admission_lock(
             &store,
             "repo",
+            1,
             Duration::from_secs(3),
             &CancellationToken::new(),
         )
