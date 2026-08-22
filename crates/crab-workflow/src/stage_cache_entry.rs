@@ -247,7 +247,7 @@ pub(crate) fn decode_b3_hash(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in bytes[3..].chunks_exact(2).enumerate() {
+    for (index, pair) in bytes[3..].as_chunks::<2>().0.iter().enumerate() {
         if !pair.iter().all(u8::is_ascii_hexdigit) {
             return None;
         }
