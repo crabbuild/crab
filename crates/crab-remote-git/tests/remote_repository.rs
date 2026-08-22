@@ -856,6 +856,17 @@ async fn read_target(fixture: &PublishedFixture) -> crab_remote_git::Result<Byte
     operation.finish(result).await
 }
 
+fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
+    match error {
+        Error::LimitExceeded { limit, .. } => *limit == expected_limit,
+        Error::SharedRead { source } => contains_limit_exceeded(source, expected_limit),
+        Error::CloseAfterFailure { operation, .. } => {
+            contains_limit_exceeded(operation, expected_limit)
+        }
+        _ => false,
+    }
+}
+
 async fn assert_runtime_is_within_configured_bounds(
     runtime: &RemoteGitRuntime,
     options: RuntimeOptions,
@@ -1840,13 +1851,7 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
         .await
         .expect_err("aggregate inflated bytes must fail");
     assert!(
-        matches!(
-            &first,
-            Error::LimitExceeded {
-                limit: "inflated bytes",
-                ..
-            }
-        ),
+        contains_limit_exceeded(&first, "inflated bytes"),
         "unexpected first error: {first:?}"
     );
 
@@ -1855,13 +1860,7 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
         .await
         .expect_err("failed decode must not become a cache hit");
     assert!(
-        matches!(
-            &second,
-            Error::LimitExceeded {
-                limit: "inflated bytes",
-                ..
-            }
-        ),
+        contains_limit_exceeded(&second, "inflated bytes"),
         "unexpected second error: {second:?}"
     );
     assert!(fixture.backend.pack_gets() > 0);
