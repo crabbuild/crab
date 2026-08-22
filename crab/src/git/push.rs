@@ -4216,6 +4216,7 @@ impl UploadedXorb {
         self.len
     }
 
+    #[cfg(test)]
     fn has_payload(&self) -> bool {
         self.payload.is_some()
     }
@@ -4476,12 +4477,47 @@ async fn warm_uploaded_xorb_cache(
         router.clone(),
     )
     .await;
-    let Some(payload) = uploaded_xorb.payload.as_ref() else {
-        return stats;
-    };
     let remote_needs_warm = caching_store
         .as_ref()
         .is_some_and(|cs| cs.should_warm_remote_object(&path, bytes));
+    let Some(payload) = uploaded_xorb.payload.as_ref() else {
+        if !remote_needs_warm {
+            return stats;
+        }
+
+        // The streaming upload path intentionally releases xorb payloads after
+        // the origin PUT. Small cache-service warms can still use the durable
+        // origin copy without retaining the upload body for the whole push.
+        let Some(store) = store.as_ref() else {
+            return stats;
+        };
+        let body = match store.get_with_etag(&path).await {
+            Ok((body, _)) if body.len() as u64 == bytes => body,
+            Ok((body, _)) => {
+                warn!(
+                    xorb = %hash.hex(),
+                    expected_bytes = bytes,
+                    actual_bytes = body.len(),
+                    "remote xorb cache warm skipped because origin body size did not match"
+                );
+                return stats;
+            }
+            Err(e) => {
+                warn!(
+                    xorb = %hash.hex(),
+                    error = %e,
+                    "remote xorb cache warm origin read failed (non-fatal)"
+                );
+                return stats;
+            }
+        };
+        if let Some(cs) = caching_store {
+            if let Err(e) = cs.warm_remote_only(&path, body).await {
+                warn!(xorb = %hash.hex(), error = %e, "remote xorb cache warm failed (non-fatal)");
+            }
+        }
+        return stats;
+    };
     if !cache_needs_write && let Err(e) = cache.index_xorb_if_present(&hash).await {
         warn!(
             xorb = %hash.hex(),
@@ -13554,7 +13590,6 @@ impl PushPipeline {
             let total_payload_bytes = uploaded
                 .iter()
                 .fold(0u64, |sum, xorb| sum.saturating_add(xorb.len() as u64));
-            let all_payloads_available = uploaded.iter().all(UploadedXorb::has_payload);
             let mut total_bytes: u64 = 0;
             let mut cached = 0usize;
             let concurrency = self
@@ -13562,7 +13597,7 @@ impl PushPipeline {
                 .upload_concurrency
                 .max(1)
                 .min(XORB_CACHE_WARM_MAX_CONCURRENCY);
-            if !all_payloads_available || !should_warm_uploaded_xorb_payloads(total_payload_bytes) {
+            if !should_warm_uploaded_xorb_payloads(total_payload_bytes) {
                 let store = self.store.clone();
                 let router = self.router.clone();
                 let mut proofs =

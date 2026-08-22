@@ -524,8 +524,18 @@ impl CachingStore {
     }
 
     async fn complete_xorb_without_install(&self, path: &Path) -> Result<Bytes> {
-        let (data, _) = self.origin.get_with_etag(path).await?;
-        Ok(data)
+        match self.get_cache_service_object_without_install(path).await {
+            Ok(Some(data)) => Ok(data),
+            Ok(None) => Ok(self.origin.get_with_etag(path).await?.0),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %error,
+                    "cache service xorb read failed, falling back to origin",
+                );
+                Ok(self.origin.get_with_etag(path).await?.0)
+            }
+        }
     }
 
     /// Whether a cache service is configured (regardless of mode).
@@ -655,6 +665,25 @@ impl CachingStore {
     /// service or integrity failure is returned to the caller so proof paths can
     /// treat the object as unverified instead of silently querying origin.
     pub async fn get_cache_service_object(&self, path: &Path) -> Result<Option<Bytes>> {
+        let Some(data) = self.get_cache_service_object_without_install(path).await? else {
+            return Ok(None);
+        };
+        #[cfg(feature = "remote-client")]
+        {
+            self.store_cache_service_response(path, &data).await?;
+            Ok(Some(data))
+        }
+        #[cfg(not(feature = "remote-client"))]
+        {
+            let _ = data;
+            Ok(None)
+        }
+    }
+
+    /// Read an immutable object from the cache service without updating the
+    /// local cache. Used by full-object hydrate reads that intentionally avoid
+    /// installing a second local copy before reconstruction consumes the body.
+    async fn get_cache_service_object_without_install(&self, path: &Path) -> Result<Option<Bytes>> {
         if classify_path(path.as_ref()) == PathClass::Mutable {
             return Ok(None);
         }
@@ -667,10 +696,7 @@ impl CachingStore {
             let Some(client) = &self.cache_client else {
                 return Ok(None);
             };
-
-            let data = client.get(path.as_ref()).await?;
-            self.store_cache_service_response(path, &data).await?;
-            Ok(Some(data))
+            Ok(Some(client.get(path.as_ref()).await?))
         }
         #[cfg(not(feature = "remote-client"))]
         {
@@ -3163,6 +3189,56 @@ mod tests {
             "hydrate reads must not write a second full copy before output"
         );
         assert_eq!(get_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn noninstalling_full_coverage_uses_warmed_cache_service() {
+        let payloads = [
+            Bytes::from(vec![0x11; 32 * 1024]),
+            Bytes::from(vec![0x22; 32 * 1024]),
+        ];
+        let expected = payloads
+            .iter()
+            .flat_map(|payload| payload.iter().copied())
+            .collect::<Vec<_>>();
+        let (xorb, hash) = test_raw_xorb(&payloads);
+        let path = content_path("xorbs", &hash.hex());
+        let server = start_test_cache_server().await;
+        server
+            .origin
+            .put(&path, PutPayload::from_bytes(xorb.clone()))
+            .await
+            .unwrap();
+
+        let warmer = CachingStore::new_with_local_cache(
+            Store::new(Arc::clone(&server.origin) as Arc<dyn ObjectStore>),
+            &cache_service_push_warming_config(server.addr),
+            Arc::new(LocalCache::new(
+                server._tempdir.path().join("noninstalling-warmer"),
+            )),
+        )
+        .unwrap();
+        warmer.warm_remote_only(&path, xorb).await.unwrap();
+
+        let reader_cache = Arc::new(LocalCache::new(
+            server._tempdir.path().join("noninstalling-reader"),
+        ));
+        let reader = CachingStore::new_with_local_cache(
+            Store::new(Arc::clone(&server.origin) as Arc<dyn ObjectStore>),
+            &cache_service_config(server.addr),
+            Arc::clone(&reader_cache),
+        )
+        .unwrap();
+        let (data, offsets) = reader
+            .get_xorb_chunks_without_install(&path, &hash, &[(0, 2)])
+            .await
+            .unwrap();
+
+        assert_eq!(data, expected);
+        assert_eq!(offsets.last().copied(), Some(expected.len() as u32));
+        assert!(!reader_cache.contains(&CacheKey::Xorb(hash)).await);
+        assert_eq!(server.origin_get_count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

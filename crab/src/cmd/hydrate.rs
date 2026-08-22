@@ -908,33 +908,23 @@ impl ShardHydrator {
                 return Ok(data.clone());
             }
         }
-        let key = crate::cache::CacheKey::Xorb(*hash);
         let origin = self.store.origin().clone();
         let path = self.router.xorb_path(hash);
         let hash_for_fetch = *hash;
-        let data = self
-            .store
-            .local_cache()
-            .get_or_fetch_with(&key, || {
-                let origin = origin;
-                let path = path;
-                let restore_orchestrator = self.restore_orchestrator.clone();
-                let auto_restore = self.auto_restore;
-                async move {
-                    debug!(xorb_hash = %hash_for_fetch.hex(), "hydrate: downloading xorb");
-                    let restore_origin = crate::storage::Store::from_storage(origin.clone());
-                    crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
-                        &restore_origin,
-                        &path,
-                        restore_orchestrator.as_deref(),
-                        auto_restore,
-                    )
-                    .await?;
-                    let (data, _) = origin.get_with_etag(&path).await?;
-                    Ok::<_, error::CrabError>(data)
-                }
-            })
-            .await?;
+        let restore_orchestrator = self.restore_orchestrator.clone();
+        let auto_restore = self.auto_restore;
+        debug!(xorb_hash = %hash_for_fetch.hex(), "hydrate: downloading xorb");
+        let restore_origin = crate::storage::Store::from_storage(origin);
+        crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
+            &restore_origin,
+            &path,
+            restore_orchestrator.as_deref(),
+            auto_restore,
+        )
+        .await?;
+        // CachingStore owns the local and remote cache read-through order.
+        // Calling the origin directly here bypasses a warmed cache service.
+        let (data, _) = self.store.get_with_etag(&path).await?;
         let mut cache = self.xorb_cache.lock().await;
         cache.insert(*hash, data.clone());
         Ok(data)
@@ -994,24 +984,11 @@ impl ShardHydrator {
         &self,
         hash: &MerkleHash,
     ) -> Result<crab_xet::shard::ShardReader> {
-        let key = crate::cache::CacheKey::Shard(*hash);
-        let origin = self.store.origin().clone();
         let obj_path = self.router.shard_path(hash);
-        let shard_hash = *hash;
-
-        let data = self
-            .store
-            .local_cache()
-            .get_or_fetch_with(&key, || {
-                let origin = origin.clone();
-                let obj_path = obj_path.clone();
-                async move {
-                    debug!(shard_hash = %shard_hash.hex(), "downloading shard");
-                    let (data, _) = origin.get_with_etag(&obj_path).await?;
-                    Ok::<_, error::CrabError>(data)
-                }
-            })
-            .await?;
+        debug!(shard_hash = %hash.hex(), "downloading shard");
+        // Keep shard reads on the same cache-aware path as xorb reads so
+        // push-warmed immutable objects are reusable by new clones.
+        let (data, _) = self.store.get_with_etag(&obj_path).await?;
 
         Ok(crab_xet::shard::ShardReader::from_bytes(data, *hash))
     }
