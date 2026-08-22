@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "crab"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "crab-auth-server"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "blake3",
  "bytes",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "crab-cache-server"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "async-trait",
  "axum 0.8.9",

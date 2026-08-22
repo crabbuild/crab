@@ -132,7 +132,7 @@ const installTabsData = [
       { text: "# Install using Homebrew", type: "comment" as const },
       { text: "brew install crabbuild/tap/crab", type: "command" as const },
       { text: "==> Fetching crabbuild/tap/crab...", type: "output" as const },
-      { text: "==> Installed crab 1.0.14", type: "output" as const },
+      { text: "==> Installed crab 1.0.15", type: "output" as const },
       { text: "", type: "output" as const },
       { text: "# Initialize Crab in your repository", type: "comment" as const },
       { text: "crab init --storage-provider s3 crab://my-s3-bucket/my-repo", type: "command" as const },
@@ -148,7 +148,7 @@ const installTabsData = [
     lines: [
       { text: "# Install via curl script", type: "comment" as const },
       { text: "curl -fsSL https://crab.build/install.sh | bash", type: "command" as const },
-      { text: "==> Downloading crab v1.0.14 for linux-x86_64", type: "output" as const },
+      { text: "==> Downloading crab v1.0.15 for linux-x86_64", type: "output" as const },
       { text: "==> Created symlink: git-remote-crab -> crab", type: "output" as const },
       { text: "", type: "output" as const },
       { text: "# Initialize Crab", type: "comment" as const },
@@ -165,7 +165,7 @@ const installTabsData = [
     lines: [
       { text: "# Install in PowerShell", type: "comment" as const },
       { text: "irm https://crab.build/install.ps1 | iex", type: "command" as const },
-      { text: "==> Downloading crab v1.0.14 for windows-x86_64", type: "output" as const },
+      { text: "==> Downloading crab v1.0.15 for windows-x86_64", type: "output" as const },
       { text: "==> Created helper: git-remote-crab.exe", type: "output" as const },
       { text: "", type: "comment" as const },
       { text: "# Initialize Crab remote", type: "comment" as const },

@@ -4,7 +4,7 @@
 #   irm https://crab.build/install.ps1 | iex
 #
 # Environment variables:
-#   $env:CRAB_VERSION     — install a specific version (e.g. "v1.0.14"). Default: latest.
+#   $env:CRAB_VERSION     — install a specific version (e.g. "v1.0.15"). Default: latest.
 #   $env:CRAB_INSTALL_DIR — installation directory. Default: ~\.crab\bin.
 
 $ErrorActionPreference = "Stop"

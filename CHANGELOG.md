@@ -5,6 +5,14 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.0.15 - 2026-08-22
+
+### Release Automation
+
+- Build the macOS, Linux, and Windows release archives natively on x86_64 and
+  ARM64 GitHub-hosted runners, execute each packaged CLI before publishing,
+  and attach build-provenance attestations to all six archives.
+
 ### CLI Add And Push
 
 - Unified native and remote-helper push on one fail-closed dependency pipeline

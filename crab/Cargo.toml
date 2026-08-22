@@ -1,6 +1,6 @@
 [package]
 name = "crab"
-version = "1.0.14"
+version = "1.0.15"
 edition = "2024"
 license = "Apache-2.0"
 description = "Serverless git remote helper backed by object storage with Xet-style chunk dedup."

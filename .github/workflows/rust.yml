@@ -82,7 +82,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Lint GitHub Actions workflows
-        run: GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        run: GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
   rust:
     name: Rust quality and tests
