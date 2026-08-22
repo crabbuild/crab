@@ -7,9 +7,10 @@ use super::GitVisibilityPublication;
 use super::git_workspace::verify_source_push;
 use super::{
     MaterializedSourcePush, PreparedViewScope, ReceiveContext, ReceiveManifestCommit,
-    build_service_candidate_manifest, commit_receive_manifest, commit_service_git_locators,
-    commit_service_metadata, conflict, invalid, parse_active_active_receive_config,
-    promote_staged_objects, publish_materialized_git_visibility, source_ref_updates_from_prepare,
+    build_service_candidate_manifest, commit_receive_manifest,
+    commit_service_git_locators_from_verified_indexes, commit_service_metadata, conflict, invalid,
+    parse_active_active_receive_config, promote_staged_objects,
+    publish_materialized_git_visibility, source_ref_updates_from_prepare,
     validate_candidate_manifest_shape, validate_candidate_metadata,
     validate_protected_dependency_receipt, validate_protected_shard_set_receipt,
     validate_push_plan_shape, validate_staged_object_shapes,
@@ -301,7 +302,13 @@ pub async fn commit_receive(
             .into_iter()
             .filter(|pack| !base_pack_ids.contains(&pack.pack_id))
             .collect::<Vec<_>>();
-        commit_service_git_locators(ctx.store(), ctx.router(), &manifest, &new_packs).await
+        commit_service_git_locators_from_verified_indexes(
+            ctx.store(),
+            ctx.router(),
+            &manifest,
+            &new_packs,
+        )
+        .await
     }
     .await
     {
@@ -345,6 +352,7 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use bytes::Bytes;
     use crab_metadata::{
@@ -855,6 +863,7 @@ mod tests {
             &source_repo,
             format!("{source_old}\n").as_bytes(),
         )?;
+        let source_pack_id = blake3_hex(&source_pack_bytes);
         let source_object_count = git_object_count(&source_repo, &format!("{source_old}\n"))?;
         let source_pack_index = put_canonical_pack(
             &ctx,
@@ -992,6 +1001,44 @@ mod tests {
             ctx.store()
                 .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
                 .await?;
+        }
+        for pack in committed_packs
+            .iter()
+            .filter(|pack| pack.pack_id != source_pack_id)
+        {
+            let idx_size = ctx
+                .store()
+                .head(&ctx.router().pack_index_path(&pack.pack_id))
+                .await?
+                .size;
+            let rev_size = ctx
+                .store()
+                .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
+                .await?
+                .size;
+            let read_bytes = Arc::new(AtomicU64::new(0));
+            let observer = Arc::clone(&read_bytes);
+            let observed_store = Store::new(Arc::clone(ctx.store().inner()))
+                .with_read_byte_observer(Arc::new(move |bytes| {
+                    observer.fetch_add(bytes, Ordering::Relaxed);
+                }));
+            let observed_router = crab_storage::StoreLayout::new(
+                observed_store.clone(),
+                ctx.repo_prefix().to_owned(),
+            );
+
+            super::super::download_verified_service_locator_evidence(
+                &observed_store,
+                &observed_router,
+                pack,
+            )
+            .await?;
+
+            assert_eq!(
+                read_bytes.load(Ordering::Relaxed),
+                20 + idx_size + rev_size,
+                "verified locator publication must not stream the pack body",
+            );
         }
         let committed_pack_inventory = committed_packs
             .iter()

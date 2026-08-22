@@ -88,6 +88,12 @@ struct CommitIdentity {
     message: Vec<u8>,
 }
 
+struct InstalledPackLocatorEvidence {
+    pack_id: String,
+    idx_path: std::path::PathBuf,
+    rev_path: std::path::PathBuf,
+}
+
 struct GitReceiveWorkspace<'a> {
     store: &'a Store,
     router: &'a StoreLayout<Store>,
@@ -143,7 +149,7 @@ impl<'a> GitReceiveWorkspace<'a> {
         run_git(["init", "--bare", path_str(&git_dir)?], None)?;
         self.install_base_packs(&git_dir).await?;
         self.install_prepared_view_packs(prepare, &git_dir).await?;
-        self.install_staged_packs(plan, &git_dir).await?;
+        let staged_locator_evidence = self.install_staged_packs(plan, &git_dir).await?;
         let view_old_refs = self.prepared_view_old_refs(prepare).await?;
         let paths = self.compute_changed_paths_in(
             &git_dir,
@@ -161,6 +167,9 @@ impl<'a> GitReceiveWorkspace<'a> {
                 &view_old_refs,
             )
             .await?;
+        for evidence in &staged_locator_evidence {
+            self.publish_pack_locator_evidence(evidence).await?;
+        }
         Ok((paths, materialized))
     }
 
@@ -437,6 +446,14 @@ impl<'a> GitReceiveWorkspace<'a> {
             self.router.repo_prefix(),
             &pack,
         )
+        .await?;
+        let idx_path = verify_path.with_extension("idx");
+        let rev_path = verify_path.with_extension("rev");
+        self.publish_pack_locator_evidence(&InstalledPackLocatorEvidence {
+            pack_id: pack_id.clone(),
+            idx_path,
+            rev_path,
+        })
         .await?;
         Ok(pack)
     }
@@ -727,7 +744,12 @@ impl<'a> GitReceiveWorkspace<'a> {
         Ok(())
     }
 
-    async fn install_staged_packs(&self, plan: &ProtectedPushPlan, git_dir: &Path) -> Result<()> {
+    async fn install_staged_packs(
+        &self,
+        plan: &ProtectedPushPlan,
+        git_dir: &Path,
+    ) -> Result<Vec<InstalledPackLocatorEvidence>> {
+        let mut evidence = Vec::new();
         for object in &plan.staged_objects {
             if object
                 .canonical_key
@@ -735,13 +757,31 @@ impl<'a> GitReceiveWorkspace<'a> {
                 && object.canonical_key.ends_with(".pack")
             {
                 let path = ObjectPath::from(object.staged_key.clone());
-                self.install_pack_from_object(&path, git_dir).await?;
+                let pack_path = self.install_pack_from_object(&path, git_dir).await?;
+                let file_name = pack_path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or_else(|| invalid("installed pack path has no UTF-8 filename"))?;
+                let pack_id = canonical_pack_id_from_object_filename(file_name)
+                    .ok_or_else(|| invalid("installed pack filename is invalid"))?
+                    .to_owned();
+                let idx_path = pack_path.with_extension("idx");
+                let rev_path = pack_path.with_extension("rev");
+                evidence.push(InstalledPackLocatorEvidence {
+                    pack_id,
+                    idx_path,
+                    rev_path,
+                });
             }
         }
-        Ok(())
+        Ok(evidence)
     }
 
-    async fn install_pack_from_object(&self, path: &ObjectPath, git_dir: &Path) -> Result<()> {
+    async fn install_pack_from_object(
+        &self,
+        path: &ObjectPath,
+        git_dir: &Path,
+    ) -> Result<std::path::PathBuf> {
         let file_name = path
             .as_ref()
             .rsplit('/')
@@ -751,8 +791,59 @@ impl<'a> GitReceiveWorkspace<'a> {
         let pack_path = git_dir.join("objects").join("pack").join(file_name);
         self.store.download_to_path(path, &pack_path).await?;
         run_git(["index-pack", path_str(&pack_path)?], Some(git_dir))?;
+        Ok(pack_path)
+    }
+
+    async fn publish_pack_locator_evidence(
+        &self,
+        evidence: &InstalledPackLocatorEvidence,
+    ) -> Result<()> {
+        let idx_path = evidence.idx_path.clone();
+        let rev_path = evidence.rev_path.clone();
+        let (idx_size, idx_hash, rev_size, rev_hash) = tokio::task::spawn_blocking(move || {
+            crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+                .map_err(crab_git::pack::PackError::from)?;
+            let (idx_size, idx_hash) = hash_file(&idx_path)?;
+            let (rev_size, rev_hash) = hash_file(&rev_path)?;
+            Ok::<_, AuthServerError>((idx_size, idx_hash, rev_size, rev_hash))
+        })
+        .await
+        .map_err(|error| {
+            AuthServerError::Internal(format!("pack locator hashing worker failed: {error}"))
+        })??;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.store
+            .put_multipart_file_retry(
+                &self.router.pack_index_path(&evidence.pack_id),
+                &evidence.idx_path,
+                idx_size,
+                idx_hash,
+                8 * 1024 * 1024,
+                &cancel,
+                None,
+            )
+            .await?;
+        self.store
+            .put_multipart_file_retry(
+                &self.router.pack_reverse_index_path(&evidence.pack_id),
+                &evidence.rev_path,
+                rev_size,
+                rev_hash,
+                8 * 1024 * 1024,
+                &cancel,
+                None,
+            )
+            .await?;
         Ok(())
     }
+}
+
+fn hash_file(path: &Path) -> Result<(u64, [u8; 32])> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok((size, *hasher.finalize().as_bytes()))
 }
 
 fn validate_git_publication(git_dir: &Path, updates: &[PushRefUpdate]) -> Result<()> {

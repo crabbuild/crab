@@ -161,6 +161,10 @@ content hash as the authorization token. Finalization requires that exact
 plan-, source-generation-, and prepare-bound evidence instead of rebuilding a
 second temporary Git object database. Session evidence is removed after a
 successful commit or by the staging TTL cleanup.
+The same verified workspace publishes immutable pack indexes. Post-commit
+locator publication reads those indexes and the 20-byte pack trailer, not the
+new pack body again; older repositories retain their documented reverse-index
+repair path when historical `.rev` evidence is absent.
 Path-scoped push rules require at least one server-verified changed path; use a
 non-path-scoped push rule for intentional ref-only or metadata-only updates.
 Protected push accepts branch ref updates only. The receive helper rejects
