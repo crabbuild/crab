@@ -294,6 +294,17 @@ impl PushLock {
         let now = backend_unix_time(store, &object_path).await?;
         expire_stale_lock_at(store, &Path::from(key), key, now).await
     }
+
+    /// Release one ref lease only while its stored holder still matches.
+    pub async fn release_ref_if_holder(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        ref_name: &str,
+        holder: &str,
+    ) -> Result<bool> {
+        let path = push_lock_path(prefix, ref_name)?;
+        release_if_holder_checked(store, &path, holder).await
+    }
 }
 
 impl Drop for PushLock {
@@ -535,22 +546,31 @@ pub(crate) async fn release_if_holder(
     path: &str,
     holder: &str,
 ) -> Result<()> {
+    release_if_holder_checked(store, path, holder)
+        .await
+        .map(|_| ())
+}
+
+async fn release_if_holder_checked(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+) -> Result<bool> {
     let object_path = Path::from(path);
     let (body, etag) = match get_with_version(store, &object_path).await {
         Ok(lock) => lock,
-        Err(object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(object_store::Error::NotFound { .. }) => return Ok(true),
         Err(source) => return Err(store_error(path, source)),
     };
     let payload = deserialize_payload(path, &body)?;
     if payload.holder != holder {
-        return Ok(());
+        return Ok(false);
     }
     let body = serialize_payload(path, &PushLockPayload::released(holder))?;
     match update(store, &object_path, body, etag).await {
-        Ok(_)
-        | Err(object_store::Error::NotFound { .. })
-        | Err(object_store::Error::AlreadyExists { .. })
-        | Err(object_store::Error::Precondition { .. }) => Ok(()),
+        Ok(_) | Err(object_store::Error::NotFound { .. }) => Ok(true),
+        Err(object_store::Error::AlreadyExists { .. })
+        | Err(object_store::Error::Precondition { .. }) => Ok(false),
         Err(source) => Err(store_error(path, source)),
     }
 }
@@ -745,6 +765,30 @@ mod tests {
         assert_eq!(payload.holder, second.holder());
         assert!(!payload.is_released());
         second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_ref_release_requires_current_holder() {
+        let store = memory_store();
+        let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+
+        assert!(
+            !PushLock::release_ref_if_holder(
+                &store,
+                "org/repo",
+                "refs/heads/main",
+                "different-holder",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            PushLock::release_ref_if_holder(&store, "org/repo", "refs/heads/main", lock.holder(),)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

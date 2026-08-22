@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +80,30 @@ class RequestCountingProxyTest(unittest.TestCase):
             content_length = response.headers["Content-Length"]
 
         self.assertEqual(content_length, "123")
+
+    def test_active_marker_gate_waits_after_upstream_commit(self) -> None:
+        self.proxy.arm_active_marker_gate()
+        result: list[bytes] = []
+
+        def put_marker() -> None:
+            request = urllib.request.Request(
+                self.proxy.url
+                + "/crab/e2e-concurrent-push/run/refs/journal/active/abc.json",
+                data=b"marker",
+                method="PUT",
+            )
+            with urllib.request.urlopen(request) as response:
+                result.append(response.read())
+
+        request = threading.Thread(target=put_marker)
+        request.start()
+
+        self.assertTrue(self.proxy.wait_for_active_marker(2))
+        time.sleep(0.05)
+        self.assertTrue(request.is_alive())
+        self.proxy.release_active_marker_gate()
+        request.join(timeout=2)
+        self.assertEqual(result, [b"marker"])
 
     def test_internal_lock_category_retains_only_bounded_resource(self) -> None:
         category = store_category("locks/internal/git-manifest/lock/clock")

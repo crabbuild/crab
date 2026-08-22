@@ -24,6 +24,9 @@ pub struct RefJournalEdit {
     pub new_oid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peeled_oid: Option<String>,
+    /// Holder of the ref lease that this committed edit makes releasable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_holder: Option<String>,
     /// Immutable closure delta required to publish visibility for `new_oid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility_evidence_hash: Option<String>,
@@ -774,6 +777,14 @@ fn validate_transaction(transaction: &RefJournalTransaction) -> Result<()> {
         if let Some(oid) = &edit.peeled_oid {
             validate_sha1(oid, "ref journal peeled oid", "ref journal transaction")?;
         }
+        if let Some(holder) = &edit.lock_holder
+            && (holder.is_empty() || holder.len() > 1_024 || holder.chars().any(char::is_control))
+        {
+            return Err(corrupt_object(
+                "ref journal transaction",
+                "ref journal lock holder is invalid",
+            ));
+        }
         if let Some(hash) = &edit.visibility_evidence_hash {
             validate_content_hash(
                 hash,
@@ -903,6 +914,7 @@ mod tests {
             old_oid: None,
             new_oid: Some(byte.to_string().repeat(40)),
             peeled_oid: None,
+            lock_holder: None,
             visibility_evidence_hash: None,
         }
     }
@@ -1132,6 +1144,7 @@ mod tests {
                 old_oid: Some("a".repeat(40)),
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
                 visibility_evidence_hash: None,
             }],
             None,

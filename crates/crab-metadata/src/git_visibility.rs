@@ -736,6 +736,7 @@ mod tests {
                 old_oid: Some("a".repeat(40)),
                 new_oid: Some("c".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
                 visibility_evidence_hash: Some(left_hash),
             },
             RefJournalEdit {
@@ -743,6 +744,7 @@ mod tests {
                 old_oid: Some("b".repeat(40)),
                 new_oid: Some("d".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
                 visibility_evidence_hash: Some(right_hash),
             },
         ];

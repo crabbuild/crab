@@ -2109,6 +2109,7 @@ mod tests {
                 old_oid: None,
                 new_oid: Some("b".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
                 visibility_evidence_hash: Some(visibility_evidence_hash.clone()),
             }],
             None,

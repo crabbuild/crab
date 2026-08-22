@@ -51,6 +51,17 @@ pub async fn read_ref_journal_head(
         .map_err(CrabError::from)
 }
 
+pub async fn read_ref_journal_transaction(
+    store: &Store,
+    router: &StoreLayout,
+    transaction_id: &str,
+) -> Result<RefJournalTransaction> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::read_transaction(store.as_storage(), &router, transaction_id)
+        .await
+        .map_err(CrabError::from)
+}
+
 pub async fn commit_ref_journal_transaction(
     store: &Store,
     router: &StoreLayout,

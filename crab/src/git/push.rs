@@ -4563,6 +4563,33 @@ fn push_lock_refs(specs: &[PushSpec]) -> Vec<String> {
     refs.into_iter().collect()
 }
 
+async fn release_lock_committed_by_visible_transaction(
+    store: &Store,
+    prefix: &str,
+    ref_name: &str,
+    holder: &str,
+) -> Result<bool> {
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let head = crate::metadata::manifest::read_ref_journal_head(store, &router, ref_name).await?;
+    let Some(transaction_id) = head.visible_transaction else {
+        return Ok(false);
+    };
+    let transaction =
+        crate::metadata::manifest::read_ref_journal_transaction(store, &router, &transaction_id)
+            .await?;
+    if !transaction
+        .edits
+        .iter()
+        .any(|edit| edit.ref_name == ref_name && edit.lock_holder.as_deref() == Some(holder))
+    {
+        return Ok(false);
+    }
+
+    PushLock::release_ref_if_holder(store.inner(), prefix, ref_name, holder)
+        .await
+        .map_err(CrabError::from)
+}
+
 pub(crate) async fn acquire_push_lock_leases(
     store: &Store,
     prefix: &str,
@@ -4573,10 +4600,12 @@ pub(crate) async fn acquire_push_lock_leases(
     let refs = push_lock_refs(specs);
     let deadline = (!config.lock_wait.is_zero()).then(|| Instant::now() + config.lock_wait);
     let mut wait_attempt = 0;
+    let mut checked_committed_holders = HashSet::new();
 
     loop {
         let mut leases = Vec::with_capacity(refs.len().max(1));
         let mut retryable_lock_error = None;
+        let mut reclaimed_committed_lock = false;
 
         for ref_name in refs.iter().map(Some).chain(refs.is_empty().then_some(None)) {
             if let Err(e) = check_cancelled(cancel) {
@@ -4600,7 +4629,35 @@ pub(crate) async fn acquire_push_lock_leases(
                     .await,
                 ),
             };
-            let lock = match acquired.map_err(CrabError::from) {
+            let acquired = acquired.map_err(CrabError::from);
+            if let (Some(ref_name), Err(CrabError::PushLockHeld { holder, .. })) =
+                (ref_name, &acquired)
+            {
+                let holder_key = (ref_name.to_owned(), holder.to_owned());
+                if checked_committed_holders.insert(holder_key) {
+                    match release_lock_committed_by_visible_transaction(
+                        store, prefix, ref_name, holder,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            info!(%ref_name, %holder, "reclaimed ref lock after visible commit");
+                            reclaimed_committed_lock = true;
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(
+                                %ref_name,
+                                %holder,
+                                %error,
+                                "could not verify whether held ref lock already committed"
+                            );
+                        }
+                    }
+                }
+            }
+            let lock = match acquired {
                 Ok(lock) => lock,
                 Err(e @ CrabError::PushLockHeld { .. }) if deadline.is_some() => {
                     retryable_lock_error = Some(e);
@@ -4630,6 +4687,11 @@ pub(crate) async fn acquire_push_lock_leases(
                 "push lock acquired"
             );
             leases.push(PushLockLease { lock, heartbeat });
+        }
+
+        if reclaimed_committed_lock {
+            release_push_lock_leases(leases).await;
+            continue;
         }
 
         let Some(err) = retryable_lock_error else {
@@ -6983,6 +7045,19 @@ impl PushPipeline {
                 .await?;
         }
         let mut edits = Vec::new();
+        let lock_holders = {
+            let lock_state = self.lock_state.lock().await;
+            lock_state
+                .as_ref()
+                .map(|state| {
+                    state
+                        .leases
+                        .iter()
+                        .map(|lease| (lease.lock.path().to_owned(), lease.lock.holder().to_owned()))
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default()
+        };
         for spec in &self.specs {
             if !matches!(
                 decisions.get(&spec.dst),
@@ -6990,6 +7065,7 @@ impl PushPipeline {
             ) {
                 continue;
             }
+            let lock_path = crab_coordination::push_lock_path(&self.prefix, &spec.dst)?;
             edits.push(crate::metadata::manifest::RefJournalEdit {
                 ref_name: spec.dst.clone(),
                 old_oid: base
@@ -7006,6 +7082,9 @@ impl PushPipeline {
                     })?)
                 },
                 peeled_oid: manifest.peeled_refs.get(&spec.dst).cloned(),
+                // The active marker proves this holder crossed the last
+                // ref-lock-protected boundary, so a successor may release it.
+                lock_holder: lock_holders.get(&lock_path).cloned(),
                 visibility_evidence_hash: None,
             });
         }
@@ -17964,6 +18043,140 @@ mod tests {
         .expect("partial acquisition must be released after later contention");
         lock.release().await.unwrap();
         blocker.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn acquire_push_lock_leases_reclaims_visible_transaction_holder() {
+        let (store, router) = test_store_router("committed-holder-recovery");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let specs = vec![make_spec("refs/heads/main")];
+        let config = PushConfig {
+            heartbeat_interval: None,
+            lock_ttl: Duration::from_secs(60),
+            ..PushConfig::default()
+        };
+        let abandoned = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let holder = abandoned[0].lock.holder().to_owned();
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: Some(holder),
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+        std::mem::forget(abandoned);
+
+        let recovered = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a visible transaction no longer needs its matching ref lease");
+
+        release_push_lock_leases(recovered).await;
+    }
+
+    #[tokio::test]
+    async fn acquire_push_lock_leases_preserves_unrelated_visible_holder() {
+        let (store, router) = test_store_router("unrelated-holder-recovery");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let specs = vec![make_spec("refs/heads/main")];
+        let config = PushConfig {
+            heartbeat_interval: None,
+            lock_ttl: Duration::from_secs(60),
+            ..PushConfig::default()
+        };
+        let held = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: Some("different-holder".to_owned()),
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+
+        let result = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::PushLockHeld { .. })));
+        release_push_lock_leases(held).await;
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ import http.client
 import http.server
 import json
 import os
+import signal
 import shutil
 import subprocess
 import threading
@@ -74,6 +75,9 @@ class RequestCountingProxy:
         self.statuses: dict[str, int] = {}
         self.server: http.server.ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
+        self.active_marker_armed = False
+        self.active_marker_committed = threading.Event()
+        self.active_marker_release = threading.Event()
 
     @property
     def url(self) -> str:
@@ -128,12 +132,23 @@ class RequestCountingProxy:
                     proxy.upstream.port,
                     timeout=60,
                 )
+                recorded = False
                 try:
                     connection.request(self.command, upstream_path, body=body, headers=headers)
                     response = connection.getresponse()
                     response_body = response.read()
                     response_headers = response.getheaders()
                     status = response.status
+                    proxy.record(
+                        self.command,
+                        self.path,
+                        self.headers,
+                        length,
+                        len(response_body),
+                        status,
+                    )
+                    recorded = True
+                    proxy.gate_active_marker_response(self.command, self.path, status)
                     self.send_response_only(status, response.reason)
                     original_content_length = None
                     for key, value in response_headers:
@@ -163,31 +178,27 @@ class RequestCountingProxy:
                     self.end_headers()
                     if self.command != "HEAD" and response_body:
                         self.wfile.write(response_body)
-                    proxy.record(
-                        self.command,
-                        self.path,
-                        self.headers,
-                        length,
-                        len(response_body),
-                        status,
-                    )
                 except Exception as exc:
                     message = f"request meter upstream failure: {exc}".encode()
-                    self.send_response(502)
-                    self.send_header("Content-Type", "text/plain")
-                    self.send_header("Content-Length", str(len(message)))
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    if self.command != "HEAD":
-                        self.wfile.write(message)
-                    proxy.record(
-                        self.command,
-                        self.path,
-                        self.headers,
-                        length,
-                        len(message),
-                        502,
-                    )
+                    if not recorded:
+                        proxy.record(
+                            self.command,
+                            self.path,
+                            self.headers,
+                            length,
+                            len(message),
+                            502,
+                        )
+                    try:
+                        self.send_response(502)
+                        self.send_header("Content-Type", "text/plain")
+                        self.send_header("Content-Length", str(len(message)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        if self.command != "HEAD":
+                            self.wfile.write(message)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                 finally:
                     connection.close()
                     self.close_connection = True
@@ -202,11 +213,42 @@ class RequestCountingProxy:
         self.thread.start()
 
     def close(self) -> None:
+        self.release_active_marker_gate()
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
         if self.thread is not None:
             self.thread.join(timeout=5)
+
+    def arm_active_marker_gate(self) -> None:
+        with self.lock:
+            if self.active_marker_armed:
+                raise SmokeError("active-marker response gate is already armed")
+            self.active_marker_armed = True
+            self.active_marker_committed.clear()
+            self.active_marker_release.clear()
+
+    def gate_active_marker_response(self, method: str, path: str, status: int) -> None:
+        decoded_path = urllib.parse.unquote(urllib.parse.urlsplit(path).path)
+        with self.lock:
+            matches = (
+                self.active_marker_armed
+                and method == "PUT"
+                and 200 <= status < 300
+                and "/refs/journal/active/" in decoded_path
+            )
+            if matches:
+                self.active_marker_armed = False
+        if not matches:
+            return
+        self.active_marker_committed.set()
+        self.active_marker_release.wait(timeout=60)
+
+    def wait_for_active_marker(self, timeout: float) -> bool:
+        return self.active_marker_committed.wait(timeout=timeout)
+
+    def release_active_marker_gate(self) -> None:
+        self.active_marker_release.set()
 
     def record(
         self,
@@ -330,6 +372,7 @@ class SmokeReport:
     branch_reads: list[dict[str, Any]] = field(default_factory=list)
     same_branch: list[dict[str, Any]] = field(default_factory=list)
     same_branch_read: dict[str, Any] = field(default_factory=dict)
+    crash_boundary: dict[str, Any] = field(default_factory=dict)
     request_snapshots: list[dict[str, Any]] = field(default_factory=list)
     store_snapshots: list[dict[str, Any]] = field(default_factory=list)
     cost_model: dict[str, Any] = field(default_factory=dict)
@@ -406,6 +449,8 @@ class ConcurrentPushSmoke:
         self.branch_readers = self.run_root / "branch-readers"
         self.same_agents = self.run_root / "same-branch-agents"
         self.same_branch_reader = self.run_root / "same-branch-reader"
+        self.crash_agent = self.run_root / "crash-agent"
+        self.crash_reader = self.run_root / "crash-reader"
         self.remote_url = f"crab://{args.bucket}/{REMOTE_PREFIX}/{self.run_id}"
         self.request_proxy: RequestCountingProxy | None = None
         self.env = self.build_env()
@@ -415,7 +460,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.3",
+            version="1.4",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -556,6 +601,67 @@ class ConcurrentPushSmoke:
                 f"{name} failed with exit {proc.returncode}; stderr log: {record.stderr_log}"
             )
         return record
+
+    def run_killed_after_active_marker(
+        self,
+        name: str,
+        args: list[str],
+        cwd: Path,
+    ) -> tuple[CommandRecord, float]:
+        proxy = self.request_proxy
+        if proxy is None:
+            raise SmokeError("active-marker crash injection requires request capture")
+        proxy.arm_active_marker_gate()
+        start = time.monotonic()
+        proc = subprocess.Popen(
+            args,
+            cwd=cwd,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name == "posix",
+        )
+        marker_committed = proxy.wait_for_active_marker(self.args.push_timeout)
+        killed_at = time.monotonic()
+
+        def kill_process_group() -> None:
+            if proc.poll() is not None:
+                return
+            if os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                proc.kill()
+
+        try:
+            kill_process_group()
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            kill_process_group()
+            stdout, stderr = proc.communicate()
+        finally:
+            proxy.release_active_marker_gate()
+        duration_ms = int((time.monotonic() - start) * 1000)
+        record = self.record_command(
+            name,
+            args,
+            cwd,
+            proc.returncode,
+            duration_ms,
+            stdout,
+            stderr,
+        )
+        if not marker_committed:
+            raise SmokeError(
+                "push did not reach the active-marker boundary before timeout; "
+                f"stderr log: {record.stderr_log}"
+            )
+        if proc.returncode == 0:
+            raise SmokeError("crash-injected push exited successfully instead of being killed")
+        return record, killed_at
 
     def run_git(
         self,
@@ -895,6 +1001,142 @@ class ConcurrentPushSmoke:
         )
         self.store_snapshot("seed", attempted_pushes=1, successful_pushes=1)
 
+    def run_crash_boundary(self) -> None:
+        if self.request_proxy is None:
+            raise SmokeError("--crash-boundary requires HTTP request capture")
+        self.run_cmd(
+            "crab clone crash agent",
+            [self.args.crab_bin, "clone", self.remote_url, str(self.crash_agent), "--jsonl"],
+            self.run_root,
+        )
+        self.configure_git_identity(self.crash_agent, "crash-agent")
+        self.configure_crab_repo(self.crash_agent)
+        self.run_crab(
+            self.crash_agent,
+            [
+                "config",
+                "set",
+                "push.lock_ttl_secs",
+                str(self.args.crash_lock_ttl_secs),
+            ],
+        )
+        branch = "crash-boundary"
+        remote_ref = f"refs/heads/{branch}"
+        refspec = f"HEAD:{remote_ref}"
+        self.run_git(self.crash_agent, ["checkout", "-b", branch])
+        payload = self.crash_agent / "crash-boundary.txt"
+        payload.write_text(
+            f"committed before process death\nrun_id {self.run_id}\n",
+            encoding="utf-8",
+        )
+        self.run_git(self.crash_agent, ["add", payload.name])
+        self.run_git(self.crash_agent, ["commit", "-m", "crash boundary first commit"])
+        first_tip_record = self.run_git(
+            self.crash_agent,
+            ["rev-parse", "HEAD"],
+            name="resolve crash-boundary first tip",
+        )
+        first_tip = Path(first_tip_record.stdout_log).read_text(encoding="utf-8").strip()
+
+        request_before = self.request_proxy.snapshot()
+        killed, killed_at = self.run_killed_after_active_marker(
+            "crash-boundary push killed after active marker",
+            self.push_args(refspec, lock_wait_secs=0),
+            self.crash_agent,
+        )
+        advertised = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, remote_ref],
+            name="git ls-remote after active-marker process death",
+        )
+        advertised_lines = Path(advertised.stdout_log).read_text(encoding="utf-8").splitlines()
+        self.check(
+            "crash-boundary-ref-readable-after-sigkill",
+            f"{first_tip}\t{remote_ref}" in advertised_lines,
+            {"ref": remote_ref, "tip": first_tip},
+        )
+
+        payload.write_text(
+            f"committed before process death\nrecovered from visible commit\nrun_id {self.run_id}\n",
+            encoding="utf-8",
+        )
+        self.run_git(self.crash_agent, ["add", payload.name])
+        self.run_git(self.crash_agent, ["commit", "-m", "crash boundary recovery commit"])
+
+        attempts: list[PushRecord] = []
+        deadline = killed_at + self.args.crash_lock_ttl_secs + 30
+        while True:
+            attempt = self.run_push_job(
+                f"crash-recovery-{len(attempts) + 1:03d}",
+                remote_ref,
+                self.crash_agent,
+                refspec,
+                lock_wait_secs=0,
+            )
+            attempts.append(attempt)
+            if attempt.status == "ok" and attempt.command.exit_code == 0:
+                break
+            if attempt.status != "lock-contention":
+                raise SmokeError(
+                    "same-ref recovery returned unexpected status "
+                    f"{attempt.status}; stderr log: {attempt.command.stderr_log}"
+                )
+            if time.monotonic() >= deadline:
+                raise SmokeError(
+                    "same-ref recovery did not acquire the expired lock within the RTO bound"
+                )
+            time.sleep(1)
+
+        recovery_ms = int((time.monotonic() - killed_at) * 1000)
+        self.check(
+            "crash-boundary-committed-holder-reclaimed-before-expiry",
+            attempts[0].status == "ok"
+            and attempts[0].command.exit_code == 0
+            and recovery_ms < self.args.crash_lock_ttl_secs * 1000,
+            {
+                "status": attempts[0].status,
+                "exit_code": attempts[0].command.exit_code,
+                "recovery_ms": recovery_ms,
+                "lock_ttl_ms": self.args.crash_lock_ttl_secs * 1000,
+            },
+        )
+        clone = self.protocol_v2_clone(
+            branch,
+            self.crash_reader,
+            "protocol v2 clone after active-marker process death",
+        )
+        expected = (
+            f"committed before process death\nrecovered from visible commit\nrun_id {self.run_id}\n"
+        )
+        actual = (self.crash_reader / payload.name).read_text(encoding="utf-8")
+        self.check(
+            "crash-boundary-restart-restores-v2-and-content",
+            clone["protocol_v2"] and actual == expected,
+            {"protocol_v2": clone["protocol_v2"], "content_visible": actual == expected},
+        )
+        with self.report_lock:
+            self.report.crash_boundary = {
+                "killed_command": asdict(killed),
+                "durable_ref": remote_ref,
+                "durable_tip": first_tip,
+                "lock_ttl_secs": self.args.crash_lock_ttl_secs,
+                "recovery_ms": recovery_ms,
+                "attempts": [asdict(attempt) for attempt in attempts],
+                "clone": clone,
+            }
+            self.write_report()
+        self.request_snapshot(
+            "crash-boundary",
+            request_before,
+            attempted_pushes=1 + len(attempts),
+            successful_pushes=1,
+        )
+        self.store_snapshot(
+            "crash-boundary",
+            attempted_pushes=1 + len(attempts),
+            successful_pushes=1,
+        )
+
     def clone_agent(self, root: Path, index: int, prefix: str) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         target = root / f"{prefix}-{index:03d}"
@@ -934,7 +1176,7 @@ class ConcurrentPushSmoke:
         self.run_git(repo, ["commit", "-m", f"agent {index:03d} same branch"])
         return f"same-agent-{index:03d}", "refs/heads/main", repo
 
-    def push_args(self, refspec: str) -> list[str]:
+    def push_args(self, refspec: str, lock_wait_secs: int | None = None) -> list[str]:
         args = [
             self.args.crab_bin,
             "push",
@@ -946,8 +1188,9 @@ class ConcurrentPushSmoke:
             "origin",
             refspec,
         ]
-        if not self.args.omit_lock_wait_secs:
-            args[3:3] = ["--lock-wait-secs", str(self.args.lock_wait_secs)]
+        if lock_wait_secs is not None or not self.args.omit_lock_wait_secs:
+            wait_secs = self.args.lock_wait_secs if lock_wait_secs is None else lock_wait_secs
+            args[3:3] = ["--lock-wait-secs", str(wait_secs)]
         if self.args.rebase_on_non_fast_forward:
             args.extend(
                 [
@@ -958,10 +1201,17 @@ class ConcurrentPushSmoke:
             )
         return args
 
-    def run_push_job(self, agent: str, branch: str, repo: Path, refspec: str) -> PushRecord:
+    def run_push_job(
+        self,
+        agent: str,
+        branch: str,
+        repo: Path,
+        refspec: str,
+        lock_wait_secs: int | None = None,
+    ) -> PushRecord:
         record = self.run_cmd(
             f"{agent} crab push",
-            self.push_args(refspec),
+            self.push_args(refspec, lock_wait_secs),
             repo,
             check=False,
             timeout=self.args.push_timeout,
@@ -1157,6 +1407,8 @@ class ConcurrentPushSmoke:
         try:
             self.preflight()
             self.init_seed()
+            if self.args.crash_boundary:
+                self.run_crash_boundary()
             if not self.args.skip_branch_fanout:
                 self.run_branch_fanout()
             if not self.args.skip_same_branch:
@@ -1213,11 +1465,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebase-retry-limit", type=int, default=256)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--push-timeout", type=int, default=300)
+    parser.add_argument("--crash-boundary", action="store_true")
+    parser.add_argument("--crash-lock-ttl-secs", type=int, default=21)
     parser.add_argument("--skip-branch-fanout", action="store_true")
     parser.add_argument("--skip-same-branch", action="store_true")
     parser.add_argument("--skip-fsck", action="store_true")
     parser.add_argument("--no-request-capture", action="store_true")
     args = parser.parse_args()
+    if args.crash_boundary and args.no_request_capture:
+        parser.error("--crash-boundary requires request capture")
+    if args.crash_lock_ttl_secs <= 20:
+        parser.error("--crash-lock-ttl-secs must be greater than 20")
     args.crab_bin = resolve_executable(args.crab_bin)
     args.git_bin = resolve_executable(args.git_bin)
     return args

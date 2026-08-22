@@ -978,6 +978,7 @@ mod tests {
                 old_oid: None,
                 new_oid: Some("a".repeat(40)),
                 peeled_oid: None,
+                lock_holder: None,
                 visibility_evidence_hash: None,
             }],
             None,
