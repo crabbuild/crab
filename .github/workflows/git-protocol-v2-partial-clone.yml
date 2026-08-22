@@ -71,14 +71,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ runner.temp }}/crab-protocol-v2-target
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target/crab-protocol-v2
 
 jobs:
   unit-and-transcript:
     name: Protocol unit and transcript tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -129,7 +134,7 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-git-${{ matrix.label }}
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-git-${{ matrix.label }}
       CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ matrix.label }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -190,7 +195,8 @@ jobs:
       - name: Start RustFS
         run: |
           mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
             --name "crab-protocol-v2-${{ matrix.label }}" \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
@@ -242,7 +248,7 @@ jobs:
     timeout-minutes: 45
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-smoke
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-smoke
       CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -274,7 +280,8 @@ jobs:
       - name: Start RustFS
         run: |
           mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
             --name crab-protocol-v2-rustfs \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
@@ -312,8 +319,8 @@ jobs:
         with:
           name: git-protocol-v2-partial-clone-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/crab-protocol-v2-smoke/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
-            ${{ runner.temp }}/crab-protocol-v2-smoke/${{ env.CRAB_E2E_RUN_ID }}/logs/**
-            ${{ runner.temp }}/crab-protocol-v2-smoke/rustfs.log
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
           if-no-files-found: warn
           retention-days: 14

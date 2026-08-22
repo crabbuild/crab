@@ -1,37 +1,201 @@
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  build:
-
+  changes:
+    name: Determine affected surfaces
     runs-on: ubuntu-latest
-
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      web: ${{ steps.filter.outputs.web }}
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Check managed OpenAPI contract
-      run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check
-    - name: Reject breaking managed OpenAPI changes
-      shell: bash
-      run: |
-        baseline="$(mktemp)"
-        base_ref="${GITHUB_BASE_REF:-main}"
-        if git show "origin/${base_ref}:crates/crab-auth/openapi/managed-v1.json" > "${baseline}"; then
-          cargo run -p crab-auth --example check_managed_openapi_compatibility --locked -- \
-            "${baseline}" crates/crab-auth/openapi/managed-v1.json
-        else
-          echo "No managed OpenAPI baseline exists on ${base_ref}; accepting the initial contract."
-        fi
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "merge_group" ]]; then
+            printf 'rust=true\nweb=true\n' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          base="${BASE_SHA:-${EVENT_BEFORE:-}}"
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+            base="$(git rev-parse "${HEAD_SHA}^" 2>/dev/null || true)"
+          fi
+          if [[ -z "${base}" ]]; then
+            printf 'rust=true\nweb=true\n' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          files="$(git diff --name-only "${base}" "${HEAD_SHA}")"
+          rust=false
+          web=false
+          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
+            rust=true
+          fi
+          if grep -Eq '^packages/web/' <<< "${files}"; then
+            web=true
+          fi
+          if [[ "${rust}" == false && "${web}" == false ]]; then
+            rust=true
+          fi
+          printf 'rust=%s\nweb=%s\n' "${rust}" "${web}" >> "${GITHUB_OUTPUT}"
+
+  actionlint:
+    name: Workflow syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint GitHub Actions workflows
+        run: GOTOOLCHAIN=local go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+  rust:
+    name: Rust quality and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.rust == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: >-
+          cargo clippy --package crab --no-deps --locked --
+          -A clippy::style
+          -A clippy::complexity
+          -A clippy::perf
+          -A clippy::pedantic
+          -A clippy::nursery
+          -A clippy::cargo
+          -A clippy::restriction
+          -D clippy::correctness
+          -D clippy::suspicious
+          -A unfulfilled_lint_expectations
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Check managed OpenAPI contract
+        run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check
+
+      - name: Reject breaking managed OpenAPI changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline="$(mktemp)"
+          trap 'rm -f "${baseline}"' EXIT
+          base_ref="${GITHUB_BASE_REF:-main}"
+          if git show "origin/${base_ref}:crates/crab-auth/openapi/managed-v1.json" > "${baseline}"; then
+            cargo run -p crab-auth --example check_managed_openapi_compatibility --locked -- \
+              "${baseline}" crates/crab-auth/openapi/managed-v1.json
+          else
+            echo "No managed OpenAPI baseline exists on ${base_ref}; accepting the initial contract."
+          fi
+
+  web:
+    name: Web quality and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.web == 'true'
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check documentation links
+        run: npm run check:links
+
+  status:
+    name: Required CI status
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, actionlint, rust, web]
+    if: always()
+    steps:
+      - name: Fail when a selected gate failed
+        if: >-
+          needs.changes.result != 'success' ||
+          needs.actionlint.result != 'success' ||
+          (needs.rust.result != 'success' && needs.rust.result != 'skipped') ||
+          (needs.web.result != 'success' && needs.web.result != 'skipped')
+        run: exit 1
+
+      - name: Report selected gates
+        run: |
+          echo "Rust gate: ${{ needs.rust.result }}"
+          echo "Web gate: ${{ needs.web.result }}"

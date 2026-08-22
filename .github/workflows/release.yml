@@ -64,6 +64,7 @@ jobs:
   prepare:
     name: Prepare release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -146,7 +147,8 @@ jobs:
       - name: Start RustFS
         run: |
           mkdir -p "${WORKFLOW_RUSTFS_ROOT}" "${RUNNER_TEMP}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${RUNNER_TEMP}/rustfs-data"
+          docker run -d \
             --name crab-workflow-rustfs \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY \
@@ -594,6 +596,7 @@ jobs:
     name: NFS feature gate
     needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -703,7 +706,7 @@ jobs:
           mkdir -p native-workflow-evidence
           printf '{"schema_version":1,"source_sha":"%s","run_id":"%s","run_attempt":"%s","os":"%s","result":"%s"}\n' \
             "$(git rev-parse HEAD)" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${RUNNER_OS}" "${{ job.status }}" \
-            > native-workflow-evidence/${RUNNER_OS}.json
+            > "native-workflow-evidence/${RUNNER_OS}.json"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -717,6 +720,7 @@ jobs:
     needs: [prepare, workflow-release-gate, workflow-native-release-gate, replica-enterprise-gate, cache-service-enterprise-gate, nfs-native-evidence-gate, nfs-feature-gate]
     if: ${{ always() && needs.prepare.result == 'success' && needs.workflow-release-gate.result == 'success' && needs.workflow-native-release-gate.result == 'success' && needs.nfs-feature-gate.result == 'success' && (needs.nfs-native-evidence-gate.result == 'success' || needs.nfs-native-evidence-gate.result == 'skipped') && (needs.replica-enterprise-gate.result == 'success' || needs.replica-enterprise-gate.result == 'skipped') && (needs.cache-service-enterprise-gate.result == 'success' || needs.cache-service-enterprise-gate.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     env:
       CRAB_BUILD_VERSION: ${{ needs.prepare.outputs.version }}
       GIT_SHA: ${{ needs.prepare.outputs.source_short_sha }}
@@ -729,7 +733,7 @@ jobs:
             os: macos-15
           - name: darwin-x86_64
             target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-13
           - name: linux-x86_64
             target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -906,7 +910,7 @@ jobs:
     timeout-minutes: 90
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-release-smoke
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-smoke
       CRAB_E2E_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -944,7 +948,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
             --name crab-protocol-v2-release-rustfs \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
@@ -1009,7 +1014,7 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-release-${{ matrix.label }}
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-${{ matrix.label }}
       CRAB_E2E_RUN_ID: release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -1077,7 +1082,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
             --name "crab-protocol-v2-release-${{ matrix.label }}" \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
@@ -1131,7 +1137,7 @@ jobs:
     timeout-minutes: 180
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-rollback-release
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-rollback-release
       CRAB_E2E_RUN_ID: release-rollback-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -1196,7 +1202,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
+          docker run -d \
             --name crab-protocol-v2-rollback-rustfs \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
@@ -1256,7 +1263,7 @@ jobs:
     timeout-minutes: 90
     env:
       CRAB_E2E_BUCKET: ${{ vars.CRAB_PROTOCOL_V2_AWS_BUCKET }}
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-aws-release-smoke
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-aws-release-smoke
       CRAB_E2E_RUN_ID: release-aws-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -1344,7 +1351,7 @@ jobs:
             archive: crab-windows-x86_64.zip
     env:
       CRAB_E2E_BUCKET: ${{ vars.CRAB_PROTOCOL_V2_AWS_BUCKET }}
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-platform-${{ matrix.platform }}
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-platform-${{ matrix.platform }}
       CRAB_E2E_RUN_ID: release-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -1450,6 +1457,7 @@ jobs:
     name: Publish release
     needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-rollback-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:

@@ -61,10 +61,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Build & test cache service
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -140,7 +145,8 @@ jobs:
       - name: Start RustFS
         run: |
           mkdir -p "${CACHE_SERVICE_RUSTFS_ROOT}" "${RUNNER_TEMP}/rustfs-data"
-          docker run --rm -d \
+          sudo chown 10001:10001 "${RUNNER_TEMP}/rustfs-data"
+          docker run -d \
             --name crab-cache-rustfs \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY \
