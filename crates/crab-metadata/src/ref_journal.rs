@@ -349,6 +349,23 @@ pub async fn list_active_transactions(
         .collect()
 }
 
+/// Return whether a committed transaction's active marker still exists.
+///
+/// Compaction normally removes the marker after its manifest CAS. It may be
+/// retained when ref-head promotion still needs repair.
+pub async fn transaction_is_active(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction_id: &str,
+) -> Result<bool> {
+    validate_content_hash(
+        transaction_id,
+        "ref journal transaction id",
+        "ref journal active marker",
+    )?;
+    active_marker_exists(store, router, transaction_id).await
+}
+
 /// Remove compacted visibility markers once no failed head promotion needs them.
 pub async fn cleanup_compacted_transactions(
     store: &Store,

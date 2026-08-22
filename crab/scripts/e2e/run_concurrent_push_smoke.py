@@ -90,6 +90,7 @@ class SmokeReport:
     same_branch: list[dict[str, Any]] = field(default_factory=list)
     same_branch_read: dict[str, Any] = field(default_factory=dict)
     store_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    cost_model: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
     updated_at: str = ""
 
@@ -149,15 +150,25 @@ class ConcurrentPushSmoke:
         self.command_index = 0
         self.command_lock = threading.Lock()
         self.report_lock = threading.RLock()
+        self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.1",
+            version="1.2",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
             root=str(self.run_root),
             endpoint_url=args.endpoint_url,
             env=redact_env(self.env),
+            cost_model={
+                "basis": "net live-object inventory deltas",
+                "request_counts_available": False,
+                "limitations": [
+                    "overwrites of an existing key are not counted as new requests",
+                    "GET, HEAD, LIST, DELETE, retry, and egress charges are not observed",
+                    "provider minimum billable object sizes are not applied",
+                ],
+            },
             updated_at=utc_now(),
         )
 
@@ -370,7 +381,30 @@ class ConcurrentPushSmoke:
                 )
                 self.write_report()
 
-    def store_snapshot(self, label: str) -> None:
+    @staticmethod
+    def store_category(relative_key: str) -> str:
+        parts = relative_key.split("/")
+        if len(parts) > 2 and parts[0] == "metadata" and parts[1] in {"pack", "shard"}:
+            return "/".join(parts[:3])
+        if len(parts) > 1 and parts[0] in {
+            "git_locator_db",
+            "git-visibility",
+            "locks",
+            "manifests",
+            "metadata",
+            "ref-journal",
+            "refs",
+        }:
+            return "/".join(parts[:2])
+        return parts[0] or "repository-root"
+
+    def store_snapshot(
+        self,
+        label: str,
+        *,
+        attempted_pushes: int,
+        successful_pushes: int,
+    ) -> None:
         if not shutil.which("aws"):
             return
         prefix = f"{REMOTE_PREFIX}/{self.run_id}/"
@@ -393,20 +427,60 @@ class ConcurrentPushSmoke:
         )
         payload = json.loads(Path(record.stdout_log).read_text(encoding="utf-8"))
         contents = payload.get("Contents") or []
+        inventory = {str(item["Key"]): int(item.get("Size", 0)) for item in contents}
+        categories: dict[str, dict[str, int]] = {}
+        for key, size in inventory.items():
+            relative = key.removeprefix(prefix)
+            category = self.store_category(relative)
+            entry = categories.setdefault(category, {"objects": 0, "stored_bytes": 0})
+            entry["objects"] += 1
+            entry["stored_bytes"] += size
         snapshot = {
             "label": label,
             "prefix": prefix,
-            "object_count": len(contents),
-            "stored_bytes": sum(int(item.get("Size", 0)) for item in contents),
+            "object_count": len(inventory),
+            "stored_bytes": sum(inventory.values()),
+            "categories": dict(sorted(categories.items())),
+            "attempted_pushes": attempted_pushes,
+            "successful_pushes": successful_pushes,
             "timestamp": utc_now(),
         }
         with self.report_lock:
-            if self.report.store_snapshots:
-                previous = self.report.store_snapshots[-1]
-                snapshot["delta_objects"] = snapshot["object_count"] - previous["object_count"]
-                snapshot["delta_stored_bytes"] = (
-                    snapshot["stored_bytes"] - previous["stored_bytes"]
+            snapshot["delta_objects"] = len(inventory) - len(self.store_inventory)
+            snapshot["delta_stored_bytes"] = sum(inventory.values()) - sum(
+                self.store_inventory.values()
+            )
+            delta_categories: dict[str, dict[str, int]] = {}
+            for key in set(self.store_inventory) | set(inventory):
+                before = self.store_inventory.get(key)
+                after = inventory.get(key)
+                relative = key.removeprefix(prefix)
+                category = self.store_category(relative)
+                entry = delta_categories.setdefault(
+                    category, {"objects": 0, "stored_bytes": 0}
                 )
+                entry["objects"] += int(after is not None) - int(before is not None)
+                entry["stored_bytes"] += (after or 0) - (before or 0)
+            snapshot["delta_categories"] = {
+                category: values
+                for category, values in sorted(delta_categories.items())
+                if values["objects"] != 0 or values["stored_bytes"] != 0
+            }
+            if attempted_pushes > 0:
+                snapshot["net_objects_per_attempt"] = round(
+                    snapshot["delta_objects"] / attempted_pushes, 3
+                )
+                snapshot["net_stored_bytes_per_attempt"] = round(
+                    snapshot["delta_stored_bytes"] / attempted_pushes, 3
+                )
+            if successful_pushes > 0:
+                snapshot["net_objects_per_successful_push"] = round(
+                    snapshot["delta_objects"] / successful_pushes, 3
+                )
+                snapshot["net_stored_bytes_per_successful_push"] = round(
+                    snapshot["delta_stored_bytes"] / successful_pushes, 3
+                )
+            self.store_inventory = inventory
             self.report.store_snapshots.append(snapshot)
             self.write_report()
 
@@ -500,7 +574,7 @@ class ConcurrentPushSmoke:
             ],
             name="crab push seed",
         )
-        self.store_snapshot("seed")
+        self.store_snapshot("seed", attempted_pushes=1, successful_pushes=1)
 
     def clone_agent(self, root: Path, index: int, prefix: str) -> Path:
         root.mkdir(parents=True, exist_ok=True)
@@ -642,7 +716,11 @@ class ConcurrentPushSmoke:
             {"visible": len(visible), "expected": self.args.agents},
         )
         self.verify_branch_tip_reads()
-        self.store_snapshot("branch-fanout")
+        self.store_snapshot(
+            "branch-fanout",
+            attempted_pushes=len(results),
+            successful_pushes=len(results),
+        )
 
     def run_same_branch_contention(self) -> None:
         prepared = [self.prepare_same_branch_agent(i) for i in range(self.args.same_branch_agents)]
@@ -680,7 +758,11 @@ class ConcurrentPushSmoke:
                 },
             )
             self.check_same_branch_files_visible(self.args.same_branch_agents)
-            self.store_snapshot("same-branch-integrated")
+            self.store_snapshot(
+                "same-branch-integrated",
+                attempted_pushes=len(results),
+                successful_pushes=len(ok),
+            )
             return
 
         self.check(
@@ -697,7 +779,11 @@ class ConcurrentPushSmoke:
             },
         )
         self.check_same_branch_files_visible(1)
-        self.store_snapshot("same-branch-contention")
+        self.store_snapshot(
+            "same-branch-contention",
+            attempted_pushes=len(results),
+            successful_pushes=len(ok),
+        )
 
     def check_same_branch_files_visible(self, expected_count: int) -> None:
         result = self.protocol_v2_clone(

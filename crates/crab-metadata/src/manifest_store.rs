@@ -1042,9 +1042,14 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &router, &transaction, &[head])
+        let committed = commit_ref_transaction(&store, &router, &transaction, &[head])
             .await
             .unwrap();
+        assert!(
+            crate::ref_journal::transaction_is_active(&store, &router, &committed.transaction_id,)
+                .await
+                .unwrap()
+        );
 
         let compacted = compact_ref_journal(
             &store,
@@ -1061,6 +1066,11 @@ mod tests {
         assert_eq!(compacted.refs["refs/heads/main"], "b".repeat(40));
         assert!(snapshot.journal.transactions.is_empty());
         assert_eq!(snapshot.journal.refs["refs/heads/main"], "b".repeat(40));
+        assert!(
+            !crate::ref_journal::transaction_is_active(&store, &router, &committed.transaction_id,)
+                .await
+                .unwrap()
+        );
         assert!(
             crate::ref_journal::list_active_transactions(&store, &router)
                 .await

@@ -66,6 +66,18 @@ pub async fn commit_ref_journal_transaction(
     .map_err(CrabError::from)
 }
 
+/// Return whether a committed ref transaction still has an active marker.
+pub async fn ref_journal_transaction_is_active(
+    store: &Store,
+    router: &StoreLayout,
+    transaction_id: &str,
+) -> Result<bool> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::transaction_is_active(store.as_storage(), &router, transaction_id)
+        .await
+        .map_err(CrabError::from)
+}
+
 pub async fn compact_ref_journal(
     store: &Store,
     router: &StoreLayout,

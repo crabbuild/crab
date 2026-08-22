@@ -215,8 +215,11 @@ push concurrently, and that simultaneous divergent pushes to `main` produce one
 winner plus structured loser statuses instead of corrupting the remote. After
 each write swarm, fresh Git protocol-v2 clients clone the resulting branches,
 run strict Git fsck, and compare the checked-out agent files byte-for-byte. The
-retained JSON report also records atomic command evidence and RustFS object-count
-and stored-byte deltas for each phase.
+retained JSON report also records atomic command evidence and RustFS net
+live-object and stored-byte deltas by storage-layout class, normalized per
+attempted and successful push. These are lower bounds: RustFS does not expose
+per-S3-method counters here, so overwrites, reads, retries, deletes, egress, and
+provider minimum billable sizes remain outside the estimate.
 The harness defaults `--manifest-cas-retries` to 128 to intentionally absorb
 bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.
