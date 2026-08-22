@@ -134,6 +134,8 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
       - name: Install workflow smoke dependencies
         run: |
           sudo apt-get update -y
@@ -216,6 +218,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
@@ -345,6 +349,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
@@ -603,6 +609,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
@@ -631,6 +639,8 @@ jobs:
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
 
       - name: Run workflow contract tests
         run: cargo test -p crab-workflow --locked
@@ -770,6 +780,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
