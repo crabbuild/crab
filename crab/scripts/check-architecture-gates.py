@@ -2482,7 +2482,8 @@ def check_workspace_third_party_dependency_sources(root: Path, metadata: dict) -
 
 
 def cargo_tree_lines(root: Path, cargo: str, args: list[str]) -> list[str]:
-    result = run([cargo, "tree", *args], root)
+    # Keep Cargo's download/progress chatter out of the machine-parsed tree.
+    result = run([cargo, "tree", "--quiet", *args], root)
     if result.returncode != 0:
         raise RuntimeError(result.stdout)
     return [
