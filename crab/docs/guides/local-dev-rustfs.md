@@ -223,6 +223,10 @@ retries and LIST pages. It groups requests by method, inferred S3 operation,
 and bounded Crab storage-layout class without retaining object keys or
 credentials. The snapshots bracket only the push commands, so the subsequent
 clone, strict fsck, and AWS CLI inventory reads do not inflate push cost.
+Each push record also contains `failure_stages`, counted from only the audit
+events appended by that command. These stable stage names retain lock or
+transient failures that an integration retry later hides behind a successful
+terminal result, without depending on provider-specific error text.
 
 The request trace is suitable for applying a provider's current request rates;
 it is not itself a bill. Provider free tiers, minimum billable object sizes,

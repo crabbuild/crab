@@ -3356,6 +3356,44 @@ impl fmt::Display for RefPushOutcome {
     }
 }
 
+/// Stable push-pipeline stage attached to a rejected batch for diagnostics.
+///
+/// This is deliberately separate from [`PushRejectReason::protocol_tag`]: Git
+/// consumes the reason tag, while operators need the stage to attribute a
+/// transient failure without parsing provider-specific error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PushFailureStage {
+    /// Repository admission ticket acquisition or renewal.
+    Admission,
+    /// Canonical manifest or repository snapshot read.
+    RemoteState,
+    /// Ref policy, ancestry, and base-bound decision planning.
+    Preflight,
+    /// Pointer, staging, and chunk classification.
+    Classify,
+    /// Per-ref push-lock acquisition or renewal.
+    Lock,
+    /// Xorb payload packing.
+    XorbPack,
+    /// Xorb payload upload or durability verification.
+    XorbUpload,
+    /// Git reachability and pack preparation.
+    GitPackPrepare,
+    /// Reconstruction shard construction.
+    ShardBuild,
+    /// Reconstruction shard and file-index upload.
+    ShardUpload,
+    /// Git pack upload.
+    GitPackUpload,
+    /// Reachability verification before refs move.
+    Connectivity,
+    /// Commit-graph summary publication.
+    CommitGraph,
+    /// Manifest/ref transaction commit.
+    RefCommit,
+}
+
 /// Result of a push batch: per-ref outcomes keyed by destination ref name.
 #[derive(Debug, Clone)]
 pub struct PushResult {
@@ -3363,6 +3401,8 @@ pub struct PushResult {
     pub outcomes: HashMap<String, RefPushOutcome>,
     /// Coordinator commit metadata when active-active mode accepted this push.
     pub active_active_commit: Option<PushCommitMetadata>,
+    /// Pipeline stage responsible for a rejected batch, when known.
+    pub failure_stage: Option<PushFailureStage>,
 }
 
 /// Coordinator metadata attached to a successful active-active push.
@@ -3408,6 +3448,7 @@ impl PushResult {
         Self {
             outcomes,
             active_active_commit: None,
+            failure_stage: None,
         }
     }
 
@@ -3419,6 +3460,12 @@ impl PushResult {
     #[must_use]
     pub fn with_active_active_commit(mut self, commit: PushCommitMetadata) -> Self {
         self.active_active_commit = Some(commit);
+        self
+    }
+
+    #[must_use]
+    pub fn with_failure_stage(mut self, stage: PushFailureStage) -> Self {
+        self.failure_stage = Some(stage);
         self
     }
 
@@ -3436,6 +3483,8 @@ struct PushAuditPayload<'a> {
     repo_prefix: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_stage: Option<PushFailureStage>,
     refs: Vec<PushAuditRef<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_active: Option<PushAuditActiveActive<'a>>,
@@ -3478,6 +3527,7 @@ pub fn record_push_audit_event(
     let details = PushAuditPayload {
         repo_prefix,
         duration_ms,
+        failure_stage: result.failure_stage,
         refs: push_audit_refs(specs, result),
         active_active: result
             .active_active_commit
@@ -3725,6 +3775,10 @@ pub struct PushPipeline {
     /// Whether this generation has the complete bounded visibility proof that
     /// protocol-v2 admission requires alongside exact locator coverage.
     git_visibility_published: std::sync::atomic::AtomicBool,
+    /// First failing stage observed by this single-use pipeline. The first
+    /// error wins so admission cleanup cannot overwrite a more precise inner
+    /// upload or commit stage.
+    failure_stage: std::sync::OnceLock<PushFailureStage>,
     /// Base-bound dependency receipt rebuilt whenever manifest CAS replans.
     push_commit_receipt: tokio::sync::Mutex<Option<crab_metadata::receipts::PushCommitReceipt>>,
     /// Current pre-commit ref decisions. Dependency discovery reads this so
@@ -5487,6 +5541,7 @@ impl PushPipeline {
             manifest_etag: tokio::sync::Mutex::new(None),
             committed_manifest_anchor: tokio::sync::Mutex::new(None),
             git_visibility_published: std::sync::atomic::AtomicBool::new(false),
+            failure_stage: std::sync::OnceLock::new(),
             push_commit_receipt: tokio::sync::Mutex::new(None),
             planned_ref_decisions: tokio::sync::Mutex::new(None),
             dependency_plan: tokio::sync::Mutex::new(None),
@@ -13822,6 +13877,20 @@ impl PushPipeline {
         }
     }
 
+    fn record_failure_stage(&self, stage: PushFailureStage) {
+        let _ = self.failure_stage.set(stage);
+    }
+
+    fn at_stage<T>(&self, stage: PushFailureStage, result: Result<T>) -> Result<T> {
+        result.inspect_err(|_| {
+            self.record_failure_stage(stage);
+        })
+    }
+
+    fn observed_failure_stage(&self) -> Option<PushFailureStage> {
+        self.failure_stage.get().copied()
+    }
+
     /// Execute the full 14-step push pipeline.
     ///
     /// Returns per-ref outcomes. On any step failure before the ref
@@ -13845,15 +13914,17 @@ impl PushPipeline {
         } else {
             Ok(None)
         };
+        let admission_lock = self.at_stage(PushFailureStage::Admission, admission_lock);
         let result = match admission_lock {
             Ok(Some(lock)) => {
                 let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
-                while_admitted_until_commit(
+                let result = while_admitted_until_commit(
                     lock,
                     self.execute_inner(Some(committed_tx)),
                     committed_rx,
                 )
-                .await
+                .await;
+                self.at_stage(PushFailureStage::Admission, result)
             }
             Ok(None) => Box::pin(self.execute_inner(None)).await,
             Err(error) => Err(error),
@@ -13884,8 +13955,9 @@ impl PushPipeline {
             // every ref with the aggregate error — otherwise a user
             // pushing three refs sees "all failed" when only one
             // actually did.
-            Err(CrabError::PushPartialOutcome { outcomes, .. }) => {
+            Err(CrabError::PushPartialOutcome { mut outcomes, .. }) => {
                 self.on_failure().await;
+                outcomes.failure_stage = self.observed_failure_stage();
                 *outcomes
             }
             Err(e) => {
@@ -13895,7 +13967,9 @@ impl PushPipeline {
                 for spec in &self.specs {
                     outcomes.insert(spec.dst.clone(), RefPushOutcome::Rejected(reason.clone()));
                 }
-                PushResult::new(outcomes)
+                let mut result = PushResult::new(outcomes);
+                result.failure_stage = self.observed_failure_stage();
+                result
             }
         }
     }
@@ -13926,26 +14000,35 @@ impl PushPipeline {
 
         // Read the current manifest pointer before any pipeline steps.
         // This establishes the base state for `build_manifest` later.
-        self.read_base_manifest().await?;
+        self.at_stage(
+            PushFailureStage::RemoteState,
+            self.read_base_manifest().await,
+        )?;
 
         // Resolve policy and ref preconditions before dependency discovery or
         // immutable uploads. In non-atomic mode only proceeding refs may add
         // pointer, Git-object, or connectivity requirements. In atomic mode a
         // single rejection terminates the batch before remote mutation.
         let mut preflight = if self.store.is_some() {
-            let sha_map = self.resolve_src_ref_map()?;
-            let decisions = self.evaluate_decisions_with_sha_map(&sha_map).await?;
+            let sha_map = self.at_stage(PushFailureStage::Preflight, self.resolve_src_ref_map())?;
+            let decisions = self.at_stage(
+                PushFailureStage::Preflight,
+                self.evaluate_decisions_with_sha_map(&sha_map).await,
+            )?;
             if (self.config.atomic || self.config.protected_push.is_some())
                 && decisions
                     .values()
                     .any(|decision| matches!(decision, RefUpdateDecision::Reject(_)))
             {
-                return Err(CrabError::PushPartialOutcome {
-                    outcomes: Box::new(PushResult::new(aborted_batch_outcomes(&decisions))),
-                    source: Box::new(CrabError::Internal(
-                        "indivisible push aborted during ref preflight".to_owned(),
-                    )),
-                });
+                return self.at_stage(
+                    PushFailureStage::Preflight,
+                    Err(CrabError::PushPartialOutcome {
+                        outcomes: Box::new(PushResult::new(aborted_batch_outcomes(&decisions))),
+                        source: Box::new(CrabError::Internal(
+                            "indivisible push aborted during ref preflight".to_owned(),
+                        )),
+                    }),
+                );
             }
             if !decisions
                 .values()
@@ -13960,7 +14043,7 @@ impl PushPipeline {
         };
 
         // Steps 1–4: data preparation (classify phase)
-        async {
+        let classify_result = async {
             self.enumerate_pointers().await?;
             // Pure Git pushes never consult file/chunk metadata. Avoid
             // opening and draining shared SlateDB readers for every branch
@@ -13981,7 +14064,8 @@ impl PushPipeline {
             self.classify_chunks().await
         }
         .instrument(info_span!("push.classify"))
-        .await?;
+        .await;
+        self.at_stage(PushFailureStage::Classify, classify_result)?;
 
         // Cancellation check: after classify, before pack.
         check_cancelled(&self.cancel)?;
@@ -13990,11 +14074,13 @@ impl PushPipeline {
         // hand this lock in after discovery; direct callers acquire it here.
         // This preserves lock-then-push serialization while immutable xorb
         // uploads overlap the remaining staged reads.
-        self.acquire_push_lock().await?;
+        self.at_stage(PushFailureStage::Lock, self.acquire_push_lock().await)?;
         if let Some((sha_map, decisions)) = preflight.as_mut() {
-            *decisions = self
-                .refresh_base_bound_plan_after_lock(sha_map, decisions)
-                .await?;
+            *decisions = self.at_stage(
+                PushFailureStage::Preflight,
+                self.refresh_base_bound_plan_after_lock(sha_map, decisions)
+                    .await,
+            )?;
         }
         if self.config.protected_push.is_none()
             && self.config.active_active_replication.is_none()
@@ -14044,9 +14130,9 @@ impl PushPipeline {
             self.upload_packed_xorb_stream(packed_rx),
             self.prepare_git_pack(),
         );
-        let pack_summary = pack_result?;
-        let upload_summary = upload_result?;
-        git_prepare_result?;
+        let pack_summary = self.at_stage(PushFailureStage::XorbPack, pack_result)?;
+        let upload_summary = self.at_stage(PushFailureStage::XorbUpload, upload_result)?;
+        self.at_stage(PushFailureStage::GitPackPrepare, git_prepare_result)?;
         if pack_summary.xorb_count != upload_summary.planned_xorbs
             || pack_summary.payload_bytes != upload_summary.planned_bytes
         {
@@ -14086,7 +14172,7 @@ impl PushPipeline {
         // Cancellation is checked between each upload step so Ctrl-C during
         // a long upload phase responds within one step boundary rather than
         // waiting for all four steps to complete.
-        self.build_shard().await?;
+        self.at_stage(PushFailureStage::ShardBuild, self.build_shard().await)?;
         check_cancelled(&self.cancel)?;
         let (shard_upload_bytes, shard_upload_count) = {
             let shards = self.shard_results.lock().await;
@@ -14099,11 +14185,12 @@ impl PushPipeline {
             )
         };
         let shard_upload_phase = PhaseTimer::start("push", "shard_upload");
-        Box::pin(self.upload_shard_and_file_index()).await?;
+        let shard_upload_result = Box::pin(self.upload_shard_and_file_index()).await;
+        self.at_stage(PushFailureStage::ShardUpload, shard_upload_result)?;
         self.emit_perf_phase(shard_upload_phase.finish(0, shard_upload_bytes, shard_upload_count));
         check_cancelled(&self.cancel)?;
         let pack_upload_phase = PhaseTimer::start("push", "pack_upload");
-        self.upload_packs().await?;
+        self.at_stage(PushFailureStage::GitPackUpload, self.upload_packs().await)?;
         let (pack_upload_bytes, pack_upload_count) = {
             let packs = self.uploaded_packs.lock().await;
             (
@@ -14129,7 +14216,10 @@ impl PushPipeline {
         // [`CrabError::PushConnectivityMissing`] which is mapped to
         // [`PushRejectReason::ConnectivityMissing`] by the per-ref
         // outcome collapse in `execute`.
-        self.verify_connectivity().await?;
+        self.at_stage(
+            PushFailureStage::Connectivity,
+            self.verify_connectivity().await,
+        )?;
 
         // Cancellation check: after connectivity, before manifest CAS.
         check_cancelled(&self.cancel)?;
@@ -14137,7 +14227,10 @@ impl PushPipeline {
         // Publish the shallow-fetch graph before exposing refs. Extra entries
         // are harmless if the later manifest CAS loses a race because fetch
         // traversal is rooted only at the committed ref tips.
-        self.publish_commit_graph_summary().await?;
+        self.at_stage(
+            PushFailureStage::CommitGraph,
+            self.publish_commit_graph_summary().await,
+        )?;
 
         // Steps 11-12: Build manifest and CAS-write the pointer.
         // When no store is available (tests without S3), skip the manifest
@@ -14150,31 +14243,44 @@ impl PushPipeline {
         // "every ref is Ok" assumption.
         let mut active_active_commit = None;
         let decisions = if self.store.is_some() {
-            let (sha_map, decisions) = preflight.ok_or_else(|| {
+            let preflight = preflight.ok_or_else(|| {
                 CrabError::Internal("push ref preflight result is missing".to_owned())
-            })?;
-            let (manifest, bulk) = self
+            });
+            let (sha_map, decisions) = self.at_stage(PushFailureStage::RefCommit, preflight)?;
+            let apply_result = self
                 .apply_decisions_with_sha_map(&decisions, self.config.atomic, &sha_map)
-                .await?;
-            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}")))?
+                .await;
+            let (manifest, bulk) = self.at_stage(PushFailureStage::RefCommit, apply_result)?;
+            let manifest_bytes = self
+                .at_stage(
+                    PushFailureStage::RefCommit,
+                    serde_json::to_vec_pretty(&manifest)
+                        .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}"))),
+                )?
                 .len() as u64;
             let manifest_phase = PhaseTimer::start("push", "ref_journal_commit");
             let manifest_item_count = manifest.refs.len() as u64;
             let manifest_bytes_out = manifest_bytes + bulk_data_bytes(&bulk);
-            let committed_decisions = if let Some(outcome) = self
+            let active_active_result = self
                 .active_active_commit_and_materialize(&manifest, &bulk, &decisions, &sha_map)
-                .await?
+                .await;
+            let committed_decisions = if let Some(outcome) =
+                self.at_stage(PushFailureStage::RefCommit, active_active_result)?
             {
                 active_active_commit = Some(PushCommitMetadata::from(outcome));
                 debug!("steps 11-12: committed through active-active coordinator");
                 decisions
             } else if self.config.protected_push.is_some() {
-                active_active_commit = self.protected_push_finalize(manifest, bulk).await?;
+                active_active_commit = self.at_stage(
+                    PushFailureStage::RefCommit,
+                    self.protected_push_finalize(manifest, bulk).await,
+                )?;
                 decisions
             } else {
-                self.commit_ref_journal(manifest, bulk, &sha_map, decisions, &mut admission_commit)
-                    .await?
+                let commit_result = self
+                    .commit_ref_journal(manifest, bulk, &sha_map, decisions, &mut admission_commit)
+                    .await;
+                self.at_stage(PushFailureStage::RefCommit, commit_result)?
             };
             self.emit_perf_phase(manifest_phase.finish(0, manifest_bytes_out, manifest_item_count));
             Some(committed_decisions)
@@ -17275,6 +17381,37 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_failure_stage_preserves_first_owner() {
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            "repo".to_owned(),
+            test_router("repo"),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        let first: Result<()> = pipeline.at_stage(
+            PushFailureStage::XorbUpload,
+            Err(CrabError::Internal("upload failed".to_owned())),
+        );
+        let cleanup: Result<()> = pipeline.at_stage(
+            PushFailureStage::Admission,
+            Err(CrabError::Internal("admission renewal failed".to_owned())),
+        );
+
+        assert!(first.is_err());
+        assert!(cleanup.is_err());
+        assert_eq!(
+            pipeline.observed_failure_stage(),
+            Some(PushFailureStage::XorbUpload)
+        );
+    }
+
+    #[test]
     fn push_audit_event_records_per_ref_outcomes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("events.jsonl");
@@ -17299,7 +17436,7 @@ mod tests {
                 want: "new".to_owned(),
             }),
         );
-        let result = PushResult::new(outcomes);
+        let result = PushResult::new(outcomes).with_failure_stage(PushFailureStage::Preflight);
 
         record_push_audit_event(
             &path,
@@ -17319,6 +17456,7 @@ mod tests {
         assert_eq!(event.repository.as_deref(), Some("crab://bucket/repo"));
         assert_eq!(event.details["repo_prefix"], "repo");
         assert_eq!(event.details["duration_ms"], 42);
+        assert_eq!(event.details["failure_stage"], "preflight");
         assert_eq!(event.details["refs"][0]["status"], "rejected");
         assert_eq!(event.details["refs"][0]["reason_tag"], "non-fast-forward");
         assert_eq!(event.details["refs"][1]["status"], "ok");

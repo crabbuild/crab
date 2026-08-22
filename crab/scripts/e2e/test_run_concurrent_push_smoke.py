@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -17,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_concurrent_push_smoke import (
     RequestCountingProxy,
     locator_requests_per_success,
+    push_failure_stages,
     store_category,
 )
 
@@ -40,6 +43,49 @@ class LocatorRequestBudgetTest(unittest.TestCase):
                 {"successful_pushes": 0, "categories": {"git_locator_db/wal": 1}}
             )
         )
+
+
+class PushFailureStagesTest(unittest.TestCase):
+    def test_counts_only_attributed_failures_from_current_command_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            previous = {
+                "operation": "push",
+                "outcome": "failure",
+                "details": {"failure_stage": "lock"},
+            }
+            path.write_text(json.dumps(previous) + "\n", encoding="utf-8")
+            offset = path.stat().st_size
+            events = [
+                {
+                    "operation": "push",
+                    "outcome": "failure",
+                    "details": {"failure_stage": "ref-commit"},
+                },
+                {
+                    "operation": "push",
+                    "outcome": "failure",
+                    "details": {"failure_stage": "ref-commit"},
+                },
+                {
+                    "operation": "push",
+                    "outcome": "success",
+                    "details": {},
+                },
+                {
+                    "operation": "fetch",
+                    "outcome": "failure",
+                    "details": {"failure_stage": "remote-state"},
+                },
+            ]
+            with path.open("a", encoding="utf-8") as audit:
+                for event in events:
+                    audit.write(json.dumps(event) + "\n")
+
+            self.assertEqual(
+                push_failure_stages(path, offset),
+                {"ref-commit": 2},
+            )
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):

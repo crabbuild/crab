@@ -18,7 +18,9 @@ two AI-agent push cases:
 
 The retained report is written atomically across worker threads and includes
 per-phase S3 HTTP attempts plus RustFS object-count and stored-byte deltas for
-cost analysis.
+cost analysis. Each push record also retains stable failure-stage counts from
+the command's local audit slice, including failed attempts hidden by a later
+successful integration retry.
 """
 
 from __future__ import annotations
@@ -468,6 +470,7 @@ class PushRecord:
     retry_after_secs: int | None = None
     integration_retries: int | None = None
     integration_retry_limit: int | None = None
+    failure_stages: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -565,6 +568,26 @@ def first_json_object(text: str, schema: str) -> dict[str, Any] | None:
     return None
 
 
+def push_failure_stages(audit_path: Path, start_offset: int) -> dict[str, int]:
+    """Count attributed push failures appended after ``start_offset``."""
+    if not audit_path.is_file():
+        return {}
+    counts: dict[str, int] = {}
+    with audit_path.open("rb") as audit:
+        audit.seek(start_offset)
+        for raw_line in audit:
+            try:
+                event = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if event.get("operation") != "push" or event.get("outcome") != "failure":
+                continue
+            stage = event.get("details", {}).get("failure_stage")
+            if isinstance(stage, str):
+                counts[stage] = counts.get(stage, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 class ConcurrentPushSmoke:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -595,7 +618,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.6",
+            version="1.7",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -1548,8 +1571,14 @@ class ConcurrentPushSmoke:
         )
         self.check(
             "marker-write-failure-is-structured-retryable",
-            failed.status == "transient" and failed.retryable is True,
-            {"status": failed.status, "retryable": failed.retryable},
+            failed.status == "transient"
+            and failed.retryable is True
+            and failed.failure_stages == {"ref-commit": 1},
+            {
+                "status": failed.status,
+                "retryable": failed.retryable,
+                "failure_stages": failed.failure_stages,
+            },
         )
         self.request_snapshot(
             "marker-write-failure",
@@ -1615,11 +1644,13 @@ class ConcurrentPushSmoke:
             fault_reached
             and pushed.command.exit_code == 0
             and pushed.status == "ok"
+            and not pushed.failure_stages
             and f"{tip}\t{remote_ref}" in advertised_lines,
             {
                 "fault_reached": fault_reached,
                 "status": pushed.status,
                 "exit_code": pushed.command.exit_code,
+                "failure_stages": pushed.failure_stages,
                 "ref_visible": f"{tip}\t{remote_ref}" in advertised_lines,
             },
         )
@@ -1712,6 +1743,8 @@ class ConcurrentPushSmoke:
         refspec: str,
         lock_wait_secs: int | None = None,
     ) -> PushRecord:
+        audit_path = repo / ".crab" / "audit" / "events.jsonl"
+        audit_offset = audit_path.stat().st_size if audit_path.is_file() else 0
         record = self.run_cmd(
             f"{agent} crab push",
             self.push_args(refspec, lock_wait_secs),
@@ -1744,6 +1777,7 @@ class ConcurrentPushSmoke:
             retry_after_secs,
             integration_retries,
             integration_retry_limit,
+            push_failure_stages(audit_path, audit_offset),
         )
 
     def push_concurrently(self, jobs: list[tuple[str, str, Path, str]]) -> list[PushRecord]:

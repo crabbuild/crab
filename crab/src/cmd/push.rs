@@ -23,8 +23,9 @@ use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::perf_phase::PerfPhaseSink;
 use crate::git::push::{
-    PushConfig, PushRejectReason, PushResult, RefPushOutcome, acquire_push_lock_leases,
-    configure_active_active_push_coordinator, record_push_audit_event, release_push_lock_leases,
+    PushConfig, PushFailureStage, PushRejectReason, PushResult, RefPushOutcome,
+    acquire_push_lock_leases, configure_active_active_push_coordinator, record_push_audit_event,
+    release_push_lock_leases,
 };
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
 use crate::git::push_state::PushState;
@@ -692,7 +693,8 @@ async fn run_push_once(
                 pre_acquired_locks = Some(leases);
             }
             Err(e) => {
-                let result = push_result_from_error(&specs, &e);
+                let result =
+                    push_result_from_error(&specs, &e).with_failure_stage(PushFailureStage::Lock);
                 if let Err(err) = record_push_audit_event(
                     &repo_root.join(default_log_path()),
                     Some(&remote_url),
@@ -904,8 +906,9 @@ fn transient_retry_branch<'a>(
         return None;
     };
     let reason = match result.outcomes.get(&spec.dst)? {
-        RefPushOutcome::Rejected(reason @ PushRejectReason::NetworkTransient(_))
-        | RefPushOutcome::Rejected(reason @ PushRejectReason::Throttled { .. }) => reason,
+        RefPushOutcome::Rejected(
+            reason @ (PushRejectReason::NetworkTransient(_) | PushRejectReason::Throttled { .. }),
+        ) => reason,
         _ => return None,
     };
 
