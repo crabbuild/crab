@@ -1,6 +1,8 @@
 //! Compatibility Adapter for repository manifest helpers.
 
-pub use crab_metadata::manifest_store::{ManifestHistoryEntry, RepositorySnapshot};
+pub use crab_metadata::manifest_store::{
+    ManifestHistoryEntry, RefJournalCompaction, RepositorySnapshot,
+};
 pub use crab_metadata::manifests::{BulkData, Manifest, PackManifestEntry};
 pub use crab_metadata::ref_journal::{
     RefJournalCommitResult, RefJournalEdit, RefJournalHeadSnapshot, RefJournalTransaction,
@@ -84,7 +86,7 @@ pub async fn compact_ref_journal(
     created_at: String,
     pusher: Option<String>,
     session_id: String,
-) -> Result<Option<Manifest>> {
+) -> Result<Option<RefJournalCompaction>> {
     let router = storage_layout(store, router);
     crab_metadata::manifest_store::compact_ref_journal(
         store.as_storage(),

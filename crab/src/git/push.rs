@@ -4776,7 +4776,7 @@ async fn compact_ref_journal_until_idle(
     store: &Store,
     router: &StoreLayout,
     pusher: Option<String>,
-) -> Result<Option<Manifest>> {
+) -> Result<Option<crate::metadata::manifest::RefJournalCompaction>> {
     let mut latest = None;
     let mut passes = 0;
     while passes < MAX_REF_JOURNAL_COMPACTION_PASSES {
@@ -4788,16 +4788,16 @@ async fn compact_ref_journal_until_idle(
             uuid::Uuid::now_v7().to_string(),
         )
         .await?;
-        let Some(manifest) = compacted else {
+        let Some(compaction) = compacted else {
             return Ok(latest);
         };
         passes += 1;
         debug!(
             pass = passes,
-            generation = manifest.generation,
+            generation = compaction.manifest.generation,
             "ref journal compactor drained one visible transaction wave"
         );
-        latest = Some(manifest);
+        latest = Some(compaction);
     }
     // Bound ownership so a continuous push stream cannot monopolize the
     // derived lock. Any transaction left active waits and becomes the next
@@ -7126,25 +7126,32 @@ impl PushPipeline {
             warn!(%error, "ref journal committed; compaction lock release requires repair");
         }
         match compacted {
-            Ok(Some(compacted_manifest)) => {
+            Ok(Some(compaction)) => {
+                let compacted_manifest = compaction.manifest;
                 match committed_manifest_anchor(&compacted_manifest) {
                     Ok(anchor) => *self.committed_manifest_anchor.lock().await = anchor,
                     Err(error) => {
                         warn!(%error, "ref journal committed; compacted anchor requires repair")
                     }
                 }
-                let visibility_published = match self
-                    .publish_git_visibility_index(&compacted_manifest, store)
-                    .await
-                {
-                    Ok(()) => true,
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            generation = compacted_manifest.generation,
-                            "ref journal committed; Git visibility proof requires repair"
-                        );
-                        false
+                let visibility_published = if compaction.git_visibility_published {
+                    // The metadata owner uploaded this immutable proof before
+                    // its manifest CAS; rereading it cannot strengthen that order.
+                    true
+                } else {
+                    match self
+                        .publish_git_visibility_index(&compacted_manifest, store)
+                        .await
+                    {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                generation = compacted_manifest.generation,
+                                "ref journal committed; Git visibility proof requires repair"
+                            );
+                            false
+                        }
                     }
                 };
                 self.git_visibility_published
