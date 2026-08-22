@@ -237,10 +237,11 @@ generation proof before manifest or coordinator commit. Protected receive
 builds that proof from its existing verified materialization workspace, so the
 commit boundary does not download the candidate pack inventory a second time.
 
-Current proof keys use the manifest Git-validation digest. Crab 1.0.15's
-generation-and-pack-index key remains readable and GC-rooted only as a shipped
-data migration; the next write or explicit metadata repair backfills the
-digest-bound proof.
+Current proof keys use the manifest Git-validation digest, and current proof
+bodies store one sorted object-ID dictionary plus per-ref position closures.
+Crab 1.0.15's generation-and-pack-index key remains readable and GC-rooted only
+as a shipped data migration; the next write or explicit metadata repair
+backfills the digest-bound proof.
 
 Source: `crab/src/git/push.rs`, `crab/src/git/push_manifest.rs`,
 `crates/crab-git/src/push_state.rs`

@@ -77,11 +77,14 @@ keeps request rejections distinguishable from truncated pack generation.
 Every requested OID is admitted from the immutable visibility proof before the
 remote reader obtains object bytes. Current proofs are keyed by and carry the
 manifest Git-validation digest, which binds generation, pack inventory, HEAD,
-refs, and peeled refs. Invalid or missing proof suppresses v2 advertisement; it
-never triggers a silent complete filtered fetch. Crab 1.0.15 proofs keyed only
-by generation and pack-index hash remain an explicit read migration: write and
-repair owners backfill the digest-bound key, and GC retains both roots while
-that tagged-data migration is supported.
+refs, and peeled refs. Their storage codec writes each object ID once in a
+sorted dictionary and represents each ref closure as sorted dictionary
+positions, avoiding repeated 40-byte IDs for shared history. Invalid or missing
+proof suppresses v2 advertisement; it never triggers a silent complete
+filtered fetch. Crab 1.0.15 proofs keyed only by generation and pack-index hash
+remain an explicit read migration: write and repair owners backfill the
+digest-bound key, and GC retains both roots while that tagged-data migration is
+supported.
 
 Each direct ref update uploads content-addressed visibility evidence before its
 journal marker becomes visible. Fast-forward and ordinary updates encode only

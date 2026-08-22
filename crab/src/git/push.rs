@@ -17804,7 +17804,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             current.format,
-            crab_metadata::git_visibility::GitVisibilityFormat::V2
+            crab_metadata::git_visibility::GitVisibilityFormat::V3
         );
     }
 
