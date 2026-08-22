@@ -1242,6 +1242,7 @@ class ConcurrentPushSmoke:
             self.pre_marker_agent,
             refspec,
             lock_wait_secs=0,
+            rebase_on_non_fast_forward=False,
         )
         self.check(
             "pre-marker-crash-holder-remains-fenced",
@@ -1273,6 +1274,7 @@ class ConcurrentPushSmoke:
                 self.pre_marker_agent,
                 refspec,
                 lock_wait_secs=0,
+                rebase_on_non_fast_forward=False,
             )
             attempts.append(attempt)
             if attempt.status == "ok" and attempt.command.exit_code == 0:
@@ -1506,13 +1508,17 @@ class ConcurrentPushSmoke:
         proxy.arm_ref_journal_fault(
             "active-marker", "before-upstream", attempts=None
         )
+        marker_retry_limit = min(self.args.rebase_retry_limit, 2)
         try:
+            # The fault stays permanent, so bound this probe's retries while
+            # retaining coverage of the structured integration telemetry.
             failed = self.run_push_job(
                 "marker-write-failure",
                 remote_ref,
                 self.marker_write_failure_agent,
                 refspec,
                 lock_wait_secs=0,
+                rebase_retry_limit=marker_retry_limit,
             )
         finally:
             proxy.clear_ref_journal_fault()
@@ -1589,12 +1595,11 @@ class ConcurrentPushSmoke:
             and not failed.integration_retry_stages
         )
         if self.args.rebase_on_non_fast_forward:
-            expected_failure_attempts += self.args.rebase_retry_limit
+            expected_failure_attempts += marker_retry_limit
             retry_telemetry_ok = (
-                failed.integration_retries == self.args.rebase_retry_limit
-                and failed.integration_retry_limit == self.args.rebase_retry_limit
-                and failed.integration_retry_stages
-                == {"ref-commit": self.args.rebase_retry_limit}
+                failed.integration_retries == marker_retry_limit
+                and failed.integration_retry_limit == marker_retry_limit
+                and failed.integration_retry_stages == {"ref-commit": marker_retry_limit}
             )
         self.check(
             "marker-write-failure-is-structured-retryable",
@@ -1741,7 +1746,18 @@ class ConcurrentPushSmoke:
         self.run_git(repo, ["commit", "-m", f"agent {index:03d} same branch"])
         return f"same-agent-{index:03d}", "refs/heads/main", repo
 
-    def push_args(self, refspec: str, lock_wait_secs: int | None = None) -> list[str]:
+    def push_args(
+        self,
+        refspec: str,
+        lock_wait_secs: int | None = None,
+        *,
+        rebase_on_non_fast_forward: bool | None = None,
+        rebase_retry_limit: int | None = None,
+    ) -> list[str]:
+        if rebase_on_non_fast_forward is None:
+            rebase_on_non_fast_forward = self.args.rebase_on_non_fast_forward
+        if rebase_retry_limit is None:
+            rebase_retry_limit = self.args.rebase_retry_limit
         args = [
             self.args.crab_bin,
             "push",
@@ -1756,12 +1772,12 @@ class ConcurrentPushSmoke:
         if lock_wait_secs is not None or not self.args.omit_lock_wait_secs:
             wait_secs = self.args.lock_wait_secs if lock_wait_secs is None else lock_wait_secs
             args[3:3] = ["--lock-wait-secs", str(wait_secs)]
-        if self.args.rebase_on_non_fast_forward:
+        if rebase_on_non_fast_forward:
             args.extend(
                 [
                     "--rebase-on-non-fast-forward",
                     "--rebase-retry-limit",
-                    str(self.args.rebase_retry_limit),
+                    str(rebase_retry_limit),
                 ]
             )
         return args
@@ -1773,12 +1789,20 @@ class ConcurrentPushSmoke:
         repo: Path,
         refspec: str,
         lock_wait_secs: int | None = None,
+        *,
+        rebase_on_non_fast_forward: bool | None = None,
+        rebase_retry_limit: int | None = None,
     ) -> PushRecord:
         audit_path = repo / ".crab" / "audit" / "events.jsonl"
         audit_offset = audit_path.stat().st_size if audit_path.is_file() else 0
         record = self.run_cmd(
             f"{agent} crab push",
-            self.push_args(refspec, lock_wait_secs),
+            self.push_args(
+                refspec,
+                lock_wait_secs,
+                rebase_on_non_fast_forward=rebase_on_non_fast_forward,
+                rebase_retry_limit=rebase_retry_limit,
+            ),
             repo,
             check=False,
             timeout=self.args.push_timeout,
