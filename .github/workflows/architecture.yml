@@ -75,6 +75,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -82,6 +86,7 @@ jobs:
   architecture:
     name: Multi-crate guardrails
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -97,6 +102,7 @@ jobs:
   crate-interfaces:
     name: Split-crate interface checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -112,6 +118,7 @@ jobs:
   crate-behavior:
     name: Split-crate behavior checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -127,6 +134,7 @@ jobs:
   split-crate-clippy:
     name: Split-crate clippy checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -142,6 +150,7 @@ jobs:
   split-crate-tests:
     name: Split-crate test checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -157,6 +166,7 @@ jobs:
   shipped-binary-versions:
     name: Shipped binary version checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -175,6 +185,7 @@ jobs:
   install-layout:
     name: Install layout check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -193,6 +204,7 @@ jobs:
   auth-helper-packaging:
     name: Auth helper packaging check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -205,6 +217,7 @@ jobs:
   auth-python-tests:
     name: Auth Python service tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -226,6 +239,7 @@ jobs:
   release-archive-contents:
     name: Release archive contents check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -238,6 +252,7 @@ jobs:
   final-integration:
     name: Final integration checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout

@@ -71,6 +71,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   NFS_SMOKE_BASELINE_RUN_ID: ${{ inputs.nfs_smoke_baseline_run_id || vars.NFS_SMOKE_BASELINE_RUN_ID }}
@@ -115,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-smoke
       CRAB_NFS_SMOKE_RUN_ID: mount-nfs-linux-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -142,7 +146,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-smoke
       CRAB_NFS_SMOKE_RUN_ID: mount-nfs-macos-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -178,7 +182,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     env:
-      CRAB_NFS_SMOKE_ROOT: ${{ runner.temp }}/crab-nfs-smoke
+      CRAB_NFS_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-smoke
       CRAB_NFS_SMOKE_RUN_ID: mount-nfs-windows-${{ github.run_id }}-${{ github.run_attempt }}
       CRAB_NFS_SMOKE_DRIVE: "Z:"
 

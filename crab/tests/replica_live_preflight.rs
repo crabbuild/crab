@@ -6,7 +6,8 @@ fn script() -> PathBuf {
 }
 
 fn release_evidence_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release/verify-replica-release-evidence.sh")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/release/verify-replica-release-evidence.sh")
 }
 
 fn cross_region_matrix_script() -> PathBuf {
