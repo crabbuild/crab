@@ -6,6 +6,7 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use slatedb::config::{DbReaderOptions, ScanOptions};
+use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
     METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
@@ -26,6 +27,11 @@ const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
 const MAX_SCAN_AMPLIFICATION: usize = 2;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
+// One cache is private to one short-lived reader process. This keeps 32
+// concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
+// 20 GiB default while still coalescing repeated SST metadata/block reads.
+const SESSION_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const SESSION_CACHE_SHARDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LookupStrategy {
@@ -119,9 +125,10 @@ impl GitObjectLocatorSession {
             builder = builder.with_checkpoint_id(checkpoint.id);
         }
         let reader = match builder
-            // Push sessions are short-lived and query each candidate once. The
-            // default 640 MiB cache multiplies RSS across concurrent pushes.
-            .with_db_cache_disabled()
+            .with_db_cache(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                max_capacity: SESSION_CACHE_BYTES,
+                shards: SESSION_CACHE_SHARDS,
+            })))
             .build()
             .await
         {
@@ -512,9 +519,14 @@ async fn close_after_error<T>(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
-    use object_store::{ObjectStore, ObjectStoreExt};
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    };
 
     use super::*;
     use crate::git_object_locator::{
@@ -526,6 +538,77 @@ mod tests {
         oid: [u8; 20],
         pack: GitPackLocatorRecord,
         inventory: GitPackInventoryEntry,
+    }
+
+    #[derive(Debug)]
+    struct ReadCountingStore {
+        inner: Arc<InMemory>,
+        reads: AtomicUsize,
+    }
+
+    impl std::fmt::Display for ReadCountingStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("read-counting-store")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for ReadCountingStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     fn hash(seed: u64) -> MerkleHash {
@@ -778,6 +861,44 @@ mod tests {
                 GitObjectLookup::Miss
             ]
         ));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn exact_batch_coalesces_shared_sst_reads() {
+        let inner = Arc::new(InMemory::new());
+        let writer_store: Arc<dyn ObjectStore> = inner.clone();
+        let (object_ids, inventory) = publish_many(writer_store, 64).await;
+        let store = Arc::new(ReadCountingStore {
+            inner,
+            reads: AtomicUsize::new(0),
+        });
+        let reader_store: Arc<dyn ObjectStore> = store.clone();
+        let session = GitObjectLocatorSession::open(reader_store, "org/repo")
+            .await
+            .expect("open reader");
+        store.reads.store(0, Ordering::Relaxed);
+
+        let lookups = session
+            .lookup_batch(&object_ids, &inventory)
+            .await
+            .expect("exact batch");
+        let first_batch_reads = store.reads.load(Ordering::Relaxed);
+        assert!(
+            first_batch_reads < object_ids.len(),
+            "shared SST reads were not coalesced: {first_batch_reads} reads"
+        );
+        assert!(
+            lookups
+                .iter()
+                .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
+        );
+
+        session
+            .lookup_batch(&object_ids, &inventory)
+            .await
+            .expect("cached exact batch");
+        assert_eq!(store.reads.load(Ordering::Relaxed), first_batch_reads);
         session.close().await.expect("close reader");
     }
 
