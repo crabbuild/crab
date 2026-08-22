@@ -1839,25 +1839,31 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
     let first = read_target(&fixture)
         .await
         .expect_err("aggregate inflated bytes must fail");
-    assert!(matches!(
-        first,
-        Error::LimitExceeded {
-            limit: "inflated bytes",
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &first,
+            Error::LimitExceeded {
+                limit: "inflated bytes",
+                ..
+            }
+        ),
+        "unexpected first error: {first:?}"
+    );
 
     fixture.backend.reset_pack_gets();
     let second = read_target(&fixture)
         .await
         .expect_err("failed decode must not become a cache hit");
-    assert!(matches!(
-        second,
-        Error::LimitExceeded {
-            limit: "inflated bytes",
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &second,
+            Error::LimitExceeded {
+                limit: "inflated bytes",
+                ..
+            }
+        ),
+        "unexpected second error: {second:?}"
+    );
     assert!(fixture.backend.pack_gets() > 0);
 }
 
