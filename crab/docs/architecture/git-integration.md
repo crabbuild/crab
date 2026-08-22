@@ -233,7 +233,14 @@ evidence must complete before the ref marker in step 11. This ensures the
 fail-forward property: an interrupted push may leave orphaned immutable data
 (cleaned by GC) but never creates dangling or proofless supported-profile
 references. Protected/service paths apply the same rule to the candidate
-generation proof before manifest or coordinator commit.
+generation proof before manifest or coordinator commit. Protected receive
+builds that proof from its existing verified materialization workspace, so the
+commit boundary does not download the candidate pack inventory a second time.
+
+Current proof keys use the manifest Git-validation digest. Crab 1.0.15's
+generation-and-pack-index key remains readable and GC-rooted only as a shipped
+data migration; the next write or explicit metadata repair backfills the
+digest-bound proof.
 
 Source: `crab/src/git/push.rs`, `crab/src/git/push_manifest.rs`,
 `crates/crab-git/src/push_state.rs`

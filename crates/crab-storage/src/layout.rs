@@ -262,7 +262,15 @@ impl<S> StoreLayout<S> {
 
     /// Path to one immutable Git object visibility proof.
     #[must_use]
-    pub fn git_visibility_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {
+    pub fn git_visibility_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility/v2/{git_validation_digest}.json"
+        ))
+    }
+
+    /// Path to a v1 visibility proof shipped by Crab 1.0.15.
+    #[must_use]
+    pub fn git_visibility_v1_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {
         self.repo_path(&format!(
             "metadata/git-visibility/{generation:020}-{pack_index_hash}.json"
         ))

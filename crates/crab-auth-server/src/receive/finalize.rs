@@ -145,7 +145,7 @@ async fn active_active_uploaded_objects(
     {
         keys.insert(
             router
-                .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+                .git_visibility_path(&manifest.git_validation_digest)
                 .as_ref()
                 .to_owned(),
         );
@@ -256,6 +256,9 @@ mod tests {
             ref_updates: Vec::new(),
             packs: Vec::new(),
             peeled_refs: std::collections::BTreeMap::new(),
+            git_visibility: super::super::MaterializedGitVisibility::Exact(
+                std::collections::BTreeMap::new(),
+            ),
         };
 
         let err = commit_receive_manifest(

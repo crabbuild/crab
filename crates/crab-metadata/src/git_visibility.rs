@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MetadataError, Result};
+use crate::manifests::Manifest;
 
 /// Current serialized visibility-index format.
-pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
+pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 2;
 
 /// Maximum serialized proof accepted from object storage.
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
@@ -175,6 +176,7 @@ fn validate_sorted_oids(objects: &[String], field: &str) -> Result<()> {
 
 /// Complete ref-rooted Git object visibility proof for one repository snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GitVisibilityIndex {
     /// Schema version of this object.
     pub version: u32,
@@ -182,6 +184,8 @@ pub struct GitVisibilityIndex {
     pub generation: u64,
     /// Pack-index hash this proof was built against.
     pub pack_index_hash: String,
+    /// Digest binding the complete manifest Git state described by this proof.
+    pub git_validation_digest: String,
     /// Complete object closure for each manifest ref, including the ref tip.
     pub refs: BTreeMap<String, Vec<String>>,
 }
@@ -192,6 +196,7 @@ impl GitVisibilityIndex {
     pub fn new(
         generation: u64,
         pack_index_hash: impl Into<String>,
+        git_validation_digest: impl Into<String>,
         refs: BTreeMap<String, Vec<String>>,
     ) -> Self {
         let refs = refs
@@ -207,6 +212,7 @@ impl GitVisibilityIndex {
             version: GIT_VISIBILITY_INDEX_VERSION,
             generation,
             pack_index_hash: pack_index_hash.into(),
+            git_validation_digest: git_validation_digest.into(),
             refs,
         }
     }
@@ -216,38 +222,48 @@ impl GitVisibilityIndex {
         if self.version != GIT_VISIBILITY_INDEX_VERSION {
             return Err(corrupt("visibility index version is unsupported"));
         }
-        if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
-            return Err(corrupt("visibility index contains too many refs"));
-        }
         if !(self.pack_index_hash.is_empty() && self.refs.is_empty()) {
             validate_hash(&self.pack_index_hash, "pack index hash")?;
         }
-        let mut object_count = 0u64;
-        for (name, objects) in &self.refs {
-            if name.is_empty() || name.bytes().any(|byte| byte.is_ascii_control()) {
-                return Err(corrupt("visibility index contains an invalid ref name"));
-            }
-            object_count =
-                object_count
-                    .checked_add(u64::try_from(objects.len()).map_err(|_| {
-                        corrupt("visibility index object count cannot be represented")
-                    })?)
-                    .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-            if object_count > MAX_GIT_VISIBILITY_OBJECTS {
-                return Err(corrupt("visibility index contains too many objects"));
-            }
-            let mut previous: Option<&str> = None;
-            for object in objects {
-                validate_oid(object)?;
-                if previous.is_some_and(|value| value >= object.as_str()) {
-                    return Err(corrupt(
-                        "visibility index object lists must be sorted and deduplicated",
-                    ));
-                }
-                previous = Some(object.as_str());
-            }
+        validate_hash(&self.git_validation_digest, "Git validation digest")?;
+        validate_ref_closures(&self.refs)
+    }
+
+    #[cfg(feature = "storage")]
+    fn validate_identity(
+        &self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<()> {
+        if self.generation != generation
+            || self.pack_index_hash != pack_index_hash
+            || self.git_validation_digest != git_validation_digest
+        {
+            return Err(corrupt(
+                "visibility index does not match its immutable identity",
+            ));
         }
         Ok(())
+    }
+
+    /// Return whether this proof covers the complete Git state of a manifest.
+    #[must_use]
+    pub fn matches_manifest(&self, manifest: &Manifest) -> bool {
+        self.generation == manifest.generation
+            && self.pack_index_hash == manifest.pack_index_hash
+            && self.git_validation_digest == manifest.git_validation_digest
+            && self.refs.keys().eq(manifest.refs.keys())
+            && manifest.refs.iter().all(|(name, tip)| {
+                self.refs
+                    .get(name)
+                    .is_some_and(|objects| objects.binary_search(tip).is_ok())
+            })
+            && manifest.peeled_refs.iter().all(|(name, peeled)| {
+                self.refs
+                    .get(name)
+                    .is_some_and(|objects| objects.binary_search(peeled).is_ok())
+            })
     }
 
     /// Return the union of objects rooted at the supplied visible refs.
@@ -310,6 +326,38 @@ impl GitVisibilityIndex {
     }
 }
 
+fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    if refs.len() > MAX_GIT_VISIBILITY_REFS {
+        return Err(corrupt("visibility index contains too many refs"));
+    }
+    let mut object_count = 0u64;
+    for (name, objects) in refs {
+        if name.is_empty() || name.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(corrupt("visibility index contains an invalid ref name"));
+        }
+        object_count = object_count
+            .checked_add(
+                u64::try_from(objects.len())
+                    .map_err(|_| corrupt("visibility index object count cannot be represented"))?,
+            )
+            .ok_or_else(|| corrupt("visibility index object count overflows"))?;
+        if object_count > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt("visibility index contains too many objects"));
+        }
+        let mut previous: Option<&str> = None;
+        for object in objects {
+            validate_oid(object)?;
+            if previous.is_some_and(|value| value >= object.as_str()) {
+                return Err(corrupt(
+                    "visibility index object lists must be sorted and deduplicated",
+                ));
+            }
+            previous = Some(object.as_str());
+        }
+    }
+    Ok(())
+}
+
 fn validate_oid(value: &str) -> Result<()> {
     if value.len() != 40
         || !value
@@ -345,23 +393,62 @@ mod storage {
 
     use bytes::Bytes;
     use crab_storage::{StorageError, Store, StoreLayout};
+    use object_store::path::Path as ObjectPath;
+    use serde::Deserialize;
 
     use super::{
         GitVisibilityEdit, GitVisibilityIndex, MAX_GIT_VISIBILITY_INDEX_BYTES, validate_hash,
+        validate_ref_closures,
     };
     use crate::error::Result;
     use crate::manifests::Manifest;
     use crate::ref_journal::RefJournalEdit;
 
-    /// Read and validate a generation-bound visibility proof.
-    pub async fn read(
-        store: &Store,
-        router: &StoreLayout<Store>,
+    const LEGACY_GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
+
+    /// Stored format used to satisfy a visibility read.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GitVisibilityFormat {
+        /// Digest-bound proof written by current Crab versions.
+        V2,
+        /// Generation-and-pack-bound proof shipped by Crab 1.0.15.
+        V1,
+    }
+
+    /// Validated visibility proof and its stored format.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GitVisibilityRead {
+        /// Normalized current-format proof.
+        pub index: GitVisibilityIndex,
+        /// Stored format that supplied the proof.
+        pub format: GitVisibilityFormat,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityIndexV1 {
+        version: u32,
         generation: u64,
-        pack_index_hash: &str,
-    ) -> Result<GitVisibilityIndex> {
-        let path = router.git_visibility_path(generation, pack_index_hash);
-        let metadata = store.head(&path).await?;
+        pack_index_hash: String,
+        refs: BTreeMap<String, Vec<String>>,
+    }
+
+    impl GitVisibilityIndexV1 {
+        fn validate(&self) -> Result<()> {
+            if self.version != LEGACY_GIT_VISIBILITY_INDEX_VERSION {
+                return Err(super::corrupt(
+                    "legacy visibility index version is unsupported",
+                ));
+            }
+            if !(self.pack_index_hash.is_empty() && self.refs.is_empty()) {
+                validate_hash(&self.pack_index_hash, "pack index hash")?;
+            }
+            validate_ref_closures(&self.refs)
+        }
+    }
+
+    async fn read_bounded(store: &Store, path: &ObjectPath) -> Result<Bytes> {
+        let metadata = store.head(path).await?;
         if metadata.size > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
@@ -371,7 +458,7 @@ mod storage {
                 ),
             });
         }
-        let (body, _) = store.get_with_etag(&path).await?;
+        let (body, _) = store.get_with_etag(path).await?;
         if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
@@ -381,20 +468,118 @@ mod storage {
                 ),
             });
         }
+        Ok(body)
+    }
+
+    async fn read_v2(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<GitVisibilityIndex> {
+        let path = router.git_visibility_path(git_validation_digest);
+        let body = read_bounded(store, &path).await?;
         let index: GitVisibilityIndex = serde_json::from_slice(&body).map_err(|error| {
             crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
                 reason: format!("invalid visibility index JSON: {error}"),
             }
         })?;
+        index.validate()?;
+        index.validate_identity(generation, pack_index_hash, git_validation_digest)?;
+        Ok(index)
+    }
+
+    async fn read_v1(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<GitVisibilityIndex> {
+        let path = router.git_visibility_v1_path(generation, pack_index_hash);
+        let body = read_bounded(store, &path).await?;
+        let index: GitVisibilityIndexV1 = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid legacy visibility index JSON: {error}"),
+            }
+        })?;
+        index.validate()?;
         if index.generation != generation || index.pack_index_hash != pack_index_hash {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
-                reason: "visibility index does not match its immutable path".to_owned(),
+                reason: "legacy visibility index does not match its immutable path".to_owned(),
             });
         }
+        let index = GitVisibilityIndex::new(
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+            index.refs,
+        );
         index.validate()?;
         Ok(index)
+    }
+
+    /// Read a digest-bound proof, falling back to the shipped v1 location.
+    pub async fn read_with_format(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<GitVisibilityRead> {
+        validate_hash(git_validation_digest, "Git validation digest")?;
+        match read_v2(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await
+        {
+            Ok(index) => Ok(GitVisibilityRead {
+                index,
+                format: GitVisibilityFormat::V2,
+            }),
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => read_v1(
+                store,
+                router,
+                generation,
+                pack_index_hash,
+                git_validation_digest,
+            )
+            .await
+            .map(|index| GitVisibilityRead {
+                index,
+                format: GitVisibilityFormat::V1,
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read and validate a visibility proof, including the shipped v1 migration path.
+    pub async fn read(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<GitVisibilityIndex> {
+        read_with_format(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await
+        .map(|read| read.index)
     }
 
     /// Upload a visibility proof once and verify an existing immutable value.
@@ -410,7 +595,7 @@ mod storage {
         if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: router
-                    .git_visibility_path(index.generation, &index.pack_index_hash)
+                    .git_visibility_path(&index.git_validation_digest)
                     .as_ref()
                     .to_owned(),
                 reason: format!(
@@ -419,7 +604,7 @@ mod storage {
                 ),
             });
         }
-        let path = router.git_visibility_path(index.generation, &index.pack_index_hash);
+        let path = router.git_visibility_path(&index.git_validation_digest);
         match store.put(&path, Bytes::from(body)).await {
             Ok(()) => Ok(()),
             Err(StorageError::StateConflict { .. }) => {
@@ -451,6 +636,11 @@ mod storage {
                         }
                     })?;
                 existing.validate()?;
+                existing.validate_identity(
+                    index.generation,
+                    &index.pack_index_hash,
+                    &index.git_validation_digest,
+                )?;
                 if existing == *index {
                     Ok(())
                 } else {
@@ -537,29 +727,35 @@ mod storage {
         edits: &[RefJournalEdit],
         generation: u64,
         pack_index_hash: &str,
+        git_validation_digest: &str,
         final_refs: &BTreeMap<String, String>,
     ) -> Result<Option<GitVisibilityIndex>> {
         let mut refs = if base.refs.is_empty() {
             BTreeMap::new()
         } else {
-            match read(store, router, base.generation, &base.pack_index_hash).await {
-                Ok(index) => {
-                    if index.refs.keys().ne(base.refs.keys())
-                        || base.refs.iter().any(|(name, tip)| {
-                            !index
-                                .refs
-                                .get(name)
-                                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-                        })
-                    {
+            match read_with_format(
+                store,
+                router,
+                base.generation,
+                &base.pack_index_hash,
+                &base.git_validation_digest,
+            )
+            .await
+            {
+                Ok(read) => {
+                    let index = read.index;
+                    if !index.matches_manifest(base) {
                         return Err(crate::error::MetadataError::CorruptObject {
                             path: router
-                                .git_visibility_path(base.generation, &base.pack_index_hash)
+                                .git_visibility_path(&base.git_validation_digest)
                                 .as_ref()
                                 .to_owned(),
                             reason: "base visibility proof does not match its manifest refs"
                                 .to_owned(),
                         });
+                    }
+                    if read.format == GitVisibilityFormat::V1 {
+                        upload_if_absent(store, router, &index).await?;
                     }
                     index.refs
                 }
@@ -616,13 +812,17 @@ mod storage {
         Ok(Some(GitVisibilityIndex::new(
             generation,
             pack_index_hash,
+            git_validation_digest,
             refs,
         )))
     }
 }
 
 #[cfg(feature = "storage")]
-pub use storage::{compact_journal_edits, read, read_edit, upload_edit, upload_if_absent};
+pub use storage::{
+    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, read, read_edit,
+    read_with_format, upload_edit, upload_if_absent,
+};
 
 #[cfg(test)]
 mod tests {
@@ -633,6 +833,7 @@ mod tests {
         let index = GitVisibilityIndex::new(
             4,
             "a".repeat(64),
+            "c".repeat(64),
             BTreeMap::from([(
                 "refs/heads/main".to_owned(),
                 vec!["b".repeat(40), "a".repeat(40), "b".repeat(40)],
@@ -650,7 +851,7 @@ mod tests {
 
     #[test]
     fn rejects_stale_or_malformed_proof() {
-        let mut index = GitVisibilityIndex::new(4, "a".repeat(64), BTreeMap::new());
+        let mut index = GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), BTreeMap::new());
         index
             .refs
             .insert("refs/heads/main".to_owned(), vec!["A".repeat(40)]);
@@ -662,8 +863,35 @@ mod tests {
         let refs = (0..=MAX_GIT_VISIBILITY_REFS)
             .map(|index| (format!("refs/heads/{index}"), Vec::new()))
             .collect();
-        let index = GitVisibilityIndex::new(4, "a".repeat(64), refs);
+        let index = GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), refs);
         assert!(index.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_match_requires_ref_and_peeled_tip_coverage() {
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 4;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/tags/release".to_owned(), "1".repeat(40));
+        manifest
+            .peeled_refs
+            .insert("refs/tags/release".to_owned(), "2".repeat(40));
+        manifest.seal_git_validation();
+        let mut index = GitVisibilityIndex::new(
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+            BTreeMap::from([(
+                "refs/tags/release".to_owned(),
+                vec!["1".repeat(40), "2".repeat(40)],
+            )]),
+        );
+
+        assert!(index.matches_manifest(&manifest));
+        index.refs.get_mut("refs/tags/release").unwrap().pop();
+        assert!(!index.matches_manifest(&manifest));
     }
 
     #[test]
@@ -677,6 +905,87 @@ mod tests {
                 .unwrap(),
             new.into_iter().collect::<Vec<_>>()
         );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn digest_bound_keys_keep_ref_only_candidates_independent() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "a".repeat(64);
+        let left = GitVisibilityIndex::new(
+            7,
+            &pack_hash,
+            "b".repeat(64),
+            BTreeMap::from([("refs/heads/left".to_owned(), vec!["1".repeat(40)])]),
+        );
+        let right = GitVisibilityIndex::new(
+            7,
+            &pack_hash,
+            "c".repeat(64),
+            BTreeMap::from([("refs/heads/right".to_owned(), vec!["2".repeat(40)])]),
+        );
+
+        upload_if_absent(&store, &router, &left).await.unwrap();
+        upload_if_absent(&store, &router, &right).await.unwrap();
+
+        let left_read = read(&store, &router, 7, &pack_hash, &left.git_validation_digest)
+            .await
+            .unwrap();
+        let right_read = read(&store, &router, 7, &pack_hash, &right.git_validation_digest)
+            .await
+            .unwrap();
+        assert_eq!(left_read, left);
+        assert_eq!(right_read, right);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn shipped_v1_proof_is_read_and_can_be_backfilled_to_v2() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let generation = 7;
+        let pack_hash = "a".repeat(64);
+        let digest = "b".repeat(64);
+        let legacy = serde_json::json!({
+            "version": 1,
+            "generation": generation,
+            "pack_index_hash": pack_hash.clone(),
+            "refs": {"refs/heads/main": ["1".repeat(40)]},
+        });
+        store
+            .put(
+                &router.git_visibility_v1_path(generation, &pack_hash),
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let migrated = read_with_format(&store, &router, generation, &pack_hash, &digest)
+            .await
+            .unwrap();
+        assert_eq!(migrated.format, GitVisibilityFormat::V1);
+        assert_eq!(migrated.index.git_validation_digest, digest);
+
+        upload_if_absent(&store, &router, &migrated.index)
+            .await
+            .unwrap();
+        let current = read_with_format(&store, &router, generation, &pack_hash, &digest)
+            .await
+            .unwrap();
+        assert_eq!(current.format, GitVisibilityFormat::V2);
+        assert_eq!(current.index, migrated.index);
     }
 
     #[cfg(feature = "storage")]
@@ -704,6 +1013,7 @@ mod tests {
         let base_index = GitVisibilityIndex::new(
             4,
             &pack_hash,
+            &base.git_validation_digest,
             BTreeMap::from([
                 (
                     "refs/heads/left".to_owned(),
@@ -755,6 +1065,11 @@ mod tests {
             ("refs/heads/left".to_owned(), "c".repeat(40)),
             ("refs/heads/right".to_owned(), "d".repeat(40)),
         ]);
+        let mut final_manifest = base.clone();
+        final_manifest.generation = 5;
+        final_manifest.pack_index_hash = "e".repeat(64);
+        final_manifest.refs.clone_from(&final_refs);
+        final_manifest.seal_git_validation();
 
         let compacted = compact_journal_edits(
             &store,
@@ -763,6 +1078,7 @@ mod tests {
             &edits,
             5,
             &"e".repeat(64),
+            &final_manifest.git_validation_digest,
             &final_refs,
         )
         .await

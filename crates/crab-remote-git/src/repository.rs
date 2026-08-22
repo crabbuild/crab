@@ -338,6 +338,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     manifest_etag,
                     coverage: None,
                     inventory: std::collections::HashMap::new(),
@@ -424,6 +425,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     manifest_etag,
                     coverage: Some(coverage),
                     inventory,
@@ -472,6 +474,10 @@ impl RemoteGitRepository {
         self.state.generation
     }
 
+    pub(crate) fn git_validation_digest(&self) -> &str {
+        &self.state.git_validation_digest
+    }
+
     /// Return complete references from the pinned manifest.
     #[must_use]
     pub fn refs(&self) -> &RepositoryRefs {
@@ -505,6 +511,7 @@ impl RemoteGitRepository {
                 &self.state.layout,
                 self.state.generation,
                 &pack_index_hash,
+                &self.state.git_validation_digest,
             );
             tokio::select! {
                 biased;
@@ -518,6 +525,7 @@ impl RemoteGitRepository {
             crab_metadata::git_visibility::GitVisibilityIndex::new(
                 self.state.generation,
                 String::new(),
+                self.state.git_validation_digest.as_ref(),
                 std::collections::BTreeMap::new(),
             )
         } else {

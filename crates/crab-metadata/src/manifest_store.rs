@@ -325,6 +325,22 @@ pub async fn compact_ref_journal(
     )
     .await?;
 
+    let mut manifest = snapshot.manifest.clone();
+    manifest.generation = generation;
+    manifest.created_at = created_at;
+    manifest.pusher = pusher;
+    manifest.session_id = session_id;
+    manifest.refs.clone_from(&snapshot.journal.refs);
+    manifest
+        .peeled_refs
+        .clone_from(&snapshot.journal.peeled_refs);
+    manifest.head.clone_from(&snapshot.journal.head);
+    manifest.shard_index_hash = shard_index_hash;
+    manifest.pack_index_hash = pack_index_hash;
+    // The old summary does not cover journal-only ref advances.
+    manifest.commit_graph_hash = None;
+    manifest.seal_git_validation();
+
     // Complete evidence publishes authorization before the compacted manifest;
     // otherwise no proof is written and upload-pack withholds protocol v2.
     let git_visibility_published = if let Some(visibility) =
@@ -334,8 +350,9 @@ pub async fn compact_ref_journal(
             &snapshot.manifest,
             &snapshot.journal.ordered_edits,
             generation,
-            &pack_index_hash,
-            &snapshot.journal.refs,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+            &manifest.refs,
         )
         .await?
     {
@@ -346,19 +363,6 @@ pub async fn compact_ref_journal(
     };
 
     let compacted_transactions = snapshot.journal.transactions.clone();
-    let mut manifest = snapshot.manifest;
-    manifest.generation = generation;
-    manifest.created_at = created_at;
-    manifest.pusher = pusher;
-    manifest.session_id = session_id;
-    manifest.refs = snapshot.journal.refs;
-    manifest.peeled_refs = snapshot.journal.peeled_refs;
-    manifest.head = snapshot.journal.head;
-    manifest.shard_index_hash = shard_index_hash;
-    manifest.pack_index_hash = pack_index_hash;
-    // The old summary does not cover journal-only ref advances.
-    manifest.commit_graph_hash = None;
-    manifest.seal_git_validation();
     write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads).await?;
     write_manifest_cas(store, router, &manifest, &snapshot.manifest_etag).await?;
     cleanup_compacted_transactions(store, router, &compacted_transactions).await;
@@ -1190,6 +1194,7 @@ mod tests {
             &router,
             compacted.manifest.generation,
             &compacted.manifest.pack_index_hash,
+            &compacted.manifest.git_validation_digest,
         )
         .await
         .unwrap();

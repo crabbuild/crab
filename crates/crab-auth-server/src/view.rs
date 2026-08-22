@@ -951,6 +951,7 @@ mod tests {
             &view_router,
             manifest.generation,
             &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
         )
         .await
         .unwrap();

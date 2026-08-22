@@ -1295,6 +1295,7 @@ mod tests {
         let visibility = GitVisibilityIndex::new(
             1,
             "c".repeat(64),
+            "d".repeat(64),
             std::collections::BTreeMap::from([(
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
@@ -1325,6 +1326,7 @@ mod tests {
         let visibility = GitVisibilityIndex::new(
             1,
             "c".repeat(64),
+            "d".repeat(64),
             std::collections::BTreeMap::from([(
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],

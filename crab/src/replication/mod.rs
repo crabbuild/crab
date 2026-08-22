@@ -8004,22 +8004,30 @@ async fn replicate_git_visibility_index(
         source_store.as_storage().clone(),
         source_router.repo_prefix().to_owned(),
     );
-    let source_path =
-        source_storage_router.git_visibility_path(manifest.generation, &manifest.pack_index_hash);
-    match source_store.as_storage().head(&source_path).await {
-        Ok(_) => {}
-        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(()),
-        Err(error) => return Err(CrabError::from(error)),
-    }
-
-    let index = crab_metadata::git_visibility::read(
+    let index = match crab_metadata::git_visibility::read(
         source_store.as_storage(),
         &source_storage_router,
         manifest.generation,
         &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
     )
     .await
-    .map_err(CrabError::from)?;
+    {
+        Ok(index) => index,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => return Ok(()),
+        Err(error) => return Err(CrabError::from(error)),
+    };
+    if !index.matches_manifest(manifest) {
+        return Err(CrabError::CorruptObject {
+            path: source_storage_router
+                .git_visibility_path(&manifest.git_validation_digest)
+                .as_ref()
+                .to_owned(),
+            reason: "Git visibility proof does not match its source manifest".to_owned(),
+        });
+    }
     let target_storage_router = crab_storage::StoreLayout::new(
         target_store.as_storage().clone(),
         target_router.repo_prefix().to_owned(),
@@ -12103,6 +12111,53 @@ mod tests {
 
         let (written, _) = read_manifest(&store, &router).await.unwrap();
         assert_eq!(written, manifest);
+    }
+
+    #[tokio::test]
+    async fn repair_refuses_to_replicate_mismatched_legacy_visibility() {
+        let source = Store::new(Arc::new(InMemory::new()));
+        let source_router = StoreLayout::new(source.clone(), "source/repo".to_owned());
+        let target = Store::new(Arc::new(InMemory::new()));
+        let target_router = StoreLayout::new(target.clone(), "target/repo".to_owned());
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 7;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        manifest.seal_git_validation();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "generation": manifest.generation,
+            "pack_index_hash": manifest.pack_index_hash,
+            "refs": {"refs/heads/main": ["2".repeat(40)]},
+        });
+        source
+            .put(
+                &source_router
+                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let error = replicate_git_visibility_index(
+            &source,
+            &source_router,
+            &target,
+            &target_router,
+            &manifest,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
+        assert!(matches!(
+            target
+                .head(&target_router.git_visibility_path(&manifest.git_validation_digest))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[test]

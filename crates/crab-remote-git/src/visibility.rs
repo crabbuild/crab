@@ -35,6 +35,7 @@ pub(crate) async fn rebuild(
         return Ok(GitVisibilityIndex::new(
             repository.generation(),
             pack_index_hash,
+            repository.git_validation_digest(),
             BTreeMap::new(),
         ));
     }
@@ -118,6 +119,7 @@ async fn rebuild_with_operation(
     Ok(GitVisibilityIndex::new(
         repository.generation(),
         pack_index_hash,
+        repository.git_validation_digest(),
         refs,
     ))
 }

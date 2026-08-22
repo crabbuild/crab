@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 
 use crab_auth::{
@@ -102,6 +102,13 @@ pub struct MaterializedSourcePush {
     pub ref_updates: Vec<PushRefUpdate>,
     pub packs: Vec<PackManifestEntry>,
     pub peeled_refs: BTreeMap<String, String>,
+    pub(crate) git_visibility: MaterializedGitVisibility,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MaterializedGitVisibility {
+    Exact(BTreeMap<String, Vec<String>>),
+    CompletePackOnly { observed: usize, maximum: usize },
 }
 
 /// Prepared protected-push session state written after view authorization.
@@ -858,16 +865,6 @@ pub async fn install_base_packs(
     git_workspace::install_base_packs(store, router, git_dir).await
 }
 
-/// Installs the packs named by a candidate manifest into a temporary Git ODB.
-pub async fn install_manifest_packs(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    manifest: &Manifest,
-    git_dir: &Path,
-) -> Result<()> {
-    git_workspace::install_manifest_packs(store, router, manifest, git_dir).await
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitVisibilityPublication {
     Published,
@@ -875,7 +872,6 @@ pub(crate) enum GitVisibilityPublication {
 }
 
 enum GitVisibilityBuildError {
-    Prepare(AuthServerError),
     Walk(crab_git::walk::WalkError),
 }
 
@@ -886,35 +882,36 @@ impl GitVisibilityPublication {
     }
 }
 
-/// Publishes the complete Git object visibility proof from canonical packs.
-///
-/// The proof is built from the same immutable packs named by the candidate
-/// manifest and may therefore be published before the manifest commit.
-pub(crate) async fn publish_git_visibility_index(
+pub(crate) async fn publish_materialized_git_visibility(
     store: &Store,
     router: &StoreLayout<Store>,
     manifest: &Manifest,
+    visibility: &MaterializedGitVisibility,
 ) -> Result<GitVisibilityPublication> {
-    if manifest.refs.is_empty() {
-        return Ok(GitVisibilityPublication::Published);
+    let refs = match visibility {
+        MaterializedGitVisibility::Exact(refs) => refs,
+        MaterializedGitVisibility::CompletePackOnly { observed, maximum } => {
+            return Ok(GitVisibilityPublication::CompletePackOnly {
+                observed: *observed,
+                maximum: *maximum,
+            });
+        }
+    };
+    let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        refs.clone(),
+    );
+    if !index.matches_manifest(manifest) {
+        return Err(invalid(
+            "materialized Git visibility does not match the candidate manifest",
+        ));
     }
-
-    let temp = tempfile::tempdir()?;
-    let git_dir = temp.path().join("visibility.git");
-    let init = Command::new("git")
-        .args(["init", "--bare", path_str(&git_dir)?])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()?;
-    if !init.status.success() {
-        return Err(invalid(format!(
-            "visibility Git repository initialization failed: {}",
-            String::from_utf8_lossy(&init.stderr).trim()
-        )));
-    }
-    install_manifest_packs(store, router, manifest, &git_dir).await?;
-
-    publish_git_visibility_index_from_git_dir(store, router, manifest, &git_dir).await
+    crab_metadata::git_visibility::upload_if_absent(store, router, &index)
+        .await
+        .map_err(AuthServerError::from)?;
+    Ok(GitVisibilityPublication::Published)
 }
 
 pub(crate) async fn publish_git_visibility_index_from_git_dir(
@@ -923,23 +920,33 @@ pub(crate) async fn publish_git_visibility_index_from_git_dir(
     manifest: &Manifest,
     git_dir: &Path,
 ) -> Result<GitVisibilityPublication> {
-    if manifest.refs.is_empty() {
-        return Ok(GitVisibilityPublication::Published);
-    }
-
     let refs = manifest
         .refs
         .iter()
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
+    let visibility =
+        build_git_visibility_from_git_dir(git_dir, &refs, &manifest.peeled_refs).await?;
+    publish_materialized_git_visibility(store, router, manifest, &visibility).await
+}
+
+pub(crate) async fn build_git_visibility_from_git_dir(
+    git_dir: &Path,
+    refs: &[(String, String)],
+    peeled_refs: &BTreeMap<String, String>,
+) -> Result<MaterializedGitVisibility> {
+    if refs.is_empty() {
+        return Ok(MaterializedGitVisibility::Exact(BTreeMap::new()));
+    }
+
+    let refs = refs.to_vec();
+    let peeled_refs = peeled_refs.clone();
     let git_dir_for_walk = git_dir.to_owned();
     let walk = tokio::task::spawn_blocking(move || {
-        let peeled = derive_peeled_refs(&git_dir_for_walk, &refs)
-            .map_err(GitVisibilityBuildError::Prepare)?;
         let closures = crab_git::walk::walk_reachable_by_ref_bounded(
             &git_dir_for_walk,
             &refs,
-            &peeled,
+            &peeled_refs,
             crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS as usize,
         )
         .map_err(GitVisibilityBuildError::Walk)?;
@@ -953,7 +960,7 @@ pub(crate) async fn publish_git_visibility_index_from_git_dir(
             actual,
             maximum,
         })) => {
-            return Ok(GitVisibilityPublication::CompletePackOnly {
+            return Ok(MaterializedGitVisibility::CompletePackOnly {
                 observed: actual,
                 maximum,
             });
@@ -961,7 +968,6 @@ pub(crate) async fn publish_git_visibility_index_from_git_dir(
         Err(GitVisibilityBuildError::Walk(source)) => {
             return Err(AuthServerError::GitVisibilityWalk { source });
         }
-        Err(GitVisibilityBuildError::Prepare(error)) => return Err(error),
     };
 
     let refs = closures
@@ -975,15 +981,7 @@ pub(crate) async fn publish_git_visibility_index_from_git_dir(
             (name, objects.into_iter().collect::<Vec<_>>())
         })
         .collect();
-    let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
-        manifest.generation,
-        manifest.pack_index_hash.clone(),
-        refs,
-    );
-    crab_metadata::git_visibility::upload_if_absent(store, router, &index)
-        .await
-        .map_err(AuthServerError::from)?;
-    Ok(GitVisibilityPublication::Published)
+    Ok(MaterializedGitVisibility::Exact(refs))
 }
 
 fn path_str(path: &Path) -> Result<&str> {
@@ -2327,6 +2325,29 @@ mod tests {
                 staged_object(format!("org/repo/metadata/pack/indexes/{}.json", hash('d'))),
             ],
         }
+    }
+
+    #[tokio::test]
+    async fn materialized_visibility_must_match_candidate_manifest() {
+        let store = store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let manifest = candidate_manifest();
+        let visibility = MaterializedGitVisibility::Exact(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            vec![oid('3')],
+        )]));
+
+        assert!(
+            publish_materialized_git_visibility(&store, &router, &manifest, &visibility)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            store
+                .head(&router.git_visibility_path(&manifest.git_validation_digest))
+                .await,
+            Err(StorageError::NotFound { .. })
+        ));
     }
 
     #[test]

@@ -2151,20 +2151,12 @@ async fn diagnose_acceleration_health(
             &router,
             manifest.generation,
             &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
         )
         .await
         {
             Ok(index) => {
-                let covers_manifest = index.refs.len() == manifest.refs.len()
-                    && manifest.refs.iter().all(|(name, oid)| {
-                        index.refs.get(name).is_some_and(|objects| {
-                            objects.binary_search(oid).is_ok()
-                                && manifest
-                                    .peeled_refs
-                                    .get(name)
-                                    .is_none_or(|peeled| objects.binary_search(peeled).is_ok())
-                        })
-                    });
+                let covers_manifest = index.matches_manifest(&manifest);
                 if !covers_manifest {
                     notes.push(
                         "Git visibility proof does not cover the current manifest refs; run `crab metadb rebuild`"

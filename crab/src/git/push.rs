@@ -2146,7 +2146,7 @@ fn active_active_uploaded_objects(
     {
         keys.insert(
             router
-                .git_visibility_path(candidate.generation, &candidate.pack_index_hash)
+                .git_visibility_path(&candidate.git_validation_digest)
                 .as_ref()
                 .to_owned(),
         );
@@ -5748,16 +5748,26 @@ async fn git_visibility_index_exists_for_manifest(
     let storage = store.as_storage();
     let storage_router =
         crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-    match crab_metadata::git_visibility::read(
+    match crab_metadata::git_visibility::read_with_format(
         storage,
         &storage_router,
         manifest.generation,
         &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
     )
     .await
     {
-        Ok(index) => {
-            ensure_git_visibility_matches_manifest(&index, manifest, router)?;
+        Ok(read) => {
+            ensure_git_visibility_matches_manifest(&read.index, manifest, router)?;
+            if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
+                crab_metadata::git_visibility::upload_if_absent(
+                    storage,
+                    &storage_router,
+                    &read.index,
+                )
+                .await
+                .map_err(CrabError::from)?;
+            }
             Ok(true)
         }
         Err(crab_metadata::error::MetadataError::Storage {
@@ -5772,27 +5782,12 @@ fn ensure_git_visibility_matches_manifest(
     manifest: &Manifest,
     router: &StoreLayout,
 ) -> Result<()> {
-    let matches = index.generation == manifest.generation
-        && index.pack_index_hash == manifest.pack_index_hash
-        && index.refs.keys().eq(manifest.refs.keys())
-        && manifest.refs.iter().all(|(name, tip)| {
-            index
-                .refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-        })
-        && manifest.peeled_refs.iter().all(|(name, peeled)| {
-            index
-                .refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(peeled).is_ok())
-        });
-    if matches {
+    if index.matches_manifest(manifest) {
         return Ok(());
     }
     Err(CrabError::CorruptObject {
         path: router
-            .git_visibility_path(manifest.generation, &manifest.pack_index_hash)
+            .git_visibility_path(&manifest.git_validation_digest)
             .as_ref()
             .to_owned(),
         reason: "Git visibility proof does not match its manifest refs".to_owned(),
@@ -7800,6 +7795,7 @@ impl PushPipeline {
                 &storage_router,
                 compacted.generation,
                 &compacted.pack_index_hash,
+                &compacted.git_validation_digest,
             )
             .await
             {
@@ -15123,6 +15119,7 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
         return Ok(crab_metadata::git_visibility::GitVisibilityIndex::new(
             manifest.generation,
             manifest.pack_index_hash.clone(),
+            manifest.git_validation_digest.clone(),
             BTreeMap::new(),
         ));
     }
@@ -15159,6 +15156,7 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
         manifest.generation,
         manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
         refs,
     );
     Ok(index)
@@ -17309,6 +17307,7 @@ mod tests {
         let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
             manifest.generation,
             manifest.pack_index_hash.clone(),
+            manifest.git_validation_digest.clone(),
             BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
         );
 
@@ -17316,6 +17315,94 @@ mod tests {
             ensure_git_visibility_matches_manifest(&index, &manifest, &router),
             Err(CrabError::CorruptObject { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn mismatched_v1_visibility_is_rejected_without_v2_backfill() {
+        let (store, router) = test_store_router("visibility-v1-mismatch");
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 3;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        manifest.seal_git_validation();
+        let storage = store.as_storage();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        let legacy = serde_json::json!({
+            "version": 1,
+            "generation": manifest.generation,
+            "pack_index_hash": manifest.pack_index_hash.clone(),
+            "refs": {"refs/heads/main": ["2".repeat(40)]},
+        });
+        storage
+            .put(
+                &storage_router
+                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            git_visibility_index_exists_for_manifest(&store, &router, &manifest).await,
+            Err(CrabError::CorruptObject { .. })
+        ));
+        assert!(matches!(
+            storage
+                .head(&storage_router.git_visibility_path(&manifest.git_validation_digest),)
+                .await,
+            Err(StorageError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn matching_v1_visibility_is_backfilled_by_writer() {
+        let (store, router) = test_store_router("visibility-v1-backfill");
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 3;
+        manifest.pack_index_hash = "a".repeat(64);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        manifest.seal_git_validation();
+        let storage = store.as_storage();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        let legacy = serde_json::json!({
+            "version": 1,
+            "generation": manifest.generation,
+            "pack_index_hash": manifest.pack_index_hash.clone(),
+            "refs": {"refs/heads/main": ["1".repeat(40)]},
+        });
+        storage
+            .put(
+                &storage_router
+                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            git_visibility_index_exists_for_manifest(&store, &router, &manifest)
+                .await
+                .unwrap()
+        );
+        let current = crab_metadata::git_visibility::read_with_format(
+            &storage,
+            &storage_router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            current.format,
+            crab_metadata::git_visibility::GitVisibilityFormat::V2
+        );
     }
 
     #[test]
@@ -18724,13 +18811,16 @@ mod tests {
             &storage_router,
             manifest.generation,
             &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
         )
         .await
         .expect("read pushed visibility proof");
         manifest.generation = manifest.generation.saturating_add(1);
+        manifest.seal_git_validation();
         let next_visibility = crab_metadata::git_visibility::GitVisibilityIndex::new(
             manifest.generation,
             manifest.pack_index_hash.clone(),
+            manifest.git_validation_digest.clone(),
             visibility.refs,
         );
         crab_metadata::git_visibility::upload_if_absent(
@@ -18740,7 +18830,6 @@ mod tests {
         )
         .await
         .expect("upload next visibility proof");
-        manifest.seal_git_validation();
         write_manifest_cas(&store, &router, &manifest, &etag)
             .await
             .expect("advance manifest without locator publication");
@@ -18817,8 +18906,7 @@ mod tests {
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read pushed manifest");
-        let visibility_path =
-            router.git_visibility_path(manifest.generation, &manifest.pack_index_hash);
+        let visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
             .await
@@ -18842,6 +18930,7 @@ mod tests {
             &crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned()),
             manifest.generation,
             &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
         )
         .await
         .expect("read repaired visibility proof");
@@ -19963,6 +20052,7 @@ mod tests {
             &storage_router,
             manifest.generation,
             &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
         )
         .await
         .expect("journal compaction publishes visibility evidence");
