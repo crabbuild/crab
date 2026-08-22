@@ -97,6 +97,11 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure Git test identity
+        run: |
+          git config --global user.name "Crab CI"
+          git config --global user.email "ci@localhost"
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
