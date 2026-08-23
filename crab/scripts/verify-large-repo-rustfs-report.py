@@ -288,8 +288,11 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
                 stage.get("manifest_generation"),
                 f"stages.{name}.manifest_generation",
             )
+            require(
+                isinstance(stage.get("generation_receipt_valid"), bool),
+                f"stages.{name}.generation_receipt_valid must be a boolean",
+            )
             for field in (
-                "generation_receipt_valid",
                 "ref_registry_repo_complete",
                 "locator_available",
                 "visibility_available",

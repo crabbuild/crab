@@ -329,6 +329,16 @@ class ReportVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.VerificationError, "visibility generation is stale"):
             VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
 
+    def test_unrelated_generation_receipt_repair_does_not_fail_git_acceleration(self) -> None:
+        report = valid_report()
+        for name, stage_data in report["stages"].items():
+            if name.startswith("acceleration_"):
+                stage_data["generation_receipt_valid"] = False
+                stage_data["repair_required"] = True
+                stage_data["notes"] = ["generation-index receipt missing"]
+        result = VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+        self.assertEqual(result.replay_count, 3)
+
     def test_inconsistent_advertised_ref_is_rejected(self) -> None:
         report = valid_report()
         report["correctness"]["advertised_refs"]["refs/heads/main"] = BASE

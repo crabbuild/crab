@@ -799,7 +799,6 @@ class LargeRepositoryQualification:
         self.check(
             f"acceleration-current-{stage}",
             state["manifest_generation"] is not None
-            and state["generation_receipt_valid"] is True
             and state["ref_registry_repo_complete"] is True
             and state["locator_available"] is True
             and state["locator_generation"] == state["manifest_generation"]

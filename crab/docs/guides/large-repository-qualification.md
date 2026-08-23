@@ -94,11 +94,12 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `metrics` | Count and min/median/p95/p99/max duration summaries by operation family |
 
 The verifier fails closed on missing stages or checks, failed commands,
-negative values, invalid generation receipts, incomplete repository registry,
-stale acceleration generations, mismatched pack-index identity, inconsistent
-refs, too-small samples, non-contiguous pushes,
+negative values, incomplete repository registry, stale Git acceleration
+generations, mismatched pack-index identity, inconsistent refs, too-small
+samples, non-contiguous pushes,
 inconsistent percentiles, cleanup failures, and credential-shaped report
-fields.
+fields. It records repository-wide generation-receipt and maintenance health
+without treating unrelated file-index repair as a Git acceleration failure.
 
 Remote-operation telemetry is emitted once per bounded operation. It records
 only numeric counts and durations; per-object debug logging is disabled because
