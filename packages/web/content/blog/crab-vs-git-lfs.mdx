@@ -50,6 +50,16 @@ Crab fits repositories with iterative models, datasets, media, or build artifact
 
 The bucket remains under your access, retention, and lifecycle policies. Clients talk to it directly, which removes a Crab data service but requires each working environment to have Crab and valid credentials.
 
+## Daily Git work is similar, but maintenance is different
+
+Both systems use Git attributes and pointer blobs, so contributors still add, commit, switch branches, and merge through Git. The distinction becomes visible during setup, large-file transfer, troubleshooting, and repository maintenance.
+
+With hosted Git LFS, the forge usually supplies the endpoint, authorization flow, storage quota, and usage reporting. Teams may need little infrastructure knowledge until they reach a quota or service limitation. With self-hosted LFS, the team owns the endpoint and its backing storage.
+
+Crab removes the endpoint from the data path. Clients need direct access to the repository prefix, and operators use object-store inventory, lifecycle, access logs, and retention policy. Crab also adds native operations for hydration, dehydration, mounts, integrity checking, optimization, and garbage collection.
+
+The right comparison includes the people who will operate the repository. A workflow that saves transfer but has no sustainable credential path is not a successful migration.
+
 ## Changed-file behavior can dominate the comparison
 
 The stored unit matters most when large files change frequently. Git LFS identifies a complete file object with a SHA-256 object ID. If one byte changes, the new file has a new object identity and transfer is based on that complete object.
@@ -74,6 +84,16 @@ Crab clones managed files as pointers by default. You can hydrate paths, use a c
 
 Both approaches require tooling on the client. A checkout without the required filter can leave pointer text in the working tree, so installation and diagnostic checks belong in developer setup and automation.
 
+## Security follows the data path
+
+Git LFS clients authenticate to an LFS endpoint, which can translate forge identity into object access. That service becomes the policy and audit boundary for large-file transfers.
+
+Crab clients authenticate to object storage through the provider's credential flow. This can support short-lived roles, workload identity, prefix-scoped permissions, provider encryption controls, and storage access logs without a Crab credential database.
+
+Direct access also increases the importance of policy design. Clients should receive the operations required for their repository prefix, not broad bucket administration. Continuous integration should use short-lived workload credentials. Lifecycle and deletion permissions should remain separate from ordinary read and push roles when the provider supports that split.
+
+Compare revocation and incident response as well as initial login. Ask how quickly access can be removed, which audit record identifies an object read, and who owns credential delivery on developer machines and runners.
+
 ## Compare control and recovery boundaries
 
 Hosted Git LFS delegates service availability, quotas, and retention behavior to the forge provider. Self-managed LFS gives you control but adds a service to deploy and recover.
@@ -81,6 +101,16 @@ Hosted Git LFS delegates service availability, quotas, and retention behavior to
 Crab delegates durability to your object-store provider and keeps repository coordination in stored metadata. Your team owns bucket access, lifecycle rules, retained recovery roots, and client credential delivery.
 
 The recovery question differs between the systems. Ask where large bytes live, who can restore them, how a deleted ref affects retention, and which logs prove a completed transfer.
+
+## Compare cost with version churn included
+
+A useful cost model includes stored bytes, requests, network transfer, retrieval, service charges, and operator time. Whole-file storage grows with each distinct file object. Native Crab storage grows with chunks that lack durable proof, plus recipe and shard metadata.
+
+The difference is workload-dependent. Two compressed or encrypted versions may share little physical content, so chunking cannot create savings from semantic similarity. Two checkpoints with stable byte regions may reuse most chunks even though the full-file hashes differ.
+
+Object-store request economics matter as well. Crab packs chunks into xorbs so hydration can coalesce ranges, but a sparse workload can still issue more requests than a single whole-file download. Hosted LFS bandwidth may include egress or enforce quotas, while a self-owned bucket exposes provider-specific transfer prices.
+
+Measure two versions, a cold clone, a warm read, and the expected retention period. Projecting cost from the first upload alone hides the version behavior that separates the systems.
 
 ## Compatibility and migration are separate decisions
 
@@ -102,6 +132,20 @@ Evaluate both systems with the same sequence:
 6. Simulate a stale push or interrupted transfer and record the recovery path.
 
 Include operational effort in the result. A transfer saving does not compensate for a credential flow the team cannot maintain. A hosted workflow advantage may outweigh storage savings for a smaller repository.
+
+## Turn the pilot into a decision record
+
+Record the result in terms that another reviewer can challenge. Include repository size, number of managed files, changed-byte pattern, measured upload and hydration bytes, request counts, local disk use, and the tested failure scenarios.
+
+Then document the non-performance constraints:
+
+- **Integration**: which forges, build systems, release tools, and developer environments must understand the pointer path
+- **Ownership**: who operates the endpoint or bucket policy and who responds to access failures
+- **Recovery**: which refs and historical objects remain recoverable after branch deletion
+- **Security**: how clients authenticate, how access is revoked, and where reads and writes are audited
+- **Migration**: whether existing commit identities and LFS pointers must remain stable
+
+A written record prevents one impressive transfer number from deciding the architecture. It also gives the team a baseline to revisit when repository churn, provider pricing, or forge limits change.
 
 <TakeawayBox title="Choose from constraints">
   Use Git LFS when hosted integration and ecosystem compatibility dominate. Use

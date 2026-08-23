@@ -29,13 +29,25 @@ A binary file can be perfectly valid in Git. The scaling problem appears when th
 
 Suppose a model checkpoint is 8 GB and a training run changes a small region. The new version is still another large Git object. Repeat that cycle across branches and releases, and the repository becomes expensive to clone, cache, back up, and operate.
 
-The result is not only slower commands. Teams begin moving related data outside the repository, sharing bucket paths in documents, or relying on naming conventions to reconnect a model with the source commit that produced it.
+The result is not only slower commands. Teams move related data outside the repository or share bucket paths in documents. Naming conventions then reconnect a model with the source commit that produced it.
+
+Git's strengths explain this behavior. A commit closes over its trees and blobs, and a clone can obtain the complete reachable object graph. That self-contained model is valuable for source code because the graph remains compact and Git can compress related objects effectively.
+
+Large binary history changes the economics of the same guarantee. Every clone, mirror, scan, and backup must account for the reachable objects. A shallow clone can narrow history for one client, but it does not change what the repository retains or what other workflows may need.
+
+The problem becomes organizational when teams avoid fresh clones, retain undocumented local copies, or split code from data without a durable identity link. At that point, slow transfer has already changed how the repository is trusted.
 
 ## Common alternatives move the pressure elsewhere
 
 Keeping binaries outside Git makes the source repository smaller, but version identity becomes a separate process. A hosted large-file service preserves Git integration, but introduces service limits, bandwidth policies, and another availability boundary.
 
 Self-hosting can provide more control. It also makes the team responsible for deployment, upgrades, scaling, observability, and recovery. None of these choices is universally wrong; they assign the operational cost to different places.
+
+A whole-file pointer system solves Git object growth, but each changed file can still become another complete storage and transfer unit. This tradeoff is acceptable for stable assets and smaller repositories. It becomes expensive when a producer rewrites multi-gigabyte files on every iteration while preserving large regions of identical bytes.
+
+Pipeline-oriented data tools solve another part of the problem. They can connect outputs to stages and remote storage, but they introduce a second command and metadata workflow beside Git. That separation can be valuable for a dedicated data pipeline. It is less attractive when source, configuration, and large artifacts must review and roll back as one commit.
+
+Manual object-store paths remove tooling overhead at first. They also make atomicity, naming, retention, and verification local conventions. Each script must decide which object belongs to a commit and what to do when the upload and source push do not complete together.
 
 ## Repository growth changes team behavior
 
@@ -55,6 +67,10 @@ Moving bytes out of Git solves only the first constraint. A practical large-file
 4. **Complete publication**: a visible branch never points to large-file data that has not become durable.
 
 Crab's pointer, chunk, shard, and ref contracts follow from these requirements. The formats are implementation details, but each format exists to protect one property.
+
+These properties also expose incomplete solutions. A URL in a configuration file can be reviewable but may not prove byte identity. A content hash can prove identity but says nothing about whether the bytes are durable. An uploaded object can be durable while the branch still points at an older commit.
+
+Crab treats those facts as separate evidence. The pointer names the file, the recipe names every chunk, shard terms locate durable ranges, and the ref transaction decides visibility. The added metadata pays for a narrower failure model.
 
 ## Crab separates identity from storage
 
@@ -87,8 +103,24 @@ A large-file tool must not hide missing bytes behind a successful Git operation.
 
 These errors can interrupt work, but they preserve the stronger contract. A failed command is recoverable. A successful command that published incomplete history would spread corruption to every later reader.
 
+## The design starts from recovery, not only the happy path
+
+A large upload can fail after minutes of useful work. A writer can disappear while holding a lease. Two contributors can push the same branch from the same old tip. A storage class can make an older xorb temporarily unreadable.
+
+Crab's immutable data objects let retries reuse completed uploads. The write journal records preparation without claiming publication. Expected-old ref updates reject stale writers, while retained roots and grace periods keep garbage collection away from in-flight or recoverable content.
+
+The resulting system does not promise that every command succeeds through a network interruption. It promises that interruption does not create a visible commit with missing dependencies. Operators can reason from the last durable boundary and retry the remaining work.
+
 ## The tradeoff is explicit client responsibility
 
 Each client needs Crab and valid object-storage access. Bucket permissions, retention, and lifecycle rules remain part of the repository's operational design. A team that prefers a fully hosted service may choose Git LFS through its forge instead.
 
 Crab is designed for teams that value direct storage ownership, chunk-level reuse, and selective hydration enough to accept that client-side responsibility. The next decision is architectural, not ideological: [compare Crab and Git LFS on the constraints that matter to your team](/blog/crab-vs-git-lfs).
+
+## Where the architecture earns its cost
+
+The strongest candidates combine large mutable binaries, repeated versions, and selective access. Model training, game asset production, data snapshots, and research repositories can satisfy all three conditions. Chunk reuse reduces new storage, and lazy materialization prevents every reader from paying for the complete history.
+
+A repository with a few stable release archives may not need this machinery. A team whose forge LFS allowance already covers its workload may prefer the hosted integration. A pipeline whose data never needs to share commit identity with source may benefit from a data-specific catalog instead.
+
+We built Crab for the boundary where Git's history model remains valuable but Git's byte-storage path stops scaling. The goal is not to make every file take the Crab path. It is to let each content class use an appropriate path without breaking one repository history.

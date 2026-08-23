@@ -14,7 +14,7 @@ prerequisites: ["How does Crab keep concurrent pushes consistent?"]
 outcome: "Preview and run repository-scoped GC without confusing branch deletion with immediate object deletion."
 diagramType: "GC lifecycle"
 meta:
-  contentType: "Conceptual tutorial"
+  contentType: "Conceptual"
   goal: "Explain which roots protect data and how to operate repository GC safely."
   audience: "Repository operators reclaiming object-storage capacity."
 ---
@@ -23,11 +23,29 @@ Crab creates immutable Git packs, xorbs, and shards. Ref updates can make earlie
 
 <GarbageCollectionDiagram />
 
+## Garbage collection has five explicit phases
+
+Repository garbage collection is easier to review as a proof pipeline:
+
+1. **Snapshot** the repository and maintenance boundary used for classification.
+2. **Enumerate roots** from refs, journals, workflows, and recovery policy.
+3. **Mark dependencies** by walking Git and Crab metadata to immutable objects.
+4. **Classify candidates** by subtracting the marked set and applying age and storage-class rules.
+5. **Delete and reconcile** the approved candidates, then verify repository state.
+
+Each phase can stop the operation without making the remaining objects less safe. A failed root read or incomplete listing blocks candidate proof. A partial delete reports progress and leaves the next run to reconcile current storage.
+
+Dry run executes the reasoning without the destructive phase. Treat its output as the review artifact for the later apply.
+
 ## Mark starts from more than current branches
 
 The live set includes the current repository state, the ref journal, workflow artifact roots, and immutable recovery roots. Crab walks those roots through shards and file recipes to mark every referenced data object.
 
 Historical roots used by `crab recover history` are retained without a time or count limit by default. Deleting a branch therefore does not imply that all associated objects become immediate GC candidates.
+
+The walk follows both data lanes. Git roots reach commits, trees, packs, and pointer blobs. Each pointer reaches a file recipe, shard terms, and xorb ranges. A collector that marked only Git object IDs would miss the large-file closure behind those pointers.
+
+Shared chunks complicate intuition but not the rule. An xorb remains live when any retained recipe needs one of its chunks. The branch or file that first uploaded it does not own the complete object.
 
 ## Retained roots express recovery policy
 
@@ -57,6 +75,12 @@ Force mode bypasses the age check, but it does not convert unknown reachability 
 
 Storage classes may add minimum-retention charges. Class-aware garbage collection can retain or report objects whose early deletion would create a provider penalty.
 
+Consider a writer that uploads a xorb after GC takes its snapshot but before the writer publishes shard metadata. The snapshot cannot yet reach that object. The age rule prevents the collector from treating the new upload as an old orphan.
+
+On the next collection, the xorb will either be reachable through the committed writer state or remain an aged orphan after an abandoned push. Only the second case becomes eligible.
+
+Choose a grace period longer than the slowest expected preparation and recovery interval. A one-hour minimum protects the default path, while offline or archival workflows may require a wider policy.
+
 ## Preview before deletion
 
 Start with a repository-scoped dry run:
@@ -74,6 +98,10 @@ crab fsck
 ```
 
 Successful deletions are idempotent. If some object deletion or reconciliation step fails, Crab exits nonzero and reports the partial outcome so rerunning the command is safe.
+
+Before apply, compare the dry-run snapshot inputs with current activity. A long delay between preview and deletion can invalidate the operational review even when the collector will take a new safe snapshot.
+
+Record the repository identity, scope, grace period, root counts, candidate counts, candidate bytes, and storage-class skips. Approval should name the same scope and policy that the apply command uses.
 
 ## Read the dry-run result as a proof report
 
@@ -108,6 +136,12 @@ crab gc --scope repo --dry-run
 
 Pruning recovery roots changes what can be restored. It should be governed as a retention policy, not hidden inside routine storage cleanup.
 
+Branch retention, recovery-history retention, and provider object retention answer different questions. A deleted branch removes an active name. Pruning recovery history removes a supported ref-restoration path. Garbage collection removes unreachable physical objects after proof.
+
+Perform the decisions in that order. Decide what history the product must recover, update retained roots, preview resulting candidates, and only then delete physical data.
+
+Signed releases, legal holds, experiment records, and workflow artifacts may need longer retention than ordinary branches. Express those requirements as explicit roots or supported repository policy instead of relying on an operator to remember object names.
+
 ## Schedule collection around repository activity
 
 Repository GC takes a renewable maintenance lease and cannot overlap conflicting history maintenance. Run it during a window that can tolerate object listings and deletes.
@@ -118,6 +152,20 @@ Avoid routine bucket-scope collection unless the operator owns every registered 
 
 Track reclaimed bytes, candidates skipped by grace, candidates blocked by storage class, failed deletes, and reconciliation outcome. Trends help distinguish healthy cleanup from a retention policy that never releases old roots.
 
+## Use a safety checklist before apply
+
+Confirm these conditions for every destructive run:
+
+- **Scope**: the command targets the intended repository, not an entire shared bucket
+- **Registration**: every repository that can reference shared objects is represented in the mark boundary
+- **Roots**: current refs, recovery history, workflows, and holds are readable
+- **Activity**: maintenance coordination protects current writers and history operations
+- **Age**: the grace period exceeds the in-flight preparation window
+- **Preview**: the reviewed dry run has no unknown classification
+- **Recovery**: operators know which history cannot be restored after deletion
+
+Stop when any item is uncertain. Delayed reclamation costs storage. Incorrect reclamation can remove the only durable bytes behind a retained pointer.
+
 ## Treat deletion failures as partial progress
 
 Object stores can accept some deletes and reject others. Crab reports the successful and failed counts, then exits nonzero when repository-scope deletion or reconciliation is incomplete.
@@ -125,6 +173,32 @@ Object stores can accept some deletes and reject others. Crab reports the succes
 Do not restore already deleted unreferenced objects merely to make the batch appear atomic. Rerun the idempotent collection after fixing the provider or permission error.
 
 If reconciliation fails after successful deletes, preserve the command output and run integrity checks before the next maintenance action. The repository needs an accurate post-delete view even when every deleted object was a valid candidate.
+
+Provider versioning or replication can make physical reclamation lag behind the logical delete. Billing inventory may therefore change after the Crab command completes. Measure provider-visible bytes over the lifecycle interval rather than assuming immediate capacity recovery.
+
+Do not interpret a missing candidate on retry as unexplained drift. It may be one of the objects deleted successfully in the earlier partial batch. Reconciliation and structured output should connect that current absence to the completed action.
+
+## Verify recovery assumptions after collection
+
+Run `crab fsck` after the apply and hydrate representative current and retained historical files from an isolated client. Integrity checks cover repository relationships, while hydration proves that readable data still backs selected pointers.
+
+Include a ref from the oldest supported recovery boundary. A successful default-branch checkout cannot prove that recovery roots retained every older xorb required by policy.
+
+Also confirm that a known deleted ref outside retention no longer appears as recoverable through the supported history interface. Storage reclamation and recovery behavior should match the policy reviewed before collection.
+
+Retain the dry run, apply result, integrity result, and provider deletion report as one maintenance record. This evidence connects candidate proof to the final repository state.
+
+## Explain a dry run that reclaims little data
+
+A small candidate set does not mean the collector failed. Current branches may share most xorbs with deleted branches, recovery history may retain earlier commits, or recent interrupted uploads may still be inside the grace period.
+
+Break the protected total down by root class and age. This shows whether storage remains because active history uses it, policy retains it, or time-based protection has not expired.
+
+Do not shorten the grace period to make one report look productive. Wait for the next safe window or change the documented recovery policy through its own review.
+
+Provider storage can also remain after successful deletion because versioning, replication, or lifecycle retention preserves physical copies. Compare Crab's logical result with provider inventory after those controls have had time to apply.
+
+The useful outcome is an explainable live set and candidate set. Reclaimed bytes are secondary to proving that every deletion respects repository history and recovery policy.
 
 <TakeawayBox title="Deletion requires two proofs">
   The object is unreachable from every retained root, and it is older than the

@@ -45,11 +45,25 @@ The useful property is resynchronization. Once the rolling content reaches a sta
 
 A replacement with the same byte length may preserve even more boundaries. An insertion or deletion creates a larger disturbed region, but stable content after that region can still recover its former chunk identities.
 
+## Chunk size trades metadata for reuse precision
+
+Smaller target chunks can isolate local edits and increase potential reuse. They also create more hashes, recipe terms, index entries, and packing work. Larger chunks reduce metadata but make each disturbed region account for more bytes.
+
+Content-defined chunking therefore uses bounded sizes around a target rather than accepting an arbitrary boundary at every matching byte pattern. Minimum and maximum limits prevent pathological tiny chunks or unbounded regions.
+
+The right target is a repository-level engineering choice because file producers and access patterns differ. A checkpoint workload and a media archive may preserve byte regions at different scales.
+
+Crab's file identity does not depend on the chosen storage packing. Changing chunking policy for new files can affect reuse with earlier chunks, so policy changes need measurement and a migration rationale.
+
 ## Hashes turn byte equality into identity
 
 Crab computes a BLAKE3 identity for each chunk. Identical bytes produce the same chunk identity regardless of file name, directory, commit, or position.
 
 The identity is useful only with proof. Before Crab skips a chunk, local or remote metadata must establish that the corresponding bytes already exist in durable storage. A cache hint alone is not enough to make a push complete.
+
+The file itself also receives a BLAKE3 identity. Chunk hashes support reuse and range verification. The full-file hash closes over recipe order and detects a result that contains the right chunks in the wrong sequence.
+
+Hash identity is independent of compression. Crab can compress chunks inside xorbs while keeping the uncompressed content identity used by recipes and reconstruction. A storage-layout change therefore does not require a new file pointer.
 
 ## Deduplication separates identity from location
 
@@ -67,6 +81,28 @@ It also protects deletion. Garbage collection cannot treat an unknown location a
 | Canonical shard term and xorb | A remote reader can locate durable bytes |
 | Complete ordered recipe | Crab can plan reconstruction of the file version |
 
+## Deduplication checks several evidence layers
+
+The cheapest useful evidence should answer first, but each layer has a different authority:
+
+1. **Session state** can recognize chunks produced earlier in the same clean or staging operation.
+2. **Local indexes and staging** can reuse recent chunks and recipes without another origin lookup.
+3. **Canonical shard and chunk indexes** prove that a remote reader can locate the durable bytes.
+
+A local hit can remove repeated CPU or disk work. It cannot authorize publication when canonical storage has no corresponding location. Push resolves that distinction before it omits a chunk upload.
+
+Negative lookup results also deserve care. A stale local metadata view may not know about a chunk published by another writer. Crab can refresh canonical state before classifying the chunk as new, which trades a lookup for an avoided duplicate upload.
+
+## Estimate the byte outcome before compression
+
+For a 10 GB second checkpoint, suppose chunk classification finds 8 GB already durable and 2 GB new. The source-level reuse ratio is 80 percent.
+
+Crab packs only the 2 GB of new source chunks. Compression may reduce the uploaded xorb bytes below 2 GB, while xorb framing and metadata add a smaller overhead. The resulting upload ratio is therefore related to, but not identical to, the reuse ratio.
+
+Hydrating the new checkpoint still produces 10 GB. A cold reader may fetch ranges containing all required chunks, including reused chunks from earlier xorbs. Deduplication reduces new storage and push transfer; it does not mean every first read downloads only the changed 2 GB.
+
+A warm reader can avoid more origin transfer when earlier ranges remain cached. Keep push reuse, cold hydration, and warm hydration as separate measurements.
+
 ## New chunks become xorbs
 
 Uploading every chunk as a separate object would create excessive request overhead. Crab therefore packs sequences of new chunks into compressed, content-addressed xorbs.
@@ -77,17 +113,59 @@ Packing balances object size against request and recovery behavior. Tiny objects
 
 Crab uses bounded xorb targets and can optimize layout later. The file contract does not depend on one permanent packing choice because chunk identities remain stable across repacking.
 
+Packing happens after chunk classification. Reused chunks keep their proven locations, while new chunks accumulate into one or more xorb builders. Each completed xorb receives an immutable content identity before upload.
+
+The xorb boundary is an operational unit, not a file boundary. One xorb can contain chunks from several files, and one file can reference chunks across several xorbs created at different times. This arrangement improves reuse but means object deletion must follow reachability metadata rather than path naming.
+
+Compression and packing also affect retry size. A bounded xorb limits how much work a failed upload repeats. The target must remain large enough to avoid turning every chunk into its own object-store request.
+
+## Shards make packed data discoverable
+
+Packing removes the one-file-to-one-object relationship, so readers need an index from chunk identity to physical range. Shards publish that relationship in immutable metadata that can evolve as new xorbs arrive.
+
+A shard term identifies the xorb and range required to obtain a chunk. File recipes remain ordered identity lists, while shards answer location. This split lets one shard generation add new locations without rewriting every file recipe that reuses the chunk.
+
+Readers synchronize relevant shard state before planning ranges. Writers prove that every recipe term has a canonical durable location before publishing a ref.
+
+Repacking can add replacement locations, and later maintenance can retire old layouts after retained readers no longer depend on them. Chunk and file identities remain stable throughout that physical change.
+
 ## A file recipe preserves order
 
 Deduplication changes storage layout, not file meaning. Crab records the complete ordered chunk sequence for each file hash. The same chunk may appear in multiple files or more than once in one file.
 
 A valid recipe must cover every byte in order. Hydration either reconstructs the byte-identical file and verifies its hash or returns an error.
 
+Repeated chunks remain repeated recipe terms. If a 4 MB block appears three times in one file, Crab can store the bytes once and reference that identity at three logical positions. Reconstruction writes it three times in the declared order.
+
+Recipes also preserve zero-length and boundary conditions explicitly through the file identity and expected size. An empty file does not need data chunks, while a non-empty file cannot succeed with an empty recipe.
+
 ## Reuse can cross ordinary boundaries
 
 Because content determines identity, reuse is not limited to adjacent commits. It can occur across renamed paths, copied assets, branches, and file versions, provided the repository metadata can prove that the chunk is already stored.
 
 The practical savings depend on the data. Encrypted or recompressed files may change most bytes even when their logical content changes little. Append-heavy snapshots and iterative checkpoints can preserve physical overlap across versions.
+
+Consider three representative overlap patterns:
+
+| Pattern | Boundary behavior | Expected reuse |
+| --- | --- | --- |
+| Append records to a stable file | Earlier boundaries remain unchanged | High reuse before the append |
+| Replace a fixed-size region | Nearby chunks change, later chunks resynchronize | Reuse on both sides of the edit |
+| Recompress one monolithic archive | The encoded stream can change after the edit | Low physical reuse |
+| Copy an existing asset to another path | Content and chunk identities remain equal | Complete data reuse |
+| Encrypt with a new random nonce | Ciphertext changes throughout | Little or no reuse |
+
+These outcomes follow bytes, not filenames or application semantics. A “small” logical edit can still rewrite the full physical stream.
+
+## Metadata has a cost worth measuring
+
+Chunk reuse is not free. Each file needs a recipe, each unique chunk needs identity and location metadata, and clients need indexes to resolve those structures.
+
+For large files, metadata should remain a small fraction of source bytes. Repositories with huge numbers of tiny managed files can invert that relationship and create more lookup and request work than the data warrants.
+
+Keep small source and configuration files on Git's ordinary blob path. Use Crab tracking for content whose size, churn, or materialization pattern earns the additional metadata path.
+
+Measure recipe terms per file, shard bytes, index synchronization time, and metadata requests beside storage savings. A high reuse ratio can still produce a poor workflow if metadata fan-out dominates every checkout.
 
 ## Estimate reuse with two representative versions
 
@@ -97,6 +175,16 @@ Publish a baseline, clear any assumptions about local cache, then publish the ch
 
 Interpret the counters together. High chunk reuse with high uploaded bytes can indicate packing or staged flush work. Low reuse may reflect a serializer that rewrites the complete file. Low uploaded bytes with a high request count can indicate an inefficient object layout.
 
+Calculate at least three ratios:
+
+- **Chunk reuse ratio**: reused source bytes divided by total source bytes
+- **Upload ratio**: uploaded xorb bytes divided by total source bytes
+- **Request density**: object-store operations divided by uploaded or hydrated GB
+
+The ratios answer different questions. Chunk reuse describes physical overlap. Upload ratio includes packing and compression. Request density shows whether the storage layout turns useful byte savings into excessive provider operations.
+
+Repeat the same measurement after clearing only the state you intend to classify as cold. Removing canonical remote data would change the repository, while clearing local cache changes only the client path.
+
 ## Design file production for stable bytes
 
 Deduplication works on physical content, so upstream file generation affects the result. Deterministic serialization keeps equivalent data byte-identical. Stable record ordering prevents unrelated entries from shifting. Partitioned outputs isolate changes to smaller files.
@@ -104,6 +192,12 @@ Deduplication works on physical content, so upstream file generation affects the
 Compression settings also matter. Recompressing one large container can alter the byte stream after a local logical edit. Compressing stable partitions independently can preserve more reusable regions.
 
 Do not weaken encryption or integrity controls to improve reuse. When confidentiality requires randomized ciphertext, plan for whole-object change and optimize with retention, tiering, or file partitioning instead.
+
+Version format and serializer changes as data migrations. A new library version can reorder fields, change compression headers, or rewrite container indexes even when the logical tensors or records remain stable.
+
+Publish one sample through both producer versions before changing the pipeline. Compare full-file bytes, chunk reuse, xorb upload, and hydration behavior. The test can reveal a storage-cost regression before the new format enters long-lived history.
+
+When partitioning is valid for the application, use stable independently encoded files. One changed partition then creates local file and chunk changes without forcing every other partition through a new container stream.
 
 <TakeawayBox title="The deduplication rule">
   A changed file does not imply a full upload. A chunk uploads only when Crab

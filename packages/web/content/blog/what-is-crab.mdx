@@ -36,6 +36,18 @@ During a push, Crab splits tracked files at content-defined boundaries, identifi
 
 During a clone, Git can check out the small pointers first. You can then hydrate selected files, hydrate everything, or mount the repository so content arrives when an application reads it.
 
+The pointer remains part of the commit, so a branch or tag still identifies one exact large-file version. Renaming a managed file changes the Git tree. Replacing its content changes the pointer identity. Reverting the commit restores the earlier pointer, which Crab can resolve through the same immutable data store.
+
+This arrangement keeps ordinary Git operations useful. You can inspect history, compare pointer changes, review path selection, and merge source changes without downloading every managed byte. A tool that needs the real model, archive, or dataset hydrates that path before reading it.
+
+## The pointer is a contract, not a placeholder
+
+A Crab pointer is small enough for Git, but it is not an informal bucket note. It records the expected file identity and size. Crab metadata expands that identity into an ordered reconstruction recipe.
+
+That distinction matters during recovery. A loose bucket URL can change, disappear, or point at the wrong upload. A committed pointer continues to name the expected bytes even when Crab repacks chunks or changes their physical xorb locations.
+
+The pointer also gives publication a testable boundary. Before the branch can advance, Crab must prove that the pointer resolves through durable metadata to durable data. During hydration, Crab must rebuild the complete file and match the recorded identity. Both sides test the same contract.
+
 ## “Serverless” means the bucket is the shared service
 
 Crab does not require a Crab data server or database between the repository and object storage. Each client reads and writes the bucket directly with the credentials and policies your team controls.
@@ -59,7 +71,17 @@ Crab finds content-defined chunks inside a file. If a new checkpoint reuses most
   ]}
 />
 
-Crab may not be the right choice for a small source-only repository, a team that cannot provide object-storage credentials, or a workflow that requires a hosted web UI to manage every large-file object. Git LFS can also be a better fit when your forge already provides enough storage and bandwidth with no operational friction.
+Crab may not fit a small source-only repository or a team without object-storage credentials. It also lacks a hosted web interface for managing every large-file object.
+
+Git LFS can be a better fit when your forge already supplies enough storage and bandwidth without operational friction.
+
+## Different contributors can materialize different working sets
+
+One repository does not require one checkout shape. A source developer can keep all model paths as pointers. A model engineer can hydrate the active checkpoints. A release job can hydrate a committed manifest, while an exploratory analysis tool can read through a mount.
+
+These clients still share the same commits and refs. Materialization is local policy, not a separate version of history. A pointer-only checkout and a hydrated checkout agree about which file belongs at a path, even though only one has the full bytes on disk.
+
+This matters when repository content exceeds a laptop or runner. Teams do not need to split history merely because different jobs have different storage capacity. They can make the required working set explicit for each workflow instead.
 
 ## Each storage layer has one responsibility
 
@@ -82,6 +104,14 @@ Consider two 8 GB model checkpoints that share 7.5 GB of byte content. A whole-f
 The exact savings depend on the file format. Encryption, recompression, or container rewrites can change nearly every byte. Append-heavy data, model checkpoints, copied assets, and files with stable internal regions tend to preserve more reuse.
 
 Clone behavior changes as well. A contributor who edits source code can clone the Git history and keep model pointers. A training job can hydrate one model family. An analysis tool with unpredictable reads can use a mount.
+
+## Crab does not replace every repository service
+
+Crab owns Git transport and the managed large-file data path. It does not become a code-review website, identity provider, secrets manager, or cloud-policy engine. Teams still choose how they review commits, issue short-lived credentials, audit bucket access, and protect release refs.
+
+The serverless claim is therefore narrow and useful: no Crab data server sits between the client and object storage. Removing that service reduces one availability and scaling boundary. It also makes bucket policy, client installation, and provider observability part of repository operations.
+
+This boundary is worth stating during adoption. A team that expects Crab to replace every forge feature will evaluate the wrong system. A team that needs Git-compatible storage for large files can evaluate the exact path Crab owns.
 
 ## Evaluate the operating contract before adoption
 

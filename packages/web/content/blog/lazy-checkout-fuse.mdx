@@ -23,6 +23,16 @@ A Crab clone leaves managed large files as pointers by default. You can keep the
 
 <LazyCheckoutDiagram />
 
+## Start from the application's access shape
+
+Choose materialization from what the task reads, how predictable those paths are, and whether the tool expects normal filesystem calls. Repository size alone does not decide the mode.
+
+A source review task knows it needs no managed bytes, so pointers are enough. A training job usually has a declared model and dataset set, so hydration gives deterministic startup. An asset browser may discover paths from user navigation, so a mount can defer reads until access.
+
+Also classify writes. Pointer checkout and hydration use the normal Git worktree. A read-only mount exposes a snapshot without a commit path. A writable mount needs an overlay, an explicit commit, and a stale-base check before publication.
+
+The choice can differ by job while all jobs use the same commit. Materialization is a client policy layered on the committed file identity.
+
 ## Keep pointers when you need history, not bytes
 
 A lazy clone downloads the Git history and Crab metadata needed to identify tracked files. It does not materialize every large file.
@@ -34,6 +44,10 @@ crab status
 ```
 
 This mode fits code review, branch inspection, metadata-only automation, and any task that needs only a small subset of assets.
+
+Pointer checkout differs from Git sparse checkout. Sparse checkout controls which paths appear in the working tree. Crab pointers allow the managed path to appear with its identity while deferring the full content.
+
+The two controls can work together. Sparse checkout can exclude unrelated directories, while Crab keeps included managed files lightweight until hydration. Document both patterns because a missing path and a pointer path require different next actions.
 
 ## A pointer checkout still has complete identity
 
@@ -61,6 +75,12 @@ crab clone crab://team-data/vision-search \
   --include 'configs/**' \
   --include 'models/current/**'
 ```
+
+Hydration is an explicit batch boundary. Crab can resolve metadata once, group ranges by xorb, and process independent files with bounded concurrency. The command returns only after selected outputs are verified or their failures are reported.
+
+Use narrow patterns with a dry inventory of matching paths when repository structure is unfamiliar. A pattern that expands across historical exports or archived partitions can exceed local capacity and trigger provider restores.
+
+For repeat jobs, prefer a committed manifest over shell-specific glob construction. The manifest makes the intended data dependency visible in review and reproducible on another runner.
 
 ## Commit working-set manifests
 
@@ -98,6 +118,10 @@ Dehydration skips modified files because replacing them would discard local data
 
 Prefetch profiles may protect files from routine dehydration. Use `--ignore-profiles` only when you intend to remove those materialized copies as well.
 
+Dehydration does not guarantee that all related disk use disappears. Verified xorb ranges can remain in the local cache, and an application may have created derived output beside the managed path. Use cache statistics and normal disk inventory to account for those stores separately.
+
+Run dehydration before the disk reaches exhaustion. The operation needs enough capacity and filesystem access to inspect state and replace clean files safely.
+
 ## Mount for unpredictable reads
 
 A mount presents a repository snapshot as a filesystem and resolves file content on demand. The automatic backend prefers NFS when available; `--backend=fuse` selects the FUSE adapter and requires FUSE support on the machine.
@@ -122,6 +146,16 @@ The overlay separates filesystem writes from the mounted base snapshot. `crab mo
 
 Before commit, Crab freezes writes, checks that the mounted base ref has not moved, and creates a Git commit. A failed push preserves the local commit and overlay recovery state rather than reporting that remote publication succeeded.
 
+## Understand read behavior through a mount
+
+Directory listing can use Git trees and Crab metadata without downloading every file. Opening a managed file resolves its pointer and begins the required range reads. Repeated reads can use the local or shared cache.
+
+Applications differ in how they access files. Sequential readers work well with coalesced ranges and readahead. Memory mapping, random seeks, and repeated metadata probes can create a wider request pattern. Benchmark the real application rather than a single sequential copy.
+
+Filesystem errors must preserve their origin. An archived xorb, denied range read, or integrity mismatch should reach the application as a read failure. Returning zero-filled or truncated data would violate the same reconstruction contract used by hydration.
+
+Unmount cleanly before removing the mountpoint or cache state. A process with an open file may still depend on the mounted snapshot and its in-flight reads.
+
 ## Mount backends share the repository contract
 
 Automatic mode prefers the available Network File System (NFS) path. `--backend=fuse` selects Filesystem in Userspace (FUSE) and requires the platform adapter.
@@ -129,6 +163,10 @@ Automatic mode prefers the available Network File System (NFS) path. `--backend=
 Backend choice affects installation, caching, and filesystem behavior. It does not change pointer identity, shard resolution, xorb verification, or ref consistency.
 
 Use a read-only mount for analysis and serving workloads. Use a writable overlay only when the application must edit through filesystem calls and your workflow includes explicit review and commit.
+
+Backend behavior still affects operations. Platform support, file-lock semantics, case sensitivity, permission mapping, and unmount behavior can differ. Qualify the selected backend with the applications and operating systems used by the team.
+
+Keep the repository-level acceptance test backend-independent: the same pointer must produce the same verified bytes. Add backend-specific tests for filesystem semantics that the application relies on.
 
 ## Choose from the access pattern
 
@@ -140,6 +178,14 @@ Use a read-only mount for analysis and serving workloads. Use a writable overlay
 | Browse a data lake with unpredictable access | Read-only mount |
 | Edit through filesystem tools | Writable mount with explicit commit |
 
+## Plan for transitions between modes
+
+A team may hydrate a manifest for routine work and mount the archive for occasional exploration. These modes can share verified local cache state, but they should not edit the same managed path concurrently.
+
+Before switching a writable mount back to a normal worktree, inspect and commit or export the overlay. Before dehydrating a path used by a running process, stop the process and confirm the file is clean.
+
+When a branch changes, refresh the mount snapshot or create a new mount at the intended ref. Do not assume a long-running mount follows branch updates automatically. A stable snapshot is easier to reason about than path contents changing underneath an application.
+
 ## Budget disk and transfer from the working set
 
 Estimate local capacity from the largest concurrent working set, not total repository history. Include hydrated files, temporary reconstruction output, local cache, mount overlay, and application scratch space.
@@ -149,6 +195,10 @@ For continuous integration, set manifests by job. A lint job may need no managed
 Measure cold and warm runs separately. The first read includes origin transfer and cache population. Later reads may use local or shared cache, but final assembly and verification still process the requested bytes.
 
 When a workload reads the complete repository every time, lazy checkout cannot remove that transfer. Its value appears when access is selective, repeated, or unpredictable enough for on-demand range reads.
+
+Include failure headroom in the capacity model. Atomic hydration needs temporary output before replacement. Writable mounts need overlay space. Cache eviction may lag behind a burst of concurrent reads.
+
+Set operational thresholds below the filesystem limit. Alert on hydrated bytes, cache bytes, overlay bytes, and free space as separate values so the response can target the correct store.
 
 <TakeawayBox title="Materialization is a policy choice">
   The committed pointer identity stays the same. Choose when full bytes become

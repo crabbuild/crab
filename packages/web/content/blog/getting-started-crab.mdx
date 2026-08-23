@@ -19,7 +19,7 @@ meta:
   audience: "Developers trying Crab for the first time."
 ---
 
-This tutorial connects an existing Git repository to an S3 path, tracks model files, pushes one commit, and verifies the result from a fresh clone. Replace the sample bucket and repository names with resources you control.
+This tutorial connects an existing Git repository to an S3 path and tracks model files. You will push one commit and verify it from a fresh clone. Replace the sample names with resources you control.
 
 <FlowSteps
   title="The first repository loop"
@@ -43,6 +43,12 @@ curl -fsSL https://crab.build/install.sh | bash
 crab --version
 ```
 
+Run the setup first in a disposable repository or a non-production object-store prefix. The first pass should prove installation, credentials, tracking, publication, and reconstruction without changing a branch used by other contributors.
+
+Choose a representative file that you are allowed to copy into the test repository. Avoid confidential production data for the tutorial. A deterministic sample helps with hash verification, while a real producer output gives better deduplication evidence during the second push.
+
+Record the CLI version, Git version, provider region, and destination prefix. These details make an access or behavior difference reproducible on another machine.
+
 ## Configure the repository
 
 Run `crab configure` from the repository root. It connects the remote and installs the Git filter configuration used for tracked files.
@@ -54,6 +60,10 @@ crab doctor
 ```
 
 `crab doctor` checks the local setup, remote discovery, credentials, and object-store access. Fix any reported error before adding data.
+
+Configuration should create one understandable ownership boundary. Use a dedicated repository prefix rather than the bucket root, and apply permissions to that prefix. A read-only client needs discovery and object reads. A writer also needs the repository's immutable uploads and ref operations.
+
+Do not place secrets in the remote URL, `.gitattributes`, or committed configuration. Use the provider's supported credential chain so local profiles, short-lived roles, and workload identity can change without rewriting repository history.
 
 ## Choose which files Crab tracks
 
@@ -93,7 +103,11 @@ crab ship models/model-v1.safetensors -m "Add model v1"
 
 <FirstRepositoryDiagram />
 
-Crab stages the file through its filter, uploads new large-file data and metadata, pushes the Git objects, and moves the remote ref only after the referenced data is durable.
+Crab stages the file through its filter, then uploads new large-file data and metadata. It pushes the Git objects and moves the remote ref after every dependency is durable.
+
+Inspect the result before continuing. `git show HEAD:models/model-v1.safetensors` should show a compact pointer rather than the complete model bytes. `git status` should be clean, and the destination branch should name the commit produced by `crab ship`.
+
+The local file remains materialized because adding a file does not need to replace your working copy with its pointer. Git's index and your working tree can therefore contain different representations of the same committed path.
 
 ## Publish a second version to exercise reuse
 
@@ -109,6 +123,10 @@ Review the reported transfer and deduplication counters. The amount of reused da
 
 If the second version uploads nearly all bytes, inspect the file format before assuming configuration is wrong. Some serializers reorder data, add nondeterministic fields, or recompress the complete container after a small logical change.
 
+Compare full-file identity and chunk reuse as different measurements. The second model should have a different full-file hash when its content changed. Reused chunk counters show how much physical data remained identical inside that new file identity.
+
+Keep both commits during verification. A fresh client should reconstruct the first version after checking out the earlier commit and the second version after returning to the branch tip. This confirms that reuse did not collapse two distinct file recipes.
+
 ## Verify from a fresh clone
 
 Clone with Crab so the repository can check out pointers without downloading every large file immediately.
@@ -123,6 +141,22 @@ crab status
 ```
 
 After hydration, the working-tree file contains its original bytes. Git history still contains the compact pointer used to locate and verify those bytes.
+
+Compare a cryptographic hash from the source repository with the hydrated result. Run the clone from a machine or environment that does not share the original repository's local cache. Otherwise, a successful hydration could prove only that the writer retained the bytes locally.
+
+Also switch to the earlier commit and hydrate the earlier model version. The repository succeeds only when its retained history can reconstruct every version protected by your policy, not merely the newest file.
+
+## Understand what each command proved
+
+The tutorial crosses several independent boundaries:
+
+1. `crab --version` proves that the CLI runs, but not that Git can invoke its helper and filter modes.
+2. `crab doctor` proves configuration and access checks, but not that a tracked path produces a publishable recipe.
+3. `git check-attr` proves path selection, but not that object storage contains the file.
+4. `crab ship` proves local preparation and remote publication for one commit.
+5. A fresh clone and hash comparison prove remote discoverability and byte-exact reconstruction.
+
+Keep these proofs separate while troubleshooting. Reinstalling the binary cannot repair a provider policy, and widening a provider policy cannot fix an uncommitted `.gitattributes` rule.
 
 ## Read common failures by boundary
 
@@ -151,6 +185,10 @@ crab fsck
 ```
 
 Avoid `crab hydrate --all` in automation unless the job consumes every managed file. Narrow hydration reduces transfer, runner disk usage, and accidental restore requests for archived xorbs.
+
+Pin the Crab version in build images or installation steps, and log it with the commit ID. Use a dedicated manifest per job so a lint task does not inherit the model and dataset requirements of a training task.
+
+Treat a fresh-clone verification job as repository health evidence. It should obtain independent credentials, fetch the published ref, hydrate representative files, compare their expected hashes, and run `crab fsck`. Schedule broader historical checks separately when they would exceed the normal build budget.
 
 <TakeawayBox title="Success means two paths agree">
   The Git commit is visible, the large-file objects are durable, and a fresh

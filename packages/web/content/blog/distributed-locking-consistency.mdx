@@ -31,6 +31,22 @@ The scope matters. Writers targeting different refs can continue independently. 
 
 The lease is not the final correctness proof. Networks pause, processes stall, and leases can expire. Ref correctness must survive those events.
 
+Lease acquisition records a holder identity and expiration time at a ref-scoped location. The holder renews before expiration while it performs contested work. Other writers observe the lease and wait with bounded backoff.
+
+The lease duration must cover normal renewal jitter without blocking recovery for an excessive period after a crash. A slow upload does not require one fixed lease that lasts for the complete push because the active holder can renew it.
+
+Every exit path attempts release, including discovery errors, upload failures, stale-ref rejection, and successful publication. Expiration remains the recovery path when the process cannot perform cleanup.
+
+## Renewal failure changes liveness before correctness
+
+A writer can lose the ability to renew while it still has local CPU and disk access. It may finish hashing or uploading immutable objects, but it can no longer assume exclusive access to the destination ref.
+
+The client should treat a lost lease as a signal to stop contested publication work or reacquire current coordination. Even if it continues reusable immutable preparation, the final ref edit still needs a current expected-old comparison.
+
+A process pause creates the same shape. The writer may wake after another client acquired the expired lease and published. Expected-old rejects the resumed stale plan.
+
+This separation keeps lease timing out of the permanent history contract. Clock skew, scheduler pauses, and delayed renew responses can reduce throughput without authorizing a lost update.
+
 ## Same-ref and different-ref writers behave differently
 
 Alice and Bob can upload immutable data concurrently when they target different branches. Their ref transactions name separate keys, so neither branch decision needs to serialize the other.
@@ -38,6 +54,10 @@ Alice and Bob can upload immutable data concurrently when they target different 
 When both target `main`, the first lease holder performs the contested publication work. The second writer waits, then must observe the branch state after the first writer finishes.
 
 Shared immutable objects can still help both writers. If their files contain identical chunks, one writer's completed xorb upload may satisfy part of the other's later closure proof.
+
+Repository-wide maintenance can introduce a broader coordination boundary. Garbage collection and history maintenance need to avoid classifying objects while a push is preparing new reachability. Those operations use maintenance policy in addition to the per-ref writer lease.
+
+The narrower ref lock remains useful because ordinary branch writes should not serialize unrelated refs. A release branch and a feature branch can progress while sharing immutable content and canonical metadata.
 
 ## Immutable uploads are safe before the decision
 
@@ -49,6 +69,10 @@ This property narrows rollback. Crab does not need to delete every uploaded obje
 
 The safe response is to leave unreferenced preparation data in storage. Retained roots and the garbage-collection grace period decide when deletion becomes safe.
 
+Immutable identity also reduces coordination scope. Writers do not need one global lock to create a xorb or Git pack whose name derives from its content. They need coordination when updating mutable indexes, journals, and refs that expose relationships to those objects.
+
+When two writers upload the same immutable identity, provider preconditions and content verification ensure that neither can replace it with different meaning. The duplicate work costs requests, but it does not create two conflicting versions behind one key.
+
 ## Expected-old prevents lost updates
 
 Each ref edit carries the value the writer observed when planning the push. At publication time, Crab compares the current branch value with that expected old object ID.
@@ -56,6 +80,21 @@ Each ref edit carries the value the writer observed when planning the push. At p
 If they differ, another writer changed the branch. Crab rejects the stale edit instead of silently replacing the newer tip. The writer must fetch, rebase or merge, and prepare a new update against current state.
 
 Compare-and-swap also handles lease loss. A paused writer may resume after its lease expired and another client published. Its expected-old value still names the earlier tip, so the final transaction rejects the stale plan.
+
+## Follow Alice and Bob through one race
+
+Alice and Bob both fetch `main` at commit `A`. Each creates a different commit and records `A` as the expected-old value.
+
+1. Alice acquires the `main` lease and prepares immutable dependencies for commit `B`.
+2. Bob waits for the same ref lease. He may prepare unrelated local staging, but he cannot publish `main`.
+3. Alice proves closure, compares `main` with `A`, and commits `A → B`.
+4. Alice releases the lease. Bob acquires it and rereads canonical branch state.
+5. Bob's plan still expects `A`, while `main` now names `B`. His update is rejected.
+6. Bob fetches `B`, rebases or merges his work, restages changed managed files, and creates a new expected-old plan.
+
+If Alice's lease expires before step 3 and Bob publishes first, the object IDs reverse but the result does not. The later stale expected-old comparison rejects whichever writer planned against the old tip.
+
+No silent overwrite occurs, and immutable data from the rejected plan can remain available for the reconciled retry.
 
 <TakeawayBox title="Correctness does not depend on the lease">
   The lease narrows contention. The expected-old comparison prevents a stale
@@ -69,6 +108,27 @@ A write journal records progress through the transaction. After an interruption,
 A retry can reuse durable work and repeat incomplete steps. It still has to prove closure and compare against the current ref before publication.
 
 The journal cannot authorize publication by itself. It records what the client attempted and which immutable work completed. Current canonical state still decides whether each dependency exists and whether the ref comparison succeeds.
+
+Useful journal states distinguish planned work, completed immutable uploads, published metadata, successful closure, and committed ref outcome. A restart can resume from the last proven boundary while rechecking canonical storage.
+
+The journal must not record “published” before the ref transaction commits. Otherwise, a crashed writer could convert an intention into false history during recovery.
+
+Journal retention also needs policy. Active and recent records support retries and diagnosis. Old completed records can be compacted after their ref outcomes and recovery roots remain represented in canonical state.
+
+## Correctness comes from a chain of checks
+
+No single mechanism proves the complete push:
+
+| Mechanism | Protects | Does not prove |
+| --- | --- | --- |
+| Ref lease | Same-ref work is less likely to overlap | The writer still has current history |
+| Immutable identity | Retried uploads keep the same meaning | A ref reaches the object |
+| Write journal | Completed preparation can be recovered | The ref transaction committed |
+| Pointer closure | Managed dependencies are durable | The branch has not changed |
+| Expected-old comparison | The ref plan is current | Managed dependencies are complete |
+| Ref transaction | One complete state becomes visible | Later cleanup succeeded |
+
+The writer needs closure and freshness at the publication boundary. Removing either check creates a different failure: complete but stale history, or current history with missing bytes.
 
 ## Readers observe complete states
 
@@ -85,6 +145,10 @@ never:  ref B -> missing xorb or shard dependency
 Readers may begin before or after the transaction, but they resolve one committed ref state. They do not combine the old branch value with the new writer's temporary metadata.
 
 Object-store consistency and journal interpretation must preserve this rule. A reader that cannot prove a committed state returns an error instead of inventing a partial view.
+
+Readers do not acquire the writer lease for ordinary ref discovery. They resolve committed state and immutable dependencies, which allows reads to continue while a writer prepares the next update.
+
+After the ref transaction, a new reader can discover the new tip because closure already succeeded. A reader that began from the old tip can finish that operation against immutable objects without having its data replaced underneath it.
 
 ## Common interruptions preserve the previous tip
 
@@ -114,6 +178,20 @@ Use this retry sequence:
 
 Avoid an automatic unbounded retry loop. A repeated conflict can indicate an active writer, an expired credential flow, or a process that keeps planning from stale state.
 
+Do not delete the rejected writer's uploaded xorbs or packs as conflict cleanup. Another branch, another writer, or the reconciled retry may already reference the same immutable identities. Garbage collection has the complete retained-root view required to make that decision later.
+
+Force push remains a deliberate history operation. It can change ancestry rules when policy permits, but it still needs durable dependency closure and a current ref transaction. Force does not turn incomplete large-file data into a valid branch state.
+
+## Bound contention instead of hiding it
+
+Waiting writers should use bounded backoff and expose wait duration. Immediate tight retries add object-store traffic and can starve the current holder. Unbounded silent waits make a failed holder look like a hung Git command.
+
+Set an operational timeout that reports the destination ref, observed lease age, and safe next action. The timeout should not delete the lease record unless the expiration contract proves it is no longer valid.
+
+High same-ref contention can indicate workflow design rather than a locking defect. Automation that publishes every artifact to one branch may benefit from per-run refs followed by an explicit promotion step.
+
+Different-ref parallelism should remain visible in metrics. A repository with active feature branches can have high total write throughput while `main` remains deliberately serialized at publication.
+
 ## Monitor leases without treating them as history
 
 Lease metrics should include acquisition time, wait duration, renewal failures, holder age, and release outcome. These values diagnose contention and abandoned work.
@@ -121,5 +199,13 @@ Lease metrics should include acquisition time, wait duration, renewal failures, 
 Ref metrics should separately include compare conflicts, committed transactions, rejected destinations, and recovery-journal resumes. Mixing the groups can make a healthy stale-write rejection look like lock corruption.
 
 Alert on leases that remain past their expected renewal window and on repeated same-ref conflicts. Do not alert on every immutable orphan because interrupted preparation can create safe short-lived orphans by design.
+
+Test the monitoring with controlled failures. Terminate a writer after lease acquisition, pause a writer past expiration, and start two writers from the same old tip. Confirm that dashboards separate wait time, lease recovery, stale-ref rejection, and published transactions.
+
+The expected outcome is not zero conflicts. A rejected stale writer is evidence that the final guard worked. The concerning outcomes are silent ref replacement, a lease that never becomes recoverable, or a visible ref whose dependencies fail closure.
+
+Keep journal and ref evidence for repeated conflict incidents. The sequence should show which object ID each writer observed, which lease it held, which immutable work completed, and which expected-old comparison committed or failed.
+
+That evidence separates an application-level merge conflict from storage or coordination corruption. Two valid competing commits are normal. A ref transaction that cannot explain its previous value is not.
 
 Next, [choose how much repository content should become local](/blog/lazy-checkout-fuse).

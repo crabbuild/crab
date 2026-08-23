@@ -41,6 +41,23 @@ staging:       ordered chunks and file recipe
 
 The pointer is an ordinary Git blob. Its format records a version, BLAKE3 file hash, byte size, and optional shard hint. Git can diff commits and move refs without carrying the full file bytes in its object database.
 
+## The pointer is the Git-facing file contract
+
+Git sees the pointer as file content, so its syntax must remain stable, parseable, and distinguishable from ordinary user data. A conceptual pointer has this shape:
+
+```text
+version https://crab.dev/spec/v1
+file-hash 4d8f…
+size 8589934592
+shard-hint 9a21…
+```
+
+The version selects the parser contract. The file hash identifies the expected original bytes. The size rejects truncation and supports planning. The optional hint can shorten metadata lookup without becoming the sole location authority.
+
+Git's blob object ID identifies the pointer text, not the 8 GB file. Crab's full-file BLAKE3 hash identifies the original file. Keeping those identities separate lets Git preserve ordinary object semantics while Crab verifies materialization.
+
+Pointer parsing fails closed. Unsupported versions, malformed hashes, invalid sizes, and contradictory fields cannot enter hydration as though they named valid content. Ordinary blobs that do not match the pointer grammar pass through the normal Git path.
+
 ## The filter process persists across paths
 
 Git filter protocol version 2 keeps one process alive for a batch of clean and smudge requests. Process reuse avoids startup and metadata initialization for every tracked path.
@@ -51,17 +68,78 @@ Session state can reuse chunk buffers, indexes, and prefetch work across files. 
 
 The process also has an idle-exit boundary on supported platforms. If Git disappears while leaving a pipe open, Crab eventually releases the process and its staging lock instead of blocking later adds indefinitely.
 
+## The filter handshake establishes the shared protocol
+
+Git and Crab begin by agreeing on filter protocol version 2 and the capabilities used by the session. Only after that exchange does Git send path-specific work.
+
+```text
+Git                                      Crab filter
+ |  git-filter-client                    |
+ |  version=2                            |
+ |  capability=clean                     |
+ |  capability=smudge                    |
+ |  capability=delay                     |
+ |<-------------------------------------->|
+ |  command=clean or command=smudge      |
+ |  pathname=models/model.safetensors    |
+ |  content packets, then flush          |
+```
+
+Packet framing separates headers, content, and status. A missing flush or an unexpected line can desynchronize the complete process, so protocol output cannot share standard output with human diagnostics.
+
+Capability negotiation also prevents accidental assumptions. Git can request delayed smudge only when both sides agreed to it. A client that does not negotiate delay receives the regular synchronous result.
+
 ## Clean must fail before it lies
 
 The filter does not return a pointer unless Crab has enough local state to reconstruct and later upload the file. If staging cannot open or accept the content, clean reports an error instead of committing a pointer with no backing recipe.
 
 Staging is opened lazily on the first clean request. A filter session that only handles smudge requests does not take the staging writer lock, which prevents read-only Git commands from blocking behind an unrelated add.
 
+Clean streams input rather than requiring the complete file in memory. The chunker finds boundaries, hashes chunks, and records recipe order while bytes arrive. New chunk content can enter bounded staging buffers and xorb preparation without changing the file-level result.
+
+Known content can take a shorter path. If Crab already has a verified recipe for the exact file identity, it can reuse that result instead of chunking the same bytes into new storage work. The returned pointer must still match the input file's identity and size.
+
+The filter distinguishes an ordinary non-pointer payload from a managed pointer during later comparisons. It cannot classify arbitrary small text as a Crab pointer merely because the file resembles the format. Strict parsing keeps user content from entering the reconstruction path by accident.
+
+## Clean connects file identity to later publication
+
+Clean completes before Git writes the pointer into the index. At that moment, Crab must retain enough state for a future push even though clean does not know which branch, commit, or remote will eventually use the pointer.
+
+The recipe records every chunk identity and its logical order. New chunk bytes remain in staging until a push flushes them into immutable xorbs. Known chunks can reference existing durable locations after canonical proof.
+
+This separation allows offline staging. A contributor can add and commit managed files without immediate object-store access when the required local state is available. Push becomes the network and durability boundary.
+
+Offline preparation also creates responsibility. Deleting staging before first publication can remove the only recipe or new bytes behind a committed pointer. The committed Git blob remains, but the client can no longer prove its Crab closure.
+
+Status and diff conversions should avoid mutating staging when Git only needs a comparison. Lazy staging acquisition keeps these read-oriented commands from taking the writer lock or creating unrelated data work.
+
 ## Smudge owns working-tree materialization
 
 During checkout, Git passes a stored blob through the filter's `smudge` command. Ordinary content passes through. A Crab pointer can remain a pointer for a lazy checkout or resolve through shards and xorbs into verified file bytes.
 
 The filter advertises Git filter protocol v2 capabilities for `clean`, `smudge`, and delayed smudge. Delay support lets Git continue checkout while Crab reconstructs requested files in the background.
+
+Smudge begins by parsing the stored blob. Ordinary content passes through unchanged. A valid Crab pointer enters repository lookup, recipe resolution, shard lookup, range planning, chunk verification, ordered assembly, and final file verification.
+
+The selected checkout policy decides whether smudge returns full bytes or preserves the pointer. That policy changes local materialization, not the committed blob. Two clients can therefore check out the same commit with different local working sets.
+
+## Hydration follows metadata from identity to bytes
+
+Smudge and `crab hydrate` share the same reconstruction contract even though Git invokes one during checkout and a contributor invokes the other explicitly.
+
+The resolver performs these steps:
+
+1. Parse the pointer and obtain the expected file hash and size.
+2. Resolve the file index into a complete ordered chunk recipe.
+3. Resolve shard terms for every chunk identity.
+4. Group required terms by xorb and coalesce compatible ranges.
+5. Read from staging, verified cache, shared cache, or canonical storage.
+6. Verify chunks, restore recipe order, and verify the final file.
+7. Replace the pointer only after the complete result passes.
+
+Checkout policy can stop after step one and preserve the pointer. Once materialization begins, the result remains binary: complete verified bytes or an error. The filter cannot emit a prefix of the file and report success.
+
+Archived xorbs add an availability state to step five. The caller's restore policy decides whether to request restoration, wait, or fail. Archive state does not change the pointer identity or recipe.
 
 ## Delayed smudge separates scheduling from delivery
 
@@ -70,6 +148,22 @@ When Git sends `can-delay=1`, Crab may accept a pointer without returning the fu
 Git later asks which delayed paths are ready and requests their content. Crab drains background work before the filter session exits, so reconstructors do not outlive the process that owns their output contract.
 
 Delay improves checkout scheduling, but it does not weaken verification. The worktree receives complete verified bytes or retains the pointer according to the selected lazy policy.
+
+Delayed work has three distinct moments. The first request registers the path and starts reconstruction. A later list request tells Git which paths have completed. Git then requests content for each ready path.
+
+The session must retain enough state to connect those moments without mixing output between files. Completion order can differ from request order, while each final response still belongs to its original path.
+
+Cancellation also belongs to the session boundary. If Git stops requesting delayed paths, Crab drains or cancels owned work and closes resources. A background reconstructor must not survive and write into a later filter session.
+
+## Session state removes repeated setup without merging requests
+
+One filter session can process hundreds of tracked paths. Shared repositories, object-store clients, shard indexes, chunk buffers, and prefetch queues reduce repeated initialization.
+
+Each path still owns its status and content response. A failed model checkout cannot consume the packet framing or reconstructed bytes of the next path. The session records request identity until Git receives the corresponding terminal response.
+
+Bounded concurrency protects memory and provider traffic when Git supplies a large checkout batch. Delay lets work overlap, while the scheduler limits active metadata lookups, xorb reads, decompression, and buffered output.
+
+Session shutdown is part of correctness. Crab closes staging handles, waits for owned reconstructors, and releases locks before exit. A fast process termination that abandons those owners can block later Git commands or leave temporary output unaccounted for.
 
 ## The remote helper owns repository transport
 
@@ -88,6 +182,10 @@ Git                         git-remote-crab
 
 Helper standard output is reserved for Git protocol responses. Diagnostics go through the logging and error boundaries so a status line cannot corrupt the transport conversation.
 
+Git chooses the helper from the remote URL scheme. For `crab://`, it searches for `git-remote-crab` and passes the remote name and URL. The Crab executable detects the helper invocation and enters protocol mode instead of the interactive CLI parser.
+
+This dispatch keeps installation compact, but the modes remain separate contracts. A CLI help message on helper standard output would be a transport failure. A remote-helper error must be formatted for Git while preserving detailed diagnostics through the logging path.
+
 ## Ref listing defines Git's remote view
 
 Git begins by asking the helper for capabilities and refs. Crab reads the stored ref state and formats each object ID with its ref name. A symbolic `HEAD` and peeled annotated tags use the shapes Git expects.
@@ -95,6 +193,20 @@ Git begins by asking the helper for capabilities and refs. Crab reads the stored
 `list for-push` returns only addressable push destinations. The helper omits symbolic `HEAD` and peeled tag targets because neither should become a destination ref edit.
 
 The response ends with a blank line. This small framing rule matters because Git waits for the complete batch before it chooses fetch or push work.
+
+Listing is also the first consistency read. Crab must interpret the committed ref journal and expose only a complete repository state. A writer's temporary plan or uploaded orphan cannot appear as a branch merely because related objects exist in the bucket.
+
+Annotated tags add one more Git-specific detail. The tag ref names the tag object, while a peeled entry can name the referenced commit. Crab formats both so Git can negotiate objects without inventing another tag representation.
+
+## Fetch batches preserve Git's object model
+
+After listing, Git decides which object IDs it lacks and sends one or more fetch commands before the batch terminator. Crab can satisfy several requested refs from shared immutable packs.
+
+The helper downloads the required pack data and imports it through Git's object database boundary. Git then validates and indexes the objects according to its normal rules. Crab does not unpack commits into a parallel repository model.
+
+Remote-tracking refs update only after Git receives the requested object closure. Managed files remain pointer blobs at this stage. Fetch therefore proves history transport, while later smudge or hydration proves large-file reconstruction.
+
+This distinction explains a valid partial workflow: a code-review job can fetch and inspect a mixed commit without obtaining any xorb ranges. The repository history is present even though managed working-tree bytes remain deferred.
 
 ## Fetch and push cross both storage paths
 
@@ -106,6 +218,24 @@ Fetch commands arrive as a batch of object IDs and ref names. The helper resolve
 
 Push commands arrive as refspecs. Crab preserves their order in the response and returns `ok` or `error` for each destination. Structured rejection reasons let Git and scripts distinguish stale refs from missing dependencies or protocol failures.
 
+Fetch does not hydrate every pointer it imports. It makes the commit graph and pointer blobs available to Git. Checkout policy and later hydration decide which managed paths become full bytes.
+
+Push cannot treat the Git pack as the complete dependency set when reachable pointers changed. It walks pointer closure, resolves staged or durable recipes, flushes xorbs before bundle publication, and verifies that remote readers can resolve every managed file from canonical state.
+
+A batch can contain several destinations. Each destination keeps its ref outcome, but immutable Git and Crab objects can be shared across the batch. One rejected ref does not change the identity of already uploaded immutable dependencies.
+
+## Push connects commits to Crab metadata
+
+Pointer discovery begins from the commits reachable through each proposed destination. Crab inspects tracked blobs, distinguishes native pointers from ordinary content, and creates the managed dependency set.
+
+For each pointer, push needs one of two proofs. Local staging can supply a complete recipe and new bytes for first publication. Canonical remote state can prove that an earlier publication already made the file reconstructable.
+
+New chunks flush into xorbs before shard metadata can name them. Shard and file-index updates become durable before pointer closure passes. Git-pack connectivity also passes before the helper attempts the ref transaction.
+
+The final `ok <destination>` response therefore means more than “some objects uploaded.” It means the destination ref transaction committed after both dependency lanes became complete. An `error <destination> <reason>` keeps the branch at its prior complete value.
+
+Ref deletion skips file upload but still validates the expected old value. Physical objects remain for retained branches, tags, recovery history, and garbage collection to evaluate later.
+
 ## Local staging connects clean to push
 
 Clean and push can run in different Git processes. The staging area persists the file recipe and new chunks between them.
@@ -113,6 +243,20 @@ Clean and push can run in different Git processes. The staging area persists the
 This handoff explains an important failure pattern. Git can contain a valid-looking pointer after clean, but push still needs the matching staged recipe or durable remote proof. Removing staging before publication can therefore make a new pointer unpushable.
 
 Once a push flushes staged xorbs and publishes complete metadata, later clients no longer depend on the original machine's staging area. Canonical object storage becomes the shared reconstruction boundary.
+
+Staging also keeps file versions separate from path names. Clean records content identity and ordered chunks, while the Git index records which path receives the pointer. The same staged content can support copies or renames without duplicating its chunk bytes.
+
+Staging lifetime still matters. Removing it before the first successful publication can strand a pointer whose recipe exists nowhere else. After canonical publication, clearing local staging affects retry performance and local recovery, not the shared file contract.
+
+## Lazy staging avoids unrelated lock contention
+
+Git starts the filter for operations beyond an explicit `git add`. Status, checkout, merge, and diff machinery can all reach conversion paths depending on attributes and configuration.
+
+Opening the staging writer at process startup would make every filter session contend with active adds. Crab delays that open until a clean request needs persistent recipe or chunk state.
+
+Smudge-only and pass-through sessions can remain readers. This ownership rule reduces blocked Git commands and makes lock diagnostics meaningful: a staging writer exists because some path attempted managed clean work.
+
+Once acquired, the writer follows the filter session lifecycle. It flushes required local state, reports errors before a successful pointer response, and closes on normal or failed session exit.
 
 ## Match commands to the process Git invokes
 
@@ -126,6 +270,17 @@ Once a push flushes staged xorbs and publishes complete metadata, later clients 
 | `crab hydrate` | Shard-backed reconstructor | Verified working-tree file |
 
 The table identifies the first log and source boundary to inspect. It also prevents a common debugging mistake: changing the remote helper cannot repair a `.gitattributes` rule that never invoked clean.
+
+## The two integrations share four invariants
+
+The filter and helper run in different processes, but the repository depends on shared rules:
+
+1. A clean response never claims a file identity without a complete local recipe.
+2. Every staged xorb flushes before a bundle or ref can depend on its chunks.
+3. Hydration covers every recipe chunk and verifies the final file identity.
+4. A ref becomes visible only after Git and Crab dependency closure succeeds.
+
+These invariants explain why some failures surface later than the action that introduced the path. Clean can prepare local state without network access. Push becomes the boundary that proves the state is durable for another client.
 
 <TakeawayBox title="Two hooks, one invariant">
   The filter may create a pointer only when it has backing local state. The
@@ -154,7 +309,53 @@ Git communicates with both integrations through standard input and standard outp
 
 Use Crab's configured logs, structured command output, and Git tracing instead of adding ad hoc prints. Capture the command, process invocation name, path or ref, and first stable Crab error code.
 
-Reproduce the narrowest boundary available. `git check-attr` tests selection without uploading. `git show :path` tests clean output without a push. Ref listing tests the helper before pack transfer. `crab hydrate path` tests reconstruction without changing history.
+Reproduce the narrowest boundary available. `git check-attr` tests selection without uploading. `git show :path` tests clean output without a push.
+
+Ref listing tests the helper before pack transfer. `crab hydrate path` tests reconstruction without changing history.
+
+Git tracing can show which executable and protocol operation ran, but trace output may contain repository paths and remote details. Store it as diagnostic evidence with the same access controls as build logs.
+
+When a failure depends on several files, reduce the reproduction to one tracked path and one destination ref. Protocol framing bugs can affect the next request after the original error, so preserve the first failing request rather than diagnosing only the final Git message.
+
+## Recognize failures by their first broken contract
+
+| Symptom | First contract to inspect |
+| --- | --- |
+| Tracked file enters Git as full bytes | Attribute selection and clean invocation |
+| `git add` reports a filter failure | Clean staging, chunking, or pointer creation |
+| Checkout leaves a pointer unexpectedly | Smudge policy, pointer parsing, or delayed delivery |
+| Remote appears to have no refs | Helper dispatch, credentials, or ref-journal listing |
+| Fetch has commits but a file cannot hydrate | Crab metadata or xorb read path, not Git pack import |
+| Push uploads data but rejects the branch | Pointer closure or expected-old ref comparison |
+
+The last visible Git error can combine several lower-level facts. Start with the earliest contract that failed and keep the successful boundaries out of the repair scope.
+
+## Advanced behavior preserves the same boundaries
+
+Mounts, selective hydration, shared cache, storage tiering, and xorb repacking extend the data path without changing Git's integration contract.
+
+A mount resolves committed pointers through the same recipe and range proof. Selective hydration changes which paths enter reconstruction. Shared cache changes where verified immutable bytes come from.
+
+Tiering changes when a xorb range becomes readable. Repacking changes physical chunk location.
+
+None of these features changes which pointer blob belongs to a commit. None can publish a branch without helper closure. Keeping those invariants stable allows performance and storage policy to evolve below Git history.
+
+## Follow one path through the complete integration
+
+For `models/model.safetensors`, the end-to-end sequence is:
+
+1. `.gitattributes` selects `filter=crab`.
+2. Git sends working-tree bytes to clean.
+3. Clean stages the recipe and returns a pointer blob.
+4. Git writes the pointer into a tree and commit.
+5. Push sends the refspec to `git-remote-crab`.
+6. The helper discovers the pointer and prepares its Git and Crab closure.
+7. Immutable Git packs, xorbs, and metadata become durable.
+8. Expected-old comparison and the ref transaction publish the commit.
+9. Another client lists the ref and fetches the pointer through Git.
+10. Smudge or hydrate resolves the pointer and verifies the original bytes.
+
+Two Git extension points divide the work, while staging and canonical metadata connect their outputs. The pointer is the shared identity contract between them.
 
 ## Source map
 
