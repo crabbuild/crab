@@ -71,6 +71,13 @@ pub struct Store {
     /// `inner` because `ObjectStore` does not expose `as_any`, so we
     /// cannot downcast after the fact.
     signer: Option<Arc<dyn object_store::signer::Signer>>,
+    /// Optional parallel handle to the same underlying store viewed as
+    /// a [`object_store::multipart::MultipartStore`], enabling explicit
+    /// upload-id / part-index control for resumable multipart uploads.
+    /// Populated by provider builders for S3, GCS, Azure, and in-memory
+    /// backends; kept separate from `inner` for the same downcast
+    /// limitation as `signer`.
+    multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     storage_scope: Option<StorageScope>,
     read_routes: Option<Arc<Vec<ReadRoute>>>,
     staging_writes: Option<Arc<StagingWriteState>>,
@@ -124,6 +131,7 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             signer: None,
+            multipart: None,
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
@@ -144,6 +152,7 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             signer: None,
+            multipart: None,
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
@@ -174,6 +183,30 @@ impl Store {
     pub fn with_signer(mut self, signer: Arc<dyn object_store::signer::Signer>) -> Self {
         self.signer = Some(signer);
         self
+    }
+
+    /// Attaches a low-level multipart handle so
+    /// [`Self::put_multipart_file_resumable_retry`] can drive explicit
+    /// upload ids and part indexes.
+    ///
+    /// The passed handle must be the same underlying instance as
+    /// `inner`. Provider builders populate this for S3, GCS, Azure, and
+    /// the in-memory store; other backends leave it unset and resumable
+    /// uploads fall back to the whole-retry path.
+    #[must_use]
+    pub fn with_multipart(
+        mut self,
+        multipart: Arc<dyn object_store::multipart::MultipartStore>,
+    ) -> Self {
+        self.multipart = Some(multipart);
+        self
+    }
+
+    /// Low-level multipart handle for the same underlying store, if the
+    /// provider supports explicit upload-id control.
+    #[must_use]
+    pub fn multipart(&self) -> Option<Arc<dyn object_store::multipart::MultipartStore>> {
+        self.multipart.clone()
     }
 
     #[must_use]
@@ -1446,10 +1479,338 @@ impl Store {
         result
     }
 
-    /// One full multipart-upload attempt: create, write parts with bounded
-    /// in-flight concurrency (progress-aware) or via `WriteMultipart`
-    /// (sequential), then complete. Any error aborts the upload so S3 does
-    /// not retain orphaned parts.
+    /// Upload a local file as a multipart object with part-level resume.
+    ///
+    /// Extends [`Self::put_multipart_file_retry`] with a
+    /// [`MultipartJournal`]: before uploading, a recorded session for
+    /// `payload_hash` is resumed and only its missing parts are sent;
+    /// every completed part is journaled so a killed process (or an
+    /// outer retry attempt within this call) continues from the last
+    /// good part instead of restarting from zero.
+    ///
+    /// Failure policy differs deliberately from the non-resumable path:
+    /// cancellation leaves the backend session and its journal row alive
+    /// so a later push resumes from the last good part; abandonment is
+    /// reclaimed by `fsck` once the row outlives its grace period.
+    /// Hard errors clean up immediately (backend abort plus row drop) —
+    /// retrying callers start a fresh session rather than inheriting one
+    /// of unknown health. Attempts that could not claim journal ownership
+    /// ([`JournalLease::StandDown`], e.g. a concurrent uploader holds the
+    /// row) abort on every exit path because nothing tracks their
+    /// orphaned parts.
+    ///
+    /// Resume is disabled under staging-write prefixes: staged targets
+    /// are unique per push, so payload-hash-keyed rows would be
+    /// ambiguous across pushes. Staging callers get the whole-retry
+    /// path unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_multipart_file_resumable_retry(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        payload_hash: &[u8],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+        journal: Option<&dyn crate::multipart::MultipartJournal>,
+    ) -> Result<()> {
+        let (write_path, _, record_staged_write) = self.exact_write_target(path);
+        // Resume is disabled under staging-write prefixes: staged targets
+        // are unique per push, so payload-hash-keyed rows would be
+        // ambiguous across pushes.
+        if record_staged_write || self.multipart().is_none() || journal.is_none() {
+            return self
+                .put_multipart_file_retry(
+                    path,
+                    file_path,
+                    size,
+                    expected_hash,
+                    part_size,
+                    cancel,
+                    on_part_done,
+                )
+                .await;
+        }
+        let multipart = self.multipart().expect("checked above");
+        let journal = journal.expect("checked above");
+
+        let bucket_label = {
+            let identity = self.bucket_identity();
+            format!("{}/{}", identity.host, identity.container)
+        };
+
+        // One strike per resume source: a recorded row is probed at most
+        // once per call. A stale upload id fails fast here and later
+        // attempts start fresh; without this guard a dead id would burn
+        // every retry attempt re-probing it. The strike is spent when an
+        // attempt starts with probing allowed, so no state crosses the
+        // retry boundary.
+        let resume_available = std::cell::Cell::new(true);
+
+        retry(&self.retry, || {
+            let allow_resume = resume_available.get();
+            if allow_resume {
+                resume_available.set(false);
+            }
+            let path = write_path.clone();
+            let file_path = file_path.to_owned();
+            let cancel = cancel.clone();
+            let multipart = multipart.clone();
+            let payload_hash = payload_hash.to_vec();
+            let bucket_label = bucket_label.clone();
+            async move {
+                Self::put_multipart_file_resumable_once(
+                    &multipart,
+                    journal,
+                    &path,
+                    &file_path,
+                    size,
+                    &payload_hash,
+                    &bucket_label,
+                    part_size,
+                    &cancel,
+                    on_part_done,
+                    allow_resume,
+                )
+                .await
+            }
+        })
+        .await
+    }
+
+    /// One resumable multipart-upload attempt: claim or resume a journal
+    /// lease, upload only missing parts with bounded concurrency, then
+    /// complete. See [`Self::put_multipart_file_resumable_retry`] for the
+    /// failure policy.
+    #[allow(clippy::too_many_arguments)]
+    async fn put_multipart_file_resumable_once(
+        multipart: &Arc<dyn object_store::multipart::MultipartStore>,
+        journal: &dyn crate::multipart::MultipartJournal,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        payload_hash: &[u8],
+        bucket_label: &str,
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+        allow_resume: bool,
+    ) -> Result<()> {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+
+        const IN_FLIGHT_PARTS: usize = 4;
+
+        if part_size == 0 {
+            return Err(StorageError::Internal(
+                "multipart part_size must be non-zero".to_owned(),
+            ));
+        }
+        let total_parts = size.div_ceil(part_size as u64) as usize;
+
+        let report_part = |bytes: u64| {
+            if let Some(cb) = on_part_done {
+                cb(bytes);
+            }
+        };
+
+        // Claim phase: reuse a compatible recorded session when probing
+        // is still allowed; discard incompatible rows.
+        let mut slots: Vec<Option<crate::multipart::JournalPart>> = vec![None; total_parts];
+        let mut lease = crate::multipart::JournalLease::StandDown;
+        if allow_resume {
+            match journal.resumable(payload_hash) {
+                Ok(Some(info)) => {
+                    match crate::multipart::compatible_parts(&info, total_parts, part_size) {
+                        Some(compatible) => {
+                            // Surface prior progress immediately so the
+                            // caller's bar reflects already-uploaded parts.
+                            for slot in compatible.iter().flatten() {
+                                report_part(slot.size);
+                            }
+                            slots = compatible;
+                            lease = crate::multipart::JournalLease::Active {
+                                upload_id: info.upload_id.clone(),
+                            };
+                        }
+                        None => {
+                            // Boundary drift or out-of-range parts make
+                            // the recorded id unusable; drop the row and
+                            // best-effort abort its backend session so
+                            // the provider does not retain stray parts.
+                            let _ = journal.abort_stale(&info.upload_id);
+                            if let Err(err) = multipart
+                                .abort_multipart(
+                                    path,
+                                    &object_store::MultipartId::from(info.upload_id.as_str()),
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    path = %path,
+                                    error = %err,
+                                    "best-effort abort of incompatible multipart session failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => crate::multipart::warn_journal_error("resumable lookup", err),
+            }
+        }
+
+        // Fresh sessions must begin before the first part PUT.
+        let upload_id = match &lease {
+            crate::multipart::JournalLease::Active { upload_id } => upload_id.clone(),
+            crate::multipart::JournalLease::StandDown => {
+                let id = multipart
+                    .create_multipart(path)
+                    .await
+                    .map_err(|e| map_object_store_error(e, path.as_ref()))?;
+                let claimed = journal
+                    .begin(payload_hash, bucket_label, path.as_ref(), &id)
+                    .unwrap_or_else(|err| {
+                        crate::multipart::warn_journal_error("begin", err);
+                        false
+                    });
+                lease = if claimed {
+                    crate::multipart::JournalLease::Active {
+                        upload_id: id.clone(),
+                    }
+                } else {
+                    // A concurrent uploader owns the row for this payload
+                    // hash; proceed unjournaled. Failures below abort the
+                    // backend session since nothing tracks our parts.
+                    crate::multipart::JournalLease::StandDown
+                };
+                id
+            }
+        };
+        let multipart_id = object_store::MultipartId::from(upload_id.as_str());
+
+        // Upload missing parts with bounded in-flight concurrency. Parts
+        // are read at their exact file offsets so resumed sessions skip
+        // already-uploaded prefixes without reading them.
+        type PartResult = std::result::Result<(usize, String, u64), object_store::Error>;
+        let mut pending: futures_util::stream::FuturesUnordered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = PartResult> + Send>>,
+        > = FuturesUnordered::new();
+        let mut next_idx = 0usize;
+        let result = loop {
+            if cancel.is_cancelled() {
+                break Err(StorageError::Cancelled);
+            }
+            while next_idx < total_parts && slots[next_idx].is_some() {
+                next_idx += 1;
+            }
+            let drained_all = next_idx >= total_parts;
+            if drained_all && pending.is_empty() {
+                break Ok(());
+            }
+            // Drain when at capacity or when nothing remains to dispatch;
+            // otherwise keep the pipeline full.
+            if pending.len() >= IN_FLIGHT_PARTS || drained_all {
+                match pending.next().await {
+                    Some(Ok((idx, content_id, bytes))) => {
+                        if let Some(id) = lease.upload_id()
+                            && let Err(err) = journal.record_part(id, idx, &content_id, bytes)
+                        {
+                            crate::multipart::warn_journal_error("record_part", err);
+                        }
+                        slots[idx] = Some(crate::multipart::JournalPart {
+                            part_idx: idx,
+                            content_id,
+                            size: bytes,
+                        });
+                        report_part(bytes);
+                    }
+                    Some(Err(err)) => {
+                        break Err(map_object_store_error(err, path.as_ref()));
+                    }
+                    None => {
+                        break Err(StorageError::Internal(
+                            "resumable multipart queue ended while non-empty".to_owned(),
+                        ));
+                    }
+                }
+                continue;
+            }
+            let idx = next_idx;
+            next_idx += 1;
+            let offset = idx as u64 * part_size as u64;
+            let want = std::cmp::min(part_size as u64, size - offset) as usize;
+            let mut buf = vec![0u8; want];
+            let read = async {
+                let mut file = tokio::fs::File::open(file_path).await?;
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                file.seek(std::io::SeekFrom::Start(offset)).await?;
+                file.read_exact(&mut buf).await?;
+                Ok::<_, std::io::Error>(())
+            };
+            if let Err(err) = read.await {
+                break Err(StorageError::Io { source: err });
+            }
+            let fut = multipart.put_part(path, &multipart_id, idx, bytes::Bytes::from(buf).into());
+            pending.push(Box::pin(async move {
+                let part = fut.await?;
+                Ok((idx, part.content_id, want as u64))
+            }));
+        };
+
+        if result.is_err() {
+            let keep_alive =
+                matches!(result, Err(StorageError::Cancelled)) && lease.upload_id().is_some();
+            if !keep_alive {
+                if let Err(err) = multipart.abort_multipart(path, &multipart_id).await {
+                    tracing::debug!(
+                        path = %path,
+                        error = %err,
+                        "best-effort abort of failed multipart session"
+                    );
+                }
+                if let Some(id) = lease.upload_id()
+                    && let Err(err) = journal.abort_stale(id)
+                {
+                    crate::multipart::warn_journal_error("abort_stale", err);
+                }
+            }
+            return result;
+        }
+
+        let parts = slots
+            .iter()
+            .enumerate()
+            .map(|(idx, slot)| {
+                let part = slot.as_ref().ok_or_else(|| {
+                    StorageError::Internal(format!("multipart part {idx} missing before complete"))
+                })?;
+                Ok(object_store::multipart::PartId {
+                    content_id: part.content_id.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let completed = multipart
+            .complete_multipart(path, &multipart_id, parts)
+            .await;
+        if let Err(err) = completed {
+            if let Some(id) = lease.upload_id()
+                && let Err(cleanup) = journal.abort_stale(id)
+            {
+                crate::multipart::warn_journal_error("abort_stale", cleanup);
+            }
+            return Err(map_object_store_error(err, path.as_ref()));
+        }
+
+        if let Some(id) = lease.upload_id()
+            && let Err(err) = journal.complete(id)
+        {
+            crate::multipart::warn_journal_error("complete", err);
+        }
+        Ok(())
+    }
     async fn put_multipart_once(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
@@ -2707,5 +3068,448 @@ mod tests {
             ),
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod resumable_multipart_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::multipart::{JournalPart, MultipartJournal, ResumeInfo};
+    use object_store::memory::InMemory;
+    use object_store::multipart::{MultipartStore, PartId};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Row {
+        upload_id: String,
+        parts: Vec<JournalPart>,
+        completed: bool,
+    }
+
+    #[derive(Default)]
+    struct MemJournal {
+        rows: Mutex<HashMap<Vec<u8>, Row>>,
+    }
+
+    impl MemJournal {
+        fn seed(&self, hash: &[u8], upload_id: &str, parts: Vec<JournalPart>) {
+            self.rows.lock().unwrap().insert(
+                hash.to_vec(),
+                Row {
+                    upload_id: upload_id.to_owned(),
+                    parts,
+                    completed: false,
+                },
+            );
+        }
+
+        fn row(&self, hash: &[u8]) -> Option<(String, Vec<JournalPart>)> {
+            self.rows
+                .lock()
+                .unwrap()
+                .get(hash)
+                .filter(|row| !row.completed)
+                .map(|row| (row.upload_id.clone(), row.parts.clone()))
+        }
+    }
+
+    impl MultipartJournal for MemJournal {
+        fn begin(
+            &self,
+            payload_hash: &[u8],
+            _bucket: &str,
+            _key: &str,
+            upload_id: &str,
+        ) -> Result<bool> {
+            let mut rows = self.rows.lock().unwrap();
+            if rows
+                .get(payload_hash)
+                .is_some_and(|row| !row.completed && row.upload_id != upload_id)
+            {
+                return Ok(false);
+            }
+            rows.insert(
+                payload_hash.to_vec(),
+                Row {
+                    upload_id: upload_id.to_owned(),
+                    parts: Vec::new(),
+                    completed: false,
+                },
+            );
+            Ok(true)
+        }
+
+        fn record_part(
+            &self,
+            upload_id: &str,
+            part_idx: usize,
+            content_id: &str,
+            size: u64,
+        ) -> Result<()> {
+            let mut rows = self.rows.lock().unwrap();
+            let Some(row) = rows.values_mut().find(|row| row.upload_id == upload_id) else {
+                return Ok(());
+            };
+            row.parts.retain(|part| part.part_idx != part_idx);
+            row.parts.push(JournalPart {
+                part_idx,
+                content_id: content_id.to_owned(),
+                size,
+            });
+            Ok(())
+        }
+
+        fn complete(&self, upload_id: &str) -> Result<()> {
+            self.rows
+                .lock()
+                .unwrap()
+                .retain(|_, row| row.upload_id != upload_id);
+            Ok(())
+        }
+
+        fn abort_stale(&self, upload_id: &str) -> Result<()> {
+            self.rows
+                .lock()
+                .unwrap()
+                .retain(|_, row| row.upload_id != upload_id);
+            Ok(())
+        }
+
+        fn resumable(&self, payload_hash: &[u8]) -> Result<Option<ResumeInfo>> {
+            Ok(self
+                .row(payload_hash)
+                .map(|(upload_id, parts)| ResumeInfo { upload_id, parts }))
+        }
+    }
+
+    /// Counts `put_part` calls and can fail a specific part index once.
+    struct CountingParts {
+        inner: Arc<InMemory>,
+        put_part_calls: AtomicU64,
+        fail_idx_once: AtomicU64,
+        create_calls: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl MultipartStore for CountingParts {
+        async fn create_multipart(
+            &self,
+            path: &Path,
+        ) -> object_store::Result<object_store::MultipartId> {
+            self.create_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.create_multipart(path).await
+        }
+
+        async fn put_part(
+            &self,
+            path: &Path,
+            id: &object_store::MultipartId,
+            part_idx: usize,
+            data: object_store::PutPayload,
+        ) -> object_store::Result<PartId> {
+            let armed = self.fail_idx_once.load(Ordering::Relaxed);
+            if armed != u64::MAX
+                && armed - 1 == part_idx as u64
+                && self
+                    .fail_idx_once
+                    .compare_exchange(armed, u64::MAX, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "injected failure".into(),
+                });
+            }
+            self.put_part_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.put_part(path, id, part_idx, data).await
+        }
+
+        async fn complete_multipart(
+            &self,
+            path: &Path,
+            id: &object_store::MultipartId,
+            parts: Vec<PartId>,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.complete_multipart(path, id, parts).await
+        }
+
+        async fn abort_multipart(
+            &self,
+            path: &Path,
+            id: &object_store::MultipartId,
+        ) -> object_store::Result<()> {
+            self.inner.abort_multipart(path, id).await
+        }
+    }
+
+    impl CountingParts {
+        fn fail_once(&self, idx: usize) {
+            self.fail_idx_once.store(idx as u64 + 1, Ordering::Relaxed);
+        }
+    }
+
+    const PART_SIZE: usize = 16;
+    const HASH: [u8; 4] = *b"hash";
+
+    fn temp_file(len: usize, fill: u8) -> (tempfile::NamedTempFile, Vec<u8>) {
+        use std::io::Write as _;
+        let data = vec![fill; len];
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&data).unwrap();
+        (file, data)
+    }
+
+    async fn uploaded_bytes(store: &Store, path: &Path, len: usize) -> Vec<u8> {
+        let (_, _, stream) = store.get_stream(path, Some(0..len as u64)).await.unwrap();
+        let mut out = Vec::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn fresh_session_journals_parts_and_completes() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+        });
+        let journal = MemJournal::default();
+        let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
+            .with_multipart(counting.clone() as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 3 - 2, 0xAB);
+        let path = Path::from("xet/xorbs/aa/aabb");
+
+        store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(counting.create_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counting.put_part_calls.load(Ordering::Relaxed),
+            3,
+            "all three parts uploaded exactly once"
+        );
+        assert!(journal.row(&HASH).is_none(), "row cleared on completion");
+        assert_eq!(uploaded_bytes(&store, &path, data.len()).await, data);
+    }
+
+    #[tokio::test]
+    async fn recorded_prefix_is_not_reuploaded() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+        });
+        let journal = MemJournal::default();
+        let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
+            .with_multipart(counting.clone() as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 2 + 5, 0x5A);
+        let path = Path::from("xet/xorbs/bb/bbcc");
+
+        // Simulate a killed process: session exists server-side with part
+        // 0 already stored, journaled under the same payload hash.
+        let live_id = counting.create_multipart(&path).await.unwrap();
+        let part0 = counting
+            .put_part(&path, &live_id, 0, data[..PART_SIZE].to_vec().into())
+            .await
+            .unwrap();
+        let seeded_calls = counting.put_part_calls.load(Ordering::Relaxed);
+        let seeded_creates = counting.create_calls.load(Ordering::Relaxed);
+        journal.seed(
+            &HASH,
+            &live_id,
+            vec![JournalPart {
+                part_idx: 0,
+                content_id: part0.content_id,
+                size: PART_SIZE as u64,
+            }],
+        );
+
+        store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting.put_part_calls.load(Ordering::Relaxed) - seeded_calls,
+            2,
+            "only the two missing suffix parts are uploaded"
+        );
+        assert_eq!(
+            counting.create_calls.load(Ordering::Relaxed) - seeded_creates,
+            0,
+            "session reused"
+        );
+        assert!(journal.row(&HASH).is_none());
+        assert_eq!(uploaded_bytes(&store, &path, data.len()).await, data);
+    }
+
+    #[tokio::test]
+    async fn incompatible_recorded_row_is_discarded_then_fresh_upload_succeeds() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+        });
+        let journal = MemJournal::default();
+        let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
+            .with_multipart(counting.clone() as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 2, 0x11);
+        let path = Path::from("xet/xorbs/cc/cacc");
+
+        // Boundary drift: non-final part smaller than the current plan.
+        journal.seed(
+            &HASH,
+            "stale-id",
+            vec![JournalPart {
+                part_idx: 0,
+                content_id: "etag".to_owned(),
+                size: (PART_SIZE / 2) as u64,
+            }],
+        );
+
+        store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting.put_part_calls.load(Ordering::Relaxed),
+            2,
+            "fresh full upload after discarding incompatible row"
+        );
+        assert_eq!(counting.create_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(uploaded_bytes(&store, &path, data.len()).await, data);
+    }
+
+    #[tokio::test]
+    async fn injected_part_failure_recovers_on_fresh_retry_attempt() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+        });
+        let journal = MemJournal::default();
+        let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
+            .with_multipart(counting.clone() as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 2, 0x77);
+        let path = Path::from("xet/xorbs/dd/dadd");
+        counting.fail_once(1);
+
+        store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            counting.create_calls.load(Ordering::Relaxed) >= 2,
+            "failed journaled session stays alive; retry opens a new one"
+        );
+        assert_eq!(uploaded_bytes(&store, &path, data.len()).await, data);
+        assert!(
+            journal.row(&HASH).is_none(),
+            "final attempt completed its row"
+        );
+    }
+
+    #[tokio::test]
+    async fn unjournaled_session_aborts_when_concurrent_row_stands_down() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+        });
+        let journal = MemJournal::default();
+        let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
+            .with_multipart(counting.clone() as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 2, 0x33);
+        let path = Path::from("xet/xorbs/ee/eadd");
+
+        // Another uploader owns the payload-hash row.
+        journal.seed(&HASH, "other-uploader", Vec::new());
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        let err = store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &cancel,
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, StorageError::Cancelled));
+        assert_eq!(
+            counting.put_part_calls.load(Ordering::Relaxed),
+            0,
+            "stand-down session cancelled before dispatching parts"
+        );
+        // The concurrent row survives untouched.
+        assert_eq!(journal.row(&HASH).unwrap().0, "other-uploader");
     }
 }

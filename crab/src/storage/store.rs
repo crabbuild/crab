@@ -73,6 +73,15 @@ impl Store {
     }
 
     #[must_use]
+    pub fn with_multipart(
+        mut self,
+        multipart: Arc<dyn object_store::multipart::MultipartStore>,
+    ) -> Self {
+        self.inner = self.inner.with_multipart(multipart);
+        self
+    }
+
+    #[must_use]
     pub fn with_storage_scope(mut self, scope: crab_types::storage::StorageScope) -> Self {
         self.inner = self.inner.with_storage_scope(scope);
         self

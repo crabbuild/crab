@@ -60,11 +60,19 @@ pub enum AzureAuthorization {
     Sas(String),
 }
 
-/// Built provider object store plus optional signing adapter.
+/// Built provider object store plus optional signing and multipart
+/// adapters.
+///
+/// `signer` is present only for providers whose concrete adapter
+/// implements URL signing. `multipart` is present only for providers
+/// whose concrete adapter implements the explicit upload-id multipart
+/// API (S3, GCS, Azure, in-memory) — it powers resumable multipart
+/// uploads via [`crate::multipart::MultipartJournal`].
 pub struct BuiltObjectStore {
     pub inner: Arc<dyn ObjectStore>,
     pub provider: StorageProviderKind,
     pub signer: Option<Arc<dyn object_store::signer::Signer>>,
+    pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
 }
 
 /// Object-store handle parsed from a URL plus the path prefix embedded in that URL.
@@ -337,10 +345,12 @@ fn build_object_store_inner(
                 .with_client_options(default_client_options())
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let gcs = Arc::new(gcs);
             Ok(BuiltObjectStore {
-                inner: Arc::new(gcs),
+                inner: gcs.clone() as Arc<dyn ObjectStore>,
                 provider,
                 signer: None,
+                multipart: Some(gcs),
             })
         }
         ObjectStoreCredentials::Azure { account, token } => {
@@ -361,10 +371,12 @@ fn build_object_store_inner(
             let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let azure = Arc::new(azure);
             Ok(BuiltObjectStore {
-                inner: Arc::new(azure),
+                inner: azure.clone() as Arc<dyn ObjectStore>,
                 provider,
                 signer: None,
+                multipart: Some(azure),
             })
         }
     }
@@ -377,6 +389,9 @@ pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Re
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
+    }
+    if let Some(multipart) = built.multipart {
+        store = store.with_multipart(multipart);
     }
     Ok(store)
 }
@@ -449,10 +464,12 @@ fn build_static_env_object_store(
                 .with_client_options(default_client_options())
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let gcs = Arc::new(gcs);
             Ok(BuiltObjectStore {
-                inner: Arc::new(gcs),
+                inner: gcs.clone() as Arc<dyn ObjectStore>,
                 provider,
                 signer: None,
+                multipart: Some(gcs),
             })
         }
         StorageProviderKind::Azure => {
@@ -461,10 +478,12 @@ fn build_static_env_object_store(
                 .with_client_options(default_client_options())
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let azure = Arc::new(azure);
             Ok(BuiltObjectStore {
-                inner: Arc::new(azure),
+                inner: azure.clone() as Arc<dyn ObjectStore>,
                 provider,
                 signer: None,
+                multipart: Some(azure),
             })
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),
@@ -493,7 +512,8 @@ fn build_s3_object_store(
     Ok(BuiltObjectStore {
         inner: s3.clone() as Arc<dyn ObjectStore>,
         provider: StorageProviderKind::S3,
-        signer: Some(s3 as Arc<dyn object_store::signer::Signer>),
+        signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
+        multipart: Some(s3),
     })
 }
 

@@ -325,11 +325,19 @@ pub async fn build_store(
         } else {
             None
         };
+        // The refreshing wrapper implements only `ObjectStore`, so the
+        // low-level multipart handle cannot survive the wrap. Resumable
+        // uploads stay enabled for static-credential stores, which skip
+        // this branch entirely.
+        built.multipart = None;
     }
 
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(s) = built.signer {
         store = store.with_signer(s);
+    }
+    if let Some(multipart) = built.multipart {
+        store = store.with_multipart(multipart);
     }
     if let Some(scope) = storage_scope {
         store = store.with_storage_scope(scope);

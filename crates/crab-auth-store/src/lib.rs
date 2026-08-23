@@ -94,6 +94,9 @@ pub fn build_store_from_transfer_grant(
             if let Some(signer) = built.signer {
                 store = store.with_signer(signer);
             }
+            if let Some(multipart) = built.multipart {
+                store = store.with_multipart(multipart);
+            }
             store
         }
         TransferTransport::Gateway { gateway } => {
@@ -197,6 +200,9 @@ pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials)
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
+    }
+    if let Some(multipart) = built.multipart {
+        store = store.with_multipart(multipart);
     }
     Ok(store)
 }
