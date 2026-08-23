@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -621,6 +621,7 @@ struct PublishedFixture {
     backend: Arc<CountingStore>,
     store: Store,
     layout: StoreLayout<Store>,
+    target: gix_hash::ObjectId,
     target_path: GitPath,
     expected: Vec<u8>,
     base_path: GitPath,
@@ -854,6 +855,7 @@ async fn publish_with_runtime_and_summary(
         backend,
         store,
         layout,
+        target: fixture.target,
         target_path: GitPath::new(Bytes::from(fixture.target_path)).expect("target path"),
         expected: fixture.expected,
         base_path: GitPath::new(Bytes::from(fixture.base_path)).expect("base path"),
@@ -955,6 +957,136 @@ fn fixture_pack_path(fixture: &PublishedFixture, extension: &str) -> PathBuf {
 
 fn fixture_pack_id(pack: &[u8]) -> MerkleHash {
     MerkleHash::from_hex(blake3::hash(pack).to_hex().as_str()).expect("raw BLAKE3 pack identity")
+}
+
+fn strict_pack_objects(pack_path: &Path, source_git_dir: &Path) -> (BTreeSet<String>, usize) {
+    let repository = tempfile::tempdir().expect("temporary strict-pack repository");
+    git(&["init", "--bare", path(repository.path())], None);
+    let pack = fs::File::open(pack_path).expect("open generated pack");
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(repository.path())
+        .args(["index-pack", "--stdin"])
+        .stdin(Stdio::from(pack))
+        .output()
+        .expect("run structural index-pack");
+    assert!(
+        output.status.success(),
+        "structural index-pack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let checksum_output = String::from_utf8(output.stdout).expect("index-pack checksum is UTF-8");
+    let checksum = checksum_output
+        .split_whitespace()
+        .next_back()
+        .expect("index-pack returns a checksum");
+    let index = repository
+        .path()
+        .join("objects/pack")
+        .join(format!("pack-{checksum}.idx"));
+    let output = Command::new("git")
+        .args(["verify-pack", "-v"])
+        .arg(index)
+        .output()
+        .expect("run verify-pack");
+    assert!(
+        output.status.success(),
+        "verify-pack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let verify_output = String::from_utf8(output.stdout).expect("verify-pack output is UTF-8");
+    let objects = verify_output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect();
+    let deltas = verify_output
+        .lines()
+        .filter(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields.first().is_some_and(|value| value.len() == 40) && fields.len() >= 7
+        })
+        .count();
+
+    let strict_repository = tempfile::tempdir().expect("temporary strict fsck repository");
+    git(&["init", "--bare", path(strict_repository.path())], None);
+    let alternates = strict_repository.path().join("objects/info/alternates");
+    fs::write(
+        alternates,
+        format!("{}\n", source_git_dir.join("objects").display()),
+    )
+    .expect("write source object alternate");
+    let pack = fs::File::open(pack_path).expect("reopen generated pack");
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(strict_repository.path())
+        .args([
+            "index-pack",
+            "--strict=hasDotdot=ignore,hasDotgit=ignore",
+            "--stdin",
+        ])
+        .stdin(Stdio::from(pack))
+        .output()
+        .expect("run strict index-pack");
+    assert!(
+        output.status.success(),
+        "strict index-pack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (objects, deltas)
+}
+
+fn fixture_ref_delta_base(fixture: &PublishedFixture) -> gix_hash::ObjectId {
+    let pack = fs::read(fixture_pack_path(fixture, "pack")).expect("read fixture pack");
+    let index = fixture_pack_path(fixture, "idx");
+    let reverse = fixture_pack_path(fixture, "rev");
+    PackLocationIter::open(&index, &reverse, pack.len() as u64)
+        .expect("open fixture locations")
+        .map(|location| location.expect("fixture location"))
+        .find_map(|location| {
+            if location.oid != fixture.target {
+                return None;
+            }
+            let start = location.pack_offset as usize;
+            let end = start + location.entry_len as usize;
+            let entry =
+                gix_pack::data::Entry::from_bytes(&pack[start..end], location.pack_offset, 20)
+                    .expect("target pack entry");
+            match entry.header {
+                Header::RefDelta { base_id } => Some(base_id),
+                _ => None,
+            }
+        })
+        .expect("target must be a REF delta")
+}
+
+fn strict_thin_pack(pack_path: &Path, source_git_dir: &Path) {
+    let repository = tempfile::tempdir().expect("temporary thin-pack repository");
+    git(&["init", "--bare", path(repository.path())], None);
+    fs::write(
+        repository.path().join("objects/info/alternates"),
+        format!("{}\n", source_git_dir.join("objects").display()),
+    )
+    .expect("write source object alternate");
+    let pack = fs::File::open(pack_path).expect("open generated thin pack");
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(repository.path())
+        .args([
+            "index-pack",
+            "--fix-thin",
+            "--strict=hasDotdot=ignore,hasDotgit=ignore",
+            "--stdin",
+        ])
+        .stdin(Stdio::from(pack))
+        .output()
+        .expect("run strict thin index-pack");
+    assert!(
+        output.status.success(),
+        "strict thin index-pack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 async fn assert_runtime_is_within_configured_bounds(
@@ -1139,6 +1271,120 @@ async fn subset_pack_generation_does_not_reuse_the_canonical_pack() {
         source_bytes,
         "subset response must not disclose the complete canonical pack containing {omitted}"
     );
+    let (packed_objects, deltas) = strict_pack_objects(generated.path(), &fixture.source_git_dir);
+    assert_eq!(
+        packed_objects,
+        object_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(deltas > 0, "OFS delta payloads should be preserved");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ref_delta_subset_pack_is_strict_and_contains_exactly_selected_objects() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.remove(0);
+
+    let generated = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect("generate ref-delta subset pack");
+
+    let (packed_objects, deltas) = strict_pack_objects(generated.path(), &fixture.source_git_dir);
+    assert_eq!(
+        packed_objects,
+        object_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(deltas > 0, "REF delta payloads should be preserved");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subset_pack_generation_honors_response_limit() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_response_bytes: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .expect("repository options");
+    let fixture = publish(DeltaKind::Ofs, false, options).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+
+    let error = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect_err("oversized subset pack must fail");
+
+    assert!(contains_limit_exceeded(&error, "pack response bytes"));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_subset_pack_generation_stops_a_blocked_range_read() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let repository = fixture.repository.clone();
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+
+    fixture.backend.block_next_pack_get();
+    let task = tokio::spawn(async move {
+        repository
+            .generate_pack(&object_ids, &task_cancellation)
+            .await
+    });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cancelled subset generation returns promptly")
+        .expect("pack task joins")
+        .expect_err("cancelled subset generation fails");
+
+    assert!(contains_cancelled(&error));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subset_pack_generation_rejects_a_corrupt_packed_entry() {
+    let fixture = publish(DeltaKind::Ref, true, RepositoryOptions::default()).await;
+
+    let error = fixture
+        .repository
+        .generate_pack(&[fixture.target], &CancellationToken::new())
+        .await
+        .expect_err("corrupt selected entry must fail");
+
+    assert!(matches!(error, Error::PackedEntryCrcMismatch { .. }));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let base = fixture_ref_delta_base(&fixture);
+
+    let generated = fixture
+        .repository
+        .generate_pack_with_bases(&[fixture.target], &[base], &CancellationToken::new())
+        .await
+        .expect("generate thin subset pack");
+
+    assert_eq!(generated.object_count(), 1);
+    strict_thin_pack(generated.path(), &fixture.source_git_dir);
     fixture.runtime.shutdown().await;
 }
 

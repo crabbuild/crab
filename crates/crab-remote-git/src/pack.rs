@@ -1,11 +1,13 @@
-//! Self-contained Git pack production from verified remote objects.
+//! Git pack production from verified remote entries and negotiated thin bases.
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
 
 use flate2::{Compression, write::ZlibEncoder};
 use gix_hash::ObjectId;
+use gix_pack::data::entry::Header;
 use sha1::{Digest, Sha1};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -139,6 +141,19 @@ impl RemoteGitRepository {
         object_ids: &[ObjectId],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
+        self.generate_pack_with_bases(object_ids, &[], cancellation)
+            .await
+    }
+
+    /// Generate a pack that may retain deltas against client-proven base
+    /// objects. Every base not in `object_ids` must already be held by the
+    /// receiving Git client under the pinned negotiation result.
+    pub async fn generate_pack_with_bases(
+        &self,
+        object_ids: &[ObjectId],
+        thin_bases: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
         let operation = self
             .operation(OperationKind::UploadPack, cancellation)
             .await?;
@@ -174,7 +189,8 @@ impl RemoteGitRepository {
                 match try_reuse_single_pack(self, &operation, &unique, cancellation).await {
                     Ok(Some(pack)) => Ok(pack),
                     Ok(None) => {
-                        generate_pack_with_operation(&operation, &unique, cancellation).await
+                        generate_pack_with_operation(&operation, &unique, thin_bases, cancellation)
+                            .await
                     }
                     Err(error) => Err(error),
                 }
@@ -327,6 +343,7 @@ fn inspect_reused_pack(
 async fn generate_pack_with_operation(
     operation: &crate::OperationContext,
     object_ids: &[ObjectId],
+    thin_bases: &[ObjectId],
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let started = Instant::now();
@@ -336,16 +353,37 @@ async fn generate_pack_with_operation(
         maximum: u32::MAX as u64,
     })?;
     let mut writer = PackWriter::new(object_count, operation.max_response_bytes())?;
+    let thin_bases = thin_bases.iter().copied().collect::<HashSet<_>>();
+    let mut emitted = HashSet::with_capacity(object_ids.len());
+    let mut stats = PackAssemblyStats::default();
     for batch in object_ids.chunks(OBJECT_BATCH_SIZE) {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let objects = operation.read_objects(batch).await?;
+        let entries = order_packed_entries(operation.read_packed_entries(batch).await?)?;
+        let materialize = entries
+            .iter()
+            .filter_map(|entry| {
+                let materialize = entry
+                    .base_oid
+                    .is_some_and(|base| !emitted.contains(&base) && !thin_bases.contains(&base));
+                emitted.insert(entry.oid);
+                materialize.then_some(entry.oid)
+            })
+            .collect::<Vec<_>>();
+        let objects = operation.read_objects_uncharged(&materialize).await?;
+        let materialized = objects
+            .into_iter()
+            .map(|object| (object.oid, object))
+            .collect::<HashMap<_, _>>();
         let batch_cancellation = cancellation.clone();
-        writer =
-            tokio::task::spawn_blocking(move || writer.write_objects(objects, &batch_cancellation))
-                .await
-                .map_err(|source| Error::DecodeTask { source })??;
+        let (next_writer, batch_stats) = tokio::task::spawn_blocking(move || {
+            writer.write_entries(entries, materialized, &batch_cancellation)
+        })
+        .await
+        .map_err(|source| Error::DecodeTask { source })??;
+        writer = next_writer;
+        stats.add(batch_stats);
     }
 
     if cancellation.is_cancelled() {
@@ -362,12 +400,95 @@ async fn generate_pack_with_operation(
     tracing::info!(
         target: "crab_remote_git::telemetry",
         telemetry_event = "pack_generation",
+        strategy = "packed_entries",
         object_count,
+        copied_entries = stats.copied_entries,
+        converted_deltas = stats.converted_deltas,
+        materialized_entries = stats.materialized_entries,
+        source_bytes = stats.source_bytes,
         response_bytes = size,
         pack_generation_ms = started.elapsed().as_millis() as u64,
         "remote Git response pack generated"
     );
     Ok(pack)
+}
+
+fn order_packed_entries(
+    entries: Vec<crate::reader::RemoteGitPackedEntry>,
+) -> Result<Vec<crate::reader::RemoteGitPackedEntry>> {
+    let positions = entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| (entry.oid, position))
+        .collect::<HashMap<_, _>>();
+    if positions.len() != entries.len() {
+        return Err(Error::InternalInvariant {
+            invariant: "pack assembler received duplicate objects",
+        });
+    }
+    let mut dependencies = vec![0u8; entries.len()];
+    let mut dependents = vec![Vec::new(); entries.len()];
+    for (position, entry) in entries.iter().enumerate() {
+        let Some(base) = entry
+            .base_oid
+            .and_then(|base| positions.get(&base).copied())
+        else {
+            continue;
+        };
+        dependencies[position] = 1;
+        dependents[base].push(position);
+    }
+    let mut ready = dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(position, dependencies)| (*dependencies == 0).then_some(Reverse(position)))
+        .collect::<BinaryHeap<_>>();
+    let mut order = Vec::with_capacity(entries.len());
+    while let Some(Reverse(position)) = ready.pop() {
+        order.push(position);
+        for dependent in &dependents[position] {
+            dependencies[*dependent] = dependencies[*dependent].saturating_sub(1);
+            if dependencies[*dependent] == 0 {
+                ready.push(Reverse(*dependent));
+            }
+        }
+    }
+    if order.len() != entries.len() {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::Delta,
+        });
+    }
+    let mut entries = entries.into_iter().map(Some).collect::<Vec<_>>();
+    order
+        .into_iter()
+        .map(|position| {
+            entries
+                .get_mut(position)
+                .and_then(Option::take)
+                .ok_or(Error::InternalInvariant {
+                    invariant: "pack assembler dependency order is invalid",
+                })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PackAssemblyStats {
+    copied_entries: u64,
+    converted_deltas: u64,
+    materialized_entries: u64,
+    source_bytes: u64,
+}
+
+impl PackAssemblyStats {
+    fn add(&mut self, other: Self) {
+        self.copied_entries = self.copied_entries.saturating_add(other.copied_entries);
+        self.converted_deltas = self.converted_deltas.saturating_add(other.converted_deltas);
+        self.materialized_entries = self
+            .materialized_entries
+            .saturating_add(other.materialized_entries);
+        self.source_bytes = self.source_bytes.saturating_add(other.source_bytes);
+    }
 }
 
 struct PackWriter {
@@ -408,11 +529,12 @@ impl PackWriter {
         })
     }
 
-    fn write_objects(
+    fn write_entries(
         mut self,
-        objects: Vec<RemoteGitObject>,
+        entries: Vec<crate::reader::RemoteGitPackedEntry>,
+        mut materialized: HashMap<ObjectId, RemoteGitObject>,
         cancellation: &CancellationToken,
-    ) -> Result<Self> {
+    ) -> Result<(Self, PackAssemblyStats)> {
         let written = self.file.stream_position().map_err(io_error)?;
         let mut sink = HashingWriter {
             file: self.file.as_file_mut(),
@@ -420,23 +542,44 @@ impl PackWriter {
             written,
             max_bytes: Some(self.max_bytes - 20),
         };
-        for object in objects {
+        let mut stats = PackAssemblyStats::default();
+        for entry in entries {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            write_object(&mut sink, &object).map_err(|error| {
-                if error.kind() == io::ErrorKind::FileTooLarge {
-                    Error::LimitExceeded {
-                        limit: "pack response bytes",
-                        actual: self.max_bytes.saturating_add(1),
-                        maximum: self.max_bytes,
+            stats.source_bytes = stats.source_bytes.saturating_add(entry.bytes.len() as u64);
+            let result = if let Some(object) = materialized.remove(&entry.oid) {
+                stats.materialized_entries = stats.materialized_entries.saturating_add(1);
+                write_object(&mut sink, &object)
+            } else {
+                match (entry.header, entry.base_oid) {
+                    (_, None) | (Header::RefDelta { .. }, Some(_)) => {
+                        stats.copied_entries = stats.copied_entries.saturating_add(1);
+                        sink.write_all(&entry.bytes)
                     }
-                } else {
-                    io_error(error)
+                    (Header::OfsDelta { .. }, Some(base_oid)) => {
+                        stats.converted_deltas = stats.converted_deltas.saturating_add(1);
+                        Header::RefDelta { base_id: base_oid }
+                            .write_to(entry.decompressed_size, &mut sink)
+                            .and_then(|_| sink.write_all(&entry.bytes[entry.header_size..]))
+                            .map(|_| ())
+                    }
+                    (Header::Commit | Header::Tree | Header::Blob | Header::Tag, Some(_)) => {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "base pack entry unexpectedly names a delta base",
+                        ))
+                    }
                 }
-            })?;
+            };
+            result.map_err(|error| map_pack_write_error(error, self.max_bytes))?;
         }
-        Ok(self)
+        if !materialized.is_empty() {
+            return Err(Error::InternalInvariant {
+                invariant: "pack assembler did not consume every materialized object",
+            });
+        }
+        Ok((self, stats))
     }
 
     fn finish(mut self, cancellation: &CancellationToken) -> Result<GeneratedPack> {
@@ -488,6 +631,18 @@ fn write_object(sink: &mut HashingWriter<'_>, object: &RemoteGitObject) -> io::R
     encoder.write_all(&object.data)?;
     let _ = encoder.finish()?;
     Ok(())
+}
+
+fn map_pack_write_error(error: io::Error, maximum: u64) -> Error {
+    if error.kind() == io::ErrorKind::FileTooLarge {
+        Error::LimitExceeded {
+            limit: "pack response bytes",
+            actual: maximum.saturating_add(1),
+            maximum,
+        }
+    } else {
+        io_error(error)
+    }
 }
 
 fn write_pack_header(writer: &mut impl Write, type_code: u8, size: u64) -> io::Result<()> {
@@ -581,6 +736,54 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
+    fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {
+        let oid = ObjectId::from([oid; 20]);
+        let base_oid = base_oid.map(|base| ObjectId::from([base; 20]));
+        crate::reader::RemoteGitPackedEntry {
+            oid,
+            header: base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id }),
+            decompressed_size: 1,
+            header_size: 1,
+            base_oid,
+            bytes: Bytes::from_static(&[0, 0]),
+        }
+    }
+
+    #[test]
+    fn pack_entries_are_ordered_base_first_across_a_deep_chain() {
+        let entries = vec![
+            packed_entry(3, Some(2)),
+            packed_entry(2, Some(1)),
+            packed_entry(1, None),
+        ];
+
+        let ordered = order_packed_entries(entries).expect("acyclic delta chain");
+
+        assert_eq!(
+            ordered
+                .into_iter()
+                .map(|entry| entry.oid)
+                .collect::<Vec<_>>(),
+            vec![
+                ObjectId::from([1; 20]),
+                ObjectId::from([2; 20]),
+                ObjectId::from([3; 20]),
+            ]
+        );
+    }
+
+    #[test]
+    fn pack_entry_dependency_cycles_fail_closed() {
+        let entries = vec![packed_entry(1, Some(2)), packed_entry(2, Some(1))];
+
+        assert!(matches!(
+            order_packed_entries(entries),
+            Err(Error::Corrupt {
+                stage: crate::CorruptionStage::Delta
+            })
+        ));
+    }
+
     #[test]
     fn pack_object_contains_raw_git_payload_without_loose_header() {
         let mut file = NamedTempFile::new().expect("temporary pack object");
@@ -624,14 +827,23 @@ mod tests {
 
     #[test]
     fn pack_writer_rejects_response_limit_before_writing_an_unbounded_temp_pack() {
-        let writer = PackWriter::new(1, 32).expect("pack header fits the response bound");
+        let mut writer = PackWriter::new(1, 32).expect("pack header fits the response bound");
         let object = RemoteGitObject {
             oid: ObjectId::from_hex(b"0000000000000000000000000000000000000000")
                 .expect("object ID"),
             kind: gix_object::Kind::Blob,
             data: Bytes::from(vec![b'x'; 128]),
         };
-        let result = writer.write_objects(vec![object], &CancellationToken::new());
+        let written = writer.file.stream_position().expect("pack position");
+        let maximum = writer.max_bytes;
+        let mut sink = HashingWriter {
+            file: writer.file.as_file_mut(),
+            hash: &mut writer.hash,
+            written,
+            max_bytes: Some(maximum - 20),
+        };
+        let result =
+            write_object(&mut sink, &object).map_err(|error| map_pack_write_error(error, maximum));
         assert!(matches!(result, Err(Error::LimitExceeded { .. })));
     }
 

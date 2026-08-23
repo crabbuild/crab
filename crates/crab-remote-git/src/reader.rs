@@ -105,6 +105,16 @@ pub struct RemoteGitObjectMetadata {
     pub size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteGitPackedEntry {
+    pub(crate) oid: gix_hash::ObjectId,
+    pub(crate) header: Header,
+    pub(crate) decompressed_size: u64,
+    pub(crate) header_size: usize,
+    pub(crate) base_oid: Option<gix_hash::ObjectId>,
+    pub(crate) bytes: Bytes,
+}
+
 /// Reads Git objects directly from immutable Crab packs in object storage.
 pub(crate) struct RemoteGitReader {
     store: Store,
@@ -460,6 +470,176 @@ impl RemoteGitReader {
             }
         }
         order_completed_objects(requested, &completed)
+    }
+
+    pub(crate) async fn read_packed_many_with_session(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        requested: &[gix_hash::ObjectId],
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let oid_bytes = requested
+            .iter()
+            .map(|oid| {
+                oid.as_bytes()
+                    .try_into()
+                    .map_err(|_| Error::UnsupportedObjectFormat)
+            })
+            .collect::<Result<Vec<[u8; 20]>>>()?;
+        budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        let lookups = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            lookups = session.lookup_batch(&oid_bytes, &self.inventory) => lookups?,
+        };
+        if lookups.len() != requested.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        let mut ready = Vec::new();
+        ready
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
+                source,
+            })?;
+        for (oid, lookup) in requested.iter().copied().zip(lookups) {
+            let locator = match lookup {
+                GitObjectLookup::Hit(locator) => locator,
+                GitObjectLookup::Corrupt => {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Locator,
+                    });
+                }
+                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
+            };
+            check_limit(
+                "packed entry bytes",
+                locator.location.entry_len,
+                self.limits.max_packed_entry_bytes,
+            )?;
+            ready.push((oid, locator));
+        }
+        let ranges = coalesce_ranges(ready)?;
+        let caller_cancellation = cancellation.clone();
+        let results = stream::iter(ranges.into_iter().map(|range| {
+            let reader = Arc::clone(self);
+            let caller_cancellation = caller_cancellation.clone();
+            async move {
+                let bytes = reader
+                    .read_coalesced_range(&range, budget, &caller_cancellation)
+                    .await?;
+                let mut entries = Vec::with_capacity(range.entries.len());
+                for (oid, locator) in range.entries {
+                    let relative_start = locator
+                        .location
+                        .pack_offset
+                        .checked_sub(range.start)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                    let relative_end = relative_start
+                        .checked_add(locator.location.entry_len)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                    let start = usize::try_from(relative_start).map_err(|_| Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    let end = usize::try_from(relative_end).map_err(|_| Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+                    if gix_features::hash::crc32(entry_bytes) != locator.location.crc32 {
+                        return Err(Error::PackedEntryCrcMismatch { oid });
+                    }
+                    let parsed = gix_pack::data::Entry::from_bytes(
+                        entry_bytes,
+                        locator.location.pack_offset,
+                        20,
+                    )
+                    .map_err(|source| Error::PackEntry { oid, source })?;
+                    let maximum = if parsed.header.as_kind().is_some() {
+                        reader
+                            .limits
+                            .max_inflated_entry_bytes
+                            .min(reader.limits.max_object_bytes)
+                    } else {
+                        reader.limits.max_inflated_entry_bytes
+                    };
+                    check_limit(
+                        "inflated pack entry bytes",
+                        parsed.decompressed_size,
+                        maximum,
+                    )?;
+                    let header_size = parsed.header_size();
+                    if header_size >= entry_bytes.len() {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        });
+                    }
+                    let base_oid = match parsed.header {
+                        Header::RefDelta { base_id } => Some(base_id),
+                        Header::OfsDelta { base_distance } => {
+                            let base_offset = Header::verified_base_pack_offset(
+                                locator.location.pack_offset,
+                                base_distance,
+                            )
+                            .ok_or(Error::Corrupt {
+                                stage: CorruptionStage::Delta,
+                            })?;
+                            Some(
+                                reader
+                                    .oid_at_pack_offset(
+                                        locator.pack_id,
+                                        base_offset,
+                                        budget,
+                                        &caller_cancellation,
+                                    )
+                                    .await?,
+                            )
+                        }
+                        Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
+                    };
+                    entries.push(RemoteGitPackedEntry {
+                        oid,
+                        header: parsed.header,
+                        decompressed_size: parsed.decompressed_size,
+                        header_size,
+                        base_oid,
+                        bytes: Bytes::copy_from_slice(entry_bytes),
+                    });
+                }
+                Ok::<_, Error>(entries)
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        let mut completed = HashMap::with_capacity(requested.len());
+        for result in results {
+            for entry in result? {
+                completed.insert(entry.oid, entry);
+            }
+        }
+        requested
+            .iter()
+            .map(|oid| {
+                completed.remove(oid).ok_or(Error::InternalInvariant {
+                    invariant: "batched packed entry read is missing an object",
+                })
+            })
+            .collect()
     }
 
     async fn read_from_locator(

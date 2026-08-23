@@ -897,8 +897,12 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     if progress && !request.no_progress {
         write_packet(writer, b"counting objects\n", Some(2), cancellation).await?;
     }
+    let thin_bases = request
+        .thin_pack
+        .then_some(plan.common_haves.as_slice())
+        .unwrap_or_default();
     let pack = match repository
-        .generate_pack(&plan.object_ids, cancellation)
+        .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
         .await
     {
         Ok(pack) => pack,

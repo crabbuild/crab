@@ -10,7 +10,7 @@ use tracing::Instrument as _;
 
 use crate::budget::{BudgetUsage, OperationBudget};
 use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
-use crate::reader::{GitObject, RemoteGitObjectMetadata};
+use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
     AnnotatedTag, Blame, BudgetDimension, Commit, Error, GitPath, MetricKind, MetricObservation,
@@ -483,6 +483,13 @@ impl OperationContext {
         self.budget
             .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
             .await?;
+        self.read_objects_uncharged(oids).await
+    }
+
+    pub(crate) async fn read_objects_uncharged(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::RemoteGitObject>> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let session = self
             .session
@@ -493,6 +500,38 @@ impl OperationContext {
             })?;
         reader
             .read_many_with_session(
+                session,
+                oids,
+                batch_concurrency(
+                    self.state.runtime.options(),
+                    self.state.options.object_limits(),
+                    self.state.options.operation_limits(),
+                ),
+                &self.budget,
+                &self.cancellation,
+            )
+            .instrument(self.span.clone())
+            .await
+    }
+
+    pub(crate) async fn read_packed_entries(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        reader
+            .read_packed_many_with_session(
                 session,
                 oids,
                 batch_concurrency(
