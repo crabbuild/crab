@@ -144,7 +144,7 @@ The reader needs only the published repository state and authorized object acces
 
 Run one controlled negative check as well. Remove access from the isolated reader or point it at an unauthorized prefix, then confirm hydration fails without replacing the pointer with partial bytes. Restore the correct credentials and rerun the same hydration successfully.
 
-This check proves that errors stay visible at the data boundary. It also confirms that the test environment is actually reading the configured origin instead of an unintended local copy.
+This check proves that errors stay visible at the data boundary. It also confirms that the test environment reads the configured origin instead of an unintended local copy.
 
 ## Verify a changed version as well
 

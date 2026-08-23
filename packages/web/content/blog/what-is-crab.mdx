@@ -38,7 +38,7 @@ During a clone, Git can check out the small pointers first. You can then hydrate
 
 The pointer remains part of the commit, so a branch or tag still identifies one exact large-file version. Renaming a managed file changes the Git tree. Replacing its content changes the pointer identity. Reverting the commit restores the earlier pointer, which Crab can resolve through the same immutable data store.
 
-This arrangement keeps ordinary Git operations useful. You can inspect history, compare pointer changes, review path selection, and merge source changes without downloading every managed byte. A tool that needs the real model, archive, or dataset hydrates that path before reading it.
+Because Git stores the pointer as a blob, ordinary Git operations remain useful. You can inspect history, compare pointer changes, review path selection, and merge source changes without downloading every managed byte. A tool that needs the real model, archive, or dataset hydrates that path before reading it.
 
 ## The pointer is a contract, not a placeholder
 
@@ -81,11 +81,11 @@ One repository does not require one checkout shape. A source developer can keep 
 
 These clients still share the same commits and refs. Materialization is local policy, not a separate version of history. A pointer-only checkout and a hydrated checkout agree about which file belongs at a path, even though only one has the full bytes on disk.
 
-This matters when repository content exceeds a laptop or runner. Teams do not need to split history merely because different jobs have different storage capacity. They can make the required working set explicit for each workflow instead.
+When repository content exceeds a laptop or runner, each workflow can declare the working set it needs. Teams keep one history even when jobs have different storage capacity.
 
 ## Each storage layer has one responsibility
 
-Crab becomes easier to operate when you separate repository identity from file materialization. Git answers which version belongs to a commit. Crab metadata answers how to reconstruct that version. Object storage supplies the immutable bytes.
+Operate Crab by separating repository identity from file materialization. Git answers which version belongs to a commit. Crab metadata answers how to reconstruct that version. Object storage supplies the immutable bytes.
 
 | Layer | Stores | Does not decide |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ Crab becomes easier to operate when you separate repository identity from file m
 | Xorbs | Packed, compressed large-file chunks | Git history or path selection |
 | Ref journal | The visible branch and tag state | Working-tree hydration state |
 
-This separation keeps failure boundaries narrow. A missing local cache entry causes an origin read, not a history change. A failed upload blocks the ref update, not an existing reader. A dehydrate operation changes local materialization, not the committed file identity.
+Separate ownership narrows each failure boundary. A missing local cache entry causes an origin read, not a history change. A failed upload blocks the ref update, not an existing reader. A dehydrate operation changes local materialization, not the committed file identity.
 
 ## One edit shows why the model matters
 
@@ -111,7 +111,7 @@ Crab owns Git transport and the managed large-file data path. It does not become
 
 The serverless claim is therefore narrow and useful: no Crab data server sits between the client and object storage. Removing that service reduces one availability and scaling boundary. It also makes bucket policy, client installation, and provider observability part of repository operations.
 
-This boundary is worth stating during adoption. A team that expects Crab to replace every forge feature will evaluate the wrong system. A team that needs Git-compatible storage for large files can evaluate the exact path Crab owns.
+State that boundary during adoption. A team that expects Crab to replace every forge feature will evaluate the wrong system. A team that needs Git-compatible storage for large files can evaluate the exact path Crab owns.
 
 ## Evaluate the operating contract before adoption
 

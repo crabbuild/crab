@@ -79,7 +79,7 @@ Mutable caches need invalidation when the value behind a key changes. A content-
 
 Crab still needs eviction, corruption handling, and metadata generation checks. Eviction controls disk capacity. Hash verification detects wrong bytes. Generation-aware metadata prevents a stale index view from hiding newer canonical state.
 
-This model reduces invalidation complexity, but it does not eliminate authority checks. A locally known chunk cannot prove that the remote repository published the same dependency.
+Immutable keys reduce invalidation complexity, but they do not eliminate authority checks. A locally known chunk cannot prove that the remote repository published the same dependency.
 
 Concurrent readers can share immutable cache entries without coordinating version replacement. If two hydrations request the same absent xorb range, request coalescing can prevent duplicate origin reads while both consumers wait for one verified result.
 
@@ -93,7 +93,7 @@ Crab groups required chunks by xorb and coalesces compatible byte ranges. It can
 
 Coalescing has an economic threshold. One wider range may cost fewer requests but transfer bytes that the file does not need. Several narrow ranges reduce unused transfer but add latency and request charges.
 
-The right balance depends on xorb layout and workload locality. Sequential model reads favor wider adjacent ranges. Sparse access through a mount may favor narrow reads, especially when object-store transfer costs exceed request costs.
+Choose range width from xorb layout and workload locality. Sequential model reads favor wider adjacent ranges. Sparse access through a mount may favor narrow reads, especially when object-store transfer costs exceed request costs.
 
 Cache measurements should retain both figures. A lower request count is not automatically an improvement if origin bytes increase enough to erase the benefit.
 
