@@ -372,7 +372,10 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   }
 
   return (
-    <figure ref={figureRef} className="my-10 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)]">
+    <figure
+      ref={figureRef}
+      className="relative left-1/2 my-10 w-[min(48.75rem,calc(100vw-2rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] lg:w-[min(48.75rem,calc(100vw-24.5rem))]"
+    >
       <div className="border-b border-slate-800/90 bg-[#0b111a] px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -432,9 +435,9 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
         </div>
       </div>
 
-      <div className="overflow-x-auto" aria-hidden="true">
+      <div className="overflow-hidden" aria-hidden="true">
         <svg
-          className="block w-full min-w-[780px]"
+          className="block w-full"
           viewBox="0 0 1080 450"
           focusable="false"
         >
@@ -592,7 +595,6 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
       </div>
 
       <figcaption className="border-t border-slate-800/80 bg-[#070b12] px-4 py-3 text-center text-xs leading-5 text-slate-500 sm:px-5">
-        <span className="sm:hidden">Swipe the canvas to inspect the full trace. </span>
         {story.caption}
       </figcaption>
     </figure>
