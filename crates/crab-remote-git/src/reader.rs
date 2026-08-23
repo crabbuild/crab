@@ -958,20 +958,30 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<gix_hash::ObjectId> {
+        let index = self.load_pack_index(pack_id, budget, cancellation).await?;
+        index
+            .by_offset
+            .get(&pack_offset)
+            .copied()
+            .ok_or(Error::DeltaBaseNotFound {
+                pack_id,
+                pack_offset,
+            })
+    }
+
+    async fn load_pack_index(
+        &self,
+        pack_id: MerkleHash,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<PackIndex>> {
         let cache_key = crate::runtime::PackIndexCacheKey::new(&self.identity, pack_id);
         let cached = self
             .runtime
             .cached_pack_index(&cache_key, self.limits.max_pack_index_bytes)
             .await;
         if let Some(index) = cached {
-            return index
-                .by_offset
-                .get(&pack_offset)
-                .copied()
-                .ok_or(Error::DeltaBaseNotFound {
-                    pack_id,
-                    pack_offset,
-                });
+            return Ok(index);
         }
         let inventory = self
             .inventory
@@ -1029,15 +1039,91 @@ impl RemoteGitReader {
                 },
             )
             .await?;
-        let oid = index
-            .by_offset
-            .get(&pack_offset)
-            .copied()
-            .ok_or(Error::DeltaBaseNotFound {
-                pack_id,
-                pack_offset,
+        Ok(index)
+    }
+
+    pub(crate) async fn pack_checksum_for_exact_objects(
+        &self,
+        pack_id: MerkleHash,
+        object_ids: &[gix_hash::ObjectId],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<[u8; 20]>> {
+        let index = self.load_pack_index(pack_id, budget, cancellation).await?;
+        if index.object_ids.len() != object_ids.len() {
+            return Ok(None);
+        }
+        let matches = object_ids
+            .iter()
+            .all(|oid| index.object_ids.binary_search(oid).is_ok());
+        Ok(matches.then_some(index.pack_checksum))
+    }
+
+    pub(crate) async fn download_pack_to_path(
+        &self,
+        pack_id: MerkleHash,
+        expected_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        budget
+            .charge(BudgetDimension::FetchedBytes, expected_size)
+            .await?;
+        tracing::debug!(
+            storage_request = "pack_stream",
+            storage_bytes = expected_size,
+            "remote Git object-store request"
+        );
+        let path = repo_pack_path(&self.repo_prefix, &pack_id);
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let (metadata, range, mut stream) = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            result = self.store.get_stream(&path, None) => result?,
+        };
+        if metadata.size != expected_size || range != (0..expected_size) {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Inventory,
+            });
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(destination)
+            .await
+            .map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
-        Ok(oid)
+        let mut written = 0u64;
+        while let Some(chunk) = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            chunk = stream.next() => chunk,
+        } {
+            let chunk = chunk?;
+            file.write_all(&chunk).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+        }
+        file.flush().await.map_err(|source| {
+            Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+        })?;
+        drop(origin_permit);
+        if written != expected_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1171,18 +1257,26 @@ enum EntryDescriptor {
 
 pub(crate) struct PackIndex {
     pub(crate) by_offset: HashMap<u64, gix_hash::ObjectId>,
+    pub(crate) object_ids: Vec<gix_hash::ObjectId>,
+    pub(crate) pack_checksum: [u8; 20],
     pub(crate) source_bytes: u64,
 }
 
 impl PackIndex {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(
-            self.by_offset.capacity().saturating_mul(
-                std::mem::size_of::<u64>()
-                    .saturating_add(std::mem::size_of::<gix_hash::ObjectId>())
-                    .saturating_add(1),
-            ),
-        )
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.by_offset.capacity().saturating_mul(
+                    std::mem::size_of::<u64>()
+                        .saturating_add(std::mem::size_of::<gix_hash::ObjectId>())
+                        .saturating_add(1),
+                ),
+            )
+            .saturating_add(
+                self.object_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+            )
     }
 }
 
@@ -1369,6 +1463,14 @@ fn parse_pack_index(
             stage: CorruptionStage::PackIndex,
         });
     }
+    let pack_checksum =
+        index
+            .pack_checksum()
+            .as_bytes()
+            .try_into()
+            .map_err(|_| Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
     let pack_data_end = inventory.pack_size.checked_sub(20).ok_or(Error::Corrupt {
         stage: CorruptionStage::Inventory,
     })?;
@@ -1380,6 +1482,14 @@ fn parse_pack_index(
             requested: capacity.saturating_mul(std::mem::size_of::<(u64, gix_hash::ObjectId)>()),
             source,
         })?;
+    let mut object_ids = Vec::new();
+    object_ids
+        .try_reserve_exact(capacity)
+        .map_err(|source| Error::Allocation {
+            requested: capacity.saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+            source,
+        })?;
+    let mut previous = None;
     for (position, entry) in index.iter().enumerate() {
         if position % 4_096 == 0 {
             check_cancelled(cancellation)?;
@@ -1394,9 +1504,18 @@ fn parse_pack_index(
                 stage: CorruptionStage::PackIndex,
             });
         }
+        if previous.is_some_and(|previous| previous >= entry.oid) {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            });
+        }
+        previous = Some(entry.oid);
+        object_ids.push(entry.oid);
     }
     Ok(PackIndex {
         by_offset,
+        object_ids,
+        pack_checksum,
         source_bytes,
     })
 }

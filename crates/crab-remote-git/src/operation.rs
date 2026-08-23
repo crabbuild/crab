@@ -345,6 +345,41 @@ impl OperationContext {
         self.state.options.operation_limits().max_response_bytes
     }
 
+    pub(crate) async fn single_pack_checksum_for_exact_objects(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        object_ids: &[gix_hash::ObjectId],
+    ) -> Result<Option<[u8; 20]>> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let checksum = reader
+            .pack_checksum_for_exact_objects(pack_id, object_ids, &self.budget, &self.cancellation)
+            .await?;
+        if checksum.is_some() {
+            self.budget
+                .charge(BudgetDimension::LogicalObjects, object_ids.len() as u64)
+                .await?;
+        }
+        Ok(checksum)
+    }
+
+    pub(crate) async fn download_pack_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        expected_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_to_path(
+                pack_id,
+                expected_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
+    }
+
     /// Read one verified Git object from the pinned repository generation.
     pub async fn read_object(&self, oid: gix_hash::ObjectId) -> Result<crate::RemoteGitObject> {
         check_cancelled(&self.cancellation)?;

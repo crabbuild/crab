@@ -1193,6 +1193,8 @@ mod tests {
                     key.clone(),
                     Arc::new(PackIndex {
                         by_offset: HashMap::new(),
+                        object_ids: Vec::new(),
+                        pack_checksum: [0; 20],
                         source_bytes: 32,
                     }),
                 )
@@ -1205,6 +1207,8 @@ mod tests {
                 keys[2].clone(),
                 Arc::new(PackIndex {
                     by_offset: HashMap::new(),
+                    object_ids: Vec::new(),
+                    pack_checksum: [0; 20],
                     source_bytes: 32,
                 }),
             )

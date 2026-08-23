@@ -28,7 +28,7 @@ use crab_remote_git::{
     RepositoryOptions, Revision, RuntimeOptions,
 };
 use crab_storage::{Store, StoreLayout};
-use crab_xet::hash::compute_data_hash;
+use crab_xet::hash::MerkleHash;
 use futures_util::StreamExt as _;
 use futures_util::stream::BoxStream;
 use gix_pack::data::entry::Header;
@@ -38,6 +38,7 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
+use sha1::{Digest as _, Sha1};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -681,7 +682,8 @@ async fn publish_with_runtime_and_summary(
     let fixture = PackFixture::new(delta_kind);
     let pack_bytes = Bytes::from(fs::read(&fixture.pack).expect("read fixture pack"));
     let index_bytes = Bytes::from(fs::read(&fixture.index).expect("read fixture index"));
-    let pack_id = compute_data_hash(&pack_bytes);
+    let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str())
+        .expect("raw BLAKE3 pack identity");
     let pack_size = pack_bytes.len() as u64;
     let backend = Arc::new(CountingStore::new());
     let inner: Arc<dyn ObjectStore> = backend.clone();
@@ -902,6 +904,59 @@ fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
     }
 }
 
+fn contains_cancelled(error: &Error) -> bool {
+    match error {
+        Error::Cancelled => true,
+        Error::SharedRead { source } => contains_cancelled(source),
+        Error::CloseAfterFailure { operation, .. } => contains_cancelled(operation),
+        _ => false,
+    }
+}
+
+fn contains_corruption(error: &Error, expected_stage: crab_remote_git::CorruptionStage) -> bool {
+    match error {
+        Error::Corrupt { stage } => *stage == expected_stage,
+        Error::SharedRead { source } => contains_corruption(source, expected_stage),
+        Error::CloseAfterFailure { operation, .. } => {
+            contains_corruption(operation, expected_stage)
+        }
+        _ => false,
+    }
+}
+
+fn fixture_object_ids(fixture: &PublishedFixture) -> Vec<gix_hash::ObjectId> {
+    let output = git(
+        &[
+            "--git-dir",
+            path(&fixture.source_git_dir),
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+        None,
+    );
+    String::from_utf8(output)
+        .expect("object list is UTF-8")
+        .lines()
+        .map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).expect("full SHA-1"))
+        .collect()
+}
+
+fn fixture_pack_path(fixture: &PublishedFixture, extension: &str) -> PathBuf {
+    fs::read_dir(fixture._source.path())
+        .expect("read source pack directory")
+        .map(|entry| entry.expect("source pack entry").path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|candidate| candidate == extension)
+        })
+        .expect("source pack artifact")
+}
+
+fn fixture_pack_id(pack: &[u8]) -> MerkleHash {
+    MerkleHash::from_hex(blake3::hash(pack).to_hex().as_str()).expect("raw BLAKE3 pack identity")
+}
+
 async fn assert_runtime_is_within_configured_bounds(
     runtime: &RemoteGitRuntime,
     options: RuntimeOptions,
@@ -923,6 +978,168 @@ async fn assert_runtime_is_within_configured_bounds(
     assert!(occupancy.inventory_bytes <= options.max_inventory_cache_bytes);
     assert!(occupancy.negative_entries <= options.max_negative_cache_entries);
     assert!(occupancy.negative_bytes <= options.max_negative_cache_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_single_pack_closure_reuses_the_verified_canonical_pack() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let object_ids = fixture_object_ids(&fixture);
+    let source_bytes = fs::read(fixture_pack_path(&fixture, "pack")).expect("read canonical pack");
+
+    fixture.backend.reset_pack_gets();
+    let generated = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect("generate exact pack");
+
+    assert_eq!(fixture.backend.pack_gets(), 1);
+    assert_eq!(
+        fs::read(generated.path()).expect("read generated pack"),
+        source_bytes
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_pack_reuse_rejects_a_valid_index_for_another_pack() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let object_ids = fixture_object_ids(&fixture);
+    let pack = fs::read(fixture_pack_path(&fixture, "pack")).expect("read canonical pack");
+    let pack_id = fixture_pack_id(&pack);
+    let mut index = fs::read(fixture_pack_path(&fixture, "idx")).expect("read canonical index");
+    let pack_checksum = index.len() - 40;
+    index[pack_checksum] ^= 1;
+    let index_checksum = index.len() - 20;
+    let checksum = Sha1::digest(&index[..index_checksum]);
+    index[index_checksum..].copy_from_slice(&checksum);
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.pack_index_path(&pack_id),
+            Bytes::from(index).into(),
+        )
+        .await
+        .expect("replace pack index");
+
+    fixture.backend.reset_pack_gets();
+    let error = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect_err("mismatched pack checksum must reject canonical reuse");
+
+    assert!(contains_corruption(
+        &error,
+        crab_remote_git::CorruptionStage::PackEntry
+    ));
+    assert_eq!(fixture.backend.pack_gets(), 1);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_pack_reuse_rejects_corrupt_pack_content() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let object_ids = fixture_object_ids(&fixture);
+    let mut pack = fs::read(fixture_pack_path(&fixture, "pack")).expect("read canonical pack");
+    let pack_id = fixture_pack_id(&pack);
+    pack[12] ^= 1;
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.pack_path(&pack_id),
+            Bytes::from(pack).into(),
+        )
+        .await
+        .expect("replace pack");
+
+    let error = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect_err("corrupt pack must reject canonical reuse");
+
+    assert!(contains_corruption(
+        &error,
+        crab_remote_git::CorruptionStage::PackEntry
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_pack_reuse_checks_response_limit_before_pack_download() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_response_bytes: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .expect("repository options");
+    let fixture = publish(DeltaKind::Ofs, false, options).await;
+    let object_ids = fixture_object_ids(&fixture);
+
+    fixture.backend.reset_pack_gets();
+    let error = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect_err("oversized pack must fail before download");
+
+    assert!(contains_limit_exceeded(&error, "pack response bytes"));
+    assert_eq!(fixture.backend.pack_gets(), 0);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_single_pack_reuse_stops_a_blocked_download() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let object_ids = fixture_object_ids(&fixture);
+    let repository = fixture.repository.clone();
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+
+    fixture.backend.block_next_pack_get();
+    let task = tokio::spawn(async move {
+        repository
+            .generate_pack(&object_ids, &task_cancellation)
+            .await
+    });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cancelled pack download returns promptly")
+        .expect("pack task joins")
+        .expect_err("cancelled pack download fails");
+
+    assert!(contains_cancelled(&error));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subset_pack_generation_does_not_reuse_the_canonical_pack() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    let omitted = object_ids.pop().expect("fixture has objects");
+    let source_bytes = fs::read(fixture_pack_path(&fixture, "pack")).expect("read canonical pack");
+
+    fixture.backend.reset_pack_gets();
+    let generated = fixture
+        .repository
+        .generate_pack(&object_ids, &CancellationToken::new())
+        .await
+        .expect("generate subset pack");
+
+    assert_eq!(generated.object_count() as usize, object_ids.len());
+    assert_ne!(
+        fs::read(generated.path()).expect("read generated pack"),
+        source_bytes,
+        "subset response must not disclose the complete canonical pack containing {omitted}"
+    );
+    fixture.runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -496,6 +496,13 @@ impl RemoteGitRepository {
         self.state.inventory.len()
     }
 
+    pub(crate) fn single_pack_inventory(&self) -> Option<GitPackInventoryEntry> {
+        if self.state.inventory.len() != 1 {
+            return None;
+        }
+        self.state.inventory.values().copied().next()
+    }
+
     /// Read the immutable object-visibility proof for this pinned generation.
     pub async fn visibility_index(
         &self,

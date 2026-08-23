@@ -132,7 +132,8 @@ impl GeneratedPack {
 
 impl RemoteGitRepository {
     /// Generate a self-contained pack from verified object IDs in this pinned
-    /// repository generation. Objects are read and written in bounded batches.
+    /// repository generation. An exact single-pack closure reuses its verified
+    /// immutable pack; other selections are read and written in bounded batches.
     pub async fn generate_pack(
         &self,
         object_ids: &[ObjectId],
@@ -169,11 +170,158 @@ impl RemoteGitRepository {
             result.map(|()| unique)
         };
         let result = match result {
-            Ok(unique) => generate_pack_with_operation(&operation, &unique, cancellation).await,
+            Ok(unique) => {
+                match try_reuse_single_pack(self, &operation, &unique, cancellation).await {
+                    Ok(Some(pack)) => Ok(pack),
+                    Ok(None) => {
+                        generate_pack_with_operation(&operation, &unique, cancellation).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => Err(error),
         };
         operation.finish(result).await
     }
+}
+
+async fn try_reuse_single_pack(
+    repository: &RemoteGitRepository,
+    operation: &crate::OperationContext,
+    object_ids: &[ObjectId],
+    cancellation: &CancellationToken,
+) -> Result<Option<GeneratedPack>> {
+    let Some(inventory) = repository.single_pack_inventory() else {
+        return Ok(None);
+    };
+    if inventory.object_count != object_ids.len() as u64 {
+        return Ok(None);
+    }
+    if inventory.pack_size > operation.max_response_bytes() {
+        return Err(Error::LimitExceeded {
+            limit: "pack response bytes",
+            actual: inventory.pack_size,
+            maximum: operation.max_response_bytes(),
+        });
+    }
+    let Some(expected_checksum) = operation
+        .single_pack_checksum_for_exact_objects(inventory.pack_id, object_ids)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let started = Instant::now();
+    let file = NamedTempFile::new().map_err(io_error)?;
+    operation
+        .download_pack_to_path(inventory.pack_id, inventory.pack_size, file.path())
+        .await?;
+    let path = file.path().to_owned();
+    let token = cancellation.clone();
+    let checksum = tokio::task::spawn_blocking(move || {
+        inspect_reused_pack(
+            &path,
+            inventory.pack_id,
+            inventory.pack_size,
+            inventory.object_count,
+            expected_checksum,
+            &token,
+        )
+    })
+    .await
+    .map_err(|source| Error::DecodeTask { source })??;
+    operation
+        .charge(BudgetDimension::ResponseBytes, inventory.pack_size)
+        .await?;
+    let object_count = u32::try_from(inventory.object_count).map_err(|_| Error::LimitExceeded {
+        limit: "pack object count",
+        actual: inventory.object_count,
+        maximum: u32::MAX as u64,
+    })?;
+    tracing::info!(
+        target: "crab_remote_git::telemetry",
+        telemetry_event = "pack_generation",
+        strategy = "canonical_pack",
+        object_count,
+        copied_entries = object_count,
+        converted_deltas = 0u64,
+        materialized_entries = 0u64,
+        source_bytes = inventory.pack_size,
+        response_bytes = inventory.pack_size,
+        pack_generation_ms = started.elapsed().as_millis() as u64,
+        "remote Git response pack reused"
+    );
+    Ok(Some(GeneratedPack {
+        file,
+        size: inventory.pack_size,
+        checksum,
+        object_count,
+    }))
+}
+
+fn inspect_reused_pack(
+    path: &std::path::Path,
+    pack_id: crab_xet::hash::MerkleHash,
+    expected_size: u64,
+    expected_objects: u64,
+    expected_checksum: [u8; 20],
+    cancellation: &CancellationToken,
+) -> Result<[u8; 20]> {
+    if expected_size < 32 {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let mut file = std::fs::File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() != expected_size {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::Inventory,
+        });
+    }
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).map_err(io_error)?;
+    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    let object_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    if &header[..4] != b"PACK"
+        || !matches!(version, 2 | 3)
+        || u64::from(object_count) != expected_objects
+    {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let mut sha1 = Sha1::new();
+    let mut blake3 = blake3::Hasher::new();
+    let mut chunk = [0u8; 1024 * 1024];
+    {
+        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let read = body.read(&mut chunk).map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            sha1.update(&chunk[..read]);
+            blake3.update(&chunk[..read]);
+        }
+    }
+    let mut trailer = [0u8; 20];
+    file.read_exact(&mut trailer).map_err(io_error)?;
+    blake3.update(&trailer);
+    let actual_sha1: [u8; 20] = sha1.finalize().into();
+    if actual_sha1 != trailer
+        || trailer != expected_checksum
+        || blake3.finalize().to_hex().as_str() != pack_id.to_string()
+    {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    Ok(trailer)
 }
 
 async fn generate_pack_with_operation(
