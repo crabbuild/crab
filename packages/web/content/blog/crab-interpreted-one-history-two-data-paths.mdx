@@ -1,441 +1,347 @@
 ---
-title: "Crab, Interpreted: One Git History, Two Data Paths"
-description: "Learn how to use Crab with a mixed code and large-file repository, then trace how add, push, and hydrate preserve one Git history across two storage paths."
-date: "2026-08-22"
+title: "How does Crab keep one history across two data paths?"
+description: "Use a mixed code and model repository, then trace add, push, failure, clone, and hydration across Git and object storage."
+date: "2026-07-10"
 author: "Crab Team"
 category: "architecture"
 tags: ["git", "xet", "large-files", "push", "object-storage", "consistency"]
-excerpt: "Start with a working Crab repository, then follow an ordinary source file and a large model file from your worktree to durable cloud storage."
+excerpt: "An ordinary source file and a tracked model file remain part of one commit even though their bytes travel through different storage lanes."
 level: "deep-dive"
 path: "core-internals"
 order: 5
 concepts: ["Git interpretability", "pointer blobs", "xorbs", "shards", "ref journal", "immutable-before-visible"]
-prerequisites: []
-outcome: "Configure a Crab repository, choose which files Crab tracks, and explain how ordinary and large files remain one consistent Git update."
+prerequisites: ["How does Crab rebuild a file from chunks?"]
+outcome: "Operate a mixed repository and explain how its two data paths remain one atomic Git update."
 diagramType: "Interactive Git transaction traces"
+meta:
+  contentType: "Conceptual"
+  goal: "Unify Crab's user workflow and architecture around one concrete mixed repository."
+  audience: "Developers who want an end-to-end model after learning the individual subsystems."
 ---
 
-Crab lets one Git repository contain source code, datasets, model weights, and media without forcing every file through one storage format. Ordinary files remain Git blobs. Tracked large files use Crab’s Xet-backed large-file path in object storage, while Git records a small pointer. This article starts with a working repository and then explains the architecture behind `crab add`, `crab push`, and `crab hydrate`.
+Crab lets source code and large binary assets share one Git commit without forcing them through one storage representation. Ordinary files remain Git blobs. Tracked large files become Git pointers backed by chunks, xorbs, and shards in object storage.
+
+<TakeawayBox title="One history, two lanes">
+  Git supplies commit identity and branch history. Crab supplies the durable
+  recipe and bytes behind each tracked large-file pointer.
+</TakeawayBox>
 
 ## Start with a repository you can picture
 
-Consider a machine learning project named `vision-search`. It contains code that Git already handles well and binary files that can grow by gigabytes.
+The `vision-search` project contains source code and model data:
 
 ```text
 vision-search/
 ├── README.md
 ├── src/
 │   └── train.py
-├── models/
-│   └── encoder.safetensors
-└── datasets/
-    └── captions.parquet
+└── models/
+    └── encoder.safetensors
 ```
 
-The repository needs one history. A commit should describe the exact combination of training code, model weights, and input data. Splitting the large files into a separate manual download process would weaken that connection.
+The source file belongs on Git's ordinary blob path. The model should stay in the same commit, but its full bytes belong on Crab's large-file path.
 
-Putting every byte into normal Git creates a different problem. A changed 8 GB model becomes another large Git blob, even when most of its bytes match the previous version. Clones and repository maintenance must account for every version of that blob.
+The repository can also contain untracked scratch output, ignored caches, and generated files that belong in neither lane. Crab does not make every large local file part of history. Git tracking and `.gitignore` still decide whether a path enters the commit at all.
 
-Crab keeps the files in one commit while choosing a representation for each path:
+For the paths that do enter history, `.gitattributes` decides representation. This creates three distinct questions: should Git track the path, should Crab manage its content, and should the current client materialize its bytes.
 
-| Path | Representation in Git | Large bytes |
-|---|---|---|
-| `README.md` | Complete Git blob | Already in Git |
-| `src/train.py` | Complete Git blob | Already in Git |
-| `models/encoder.safetensors` | Small Crab pointer | Chunks in object storage |
-| `datasets/captions.parquet` | Small Crab pointer | Chunks in object storage |
+Keeping those questions separate prevents accidental policy coupling. A tracked Crab pointer can stay unhydrated locally. An ignored model cache can stay full-sized locally without entering any commit.
 
-The pointer records the file’s identity. It is not the file itself. A Crab-aware client reads that identity and reconstructs the original bytes when you need them.
+## Configure path selection once
 
-## Create your first Crab repository
-
-You need the Crab command-line interface, a cloud storage bucket, and credentials that can write to that bucket. Crab supports Amazon S3, Google Cloud Storage, Azure Blob Storage, and S3-compatible storage.
-
-Create the directory and connect it to a bucket:
+Connect the repository and add a tracking rule:
 
 ```bash
-mkdir vision-search
-cd vision-search
-crab configure s3://company-repos/vision-search --no-auto-track
-```
-
-Replace `company-repos` with your bucket name. `crab configure` initializes Git when needed, writes Crab’s local configuration, registers the Git filter driver, and configures the remote.
-
-The `--no-auto-track` option makes this example explicit. Register two large-file patterns after you copy the example files into the repository:
-
-```bash
+crab configure s3://team-data/vision-search
 crab track '*.safetensors'
-crab track 'datasets/**'
+git add .gitattributes
+git commit -m "Track model files with Crab"
 ```
 
-Crab writes these rules to `.gitattributes`. Commit that file with the project so every collaborator uses the same path selection.
+The rule selects representation by path. It does not create a second history or a separate branch model.
 
-Stage ordinary Git files first, then let `crab ship` stage the tracked files, commit everything, and push:
+Review the generated rule as repository code. A broad pattern can route files through Crab that were intended to remain ordinary Git blobs. A narrow pattern can leave a large binary inside Git and make later tracking changes require a separate history decision.
+
+Attribute rules follow Git's path-matching and precedence behavior. Check a representative path before staging:
 
 ```bash
-git add README.md src/
-crab ship models/ datasets/ -m "Add training code, model, and caption data"
+git check-attr filter diff merge -- models/encoder.safetensors
+git check-attr filter diff merge -- src/train.py
 ```
 
-`crab ship` runs the remaining workflow:
-
-1. It stages Crab pointers for the tracked model and dataset.
-2. It creates a Git commit with your message.
-3. It uploads missing Crab data and Git objects.
-4. It updates the remote branch after its dependencies are durable.
-
-The commit includes the ordinary files already staged by `git add`. This explicit split is useful for a first repository because each command shows which storage path it owns.
-
-Run `crab status` when you want to inspect tracked files in the worktree:
-
-```bash
-crab status
-```
-
-The status view distinguishes full files, pointer files, and modified files. It does not replace `git status`; each command reports the state owned by its layer.
-
-<TakeawayBox title="Your first working model">
-You keep using a normal Git repository. Tracking rules select large-file paths. Crab stores their bytes efficiently and keeps a pointer in the same commit as your source code.
-</TakeawayBox>
-
-## Use the reviewable daily workflow
-
-`crab ship` combines large-file staging, commit, and push. Use separate commands when you want to review the index, split work into commits, or control the destination branch.
-
-Suppose you update both `src/train.py` and `models/encoder.safetensors`. Stage them together:
-
-```bash
-git add src/train.py
-crab add models/encoder.safetensors
-crab status
-git diff --cached --stat
-```
-
-`git add` stages the complete source blob. `crab add` stages the model pointer and prepares its large-file data. The full model remains available at `models/encoder.safetensors` in your worktree.
-
-Commit and publish the combined change:
-
-```bash
-git commit -m "Improve encoder training"
-crab push origin main
-```
-
-You can also use `git push` with a `crab://` remote. Git invokes Crab’s remote helper for that URL. `crab push` exposes Crab-specific progress and uses the native concurrent upload path, so this article uses it in command examples.
-
-The commands are familiar, but the storage work is different for each file. The next diagram shows the complete model before we inspect each stage.
-
-> **One Git history. Two physical data paths. One publication boundary.**
+The model should select the Crab filter. The source file should remain outside it. Commit the rule so every contributor and automated checkout sees the same representation policy.
 
 <GitArchitecturePlayer story="overview" />
 
-## Learn the terms used in the diagrams
+## Three change shapes use the same branch model
 
-Crab’s Xet-backed path uses content-defined chunking and Xet’s reconstruction model. The architecture is easier to follow when each storage term names one job:
+A source-only commit changes ordinary Git blobs and needs no new large-file data. A model-only commit changes pointer blobs and may create xorbs and shards. A mixed commit changes both lanes.
 
-- **Git blob**: an immutable Git object that contains file bytes. Ordinary files use this representation directly
-- **Pointer blob**: a small Git blob that records a tracked file’s hash, size, and format information
-- **Chunk**: a byte range selected from a large file by content-defined chunking. Similar file versions can reuse matching chunks
-- **Xorb**: an immutable compressed object that stores one or more chunks in cloud object storage
-- **Shard**: metadata that maps a file’s ordered chunks to byte ranges inside xorbs
+| Change | Git lane | Crab data lane | Publication |
+| --- | --- | --- | --- |
+| Edit `src/train.py` | New source blob and commit graph | No new xorb required | One ref transaction |
+| Update `encoder.safetensors` | New pointer blob and commit graph | Classify chunks and publish new metadata | One ref transaction |
+| Update both files | New source and pointer blobs | Publish only unproven chunks | One ref transaction |
 
-A Git ref is the final name in the process. For example, `refs/heads/main` identifies the commit currently visible as the `main` branch. Crab changes that ref only after every required Git object, xorb, and shard can be read.
+The branch does not expose separate source and data revisions. One commit identifies both path versions, so review and rollback use normal Git history.
 
-The word **hydrate** means replacing a pointer in your worktree with the complete reconstructed file. **Dehydrate** means replacing a clean full file with its pointer to recover local disk space. Neither operation changes committed history.
+## Learn the identities before following the bytes
 
-## Crab extends Git instead of replacing it
+The mixed workflow uses several identities with different scopes:
 
-Crab integrates at two extension points that Git already supports:
+- **Commit object ID**: identifies the complete Git history state
+- **Pointer blob object ID**: identifies the pointer text stored by Git
+- **Full-file BLAKE3 hash**: identifies the original managed file bytes
+- **Chunk BLAKE3 hash**: identifies one reusable byte region
+- **Xorb identity**: identifies an immutable packed storage object
+- **Ref expected-old value**: identifies the branch state a writer planned against
 
-- A **filter driver** selects the blob Git records for a tracked path
-- A **remote helper** transfers Git objects and refs for a `crab://` remote
+Two model versions can share chunks while keeping different full-file identities. Two commits can reuse the same pointer when the model path did not change. Repacking can change xorb placement without changing either identity.
 
-Commands above those boundaries still behave like Git. You can branch, merge, commit, diff, fetch, and push. Commits still point to trees, trees still point to blobs, and refs still identify commits.
+These distinctions make logs interpretable. A commit conflict concerns branch history. A file-hash mismatch concerns reconstructed output. A missing xorb range concerns physical storage.
 
-The difference is the meaning of a blob. An ordinary blob contains the file. A Crab pointer blob describes how Crab identifies the file.
+## Follow the daily workflow as state transitions
 
-```text
-ordinary blob
-└── exact file bytes
+The working tree, Git index, local staging, canonical object storage, and visible ref do not change at the same moment. A contributor can reason about the workflow by asking which state owns the file at each boundary.
 
-Crab pointer blob
-├── pointer format version
-├── full-file BLAKE3 hash
-├── byte size
-└── optional shard hint
-```
+| Action | Working tree | Git index | Crab staging | Shared origin |
+| --- | --- | --- | --- | --- |
+| Edit source and model | Full local files | Previous commit state | Previous or empty state | Previous complete ref |
+| Add paths | Full local files | Source blob and model pointer | New model recipe and chunks | Unchanged |
+| Commit | Full local files | Commit closes over both blobs | New model state retained | Unchanged |
+| Prepare push | Full local files | Commit unchanged | Xorbs flush and metadata publishes | Immutable dependencies grow |
+| Commit ref | Full local files | Commit unchanged | Publication recorded | New complete ref appears |
+| Dehydrate model | Pointer at model path | Commit unchanged | Cache may remain | Unchanged |
 
-Git can inspect repository structure without understanding Crab’s data plane. It can walk commits and trees, compare pointer blobs, and update refs. A Crab-aware client resolves a pointer when an application needs the full large file.
+This table explains why a committed pointer can exist before the remote has seen it. Local commit and remote publication are separate Git states. Staging preserves the Crab side between them.
 
-<TakeawayBox title="The ownership boundary">
-Git owns history, path names, and commit identity. Crab owns reconstruction of the content named by a pointer. Object storage keeps both systems’ immutable data durable.
-</TakeawayBox>
+It also explains why dehydrate is not a history rewrite. The operation changes only the working-tree representation after verifying that local materialized bytes are clean.
 
-## Tracking rules select a representation per path
+## Add prepares the representation for each path
 
-The split begins in `.gitattributes`. `crab track` writes entries like these:
-
-```gitattributes
-*.py          text
-*.safetensors filter=crab diff=crab merge=crab -text
-datasets/**   filter=crab diff=crab merge=crab -text
-```
-
-Paths without `filter=crab` stay on the ordinary Git path. Matching paths enter Crab’s large-file path. Files below Crab’s chunk threshold can remain normal content, so a broad pattern does not force every small file into chunk storage.
-
-You can inspect or change the rules with commands that operate on the shared `.gitattributes` file:
+Stage both files:
 
 ```bash
-crab track
-crab track '*.onnx'
-crab untrack '*.onnx'
+crab add src/train.py models/encoder.safetensors
+git diff --cached --stat
 ```
 
-Quote glob patterns so your shell passes the pattern to Crab. Without quotes, the shell may expand a pattern before Crab sees it.
-
-## Add prepares the right representation
-
-Two commands can invoke Crab’s large-file path:
-
-- `git add` streams a tracked file through Crab’s long-running clean filter
-- `crab add` processes multiple files concurrently and writes pointer blobs into Git’s object database and index
-
-Both paths produce an index that Git can commit. `crab add` exists to improve throughput when a workload contains multiple large files.
+Git stores `src/train.py` as a normal blob. For the model, the clean filter streams bytes into Crab staging, produces a complete recipe, and returns a compact pointer to Git.
 
 <GitArchitecturePlayer story="add" />
 
+The index now contains two ordinary Git blob objects with different content. One blob contains Python source. The other contains the pointer contract that Crab can resolve to the model bytes.
+
 ### Ordinary files remain ordinary Git blobs
 
-For `src/train.py`, Git already has the right representation. You stage it with `git add`, so it stays entirely within Git’s object model.
+Git hashes the source content and stores it in the local object database. The staged tree references that blob directly. Crab does not chunk or stage the source file because the path did not select its filter.
 
-Git hashes the complete file, writes the blob to `.git/objects`, and updates the index. A later commit records the blob through a tree. Crab does not create chunks, xorbs, or shard metadata for this file.
+This keeps source-only commands and repositories inside Git's established storage model. Crab does not impose large-file metadata on content that Git already handles well.
 
-This distinction also reduces push work. When pointer discovery finds no Crab pointers, the push skips the file and chunk indexes needed by the large-file lane.
+### Managed files create two local results
 
-### Tracked large files stage bytes and publish a pointer
+Clean returns the pointer blob to Git and persists the model recipe in Crab staging. Both results are required. The pointer connects the future commit to a file identity, while staging preserves the bytes and chunk order needed for publication.
 
-For `models/encoder.safetensors`, `crab add` reads the file as a bounded stream:
+If clean cannot produce complete staging state, it fails instead of returning a pointer. A pointer without a recipe could make the commit look valid locally while leaving push unable to make it reconstructable.
 
-1. Compute the full-file BLAKE3 hash.
-2. Split the file with content-defined chunking.
-3. Hash each chunk and preserve its order.
-4. Write new chunks and the file recipe to local staging.
-5. Flush staged data before adding the pointer to Git’s index.
+## Review remains Git-centered
 
-Crab does not load the complete model into memory. The original file also remains in the worktree, so Python, training tools, and editors continue to open normal bytes.
+A reviewer can inspect commits, tree paths, tracking rules, and pointer identity without downloading the complete model. The pointer shows that the managed file changed and records its expected hash and size.
 
-The representations now differ by surface:
+Content-aware review still needs domain tools after hydration. Git cannot produce a semantic diff for model weights because the pointer deliberately separates history identity from large binary bytes.
 
-| Surface | `src/train.py` | `models/encoder.safetensors` |
-|---|---|---|
-| Working tree | Complete source | Complete model |
-| Git index | Complete blob | Crab pointer blob |
-| Local Crab staging | Not used | Ordered chunks and file recipe |
-| Commit tree | Git blob | Git blob containing a pointer |
+This split supports review policy. A team can require source approval, pointer size checks, model evaluation artifacts, and storage integrity evidence as separate checks on the same commit.
 
-The ordering is important. Crab closes the staging boundary that owns the model chunks before it publishes the pointer to Git’s index. If staging fails, Crab rolls back the unpublished work instead of leaving a pointer to incomplete local data.
+Reviewers can also detect unintended representation changes. A managed path that suddenly appears as a large Git blob indicates an attribute or filter problem. A small source file that turns into a pointer indicates a tracking rule broader than intended.
 
-### A small change can reuse large-file content
+Pointer diffs should not pretend to be semantic model diffs. They establish that identity or size changed. Evaluation metrics, generated reports, or hydrated domain tools explain whether the new model behavior is acceptable.
 
-Assume the next training run changes 300 MB inside an 8 GB model. Normal Git sees a new 8 GB blob because the file’s complete hash changed.
+## A changed model can reuse old storage
 
-Crab computes content-defined chunk boundaries. Unchanged regions tend to produce the same chunk hashes, even when nearby bytes shift. During push, Crab uploads only chunks that the remote does not already contain.
+Suppose training changes a small region in the checkpoint. Content-defined chunking tends to preserve boundaries around unchanged regions. Known chunk identities reuse existing xorb ranges; only unproven chunks enter new xorbs.
 
-Chunk reuse is exact, not approximate. Every reconstructed file must match the full-file BLAKE3 hash stored in its pointer. A hash mismatch returns an error instead of exposing corrupted bytes.
+This reuse is independent of the file path. Copying or renaming content does not automatically require another copy of the same chunks.
 
-## Push makes data durable before changing the branch
+Chunk reuse does not merge file identities. Two pointers with different full-file hashes remain different versions even when they share nearly every chunk. Each recipe preserves its own order, size, and final hash.
 
-After `git commit`, the local commit may reference both ordinary blobs and Crab pointers. `crab push origin main` discovers the complete dependency set before it changes the remote branch.
+Reuse can also cross branches and paths. A release branch that references an existing model can use the same canonical chunks. Copying the model into another managed path creates another recipe relationship without requiring another physical copy of proven chunks.
 
-The push plan has two lanes. The Git lane transfers commits, trees, ordinary blobs, and pointer blobs. The large-file lane transfers new xorbs and shards required by those pointers.
+The push still validates durable location. A local cache entry or earlier staging record can speed classification, but another client needs canonical shard terms that resolve the reused chunk to readable xorb bytes.
 
-### A source-only push uses the Git lane
+## Push brings both lanes to one publication point
 
-When pointer discovery finds no Crab pointers, the large-file lane is empty:
-
-1. Resolve and validate the ref edit.
-2. Acquire the destination ref lock.
-3. Select reachable Git objects.
-4. Build and upload immutable Git pack data.
-5. Verify connectivity for the new commit.
-6. Commit the ref-journal transaction.
-
-Crab acts as a serverless Git transport in this case. Object storage contains the Git packs and metadata, but every repository object remains a standard Git object.
-
-### A mixed push runs both lanes
-
-When a commit contains Crab pointers, the same push performs more work:
-
-1. Resolve every pointer to a staged recipe or a proven remote copy.
-2. Check which chunk hashes already exist at the remote.
-3. Pack new chunks into compressed, content-addressed xorbs.
-4. Upload xorbs and the shards that locate their chunks.
-5. Upload the Git pack containing both ordinary and pointer blobs.
-6. Verify the complete dependency closure.
-7. Commit the ref update.
-
-Crab overlaps staged reads, compression, and uploads within bounded queues. Backpressure limits in-flight work when the network or object store cannot keep pace. Every stage finishes before Crab releases the ref lock and staging handles.
-
-<GitArchitecturePlayer story="push" />
-
-## One ordering rule prevents visible broken commits
-
-Crab’s central push invariant is:
-
-> **All immutable dependencies are durable before any ref moves.**
-
-For a source-only repository, the new commit stays hidden until its Git pack is durable and its reachable graph passes connectivity checks.
-
-For a repository with Crab pointers, the same rule covers every referenced xorb and shard. A local cache can suggest that content exists, but only canonical remote storage can prove durability for publication.
-
-The final visibility operation is a ref-journal transaction bound to the expected old ref state. Per-ref locks serialize writers to the same branch. Expected-old checks reject stale writers instead of overwriting a teammate’s push.
-
-After the commit, a compactor folds journal transactions into a bounded manifest snapshot. File indexes and exact object locators can be repaired later because they accelerate reads. They do not define whether the visible ref is valid.
-
-This ordering gives each failure point a predictable result:
-
-| Failure point | Result visible to readers |
-|---|---|
-| Before an immutable upload | The old ref remains visible |
-| During xorb, shard, or pack upload | The old ref remains visible; later garbage collection can remove unreferenced objects |
-| During dependency verification | Crab rejects the push and keeps the old ref |
-| During a conflicting ref transaction | Crab rejects or replans the stale edit |
-| After the ref commit, during derived indexing | The new ref remains valid; repair can rebuild acceleration metadata |
-
-A visible pointer should never name missing content. Crab checks this property at the publication boundary instead of relying on later repair.
-
-<GitArchitecturePlayer story="failure" />
-
-## Clone and hydrate reconstruct the files you need
-
-A collaborator starts with a Crab-aware clone:
+Commit and push the mixed change:
 
 ```bash
-crab clone crab://company-repos/vision-search
-cd vision-search
-crab status
-```
-
-The clone contains complete Git history and the committed pointer identities. Large files may remain as pointers until the collaborator requests their bytes.
-
-Hydrate only the files needed for the current task:
-
-```bash
-crab hydrate models/encoder.safetensors
-crab hydrate 'datasets/**'
-```
-
-Hydration follows a verified read path:
-
-1. Read the pointer from the Git worktree state.
-2. Resolve the file recipe through shard metadata.
-3. Plan coalesced byte-range reads from the required xorbs.
-4. Download missing ranges from object storage or reuse the local cache.
-5. Reassemble chunks in their original order.
-6. Verify the complete file’s BLAKE3 hash.
-7. Replace the pointer atomically with the verified file.
-
-<GitArchitecturePlayer story="hydrate" />
-
-Applications never need to understand pointers, chunks, or xorbs. After hydration, `models/encoder.safetensors` is an ordinary file with the original bytes. If reconstruction or verification fails, Crab returns an error and does not expose a partial result.
-
-### Dehydrate clean files to recover disk space
-
-After a training or evaluation job finishes, replace clean full files with their pointers:
-
-```bash
-crab dehydrate models/encoder.safetensors
-crab dehydrate 'datasets/**'
-```
-
-Crab skips files with uncommitted changes. It verifies clean content and performs an atomic replacement, while the durable chunks remain in object storage. You can hydrate the same files again later.
-
-Hydration state is local. Your teammate can keep the model hydrated while your laptop keeps only its pointer. Both worktrees still refer to the same committed file identity.
-
-## Object storage changes the scaling boundary
-
-A conventional Git host places a repository filesystem behind a service fleet. Every serving replica must access or reconstruct that repository state. Large binary history increases the data each replica must account for.
-
-Crab assigns the work differently:
-
-- Clients hash, chunk, pack, upload, and reconstruct content
-- Cloud object storage keeps immutable Git packs, xorbs, shards, and segmented metadata
-- Per-ref locks and expected-old checks coordinate concurrent writers
-- Metadata compaction keeps read indexes bounded
-- Idle repositories consume stored objects without an always-on Crab data server
-
-This design scales client work independently. Separate clients can upload unrelated branches or hydrate unrelated files without routing every byte through one Crab service process.
-
-Object storage still imposes limits. Updates to one hot ref must serialize because Git requires an ordered result. Request latency, range-read fan-out, metadata size, and storage request budgets also affect performance.
-
-Crab keeps those constraints on narrow surfaces. Coalesced range reads reduce request fan-out. Bounded queues control memory and concurrency. Immutable objects let readers cache data without coordinating cache invalidation for each file byte.
-
-## Each layer answers a smaller set of questions
-
-The two-path model remains understandable because each layer owns a defined contract.
-
-Git answers:
-
-- Which commit does this branch identify?
-- Which paths changed in a commit?
-- Which ordinary blobs are reachable?
-- Which pointer identity changed between two versions?
-
-Crab answers:
-
-- Which file does this pointer identify?
-- Which ordered chunks reconstruct the file?
-- Which chunks already exist at the remote?
-- Which xorb byte ranges should a reader fetch?
-- Does the reconstructed content match its full-file hash?
-
-Object storage answers:
-
-- Is this immutable object durable?
-- Does the ref still match the expected old value?
-- Which committed journal generation is visible?
-
-No layer needs to understand every implementation detail. The boundary contracts provide the proof needed by the next operation.
-
-<TakeawayBox title="One mental model">
-Use Git history for every path. Let Crab choose the storage representation for tracked large files. Treat the ref update as the moment both data paths become one visible repository state.
-</TakeawayBox>
-
-## Follow the complete workflow
-
-The first-time setup commands establish shared tracking rules:
-
-```bash
-crab configure s3://company-repos/vision-search --no-auto-track
-crab track '*.safetensors'
-crab track 'datasets/**'
-git add README.md src/
-crab ship models/ datasets/ -m "Add the first training snapshot"
-```
-
-The daily reviewable workflow keeps normal and large changes in one commit:
-
-```bash
-git add src/
-crab add models/ datasets/
-git diff --cached --stat
-git commit -m "Update training data and encoder"
+git commit -m "Update trainer and encoder"
 crab push origin main
 ```
 
-A collaborator hydrates only the content required for current work:
+The Git lane builds and uploads a pack containing commits, trees, source blobs, and pointer blobs. The Crab lane classifies chunks, uploads new xorbs, and publishes complete shard metadata.
+
+<GitArchitecturePlayer story="push" />
+
+Both lanes meet at the ref transaction. Crab proves Git connectivity and pointer closure, compares the expected old branch tip, then publishes the new tip.
+
+The ref transaction also protects source-only readers. They never need to understand Crab metadata, but they still benefit from the rule that a visible mixed commit has complete dependencies.
+
+Writers targeting another branch can prepare work in parallel. Same-ref writers must compare against the branch tip they originally observed, so an older plan cannot silently replace a newer mixed commit.
+
+### A source-only push uses a smaller plan
+
+When only `src/train.py` changes, the Git pack and ref transaction still run. Pointer discovery finds no new managed identity, so the push does not need to build new xorbs or publish new file recipes.
+
+Existing pointers reachable from the commit remain part of closure. Their durable dependencies have already been published, and Crab can prove that state without uploading the model again.
+
+### A model-only push still changes Git history
+
+When only the checkpoint changes, Git receives a new pointer blob, tree, and commit. The Crab data lane may add chunks and metadata, but it does not create an independent “data commit.”
+
+This property keeps rollback direct. Checking out the earlier Git commit selects the earlier pointer recipe. Hydration reconstructs the earlier file subject to the repository's retained-root policy.
+
+## Object storage holds several kinds of immutable evidence
+
+The bucket is not one flat collection of model files named by repository path. Crab stores Git transport objects, chunk data, shard metadata, file-index state, journals, and coordination records under repository-owned namespaces.
+
+Xorbs pack reusable chunks without preserving the source directory layout. Shards connect chunk identities to xorb ranges. File metadata connects full-file identities to ordered recipes. Ref state connects Git names to complete commit identities.
+
+This layout prevents path operations from becoming data operations. Renaming `models/encoder.safetensors` changes the Git tree but can reuse the same recipe and chunks. Deleting the path from one branch does not immediately delete an xorb that another retained recipe still needs.
+
+Operators should therefore use Crab's repository-aware inventory, recovery, and garbage-collection commands. Deleting bucket keys based on a source path cannot account for shared chunks or retained historical roots.
+
+## Failure before publication leaves the old view intact
+
+A client can fail after uploading some immutable objects. Those uploads may be reusable, but no reader sees the proposed commit until the final ref transaction succeeds.
+
+<GitArchitecturePlayer story="failure" />
+
+This ordering turns partial uploads into safe orphans instead of visible broken history. A retry can use the write journal and existing objects; garbage collection can later remove unreachable data after its protection window.
+
+Failure after publication has a different meaning. If response delivery or cleanup fails after the ref transaction, another reader may already see the new complete commit. Retry begins by reading the current ref instead of assuming the old state remains.
+
+This distinction is why the ref journal is more authoritative than a local progress line. Preparation logs say which work a client attempted. The committed ref state says which history became visible.
+
+## Retry behavior depends on the last proven state
+
+If clean fails, no valid pointer should enter the index for that request. Fix local staging or file access and add the path again.
+
+If immutable upload fails, the commit remains local and the remote ref remains old. Restore access and retry; content identities allow completed uploads to be recognized.
+
+If pointer closure fails, keep the prepared objects but do not force publication. Repair or republish the missing recipe, shard, or xorb dependency, then rerun closure.
+
+If expected-old comparison fails, the repository data may be complete but the Git plan is stale. Fetch the new tip, reconcile history, restage any managed file whose bytes changed, and create a new ref plan.
+
+If cleanup fails after the ref transaction, first read the canonical ref. A complete visible update should remain visible while the client finishes lock and staging cleanup.
+
+## Branch switching changes pointers before bytes
+
+When you switch between commits, Git selects the pointer blob for each tracked path. Crab then decides whether the working tree should keep that pointer or materialize its content.
+
+A lazy checkout can switch history without downloading both model versions. Hydrating after the switch reconstructs only the selected pointer. Returning to a cached version may reuse local xorb data.
+
+Dirty materialized files require protection. Dehydrate and checkout operations skip or reject local modifications instead of replacing them as clean committed content.
+
+Switching from one pointer to another does not require both file versions on disk. The client can preserve the selected pointer until an application needs the bytes. If cached xorb ranges satisfy part of the new recipe, later hydration reuses them.
+
+When a managed file is dirty, Git and Crab must preserve user work before either pointer replacement or hydration. The safe response is an explicit conflict or skip, not a silent reconstruction over the local content.
+
+## Clone fetches history before large bytes
+
+A new machine can clone the Git history and pointer blobs without immediately materializing every model:
 
 ```bash
-crab clone crab://company-repos/vision-search
-cd vision-search
-crab hydrate models/encoder.safetensors
-crab hydrate 'datasets/**'
+crab clone crab://team-data/vision-search vision-search-copy
+cd vision-search-copy
+crab status
 ```
 
-Remember four points:
+Hydrate only what the current task needs:
 
-1. `.gitattributes` selects which paths use Crab.
-2. Git commits a pointer for tracked large files and complete blobs for ordinary files.
-3. Push uploads every immutable dependency before it updates the branch.
-4. Hydrate reconstructs and verifies full bytes only where you need them.
+```bash
+crab hydrate 'models/encoder.safetensors'
+```
 
-Continue with [Creating a Repository](/docs/cli/getting-started/first-repository), [Tracking Files](/docs/cli/getting-started/tracking-files), [Adding Files](/docs/cli/daily-workflow/adding-files), and [Pushing Changes](/docs/cli/daily-workflow/pushing-changes).
+<GitArchitecturePlayer story="hydrate" />
+
+Hydration resolves the pointer through file and shard metadata, plans xorb range reads, assembles chunks in recipe order, and verifies the final BLAKE3 identity. Clean committed files can return to pointer form with `crab dehydrate`.
+
+Dehydration changes only the working tree. It does not remove the file recipe, xorb data, commit, or cache entries required by future hydration. Garbage collection operates on remote reachability through a separate repository-scoped policy.
+
+A committed hydration manifest can make working-set choice reviewable. Source-only jobs can use no managed paths, model tests can select one checkpoint, and release jobs can name the complete artifact set required for publication.
+
+## Failures stay attached to their owner boundary
+
+| Symptom | Owning boundary |
+| --- | --- |
+| Ordinary source blob missing after fetch | Git pack connectivity |
+| Tracked file staged as full content | `.gitattributes` and clean filter |
+| Pointer has no staged recipe during push | Local Crab staging |
+| Ref conflict after upload | Expected-old branch comparison |
+| Hydration cannot locate a chunk | Shard and xorb closure |
+| Reconstructed hash differs | Chunk or final-file verification |
+
+The boundary tells you which state can change safely. Reinstalling a filter does not repair a missing remote xorb. Forcing a ref does not repair an incomplete recipe. Clearing a cache does not change committed history.
+
+## Each layer has a narrow responsibility
+
+| Layer | Question it answers |
+| --- | --- |
+| Git commit and tree | Which paths belong to this history state? |
+| Crab pointer | Which exact large file belongs at this path? |
+| File recipe | Which chunks reconstruct that file, and in what order? |
+| Shard | Which xorb range contains each chunk? |
+| Xorb | Where are the compressed immutable data bytes? |
+| Ref journal | Which complete commit is currently visible? |
+
+The boundaries remain interpretable because each format answers one question. Git never needs to understand xorb layout, and object storage never needs to interpret a working tree.
+
+## Rollback and retention cross both lanes
+
+Reverting a mixed commit creates a new Git commit whose tree selects earlier source and pointer content. The revert itself follows the normal push transaction, including closure for every managed pointer reachable from the new tip.
+
+Resetting or force-updating a branch changes which history is active, but it does not immediately erase earlier immutable data. Ref journals and recovery roots can preserve the previous state for restoration.
+
+Repository garbage collection later walks the retained Git roots into pointer recipes and xorbs. It deletes an object only when no retained root reaches it and the grace period has elapsed. This delay protects shared chunks, interrupted writers, and intentional recovery history.
+
+The team should set history retention before it expects storage reclamation. A policy that retains every ref transition indefinitely will keep the data closure behind those transitions, even after current branches move on.
+
+Rollback testing should include a historical managed file. Restore an earlier ref, clone it from another client, hydrate the model, and compare its file hash. This proves the recovery policy protects both the Git commit and its separate data lane.
+
+## Operate the two paths with one evidence set
+
+A production workflow should capture evidence from both lanes. Record the Git commit ID and ref outcome, then record pointer counts, uploaded xorb bytes, closure checks, and hydration hashes.
+
+Monitor object-store errors separately from Git ancestry conflicts. Both can reject a push, but they require different operators and recovery actions.
+
+Retention policy must also cover both paths. Git refs and recovery history determine which commits remain meaningful. Crab garbage collection uses retained roots to keep every xorb needed by those commits.
+
+The final acceptance test uses a new client. Clone the published ref, inspect the source file, hydrate the model, and compare both with the intended commit and source hash.
+
+Run this test for at least one source-only change, one model-only change, and one mixed change. The source-only case proves the Crab integration does not manufacture unnecessary xorb work. The model-only case proves pointer and recipe publication. The mixed case proves both closures meet at one ref.
+
+Include one stale-writer test. Two clients should plan from the same old tip, and only the first complete ref transaction should succeed without reconciliation. This shows that a complete data upload cannot overwrite newer Git history.
+
+## Teach the model through one incident
+
+Suppose a mixed push uploads its Git pack and two xorbs, then loses network access before shard publication. Object inventory now contains new immutable data, but `main` still names the previous commit.
+
+A reader of `main` remains healthy because it resolves only the previous closure. A retry discovers that the immutable uploads exist, publishes the missing metadata, proves both closures, and compares the current ref with its expected old value.
+
+If another contributor changed `main` during the interruption, closure can still succeed while the ref comparison fails. The first writer must reconcile Git history, but it may reuse the already durable chunks when restaging the merged model.
+
+This incident involves storage progress, metadata progress, and Git concurrency without creating an ambiguous branch. The visible ref remains the line between preparation and publication.
+
+## The complete loop
+
+```bash
+crab configure s3://team-data/vision-search
+crab track '*.safetensors'
+crab ship . -m "Add source and model"
+
+crab clone crab://team-data/vision-search vision-search-copy
+cd vision-search-copy
+crab hydrate 'models/*.safetensors'
+crab fsck
+```
+
+This loop preserves one reviewable Git history while letting each content class use the storage path designed for it.

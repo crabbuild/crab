@@ -1,150 +1,126 @@
 ---
-title: "Why We Built Crab: The Problem with Large Files in Git"
-description: "The origin story behind Crab — why large files strain Git, why server-based fixes add operational weight, and how object storage can become the remote."
-date: "2025-09-08"
+title: "Why does Git struggle with large files?"
+description: "See why binary history makes Git repositories heavy and how Crab separates identity from large-file storage."
+date: "2026-05-08"
 author: "Crab Team"
 category: "product"
-tags: ["beginner", "origin-story", "motivation"]
-excerpt: "Git wasn't built for large files. Instead of adding another server to babysit, Crab asks a simpler question: what if object storage is the remote?"
+tags: ["beginner", "motivation", "git"]
+excerpt: "Large binaries turn every version into transfer and storage work. Crab keeps their identity in Git and their bytes in object storage."
 level: "beginner"
 path: "start-here"
 order: 2
 concepts: ["large files", "git limits", "serverless architecture"]
-prerequisites: ["What Is Crab?"]
-outcome: "See why Crab exists and how its serverless premise changes the tradeoffs of large-file versioning."
+prerequisites: ["What is Crab, and when should you use it?"]
+outcome: "Explain the scaling problem Crab is designed to solve and the tradeoffs of its architecture."
 diagramType: "Problem framing"
+meta:
+  contentType: "Conceptual"
+  goal: "Explain why large binary history needs a different data path."
+  audience: "Developers who have experienced slow clones, pushes, or repository growth."
 ---
 
-## The Pain: Git Wasn't Built for Large Files
+Git's object model is excellent for source code, but large binary versions create a different workload. A clone must transfer the reachable history, binary changes can reuse poorly at the Git-object level, and every contributor pays the local disk cost.
 
-If you've ever tried to commit a 2 GB machine learning model, a 500 MB game texture pack, or a dataset that grows every week, you already know the feeling. Git slows to a crawl. Your `.git` folder balloons. Clones take forever. Colleagues curse your name in Slack.
+<LargeFileProblemDiagram />
 
-Git is brilliant at tracking text — source code, configs, documentation. It diffs line by line, compresses efficiently, and keeps a full history without breaking a sweat. But hand it a binary file larger than a few megabytes and the whole model breaks down. Every version of that file gets stored in full. There's no meaningful diff. Your repository becomes a liability.
+## The problem compounds with every version
 
-We lived this pain firsthand. Our team was working with repositories containing hundreds of gigabytes of ML model weights, training data, and media assets. Every `git clone` was a coffee break. Every `git push` was a prayer. We needed a better way.
+A binary file can be perfectly valid in Git. The scaling problem appears when that file is large, changes across regular work, and remains reachable through history.
 
-## Existing Solutions and Their Tradeoffs
+Suppose a model checkpoint is 8 GB and a training run changes a small region. The new version is still another large Git object. Repeat that cycle across branches and releases, and the repository becomes expensive to clone, cache, back up, and operate.
 
-We tried everything. Here's what we found:
+The result is not only slower commands. Teams move related data outside the repository or share bucket paths in documents. Naming conventions then reconnect a model with the source commit that produced it.
 
-**Git LFS** — the most popular option. It replaces large files with pointer files and stores the actual content on a separate server. It works, but you need to run (or pay for) an LFS server. GitHub's LFS has bandwidth limits. Self-hosted LFS means another service to maintain, monitor, and scale. And there's no deduplication — store the same 1 GB file in two branches and you're paying for 2 GB.
+Git's strengths explain this behavior. A commit closes over its trees and blobs, and a clone can obtain the complete reachable object graph. That self-contained model is valuable for source code because the graph remains compact and Git can compress related objects effectively.
 
-**DVC (Data Version Control)** — designed for ML pipelines. It tracks large files outside git and pushes them to remote storage. But DVC introduces its own CLI, its own workflow (`dvc push`, `dvc pull`), and its own metadata files. Your team now needs to learn two version control systems. And if someone forgets `dvc pull` after cloning, nothing works.
+Large binary history changes the economics of the same guarantee. Every clone, mirror, scan, and backup must account for the reachable objects. A shallow clone can narrow history for one client, but it does not change what the repository retains or what other workflows may need.
 
-**Manual cloud storage** — just throw files in S3 and reference them by URL. Simple, but now you've lost versioning. You've lost atomic commits. You can't roll back to "the model that worked last Tuesday" without building your own tracking system. You've essentially given up on git's core value proposition.
+The problem becomes organizational when teams avoid fresh clones, retain undocumented local copies, or split code from data without a durable identity link. At that point, slow transfer has already changed how the repository is trusted.
 
-Every solution we evaluated had the same fundamental architecture:
+## Common alternatives move the pressure elsewhere
 
-```
-Your Machine → Git Server → Separate Storage Server
-                              ↑
-                    (you maintain this)
-```
+Keeping binaries outside Git makes the source repository smaller, but version identity becomes a separate process. A hosted large-file service preserves Git integration, but introduces service limits, bandwidth policies, and another availability boundary.
 
-There's always a server in the middle. Something to deploy, configure, monitor, patch, and pay for — even when all you want is to store bytes somewhere and get them back later.
+Self-hosting can provide more control. It also makes the team responsible for deployment, upgrades, scaling, observability, and recovery. None of these choices is universally wrong; they assign the operational cost to different places.
 
-## The Insight: What If Storage IS the Server?
+A whole-file pointer system solves Git object growth, but each changed file can still become another complete storage and transfer unit. This tradeoff is acceptable for stable assets and smaller repositories. It becomes expensive when a producer rewrites multi-gigabyte files on every iteration while preserving large regions of identical bytes.
 
-One evening, staring at yet another LFS server outage alert, we asked a simple question: **why do we need a server at all?**
+Pipeline-oriented data tools solve another part of the problem. They can connect outputs to stages and remote storage, but they introduce a second command and metadata workflow beside Git. That separation can be valuable for a dedicated data pipeline. It is less attractive when source, configuration, and large artifacts must review and roll back as one commit.
 
-Think about what an LFS server actually does. It receives file uploads and puts them in object storage (usually S3). It receives download requests and streams files back from that same object storage. It's a middleman. A proxy. A $200/month EC2 instance whose entire job is to shuttle bytes between your laptop and an S3 bucket.
+Manual object-store paths remove tooling overhead at first. They also make atomicity, naming, retention, and verification local conventions. Each script must decide which object belongs to a commit and what to do when the upload and source push do not complete together.
 
-What if we cut out the middleman entirely?
+## Repository growth changes team behavior
 
-Cloud object storage — S3, GCS, Azure Blob — already provides everything a file server does: uploads, downloads, access control, durability, availability. It's managed infrastructure that scales to exabytes without you lifting a finger. The only reason we put a server in front of it is because git doesn't know how to talk to S3 directly.
+Large history affects more than clone duration. Continuous integration runners download data they may never read. Developers keep old clones because creating a new one is expensive. Backups, mirrors, and security scans repeat the same transfer cost.
 
-But git has an extension point for exactly this: **remote helpers**. A git remote helper is a program that teaches git how to push and pull from any storage backend. If we wrote a remote helper that speaks directly to object storage, we could eliminate the server entirely.
+Teams may respond by separating code and data informally. A commit message names a bucket key, a spreadsheet maps experiments to checkpoints, or a script assumes the newest timestamp is correct. These conventions reduce Git pressure but weaken reproducibility.
 
-That was the moment Crab was born.
+The missing contract is identity. A source commit should identify the exact data it consumes or produces. That relationship must survive renames, branch changes, storage lifecycle rules, and work on another machine.
 
-<svg viewBox="0 0 800 480" width="100%" role="img" aria-label="Diagram showing pain points on the left (server maintenance, bandwidth costs, no deduplication, complex setup) mapped to Crab's solutions on the right (serverless, pay only for storage, content-addressed dedup, zero config)">
-  <defs>
-    <marker id="arrow-why" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)"/>
-    </marker>
-  </defs>
+## A useful design must preserve four properties
 
-  <text x="400" y="35" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Pain Points → Crab's Solutions"}</text>
+Moving bytes out of Git solves only the first constraint. A practical large-file path also needs to preserve these properties:
 
-  <rect x="30" y="60" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="180" y="90" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Server maintenance & monitoring"}</text>
+1. **Reviewable identity**: the Git commit records which exact file version belongs at each tracked path.
+2. **Byte-exact reconstruction**: another client either rebuilds the original content or receives an error.
+3. **Bounded transfer**: a changed binary does not automatically require another full-file upload.
+4. **Complete publication**: a visible branch never points to large-file data that has not become durable.
 
-  <rect x="30" y="130" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="180" y="160" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Bandwidth costs & transfer limits"}</text>
+Crab's pointer, chunk, shard, and ref contracts follow from these requirements. The formats are implementation details, but each format exists to protect one property.
 
-  <rect x="30" y="200" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="180" y="230" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"No deduplication across versions"}</text>
+These properties also expose incomplete solutions. A URL in a configuration file can be reviewable but may not prove byte identity. A content hash can prove identity but says nothing about whether the bytes are durable. An uploaded object can be durable while the branch still points at an older commit.
 
-  <rect x="30" y="270" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="180" y="300" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Complex setup & configuration"}</text>
+Crab treats those facts as separate evidence. The pointer names the file, the recipe names every chunk, shard terms locate durable ranges, and the ref transaction decides visibility. The added metadata pays for a narrower failure model.
 
-  <rect x="30" y="340" width="300" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="180" y="370" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Separate workflow from git"}</text>
+## Crab separates identity from storage
 
-  <rect x="470" y="60" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="620" y="90" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Serverless — just object storage"}</text>
+Crab keeps a compact pointer in the Git commit and stores the large-file data in object storage. The pointer identifies the original file and the recipe required to reconstruct it.
 
-  <rect x="470" y="130" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="620" y="160" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Pay only for storage you use"}</text>
+This split preserves the relationship between code and data without forcing each large version through Git's normal blob path. Content-defined chunking also lets a new version reuse unchanged chunks from earlier files and commits.
 
-  <rect x="470" y="200" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="620" y="230" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Content-addressed deduplication"}</text>
+## Object storage becomes the durable boundary
 
-  <rect x="470" y="270" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="620" y="300" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Zero config — works out of the box"}</text>
+Object stores already provide durable objects, range reads, lifecycle policies, and access control. Crab uses those primitives directly instead of placing a permanent Crab service in front of them.
 
-  <rect x="470" y="340" width="300" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="620" y="370" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Native git commands — no new CLI"}</text>
+The absence of a central writer creates a consistency requirement: readers must never observe a Git ref before all referenced data is durable. Crab therefore follows one central rule.
 
-  <line x1="330" y1="85" x2="470" y2="85" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
-  <line x1="330" y1="155" x2="470" y2="155" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
-  <line x1="330" y1="225" x2="470" y2="225" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
-  <line x1="330" y1="295" x2="470" y2="295" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
-  <line x1="330" y1="365" x2="470" y2="365" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-why)"/>
+<TakeawayBox title="The publication invariant">
+  Large-file data and metadata become durable first. The visible Git ref moves
+  last, with an atomic compare-and-swap update.
+</TakeawayBox>
 
-  <text x="400" y="440" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Every pain point maps to a design decision"}</text>
-</svg>
+## The storage boundary changes the cost model
 
-## Design Goals
+With ordinary Git blobs, every reachable binary version contributes to repository storage and clone transfer. With a pointer path, Git history grows with compact identities while object storage grows with unique large-file content.
 
-With the core insight in hand, we set four non-negotiable design goals:
+This does not make storage free. The bucket still charges for stored bytes, requests, retrieval, and network transfer. Crab adds controls for those terms: deduplication reduces new bytes, xorb packing reduces requests, caching reduces repeated reads, and lifecycle rules can tier old xorbs.
 
-**Serverless.** No EC2 instances, no containers, no databases. Your repository lives entirely in cloud object storage. The only infrastructure you manage is a bucket — and your cloud provider handles the rest. No more 3 AM pager alerts because your LFS server ran out of disk.
+The architecture also makes costs observable at the storage account your team controls. You can connect object inventory, access logs, retention, and billing to the repository's actual data path.
 
-**Content-addressed deduplication.** When you modify 10 bytes in a 1 GB file, you shouldn't re-upload 1 GB. Crab splits files into variable-size chunks using content-defined chunking. Identical chunks are stored once, regardless of which file or branch they appear in. Iterative large-file work starts to scale with changed chunks, not whole-file versions.
+## The system favors explicit failure
 
-**Git-native.** No new commands to learn. No separate push/pull workflow. You use `git add`, `git commit`, `git push`, and `git clone` exactly as you always have. Crab hooks into git's remote helper and filter process protocols to handle large files transparently. If you know git, you already know Crab.
+A large-file tool must not hide missing bytes behind a successful Git operation. Crab blocks clean when it cannot stage a tracked file. It blocks push when a pointer lacks durable backing data. It blocks hydration when reconstruction or verification fails.
 
-**Zero configuration.** Point Crab at a bucket and start pushing. No server provisioning, no webhook setup, no token management beyond your existing cloud credentials. A new team member clones the repo and everything works — no "did you install the LFS extension?" conversations.
+These errors can interrupt work, but they preserve the stronger contract. A failed command is recoverable. A successful command that published incomplete history would spread corruption to every later reader.
 
-Here's what the workflow looks like in practice:
+## The design starts from recovery, not only the happy path
 
-```bash
-# Initialize Crab in your repo (one time)
-crab init --storage-provider s3 crab://my-team-bucket/ml-models
-crab setup
+A large upload can fail after minutes of useful work. A writer can disappear while holding a lease. Two contributors can push the same branch from the same old tip. A storage class can make an older xorb temporarily unreadable.
 
-# Add a large file — Crab chunks and deduplicates it
-crab add training-data/model-v3.safetensors
+Crab's immutable data objects let retries reuse completed uploads. The write journal records preparation without claiming publication. Expected-old ref updates reject stale writers, while retained roots and grace periods keep garbage collection away from in-flight or recoverable content.
 
-# Commit and push — standard git commands
-git commit -m "Add v3 model weights"
-git push origin main
+The resulting system does not promise that every command succeeds through a network interruption. It promises that interruption does not create a visible commit with missing dependencies. Operators can reason from the last durable boundary and retry the remaining work.
 
-# On another machine — clone and everything is there
-git clone crab://my-team-bucket/ml-models
-```
+## The tradeoff is explicit client responsibility
 
-No server to deploy. No LFS endpoint to configure. No separate `dvc pull` to remember. Just git, a bucket, and your files.
+Each client needs Crab and valid object-storage access. Bucket permissions, retention, and lifecycle rules remain part of the repository's operational design. A team that prefers a fully hosted service may choose Git LFS through its forge instead.
 
-## Where Crab Is Today
+Crab is designed for teams that value direct storage ownership, chunk-level reuse, and selective hydration enough to accept that client-side responsibility. The next decision is architectural, not ideological: [compare Crab and Git LFS on the constraints that matter to your team](/blog/crab-vs-git-lfs).
 
-What started as a frustrated question — "why do we need a server?" — has grown into a tool used by ML teams, game studios, and data engineering groups who got tired of maintaining infrastructure just to store files.
+## Where the architecture earns its cost
 
-Crab today supports S3, Google Cloud Storage, and Azure Blob Storage. It handles repositories with hundreds of gigabytes of data. It deduplicates aggressively, caches intelligently, and integrates with existing Git LFS workflows for teams migrating gradually.
+The strongest candidates combine large mutable binaries, repeated versions, and selective access. Model training, game asset production, data snapshots, and research repositories can satisfy all three conditions. Chunk reuse reduces new storage, and lazy materialization prevents every reader from paying for the complete history.
 
-We're still building. Lazy checkout lets you clone pointer metadata first and download file content only when you need it. A FUSE-based virtual filesystem can make large repositories feel local while bytes stream on demand. Garbage collection reclaims space from deleted branches when you run it.
+A repository with a few stable release archives may not need this machinery. A team whose forge LFS allowance already covers its workload may prefer the hosted integration. A pipeline whose data never needs to share commit identity with source may benefit from a data-specific catalog instead.
 
-But the core insight hasn't changed: your cloud storage is already a world-class file server. You just needed a git remote helper smart enough to use it directly.
-
-If you've felt the pain of large files in git — the slow clones, the ballooning costs, the server babysitting — we built Crab for you. Give it a try and let us know what you think.
+We built Crab for the boundary where Git's history model remains valuable but Git's byte-storage path stops scaling. The goal is not to make every file take the Crab path. It is to let each content class use an appropriate path without breaking one repository history.

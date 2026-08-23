@@ -1,135 +1,142 @@
 ---
-title: "What Is Crab? Git for Large Files, Without the Server"
-description: "Crab is a serverless git remote helper that stores your large files directly in cloud object storage — no servers, no databases, no LFS endpoints. Here's what that means for you."
-date: "2025-08-18"
+title: "What is Crab, and when should you use it?"
+description: "Understand how Crab keeps Git as the interface while storing large-file data directly in object storage."
+date: "2026-05-01"
 author: "Crab Team"
 category: "product"
 tags: ["beginner", "introduction", "overview"]
-excerpt: "Crab lets you push and pull large files with plain git commands, storing everything in your own cloud bucket. No server to run, no LFS endpoint to maintain — just your files and your storage."
+excerpt: "Crab gives large files a separate data path without splitting them from the repository's Git history."
 level: "beginner"
 path: "start-here"
 order: 1
 concepts: ["serverless git", "object storage", "large files"]
 prerequisites: []
-outcome: "Understand the core Crab mental model: Git remains the interface, object storage becomes the durable large-file backend."
+outcome: "Decide whether Crab's Git-plus-object-storage model fits your repository."
 diagramType: "Mental model"
+meta:
+  contentType: "Conceptual"
+  goal: "Explain Crab's mental model and help readers decide whether to continue."
+  audience: "Developers and technical leads evaluating version control for large files."
 ---
+
+Crab is a Git remote helper for repositories that contain large binary files. Git still records commits, trees, and small blobs. Crab stores tracked large-file data in S3, Google Cloud Storage, or Azure Blob Storage, then keeps a compact pointer in Git history.
+
+<TakeawayBox title="The mental model">
+  One repository keeps one Git history, but ordinary files and tracked large
+  files take different storage paths.
+</TakeawayBox>
+
+<CrabMentalModelDiagram />
+
+## Crab changes the data path, not the history
+
+Source code, configuration, and documentation remain ordinary Git blobs. Files matched by Crab tracking rules pass through Crab's filter, which replaces the Git blob with a pointer to a byte-identical recipe.
+
+During a push, Crab splits tracked files at content-defined boundaries, identifies chunks by their content, and uploads only data that is not already present. It publishes the data and reconstruction metadata before it makes the new branch head visible.
+
+During a clone, Git can check out the small pointers first. You can then hydrate selected files, hydrate everything, or mount the repository so content arrives when an application reads it.
+
+The pointer remains part of the commit, so a branch or tag still identifies one exact large-file version. Renaming a managed file changes the Git tree. Replacing its content changes the pointer identity. Reverting the commit restores the earlier pointer, which Crab can resolve through the same immutable data store.
+
+This arrangement keeps ordinary Git operations useful. You can inspect history, compare pointer changes, review path selection, and merge source changes without downloading every managed byte. A tool that needs the real model, archive, or dataset hydrates that path before reading it.
+
+## The pointer is a contract, not a placeholder
+
+A Crab pointer is small enough for Git, but it is not an informal bucket note. It records the expected file identity and size. Crab metadata expands that identity into an ordered reconstruction recipe.
+
+That distinction matters during recovery. A loose bucket URL can change, disappear, or point at the wrong upload. A committed pointer continues to name the expected bytes even when Crab repacks chunks or changes their physical xorb locations.
+
+The pointer also gives publication a testable boundary. Before the branch can advance, Crab must prove that the pointer resolves through durable metadata to durable data. During hydration, Crab must rebuild the complete file and match the recorded identity. Both sides test the same contract.
+
+## “Serverless” means the bucket is the shared service
+
+Crab does not require a Crab data server or database between the repository and object storage. Each client reads and writes the bucket directly with the credentials and policies your team controls.
+
+This removes a service from the architecture, but it does not remove coordination. Crab uses immutable objects, short leases, journals, and compare-and-swap ref updates so concurrent clients cannot publish a ref that points to missing data.
+
+## Deduplication works across versions
+
+Git handles text changes well because its object model and compression are designed around source history. Large binary changes can make whole-file versions expensive.
+
+Crab finds content-defined chunks inside a file. If a new checkpoint reuses most bytes from the previous checkpoint, those identical chunks keep the same identity and do not need another upload. Storage grows with new content, not automatically with every full file version.
+
+## Crab is a strong fit when three conditions hold
 
 <ConceptChecklist
   items={[
-    "Why large files make plain Git slow and expensive",
-    "How Crab routes large-file bytes directly to your cloud bucket",
-    "Where deduplication, pointers, and hydration fit in the workflow",
-    "When Crab is a better fit than a hosted LFS server"
+    "The repository contains models, datasets, media, archives, or other large binaries.",
+    "Your team can use object storage and manage access to a bucket.",
+    "You want large files in the same commits and branches as the code that uses them.",
+    "Selective hydration or chunk-level reuse would reduce transfer and local disk pressure."
   ]}
 />
 
-<TakeawayBox>
-  Crab keeps Git as the interface but moves large-file storage to the object
-  store you already control. The main shift is mental: storage becomes the
-  server.
-</TakeawayBox>
+Crab may not fit a small source-only repository or a team without object-storage credentials. It also lacks a hosted web interface for managing every large-file object.
 
-## The Short Version
+Git LFS can be a better fit when your forge already supplies enough storage and bandwidth without operational friction.
 
-You have large files — models, datasets, game assets, media — and git wasn't built for them. Crab fixes that. It's a small tool that plugs into git and routes your large files straight to cloud storage (S3, GCS, or Azure). No server in between. No infrastructure to manage. Just your files, your bucket, and the git commands you already know.
+## Different contributors can materialize different working sets
 
-## Who Is Crab For?
+One repository does not require one checkout shape. A source developer can keep all model paths as pointers. A model engineer can hydrate the active checkpoints. A release job can hydrate a committed manifest, while an exploratory analysis tool can read through a mount.
 
-Crab is built for teams that work with large files every day but don't want to run (or pay for) dedicated file servers.
+These clients still share the same commits and refs. Materialization is local policy, not a separate version of history. A pointer-only checkout and a hydrated checkout agree about which file belongs at a path, even though only one has the full bytes on disk.
 
-**Machine learning engineers** who iterate on multi-gigabyte model weights and training datasets. You push a new checkpoint, and Crab only uploads the parts that actually changed — not the entire file again.
+This matters when repository content exceeds a laptop or runner. Teams do not need to split history merely because different jobs have different storage capacity. They can make the required working set explicit for each workflow instead.
 
-**Game developers** managing binary assets like textures, meshes, and audio. Your artists commit assets alongside code, and everyone clones only what they need for their current task.
+## Each storage layer has one responsibility
 
-**Data teams** versioning large Parquet files, database dumps, or media libraries. You get full git history for your data without blowing up your storage bill.
+Crab becomes easier to operate when you separate repository identity from file materialization. Git answers which version belongs to a commit. Crab metadata answers how to reconstruct that version. Object storage supplies the immutable bytes.
 
-If your workflow involves files bigger than what GitHub or GitLab comfortably handles, Crab is worth a look.
+| Layer | Stores | Does not decide |
+| --- | --- | --- |
+| Git objects | Commits, trees, ordinary blobs, and Crab pointers | Where xorb ranges live |
+| Crab file metadata | File identities and ordered reconstruction recipes | Which branch is current |
+| Shards | Chunk locations inside xorbs | Which files your task needs |
+| Xorbs | Packed, compressed large-file chunks | Git history or path selection |
+| Ref journal | The visible branch and tag state | Working-tree hydration state |
 
-## How It Works
+This separation keeps failure boundaries narrow. A missing local cache entry causes an origin read, not a history change. A failed upload blocks the ref update, not an existing reader. A dehydrate operation changes local materialization, not the committed file identity.
 
-The core idea is simple: your repository talks directly to cloud storage. There's no server sitting in between.
+## One edit shows why the model matters
 
-<svg viewBox="0 0 720 260" width="100%" role="img" aria-label="Diagram showing how Crab connects your local git repository directly to cloud object storage with no server in between">
-  <defs>
-    <marker id="arrow-what-is" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+Consider two 8 GB model checkpoints that share 7.5 GB of byte content. A whole-file storage path treats them as two independent objects. Crab can identify the unchanged chunks and upload only the new regions, plus the metadata for the second recipe.
 
-  {/* Local machine */}
-  <rect x="20" y="80" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="120" y="115" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Your Machine"}</text>
-  <text x="120" y="142" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"git repo + crab"}</text>
-  <text x="120" y="164" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"large files live here"}</text>
+The exact savings depend on the file format. Encryption, recompression, or container rewrites can change nearly every byte. Append-heavy data, model checkpoints, copied assets, and files with stable internal regions tend to preserve more reuse.
 
-  {/* Arrow */}
-  <line x1="220" y1="130" x2="360" y2="130" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-what-is)" />
-  <text x="290" y="118" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"push / pull"}</text>
+Clone behavior changes as well. A contributor who edits source code can clone the Git history and keep model pointers. A training job can hydrate one model family. An analysis tool with unpredictable reads can use a mount.
 
-  {/* No server - crossed out */}
-  <rect x="310" y="185" width="100" height="40" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" strokeDasharray="4 3" />
-  <text x="360" y="210" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"no server"}</text>
+## Crab does not replace every repository service
 
-  {/* Cloud storage */}
-  <rect x="380" y="80" width="320" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="540" y="115" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Cloud Object Storage"}</text>
-  <text x="540" y="142" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"S3 / GCS / Azure Blob"}</text>
-  <text x="540" y="164" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"your bucket, your data"}</text>
-</svg>
+Crab owns Git transport and the managed large-file data path. It does not become a code-review website, identity provider, secrets manager, or cloud-policy engine. Teams still choose how they review commits, issue short-lived credentials, audit bucket access, and protect release refs.
 
-When you run `git push`, Crab intercepts the large files, splits them into chunks, deduplicates them against what's already in your bucket, and uploads only the new pieces. When you `git clone` or `git pull`, it reassembles your files from those chunks. The entire process uses standard git commands — no new workflow to learn.
+The serverless claim is therefore narrow and useful: no Crab data server sits between the client and object storage. Removing that service reduces one availability and scaling boundary. It also makes bucket policy, client installation, and provider observability part of repository operations.
 
-## What Makes Crab Different from Git LFS
+This boundary is worth stating during adoption. A team that expects Crab to replace every forge feature will evaluate the wrong system. A team that needs Git-compatible storage for large files can evaluate the exact path Crab owns.
 
-If you've used Git LFS before, you know the drill: set up a server, configure endpoints, manage storage quotas, and hope the server stays up when your team needs it. Crab takes a fundamentally different approach.
+## Evaluate the operating contract before adoption
 
-**No server to run.** Git LFS requires a dedicated server (or a hosted service) to store and serve your files. Crab stores everything directly in your cloud bucket. There's nothing to deploy, scale, or keep online.
+Run a small pilot with representative files and workflows. Measure new bytes uploaded after a realistic edit, clone metadata size, hydration transfer, and object-store request counts.
 
-**Smart deduplication.** When you modify a large file, LFS uploads the entire new version. Crab splits files into content-aware chunks and only uploads the pieces that actually changed. Edit one layer of a 4 GB model? You might upload 50 MB instead of 4 GB.
+Confirm these operational requirements during the pilot:
 
-**You own the storage.** Your files live in your own S3 bucket (or GCS, or Azure). You control access, retention, and cost. There's no third-party service holding your data or charging per-seat fees for storage access.
+- **Credentials**: every client can obtain scoped access to the repository prefix
+- **Recovery**: the team understands ref history, retained roots, and garbage-collection policy
+- **Local capacity**: developers know when to hydrate, dehydrate, or mount content
+- **Automation**: continuous integration jobs install Crab and request only their required files
+- **Ownership**: someone owns bucket lifecycle, retention, access, and cost review
 
-## Try It in 30 Seconds
+The pilot should end with a fresh clone and cryptographic comparison of representative files. Upload statistics alone do not prove that another machine can reconstruct the published state.
 
-Here's what using Crab looks like. If you've used git before, this will feel familiar:
+## The working loop stays close to Git
+
+A new repository usually starts with three commands:
 
 ```bash
-# Install crab
-curl -fsSL https://crab.build/install.sh | bash
-
-# Initialize crab in an existing git repo
-cd my-project
-crab init crab://my-bucket/my-project
-crab setup
-
-# Add a large file and push
-crab add models/checkpoint-v2.bin
-git commit -m "Add latest model checkpoint"
-git push origin main
+crab configure s3://team-data/vision-search
+crab track '*.safetensors'
+crab ship . -m "Add the first model"
 ```
 
-That's it. Your 3 GB model file is now chunked, deduplicated, and stored in your S3 bucket. Your teammates can clone the repo and pull down exactly the files they need — no special setup on their end beyond having Crab installed.
+`crab configure` connects the repository and installs the Git integration. `crab track` writes the large-file pattern. `crab ship` stages, commits, and pushes through the configured Crab remote.
 
-## What Happens Under the Hood
-
-You don't need to understand the internals to use Crab, but here's the quick version:
-
-1. **Chunking** — Crab splits your file at content-determined boundaries (not fixed sizes). This means small edits only affect nearby chunks.
-2. **Deduplication** — Before uploading, Crab checks which chunks already exist in your bucket. Duplicates are skipped entirely.
-3. **Upload** — Only genuinely new chunks get uploaded and compressed.
-4. **Metadata** — A lightweight manifest tracks which chunks make up each file version, so reconstruction is fast and exact.
-
-The result: fast pushes, minimal bandwidth, and storage costs that scale with your actual unique data — not with how many times you've modified a file.
-
-## Getting Started
-
-Crab works on macOS, Linux, and Windows. It supports S3, Google Cloud Storage, and Azure Blob Storage. You can start using it in under five minutes:
-
-1. Install Crab (one command)
-2. Point it at a bucket you own
-3. Use git normally — Crab handles the rest
-
-Check out our [Getting Started guide](/blog/getting-started-crab) for a full walkthrough, or visit the [CLI documentation](/docs/cli) for detailed command reference.
-
-Whether you're versioning ML models, game assets, or research datasets, Crab gives you the version control workflow you already know — without the server you never wanted to manage.
+For a guided setup, continue with [How do you set up a Crab repository?](/blog/getting-started-crab). To compare architectures first, read [Should you use Crab or Git LFS?](/blog/crab-vs-git-lfs).

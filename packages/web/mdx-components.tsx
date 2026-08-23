@@ -15,6 +15,21 @@ import {
   TakeawayBox,
 } from '@/components/blog/blog-mdx-helpers';
 import { GitArchitecturePlayer } from '@/components/blog/git-architecture-player';
+import { BlogProcessPlayer } from '@/components/blog/blog-process-player';
+import {
+  CacheHierarchyDiagram,
+  CrabMentalModelDiagram,
+  DedupPipelineDiagram,
+  FirstPushStateDiagram,
+  FirstRepositoryDiagram,
+  GarbageCollectionDiagram,
+  HydrationPlanDiagram,
+  LargeFileProblemDiagram,
+  LazyCheckoutDiagram,
+  LfsComparisonDiagram,
+  LfsMigrationDiagram,
+  StorageTierDiagram,
+} from '@/components/blog/blog-diagrams';
 import type { MDXComponents } from 'mdx/types';
 import {
   Children,
@@ -97,6 +112,19 @@ export function getMDXComponents(components?: MDXComponents) {
     SystemNote,
     TakeawayBox,
     GitArchitecturePlayer,
+    BlogProcessPlayer,
+    CacheHierarchyDiagram,
+    CrabMentalModelDiagram,
+    DedupPipelineDiagram,
+    FirstPushStateDiagram,
+    FirstRepositoryDiagram,
+    GarbageCollectionDiagram,
+    HydrationPlanDiagram,
+    LargeFileProblemDiagram,
+    LazyCheckoutDiagram,
+    LfsComparisonDiagram,
+    LfsMigrationDiagram,
+    StorageTierDiagram,
     ...components,
   } satisfies MDXComponents;
 }

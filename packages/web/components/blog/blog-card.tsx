@@ -3,6 +3,7 @@ import Link from "next/link"
 
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { formatBlogDate } from "@/lib/blog-date"
 import { cn } from "@/lib/utils"
 
 export interface BlogCardProps {
@@ -37,15 +38,8 @@ export function BlogCard({
           <CardTitle className="mt-2 text-base font-semibold">
             {title}
           </CardTitle>
-          <time
-            dateTime={date}
-            className="text-xs text-muted-foreground"
-          >
-            {new Date(date).toLocaleDateString("en-US", {
-              year: "numeric",
-              month: "long",
-              day: "numeric",
-            })}
+          <time dateTime={date} className="text-xs text-muted-foreground">
+            {formatBlogDate(date)}
           </time>
         </CardHeader>
         <CardContent>

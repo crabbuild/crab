@@ -1,232 +1,218 @@
 ---
-title: "Git LFS Compatibility Layer"
-description: "Already using Git LFS? Crab can preserve familiar pointer and pattern workflows while moving large-file bytes to your own cloud bucket."
-date: "2025-07-21"
+title: "How do you move a Git LFS repository to Crab?"
+description: "Choose between a compatible Crab transfer agent and a coordinated history rewrite from LFS pointers to native Crab pointers."
+date: "2026-08-14"
 author: "Crab Team"
 category: "architecture"
-tags: ["git-lfs", "migration", "compatibility", "deduplication"]
-excerpt: "Crab uses Git LFS extension points to route large-file bytes to your own bucket, then lets teams adopt deduplication and history migration when they are ready."
+tags: ["git-lfs", "migration", "compatibility", "history-rewrite"]
+excerpt: "Preserve LFS pointers first if you need a low-risk bridge; rewrite history only when the team is ready for new commit identities."
 level: "intermediate"
 path: "advanced-operations"
 order: 5
 concepts: ["Git LFS", "custom transfer", "migration", ".gitattributes"]
-prerequisites: ["Cost Optimization: S3 Storage Classes and Request Budgets", "Crab vs Git LFS"]
-outcome: "Plan a gradual migration from Git LFS while keeping existing patterns and automation usable."
-diagramType: "Migration bridge"
+prerequisites: ["How do you control Crab object-storage cost?", "Should you use Crab or Git LFS?"]
+outcome: "Plan and verify either a compatible LFS transfer path or a native Crab history conversion."
+diagramType: "Migration decision flow"
+meta:
+  contentType: "How-to"
+  goal: "Separate reversible transfer-agent adoption from coordinated history rewriting."
+  audience: "Teams with existing Git LFS pointers, automation, and remote objects."
 ---
 
-<BeforeAfter
-  before={[
-    "Large files move through a hosted or self-managed LFS server.",
-    "Storage, bandwidth, and availability are tied to that server.",
-    "Migration usually feels like a disruptive cutover."
-  ]}
-  after={[
-    "Existing LFS pointers and patterns keep working.",
-    "Large-file bytes stream directly to your cloud bucket.",
-    "Teams can adopt Crab incrementally and optimize later."
-  ]}
-/>
+Crab offers two different paths for an LFS repository. The compatibility path keeps LFS pointer format and commands while using Crab as Git LFS's custom transfer agent. The native path rewrites selected LFS history into Crab pointers backed by chunks, xorbs, and shards.
 
-## Already Using Git LFS? Crab Works with Your Existing Setup
+<LfsMigrationDiagram />
 
-If your team uses Git LFS today, you already have the basics in place: a `.gitattributes` file marks which patterns are large, `git lfs` commands move bytes around, and your CI runs `git lfs pull` before tests. The pieces work — but a separate LFS server sits in the middle, and that server is the part that breaks, throttles, or gets expensive.
+## Separate pointer format, transfer path, and storage layout
 
-Crab keeps every part of your workflow except the server. Your `.gitattributes`, your `git lfs` commands, your CI scripts — none of it has to change. LFS-tracked files just go straight to your own cloud bucket instead of through a hosted middleman.
+Migration discussions can combine three independent choices:
 
-You can adopt Crab one step at a time. There's no big-bang cutover, no flag day, and no need to rewrite history before things start working.
+- **Pointer format**: the blob stored in Git history, either LFS or native Crab
+- **Transfer path**: the client integration that uploads and downloads managed objects
+- **Storage layout**: whole-file LFS objects or native chunk, xorb, and shard data
 
-## TL;DR
+The transfer-agent path changes transfer routing while preserving LFS pointers and commit IDs. Native conversion changes the pointer and storage layout, which rewrites every affected commit and descendant.
 
-- **Drop-in compatible** — your `.gitattributes`, `git lfs` commands, and CI pipelines keep working unchanged
-- **No LFS server** — large files travel directly to S3, GCS, or Azure Blob using your own credentials
-- **Optional deduplication** is available when you are ready to optimize overlapping large-file history
-- **Migrate incrementally** — install the transfer agent first, rewrite history later (or never)
+State the desired end condition before running a command. A team seeking direct bucket ownership may need only the compatibility bridge. A team seeking chunk reuse and native hydration needs conversion and the history coordination that follows.
 
----
+## Inventory pointers and tracking rules first
 
-## How Crab Slots into Git LFS
+Run the migration from a disposable clone with a clean working tree. Record current refs, remotes, `.gitattributes`, and pointer inventory before changing configuration.
 
-Git LFS leans on two well-defined extension points: a `.gitattributes` filter rule that tells Git "this file type is large", and a [custom transfer agent](https://github.com/git-lfs/git-lfs/blob/main/docs/custom-transfers.md) that handles the actual upload and download. The traditional LFS server is just one possible agent. Crab is another.
+```bash
+git status --short
+git remote -v
+git lfs ls-files
+crab lfs migrate info --pointers only --everything
+```
 
-When Git encounters a file marked with `filter=lfs`, it writes a small pointer in your repo (a few hundred bytes) and hands the real content to the transfer agent. With Crab installed, that agent is `crab` itself — and instead of POSTing to a Batch API server, it streams the bytes straight to your bucket.
+Verify that every required LFS object is still available from its current remote. A history rewrite cannot recover bytes that no source can provide.
 
-<svg viewBox="0 0 760 280" width="100%" role="img" aria-label="Diagram showing how Crab routes Git LFS pointer files directly to your cloud bucket, replacing the traditional LFS server.">
-  <defs>
-    <marker id="arrow-lfs-route" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <path d="M0,0 L7,2.5 L0,5" fill="none" stroke="var(--primary)" strokeWidth="1.5" />
-    </marker>
-  </defs>
+Save hashes for representative large files before changing transfer or history. The later compatibility and native checks should reconstruct those exact bytes.
 
-  {/* Title */}
-  <text x="380" y="34" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"LFS pointer → your cloud bucket"}</text>
+Inventory automation as well as repository data. Continuous integration images, developer bootstrap scripts, hooks, and deployment jobs may call `git lfs` directly even when contributors do not.
 
-  {/* LFS Pointer */}
-  <rect x="40" y="100" width="180" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="130" y="132" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"LFS Pointer"}</text>
-  <text x="130" y="154" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"~130 bytes in git"}</text>
+Classify LFS objects by availability. Some may exist in the local clone, some only at the current LFS endpoint, and some may be missing from both. Record missing object IDs before choosing a migration scope.
 
-  {/* Crab transfer agent */}
-  <rect x="280" y="100" width="200" height="80" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="380" y="132" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Crab Transfer Agent"}</text>
-  <text x="380" y="154" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"runs locally on your machine"}</text>
+Inspect all selected refs, including annotated tags and release branches. A current checkout can appear healthy while an older tag points at an LFS object the server no longer retains.
 
-  {/* Cloud bucket */}
-  <rect x="540" y="60" width="200" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="640" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Your Cloud Bucket"}</text>
-  <text x="640" y="114" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"S3 / GCS / Azure"}</text>
+Record signed commits and tags as well. Rewriting their object IDs invalidates existing signatures and requires an explicit signing and provenance plan.
 
-  {/* Faded LFS server */}
-  <rect x="540" y="170" width="200" height="70" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" strokeDasharray="6 4" opacity="0.45" />
-  <text x="640" y="200" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14" opacity="0.7">{"Hosted LFS Server"}</text>
-  <text x="640" y="222" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12" opacity="0.7">{"no longer required"}</text>
-  <line x1="552" y1="178" x2="728" y2="232" stroke="var(--primary)" strokeWidth="2" opacity="0.55" />
+## Use the transfer agent for a compatible bridge
 
-  {/* Arrows */}
-  <line x1="220" y1="140" x2="272" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-route)" />
-  <line x1="480" y1="125" x2="532" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-route)" />
-</svg>
-
-The pointer file in your git history is the same format LFS has always used. Anyone with a working LFS setup can still read it — Crab just adds a faster, cheaper, server-free way to fetch the bytes it points to.
-
-## Install Once, Keep Working
-
-The first step takes one command and changes nothing about how you work day to day:
+Install Crab as the repository's LFS transfer agent:
 
 ```bash
 crab lfs install
-# Configures git to route lfs transfers through crab.
-# Your .gitattributes, hooks, and CI scripts stay exactly as they are.
+crab lfs env
+crab lfs fetch
+crab lfs checkout
+crab lfs fsck
 ```
 
-After that, `git lfs track`, `git push`, and `git lfs pull` all behave like before. The only thing that's different is where the bytes end up — your bucket, addressed by your credentials. Developers who haven't installed Crab yet can keep using the old LFS server (if one is still online), so adoption can be gradual rather than coordinated.
+This path preserves LFS pointers and familiar LFS operations. It is useful when existing CI, clients, or downstream tools still require LFS semantics.
 
-This is the entire migration for many teams. You stop paying for a hosted LFS plan, point Crab at your bucket, and the rest of the workflow stays put.
+The compatibility layer does not make an LFS pointer a native Crab pointer. Treat it as a stable bridge, not as evidence that chunk-level native storage has already replaced LFS object history.
 
-## Compatibility First, Savings When You're Ready
+Git continues to store the LFS pointer format and invokes the configured custom transfer agent for object upload and download. Existing pointer object IDs and commit identities remain unchanged.
 
-Crab gives you a choice in how stored objects are laid out, and the choice is meant to be reversible.
+This path narrows cutover risk because clients can adopt the new transfer route without rewriting refs. It also preserves whole-file LFS object semantics, so changed versions do not automatically gain native Crab chunk reuse.
 
-**Compatibility mode** stores each LFS object whole, in the same SHA-256-addressed layout an LFS server would use. That predictability matters during a migration: if your CI scripts or backup tools expect to find objects under a familiar path, they still find them.
+Keep a rollback record of the prior Git configuration. `crab lfs uninstall` removes Crab's transfer-agent entries, but the team still needs a working LFS endpoint before switching clients back.
 
-**Crab-native storage** runs files through Crab's content-defined chunking pipeline, so files that share large stretches of bytes can share storage. The LFS compatibility layer can coexist with that native path, and `crab lfs dedup --dry-run` helps identify local LFS objects that also exist in Crab staging before any cleanup.
+Test upload and download separately. Publish one new LFS object through the transfer agent, remove the local LFS object cache in a disposable clone, and fetch it again through the configured path. Existing object download alone does not prove new writes use the intended destination.
 
-The savings show up wherever your team iterates on big files. A model checkpoint that grows by a small percentage each week, a Unity scene with daily edits, a dataset that gets re-exported with mostly stable rows — all of those can store roughly the changed slice instead of the whole file. The exact reduction depends on how much byte-level overlap exists between versions.
+Confirm how non-Crab clients behave. A contributor without the custom transfer configuration may continue contacting the prior LFS endpoint or fail to materialize files. Decide whether that mixed-client period is supported and how bootstrap tooling enforces the configuration.
 
-Most teams start with compatibility, confirm everything is healthy, and only then decide whether a Crab-native migration or cleanup pass is worth coordinating. You don't have to commit upfront.
+During the bridge, monitor both systems. Existing historical objects may still come from the old endpoint while newly transferred objects use the Crab path. Keep retention on the old source until inventory proves the supported ref set no longer depends on it.
 
-## Migrating an Existing Repository
+## Use native conversion when chunk reuse matters
 
-For most teams, the install step is enough. If you also want existing history rewritten, Crab exposes the same style of import/export workflow teams know from `git lfs migrate`. Use it deliberately: it rewrites refs, requires a clean working tree, and should be tested on a backup before force-pushing shared branches.
+`crab lfs migrate export --to-crab` resolves selected LFS objects and rewrites their Git blobs as native Crab pointers. This changes commit IDs for rewritten commits and every descendant.
 
-<svg viewBox="0 0 780 220" width="100%" role="img" aria-label="Three-phase migration workflow: inspect repository history, import matching files as LFS pointers, then verify and coordinate the rewritten refs.">
-  <defs>
-    <marker id="arrow-lfs-migrate" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <path d="M0,0 L7,2.5 L0,5" fill="none" stroke="var(--primary)" strokeWidth="1.5" />
-    </marker>
-  </defs>
-
-  {/* Title */}
-  <text x="390" y="36" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Migration pipeline"}</text>
-
-  {/* Step 1 */}
-  <rect x="40" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 1"}</text>
-  <text x="140" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Inspect"}</text>
-  <text x="140" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"find large files"}</text>
-  <text x="140" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"or existing pointers"}</text>
-
-  {/* Arrow 1→2 */}
-  <line x1="240" y1="120" x2="288" y2="120" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-migrate)" />
-
-  {/* Step 2 */}
-  <rect x="296" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="396" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 2"}</text>
-  <text x="396" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Import"}</text>
-  <text x="396" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"rewrite matching"}</text>
-  <text x="396" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"history blobs"}</text>
-
-  {/* Arrow 2→3 */}
-  <line x1="496" y1="120" x2="544" y2="120" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lfs-migrate)" />
-
-  {/* Step 3 */}
-  <rect x="552" y="70" width="200" height="100" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="652" y="100" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" fontWeight="bold">{"STEP 3"}</text>
-  <text x="652" y="124" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Verify"}</text>
-  <text x="652" y="146" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"check status,"}</text>
-  <text x="652" y="162" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"fsck, then push"}</text>
-
-  {/* Footnote line */}
-  <text x="390" y="200" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"Inspect first; rewrite only after a backup and a clean working tree."}</text>
-</svg>
-
-Start by inspecting the repository. `crab lfs migrate info` summarizes large candidates, and `--pointers` switches the report to existing LFS pointers in `HEAD`:
+Test the exact scope in an isolated clone. Write an object map so old and new commit identities can be audited:
 
 ```bash
-crab lfs migrate info --above 10mb
-crab lfs migrate info --pointers
+crab lfs migrate export \
+  --include '*.safetensors' \
+  --to-crab \
+  --everything \
+  --object-map ../lfs-to-crab.csv
 ```
 
-When you are ready to rewrite, choose the exact pattern and scope. `--everything` expands the rewrite from the current branch to all local branches:
+Do not publish rewritten refs until the converted repository passes verification and the team has agreed on a cutover window.
+
+The converter must resolve each selected LFS object, create native Crab content and metadata, replace the Git blob, and rewrite descendant commit identities. Tags, branch protections, submodules, release references, and external build records may all name old object IDs.
+
+Use the object map to connect old and new commits during review. Keep it outside the repository being rewritten so a reset or fresh clone cannot remove the evidence.
+
+Choose the rewrite scope explicitly. `--everything` can include branches and tags beyond the default path. Include and exclude patterns can limit file paths, but any rewritten blob still changes its containing commit and descendants.
+
+Mixed pointer history is possible when conversion selects only some patterns or refs. That state requires both integration paths until the remaining LFS pointers leave the supported history. Prefer one documented boundary over an accidental mixture.
+
+Native conversion should preserve file bytes, executable modes, path names, authorship, messages, and parent relationships apart from the necessary new object IDs. The object map and fresh-clone validation supply evidence for those claims.
+
+## Rehearse with the production ref shape
+
+A default-branch trial does not prove an all-history cutover. Rehearse the same branch and tag selection planned for production.
+
+The rehearsal should cover these phases:
+
+1. Freeze writes to the disposable source clone and fetch the selected refs.
+2. Confirm all LFS objects are available and hash representative files.
+3. Configure a separate Crab destination prefix for the rehearsal.
+4. Run the conversion and preserve the object map.
+5. Push rewritten refs to an isolated remote namespace.
+6. Clone from an empty client cache and hydrate representative files from several historical refs.
+7. Record duration, uploaded bytes, failed paths, new commit IDs, and integrity results.
+
+Repeat the rehearsal after fixing any missing object or automation dependency. A successful retry from a partially populated destination also tests immutable-upload reuse.
+
+Use a destination that cannot be mistaken for production. Distinct bucket prefixes, remote names, and branch namespaces reduce the chance that rehearsal refs become contributor inputs.
+
+Time each phase independently: source fetch, LFS object resolution, chunking and upload, Git rewrite, ref push, fresh clone, and hydration. This identifies whether the cutover window is limited by history computation, source bandwidth, or destination publication.
+
+Test the contributor reset procedure against the rehearsal remote. A migration is incomplete when the converted repository works only for the operator who performed the rewrite.
+
+## Verify content and repository closure
+
+After conversion, inspect attributes and pointer state, then push to a test location and hydrate from a fresh clone.
 
 ```bash
-crab lfs migrate import --include "*.safetensors" --everything
+git status --short
+git log --all --oneline --decorate
+crab status
+crab fsck
 ```
 
-Under the hood, Crab uses a `git fast-export` → transform → `git fast-import` pipeline. Matching blobs are replaced with canonical LFS pointer files, `.gitattributes` is updated with the LFS filter line, and original bytes are cached locally and uploaded to the configured LFS store when a remote store is available. If `git fast-import` fails, Crab restores the saved refs before returning the error.
+For representative files, compare cryptographic hashes before migration and after fresh hydration. Verify every branch and tag included in the cutover, not only the default branch.
 
-<Callout type="warning" title="Rewriting history is the one coordination point">
-A full migration ends with a force-push of rewritten refs. Everyone with a clone needs to re-clone or reset. Keep the previous LFS remote available until all active clones and CI jobs have moved to the rewritten history.
-</Callout>
+Inspect `.gitattributes` in rewritten historical commits, not only the current worktree. The path rules must agree with the pointer representation at each migrated state.
 
-## What Stays the Same, What Changes
+Run source builds or model validation against the fresh clone. Byte equality proves migration integrity, while workload validation proves that automation still finds the expected paths and commands.
 
-Most of the contract you've built around LFS is preserved.
+Compare more than sample file hashes:
 
-**Stays the same:**
+- **Ref coverage**: every selected branch and tag exists at its mapped new object ID
+- **Commit topology**: parent relationships preserve the intended history shape
+- **Attributes**: each historical path selects the pointer representation stored in that commit
+- **Large-file closure**: every native pointer resolves through durable Crab metadata
+- **Remaining LFS closure**: every intentionally retained LFS pointer still has a supported transfer source
+- **Signatures**: rewritten signed objects follow the approved replacement policy
 
-- `.gitattributes` lines like `*.safetensors filter=lfs diff=lfs merge=lfs -text`
-- The `git lfs track`, `git lfs pull`, and `git lfs push` commands you have memorized
-- The pointer-file format inside your git history
-- CI jobs and scripts that drive LFS through standard git commands
-- Branching, merging, and review workflows
+Save machine-readable inventories before and after conversion. Review count differences instead of relying on a successful default-branch checkout.
 
-**What changes:**
+## Coordinate the history cutover
 
-- The hosted LFS server is gone — bytes go to your own bucket
-- You manage cloud credentials directly instead of an LFS server's auth layer
-- Crab-native dedup can reduce storage when large files share byte ranges
-- Optional lazy checkout means clones only download files you actually open
+A rewrite requires contributors to stop pushing, preserve or rebase unmerged work, and replace old local refs after the new history is published. Protected branches and CI references may need an explicit update.
 
-There's nothing forcing you to use the optional pieces. A team that just wants its LFS bill to go away can stop after `crab lfs install`.
+Keep the old remote or backup refs read-only until the verification and rollback window closes. Document the object map and the date after which new work must use the rewritten history.
 
-## Tradeoffs Worth Knowing
+The cutover sequence should name one owner for each action:
 
-Removing the server gives you simpler infrastructure, but it does shift a few responsibilities.
+1. Announce the write freeze and confirm protected automation has stopped.
+2. Fetch the final production ref state into the migration clone.
+3. Verify LFS object availability and rerun the practiced conversion.
+4. Run content, topology, attribute, and closure checks.
+5. Publish rewritten refs under the agreed protection exception.
+6. Update build references, release metadata, and branch protections.
+7. Ask a clean client to follow the published reset procedure.
+8. Reopen writes only after the independent client passes.
 
-Every client needs read or write access to the bucket, since there's no server brokering signed URLs on demand. Most teams handle this with scoped IAM roles or per-repo prefixes — the same patterns you'd use for any internal tool that talks to S3.
+Record the final old and new default-branch object IDs in the announcement. Contributors can then detect whether a local branch still belongs to the old history.
 
-Server-side policy hooks (max file size, allowed extensions, quotas) don't have a hosted server to live on. Bucket policies cover most cases, and Crab provides a `pre-push` hook for client-side enforcement when you want stricter rules.
+## Define rollback before the write freeze
 
-Finally, full history rewrite is a one-time event. If you skip phase 3 and only adopt the transfer agent, you keep all of this optional. New pushes get the benefits, old history stays as-is, and there's nothing to coordinate across the team.
+Compatibility rollback restores the prior LFS endpoint and transfer configuration because commit identities did not change. Native rollback is a ref cutover: restore the preserved old refs and direct clients back to the original object source.
 
-## What This Means for You
+Do not delete the original LFS objects during the migration window. Native Crab verification may pass for sampled files while an untested historical ref still depends on an object you missed.
 
-Git LFS is a fine tool, and a lot of teams do well with the standard hosted setup. Crab is for the moment that arrangement starts to feel like a bottleneck — when the LFS server's bandwidth caps your CI, when storage bills creep up, or when a vendor outage blocks a release.
+Set a clear rollback deadline and retention period. After the deadline, archive the object map and migration evidence before applying the separate deletion policy for old LFS storage.
 
-In that situation you don't need to throw out what you've built. Keep your `.gitattributes`. Keep your `git lfs` muscle memory. Keep the pointer files in your history. Just point the transfer at storage you already trust, and turn on deduplication when you want the savings.
+## Publish a contributor reset procedure
 
-<Cards>
-<Card title="Zero Server">
-LFS objects go straight to your cloud bucket. Nothing extra to deploy or pay for.
-</Card>
-<Card title="Drop-In Compatible">
-Existing `.gitattributes`, `git lfs` commands, and CI pipelines keep working.
-</Card>
-<Card title="Optional Dedup">
-Deduplication shrinks workflows where new versions share chunks with old ones.
-</Card>
-<Card title="Migrate Your Way">
-Install the agent today, rewrite history later — or never.
-</Card>
-</Cards>
+History rewrite changes the base of open work. Contributors need commands tailored to whether they have no local work, local commits, or uncommitted changes.
+
+The procedure should name the new canonical refs, the backup location, and the expected object IDs. It should also explain how to preserve local work before replacing old branches.
+
+Avoid a generic instruction to force-pull or delete every local branch. Those commands can destroy unrelated work. Test the reset procedure with representative contributor states during rehearsal.
+
+Provide separate paths for clean clones, local unpushed commits, and dirty worktrees. The clean case can replace the local canonical branch. The local-commit case needs a backup ref and a deliberate rebase or cherry-pick onto mapped history. The dirty case must save or commit work before any ref replacement.
+
+Include verification after reset. Contributors should confirm the new canonical object ID, inspect tracking attributes, hydrate one representative file, and run the repository's integrity check.
+
+## Retire the old LFS path only after the evidence window
+
+Removing old LFS objects is a separate destructive decision. Wait until supported refs, CI, releases, and contributor recovery no longer depend on the old endpoint.
+
+Keep the pre-migration ref snapshot, object inventory, and mapping through the rollback period. If policy requires longer provenance retention, archive those records even after the old object bytes become eligible for deletion.
+
+Apply the old-system deletion policy with its own preview and approval. A successful native migration proves the new repository; it does not authorize immediate removal of every historical LFS copy.
+
+<TakeawayBox title="Choose the smallest migration boundary">
+  Install the transfer agent when compatibility is enough. Rewrite history
+  only when native Crab pointers provide a measured benefit worth coordinating
+  new commit identities.
+</TakeawayBox>
+
+Use the [`crab lfs`](/docs/cli/reference/crab-lfs) reference for exact subcommand options during a migration rehearsal.
