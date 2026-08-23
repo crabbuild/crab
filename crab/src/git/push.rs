@@ -3890,6 +3890,10 @@ pub struct PushPipeline {
     /// uploaded objects to the cache in the background.
     caching_store: Option<crab_cache_store::CachingStore>,
     staging: Option<Arc<StagingAreaReadOnly>>,
+    /// Journal backing resumable multipart uploads, opened from the
+    /// staging registry when a staging dir exists. `None` otherwise —
+    /// large uploads then use the non-resumable whole-retry path.
+    multipart_journal: Option<Arc<dyn crab_storage::multipart::MultipartJournal>>,
     /// Object-store key prefix (e.g. `ml` for `crab://crab/ml`).
     prefix: String,
     /// Routes content-addressed paths to `.crab/` and per-repo paths
@@ -6470,12 +6474,32 @@ impl PushPipeline {
     ) -> Self {
         let chunk_index_ceiling = config.shard_chunk_index_table_max_size;
         let receive_config = ReceiveConfig::from_push_config(&config);
+        // Open the resume journal only when a staging dir already exists:
+        // resume matters for interrupted pushes, and clean checkouts
+        // should not grow a new database file.
+        let multipart_journal = staging.as_ref().and_then(|staging| {
+            let registry_path = staging.root().join("multipart.db");
+            match crab_staging::MultipartRegistry::open(&registry_path) {
+                Ok(registry) => Some(
+                    Arc::new(crab_staging::SharedMultipartJournal::new(registry))
+                        as Arc<dyn crab_storage::multipart::MultipartJournal>,
+                ),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "multipart resume journal unavailable; uploads use whole-retry"
+                    );
+                    None
+                }
+            }
+        });
         Self {
             config,
             specs,
             store,
             caching_store,
             staging,
+            multipart_journal,
             prefix,
             router,
             metrics,
@@ -11124,6 +11148,8 @@ impl PushPipeline {
             // retried multipart upload can observe cancellation between
             // parts and abort cleanly.
             let cancel_for_task = self.cancel.clone();
+            let journal_for_task = self.multipart_journal.clone();
+            let metrics_for_task = self.metrics.clone();
 
             handles.push(tokio::spawn(async move {
                 let permit = uc.acquire().await?;
@@ -11164,17 +11190,23 @@ impl PushPipeline {
                             p.add_upload_bytes(bytes);
                         }
                     });
-                    store_for_task
-                        .put_multipart_file_retry(
+                    let resumed = store_for_task
+                        .put_multipart_file_resumable_retry(
                             &path,
                             file_path,
                             file_len as u64,
                             payload_hash,
+                            &payload_hash,
                             XORB_MULTIPART_PART_SIZE,
                             &cancel_for_task,
                             Some(&*on_part),
+                            journal_for_task.as_deref(),
                         )
-                        .await
+                        .await?;
+                    if resumed && let Some(metrics) = &metrics_for_task {
+                        metrics.inc_multipart_resumed_uploads();
+                    }
+                    Ok(())
                 } else {
                     let data = match payload.read_bytes().await {
                         Ok(data) => data,
@@ -12331,6 +12363,7 @@ impl PushPipeline {
                     packed.pack_size,
                     packed.pack_blake3,
                     &self.cancel,
+                    self.multipart_journal.as_deref(),
                 )
                 .await?
                 {
@@ -16412,6 +16445,7 @@ async fn upload_push_pack_file_body(
     pack_size: u64,
     pack_blake3: [u8; 32],
     cancel: &CancellationToken,
+    journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
 ) -> Result<bool> {
     if store.staging_write_prefix().is_some() {
         let pack_bytes = tokio::fs::read(pack_file).await?;
@@ -16431,19 +16465,24 @@ async fn upload_push_pack_file_body(
     }
 
     if pack_size > PACK_MULTIPART_THRESHOLD_BYTES {
-        // Route through `Store` so a transient part-PUT failure retries
-        // the whole upload instead of aborting the push.
-        store
-            .put_multipart_file_retry(
+        // Resumable multipart: a cancelled or killed push resumes from its
+        // last journaled part instead of re-uploading the whole pack.
+        let resumed = store
+            .put_multipart_file_resumable_retry(
                 pack_path,
                 pack_file,
                 pack_size,
                 pack_blake3,
+                &pack_blake3,
                 PACK_MULTIPART_THRESHOLD_BYTES as usize,
                 cancel,
                 None,
+                journal,
             )
             .await?;
+        if resumed {
+            debug!(pack_size, "resumed interrupted pack upload");
+        }
     } else {
         let pack_bytes = tokio::fs::read(pack_file).await?;
         store.put(pack_path, Bytes::from(pack_bytes)).await?;
@@ -17969,6 +18008,7 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -18007,6 +18047,7 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -18017,6 +18058,7 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();

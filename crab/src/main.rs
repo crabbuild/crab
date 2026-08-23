@@ -4035,9 +4035,32 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let prefix = parsed.repo_path.clone();
             let store = create_cli_store(&parsed.bucket, &config, "fsck", &cancel).await?;
 
+            // Attach the local staging multipart registry when present so
+            // fsck can detect and repair abandoned resumable uploads.
+            let multipart_registry = discover_git_repo_root()
+                .map(|root| root.join(".crab").join("staging").join("multipart.db"))
+                .filter(|db| db.exists())
+                .and_then(|db| match crab_staging::MultipartRegistry::open(&db) {
+                    Ok(registry) => Some(std::sync::Arc::new(
+                        crab_staging::SharedMultipartJournal::new(registry),
+                    )),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "staging multipart registry unreadable");
+                        None
+                    }
+                });
             let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone());
+            let checker = if let Some(registry) = multipart_registry.clone() {
+                checker.with_multipart_registry(registry)
+            } else {
+                checker
+            };
             let repairer: Box<dyn crab::cmd::fsck::FsckRepairer> = if repair {
-                Box::new(crab::cmd::fsck_store::StoreRepairer::new(store, prefix))
+                Box::new(match multipart_registry {
+                    Some(registry) => crab::cmd::fsck_store::StoreRepairer::new(store, prefix)
+                        .with_multipart_registry(registry),
+                    None => crab::cmd::fsck_store::StoreRepairer::new(store, prefix),
+                })
             } else {
                 Box::new(crab::cmd::fsck::NullRepairer)
             };

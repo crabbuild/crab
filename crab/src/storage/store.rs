@@ -81,6 +81,37 @@ impl Store {
         self
     }
 
+    /// Resumable multipart upload with part-level journaling. Returns
+    /// whether a previously recorded session was resumed. See
+    /// [`crab_storage::Store::put_multipart_file_resumable_retry`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_multipart_file_resumable_retry(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        payload_hash: &[u8],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+        journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
+    ) -> crab_storage::Result<bool> {
+        self.inner
+            .put_multipart_file_resumable_retry(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                payload_hash,
+                part_size,
+                cancel,
+                on_part_done,
+                journal,
+            )
+            .await
+    }
+
     #[must_use]
     pub fn with_storage_scope(mut self, scope: crab_types::storage::StorageScope) -> Self {
         self.inner = self.inner.with_storage_scope(scope);

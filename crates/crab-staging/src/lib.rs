@@ -43,6 +43,7 @@ pub mod error;
 mod index;
 pub mod metrics;
 pub mod multipart_resume;
+pub use multipart_resume::{AbandonedUpload, MultipartRegistry, SharedMultipartJournal};
 pub mod push_plan;
 pub mod recipe;
 mod recovery;

@@ -1515,23 +1515,23 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
         journal: Option<&dyn crate::multipart::MultipartJournal>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (write_path, _, record_staged_write) = self.exact_write_target(path);
         // Resume is disabled under staging-write prefixes: staged targets
         // are unique per push, so payload-hash-keyed rows would be
         // ambiguous across pushes.
         if record_staged_write || self.multipart().is_none() || journal.is_none() {
-            return self
-                .put_multipart_file_retry(
-                    path,
-                    file_path,
-                    size,
-                    expected_hash,
-                    part_size,
-                    cancel,
-                    on_part_done,
-                )
-                .await;
+            self.put_multipart_file_retry(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                part_size,
+                cancel,
+                on_part_done,
+            )
+            .await?;
+            return Ok(false);
         }
         let multipart = self.multipart().expect("checked above");
         let journal = journal.expect("checked above");
@@ -1547,13 +1547,10 @@ impl Store {
         // every retry attempt re-probing it. The strike is spent when an
         // attempt starts with probing allowed, so no state crosses the
         // retry boundary.
-        let resume_available = std::cell::Cell::new(true);
+        let resume_available = std::sync::atomic::AtomicBool::new(true);
 
         retry(&self.retry, || {
-            let allow_resume = resume_available.get();
-            if allow_resume {
-                resume_available.set(false);
-            }
+            let allow_resume = resume_available.swap(false, std::sync::atomic::Ordering::Relaxed);
             let path = write_path.clone();
             let file_path = file_path.to_owned();
             let cancel = cancel.clone();
@@ -1597,7 +1594,7 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
         allow_resume: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use futures_util::stream::{FuturesUnordered, StreamExt};
 
         const IN_FLIGHT_PARTS: usize = 4;
@@ -1690,6 +1687,9 @@ impl Store {
         };
         let multipart_id = object_store::MultipartId::from(upload_id.as_str());
 
+        let resumed =
+            lease.upload_id().is_some() && slots.iter().filter(|slot| slot.is_some()).count() > 0;
+
         // Upload missing parts with bounded in-flight concurrency. Parts
         // are read at their exact file offsets so resumed sessions skip
         // already-uploaded prefixes without reading them.
@@ -1776,7 +1776,7 @@ impl Store {
                     crate::multipart::warn_journal_error("abort_stale", err);
                 }
             }
-            return result;
+            return result.map(|_| false);
         }
 
         let parts = slots
@@ -1809,7 +1809,7 @@ impl Store {
         {
             crate::multipart::warn_journal_error("complete", err);
         }
-        Ok(())
+        Ok(resumed)
     }
     async fn put_multipart_once(
         inner: &Arc<dyn ObjectStore>,

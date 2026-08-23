@@ -2308,6 +2308,7 @@ dependencies = [
  "blake3",
  "bytes",
  "crab-diff",
+ "crab-storage",
  "crab-xet",
  "crc32c",
  "fs4",
