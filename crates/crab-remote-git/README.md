@@ -36,6 +36,8 @@ The supported entry points are:
   work budget;
 - `RemoteGitRepository::{refs,resolve,snapshot}`: ref and reachable-revision
   selection;
+- `RemoteGitRepository::{generate_pack,generate_pack_cached}`: verified
+  delta-preserving response packs, with immutable reuse for no-have requests;
 - `RemoteGitSnapshot::{entry,list_directory,blob_metadata,read_blob}`: browser
   navigation and Git-representation content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
@@ -70,6 +72,14 @@ Services may keep a bounded cache of cloned immutable repository handles and
 use `is_current` after a short freshness interval. A changed manifest always
 requires a new complete open handshake; cached state is never refreshed in
 place.
+
+No-have response packs can be persisted beneath the repository's immutable
+`generated-packs/v1` namespace. Keys bind physical repository identity,
+manifest Git state, the visible authorization union, canonical request
+semantics, output policy, and ordered object selection. Complete pack bodies
+and descriptors are verified on every read. Runtime single-flight and the
+existing renewable internal-lock contract coalesce concurrent producers;
+cancelling one waiter does not cancel work still needed by another process.
 
 Directory listing reads only the selected tree. Child sizes are absent unless
 the caller requests bounded page-only metadata. Comparison prunes equal tree

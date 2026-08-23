@@ -2279,6 +2279,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "crab-coordination",
  "crab-git",
  "crab-metadata",
  "crab-storage",

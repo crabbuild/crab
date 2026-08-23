@@ -75,6 +75,7 @@ struct PackFixture {
 struct CountingStore {
     inner: Arc<InMemory>,
     pack_gets: AtomicUsize,
+    generated_pack_descriptor_puts: AtomicUsize,
     block_next_pack_get: AtomicBool,
     pack_get_entered: Semaphore,
     release_pack_get: Notify,
@@ -88,6 +89,7 @@ impl CountingStore {
         Self {
             inner: Arc::new(InMemory::new()),
             pack_gets: AtomicUsize::new(0),
+            generated_pack_descriptor_puts: AtomicUsize::new(0),
             block_next_pack_get: AtomicBool::new(false),
             pack_get_entered: Semaphore::new(0),
             release_pack_get: Notify::new(),
@@ -108,6 +110,10 @@ impl CountingStore {
 
     fn pack_gets(&self) -> usize {
         self.pack_gets.load(Ordering::SeqCst)
+    }
+
+    fn generated_pack_descriptor_puts(&self) -> usize {
+        self.generated_pack_descriptor_puts.load(Ordering::SeqCst)
     }
 
     fn block_next_pack_get(&self) {
@@ -150,6 +156,10 @@ impl ObjectStore for CountingStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if location.as_ref().contains("/generated-packs/v1/requests/") {
+            self.generated_pack_descriptor_puts
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.put_opts(location, payload, options).await
     }
 
@@ -895,6 +905,29 @@ async fn read_target(fixture: &PublishedFixture) -> crab_remote_git::Result<Byte
     operation.finish(result).await
 }
 
+async fn reopen_fixture(
+    fixture: &PublishedFixture,
+) -> (RemoteGitRepository, Arc<RemoteGitRuntime>) {
+    let runtime = Arc::new(
+        RemoteGitRuntime::new(
+            RuntimeOptions::default(),
+            Arc::new(crab_remote_git::NoopMetrics),
+        )
+        .expect("runtime"),
+    );
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
+        Arc::clone(&runtime),
+        RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("reopen fixture");
+    (repository, runtime)
+}
+
 fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
     match error {
         Error::LimitExceeded { limit, .. } => *limit == expected_limit,
@@ -1096,6 +1129,7 @@ async fn assert_runtime_is_within_configured_bounds(
     let occupancy = runtime.snapshot().await;
     assert_eq!(occupancy.active_object_flights, 0);
     assert_eq!(occupancy.active_pack_index_flights, 0);
+    assert_eq!(occupancy.active_generated_pack_flights, 0);
     assert!(occupancy.object_entries <= options.max_object_cache_entries);
     assert!(occupancy.object_bytes <= options.max_object_cache_bytes);
     assert!(occupancy.pack_index_entries <= options.max_pack_index_cache_entries);
@@ -1385,6 +1419,233 @@ async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
 
     assert_eq!(generated.object_count(), 1);
     strict_thin_pack(generated.path(), &fixture.source_git_dir);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let key = fixture
+        .repository
+        .generated_pack_cache_key([3; 32], [4; 32], &object_ids, false);
+
+    let cold = fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect("generate and publish cached pack");
+    fixture.backend.reset_pack_gets();
+    let warm = fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect("load cached pack");
+
+    assert_eq!(fixture.backend.generated_pack_descriptor_puts(), 1);
+    assert_eq!(fixture.backend.pack_gets(), 1);
+    assert_eq!(
+        fs::read(cold.path()).expect("read cold pack"),
+        fs::read(warm.path()).expect("read warm pack")
+    );
+    let (packed_objects, _) = strict_pack_objects(warm.path(), &fixture.source_git_dir);
+    assert_eq!(
+        packed_objects,
+        object_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_rejects_corrupt_artifact_bytes() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let key = fixture
+        .repository
+        .generated_pack_cache_key([7; 32], [8; 32], &object_ids, false);
+    fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect("publish cached pack");
+    let prefix = fixture.layout.repo_path("generated-packs/v1/artifacts");
+    let artifacts = fixture
+        .backend
+        .inner
+        .list(Some(&prefix))
+        .collect::<Vec<_>>()
+        .await;
+    let artifact = artifacts
+        .into_iter()
+        .next()
+        .expect("generated artifact")
+        .expect("artifact metadata")
+        .location;
+    let mut bytes = fixture
+        .backend
+        .inner
+        .get(&artifact)
+        .await
+        .expect("read artifact")
+        .bytes()
+        .await
+        .expect("collect artifact")
+        .to_vec();
+    bytes[12] ^= 1;
+    fixture
+        .backend
+        .inner
+        .put(&artifact, Bytes::from(bytes).into())
+        .await
+        .expect("corrupt artifact");
+
+    let error = fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect_err("corrupt cached pack must fail closed");
+    assert!(contains_corruption(
+        &error,
+        crab_remote_git::CorruptionStage::PackEntry
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_rejects_corrupt_request_descriptor() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let key = fixture
+        .repository
+        .generated_pack_cache_key([7; 32], [9; 32], &object_ids, false);
+    fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect("publish cached pack");
+    let prefix = fixture.layout.repo_path("generated-packs/v1/requests");
+    let descriptors = fixture
+        .backend
+        .inner
+        .list(Some(&prefix))
+        .collect::<Vec<_>>()
+        .await;
+    let descriptor = descriptors
+        .into_iter()
+        .next()
+        .expect("generated descriptor")
+        .expect("descriptor metadata")
+        .location;
+    fixture
+        .backend
+        .inner
+        .put(&descriptor, Bytes::from_static(b"{}").into())
+        .await
+        .expect("corrupt descriptor");
+
+    let error = fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect_err("corrupt descriptor must fail closed");
+    assert!(contains_corruption(
+        &error,
+        crab_remote_git::CorruptionStage::PackEntry
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellation() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let (second_repository, second_runtime) = reopen_fixture(&fixture).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let key = fixture
+        .repository
+        .generated_pack_cache_key([5; 32], [6; 32], &object_ids, false);
+    let cancelled = CancellationToken::new();
+    let first_repository = fixture.repository.clone();
+    let first_objects = object_ids.clone();
+    let first_cancellation = cancelled.clone();
+
+    fixture.backend.block_next_pack_get();
+    let first = tokio::spawn(async move {
+        first_repository
+            .generate_pack_cached(&first_objects, key, &first_cancellation)
+            .await
+    });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    let second_objects = object_ids.clone();
+    let second = tokio::spawn(async move {
+        second_repository
+            .generate_pack_cached(&second_objects, key, &CancellationToken::new())
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancelled.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .expect("cancelled waiter returns promptly")
+        .expect("cancelled waiter joins")
+        .expect_err("cancelled waiter fails");
+    assert!(contains_cancelled(&error));
+
+    fixture.backend.release_blocked_pack_get();
+    let generated = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("coalesced runtime completes")
+        .expect("coalesced runtime joins")
+        .expect("coalesced runtime receives pack");
+    assert_eq!(generated.object_count() as usize, object_ids.len());
+    assert_eq!(fixture.backend.generated_pack_descriptor_puts(), 1);
+    assert_eq!(
+        fixture
+            .runtime
+            .snapshot()
+            .await
+            .active_generated_pack_flights,
+        0
+    );
+    assert_eq!(
+        second_runtime
+            .snapshot()
+            .await
+            .active_generated_pack_flights,
+        0
+    );
+    fixture.runtime.shutdown().await;
+    second_runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_key_binds_authorization_request_policy_and_selection() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let first = fixture.target;
+    let second = fixture.root_commit;
+    let key = |authorization, request, objects: &[gix_hash::ObjectId], thin_pack| {
+        fixture
+            .repository
+            .generated_pack_cache_key(authorization, request, objects, thin_pack)
+    };
+
+    let base = key([1; 32], [2; 32], &[first], false);
+    assert_ne!(base, key([9; 32], [2; 32], &[first], false));
+    assert_ne!(base, key([1; 32], [9; 32], &[first], false));
+    assert_ne!(base, key([1; 32], [2; 32], &[first], true));
+    assert_ne!(base, key([1; 32], [2; 32], &[first, second], false));
+    let error = fixture
+        .repository
+        .generate_pack_cached(&[second], base, &CancellationToken::new())
+        .await
+        .expect_err("cache key cannot be reused for another selection");
+    assert!(matches!(error, Error::InternalInvariant { .. }));
     fixture.runtime.shutdown().await;
 }
 

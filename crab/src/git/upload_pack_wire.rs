@@ -901,10 +901,25 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .thin_pack
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
-    let pack = match repository
-        .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
-        .await
-    {
+    let generated = if request.haves.is_empty() {
+        let authorization_digest =
+            visibility.authorization_digest_for_refs(visible_ref_names.iter().map(String::as_str));
+        let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
+        let cache_key = repository.generated_pack_cache_key(
+            authorization_digest,
+            request_digest,
+            &plan.object_ids,
+            !thin_bases.is_empty(),
+        );
+        repository
+            .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
+            .await
+    } else {
+        repository
+            .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
+            .await
+    };
+    let pack = match generated {
         Ok(pack) => pack,
         Err(error) => {
             write_packet(writer, error.to_string().as_bytes(), Some(3), cancellation).await?;
@@ -933,6 +948,46 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .map_err(remote_error)?;
     write_flush(writer, cancellation).await?;
     write_response_end(writer, cancellation).await
+}
+
+fn generated_pack_request_digest(
+    request: &FetchRequest,
+    response_shallow: &[ObjectId],
+    response_unshallow: &[ObjectId],
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.upload-pack.generated-request.v1\0");
+    let filter = request.filter.canonical_spec();
+    hash.update(&(filter.len() as u64).to_be_bytes());
+    hash.update(filter.as_bytes());
+    hash.update(&[
+        u8::from(request.deepen_relative),
+        u8::from(request.include_tags),
+        u8::from(request.thin_pack),
+        u8::from(request.ofs_delta),
+    ]);
+    match request.deepen {
+        Some(depth) => {
+            hash.update(&[1]);
+            hash.update(&depth.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    for objects in [
+        request.shallow.as_slice(),
+        response_shallow,
+        response_unshallow,
+    ] {
+        let mut objects = objects.to_vec();
+        objects.sort_unstable();
+        hash.update(&(objects.len() as u64).to_be_bytes());
+        for oid in objects {
+            hash.update(oid.as_bytes());
+        }
+    }
+    *hash.finalize().as_bytes()
 }
 
 fn is_likely_lazy_fetch(repository: &RemoteGitRepository, request: &FetchRequest) -> bool {
@@ -1167,6 +1222,33 @@ mod tests {
         assert!(parse_oid(&"a".repeat(40)).is_ok());
         assert!(parse_oid(&"a".repeat(39)).is_err());
         assert!(parse_oid(&format!("{}z", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn generated_pack_request_digest_is_canonical_and_policy_bound() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let request = FetchRequest {
+            shallow: vec![second, first],
+            include_tags: true,
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        let mut reordered = request.clone();
+        reordered.shallow.reverse();
+
+        let digest = generated_pack_request_digest(&request, &[second, first], &[]);
+        assert_eq!(
+            digest,
+            generated_pack_request_digest(&reordered, &[first, second], &[])
+        );
+        reordered.thin_pack = true;
+        assert_ne!(
+            digest,
+            generated_pack_request_digest(&reordered, &[first, second], &[])
+        );
     }
 
     #[test]

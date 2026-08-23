@@ -35,7 +35,7 @@ pub use objects::{
     Signature, SignatureHeader, TreeEntry,
 };
 pub use operation::{OperationContext, OperationKind};
-pub use pack::GeneratedPack;
+pub use pack::{GeneratedPack, GeneratedPackCacheKey};
 pub use path::GitPath;
 pub use reader::{RemoteGitObject, RemoteGitObjectMetadata};
 pub use refs::{HeadReference, RepositoryRef, RepositoryRefs};

@@ -25,6 +25,7 @@ pub enum CacheObjectKind {
     Shard,
     Pack,
     PackIndex,
+    GeneratedPack,
     Metadata,
 }
 
@@ -61,6 +62,14 @@ pub fn cache_route_contract() -> CacheRouteContract {
             ("shard", ".crab/shards/{first-two-hex}/{hash}"),
             ("pack", "{repo}/packs/pack-{id}.pack"),
             ("pack_index", "{repo}/packs/pack-{id}.idx"),
+            (
+                "generated_pack",
+                "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+            ),
+            (
+                "generated_pack",
+                "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+            ),
             ("metadata", "{repo}/file_index_db/compacted/*.sst"),
             ("metadata", "{repo}/file_index_db/manifest/*.manifest"),
             ("metadata", "{repo}/file_index_db/wal/*.sst"),
@@ -104,7 +113,8 @@ fn route_patterns(patterns: &[(&str, &str)]) -> Vec<CacheRoutePattern> {
 ///
 /// Immutable paths are canonical object keys under the optional `/v1/`
 /// cache-service route prefix: `.crab/xorbs/`, `.crab/shards/`, repo
-/// `packs/`, or versioned SlateDB metadata objects. Everything else —
+/// `packs/`, generated response packs, or versioned SlateDB metadata objects.
+/// Everything else —
 /// refs, HEAD, config, locks, embedded noncanonical paths, and unversioned
 /// metadata discovery — is mutable.
 pub fn classify_path(path: &str) -> PathClass {
@@ -119,6 +129,7 @@ pub fn parse_cache_object_path(path: &str) -> Option<CacheObjectPath<'_>> {
     let path = normalize_transport_path(path);
     parse_global_crab_object(path)
         .or_else(|| parse_pack_object(path))
+        .or_else(|| parse_generated_pack_object(path))
         .or_else(|| parse_versioned_metadb_object(path))
 }
 
@@ -133,7 +144,10 @@ pub fn cache_key_for_path(path: &str) -> Option<CacheKey> {
     match parsed.kind {
         CacheObjectKind::Xorb => Some(CacheKey::Xorb(hash)),
         CacheObjectKind::Shard => Some(CacheKey::Shard(hash)),
-        CacheObjectKind::Pack | CacheObjectKind::PackIndex | CacheObjectKind::Metadata => None,
+        CacheObjectKind::Pack
+        | CacheObjectKind::PackIndex
+        | CacheObjectKind::GeneratedPack
+        | CacheObjectKind::Metadata => None,
     }
 }
 
@@ -151,6 +165,7 @@ pub fn parse_mutable_repo_path(path: &str) -> Option<&str> {
         "/locks/",
         "/refs/",
         "/packs/",
+        "/generated-packs/",
         "/manifests/",
         "/file_index_db/",
         "/chunk_index_db/",
@@ -174,6 +189,33 @@ pub fn parse_mutable_repo_path(path: &str) -> Option<&str> {
     }
 
     None
+}
+
+fn parse_generated_pack_object(path: &str) -> Option<CacheObjectPath<'_>> {
+    let marker = "/generated-packs/v1/";
+    let marker_position = path.find(marker)?;
+    let repo_path = &path[..marker_position];
+    let suffix = &path[marker_position + marker.len()..];
+    let (kind, extension) = if let Some(suffix) = suffix.strip_prefix("artifacts/") {
+        (suffix, ".pack")
+    } else {
+        (suffix.strip_prefix("requests/")?, ".json")
+    };
+    let mut parts = kind.split('/');
+    let partition = parts.next()?;
+    let filename = parts.next()?;
+    if repo_path.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let hash = filename.strip_suffix(extension)?;
+    if !is_hash_hex(hash) || partition != hash.get(..2)? {
+        return None;
+    }
+    Some(CacheObjectPath {
+        repo_path,
+        kind: CacheObjectKind::GeneratedPack,
+        identity: Cow::Owned(blake3::hash(path.as_bytes()).to_hex().to_string()),
+    })
 }
 
 pub(crate) fn normalize_transport_path(path: &str) -> &str {
@@ -303,6 +345,7 @@ mod tests {
     fn route_contract_cases() -> Vec<RouteContractCase> {
         let xorb_hash = hex_hash('a');
         let shard_hash = hex_hash('b');
+        let generated_hash = hex_hash('c');
         vec![
             RouteContractCase {
                 name: "global xorb",
@@ -347,6 +390,38 @@ mod tests {
                     identity: "pack-abc".to_string(),
                 }),
                 docs_token: "{repo}/packs/pack-{id}.idx",
+            },
+            RouteContractCase {
+                name: "generated pack artifact",
+                path: format!("/v1/org/repo/generated-packs/v1/artifacts/cc/{generated_hash}.pack"),
+                class: PathClass::Immutable,
+                parsed: Some(ParsedRouteContract {
+                    repo_path: "org/repo",
+                    kind: CacheObjectKind::GeneratedPack,
+                    identity: blake3::hash(
+                        format!("org/repo/generated-packs/v1/artifacts/cc/{generated_hash}.pack")
+                            .as_bytes(),
+                    )
+                    .to_hex()
+                    .to_string(),
+                }),
+                docs_token: "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+            },
+            RouteContractCase {
+                name: "generated pack request",
+                path: format!("/v1/org/repo/generated-packs/v1/requests/cc/{generated_hash}.json"),
+                class: PathClass::Immutable,
+                parsed: Some(ParsedRouteContract {
+                    repo_path: "org/repo",
+                    kind: CacheObjectKind::GeneratedPack,
+                    identity: blake3::hash(
+                        format!("org/repo/generated-packs/v1/requests/cc/{generated_hash}.json")
+                            .as_bytes(),
+                    )
+                    .to_hex()
+                    .to_string(),
+                }),
+                docs_token: "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
             },
             RouteContractCase {
                 name: "file index db sst",
@@ -463,6 +538,8 @@ mod tests {
             ".crab/shards/{first-two-hex}/{hash}",
             "{repo}/packs/pack-{id}.pack",
             "{repo}/packs/pack-{id}.idx",
+            "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+            "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
             "{repo}/file_index_db/manifest/*.manifest",
             ".crab/chunk_index_db/manifest/*.manifest",
         ] {

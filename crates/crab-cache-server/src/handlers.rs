@@ -1323,6 +1323,7 @@ fn parse_object_path(path: &str) -> Option<(String, String, ObjectType, String)>
         CacheObjectKind::Shard => ObjectType::Shard,
         CacheObjectKind::Pack => ObjectType::Pack,
         CacheObjectKind::PackIndex => ObjectType::PackIndex,
+        CacheObjectKind::GeneratedPack => ObjectType::Pack,
         CacheObjectKind::Metadata => ObjectType::Metadata,
     };
     Some((
@@ -2844,6 +2845,23 @@ mod tests {
         assert_eq!(repo, "org/repo");
         assert_eq!(ot, ObjectType::PackIndex);
         assert_eq!(hash, "pack-abc");
+    }
+
+    #[test]
+    fn parse_generated_pack_paths_use_distinct_cache_identities() {
+        let hash = hex_hash('c');
+        let artifact = format!("org/repo/generated-packs/v1/artifacts/cc/{hash}.pack");
+        let request = format!("org/repo/generated-packs/v1/requests/cc/{hash}.json");
+        let (_, artifact_repo, artifact_type, artifact_id) =
+            parse_object_path(&artifact).expect("generated pack artifact");
+        let (_, request_repo, request_type, request_id) =
+            parse_object_path(&request).expect("generated pack request");
+
+        assert_eq!(artifact_repo, "org/repo");
+        assert_eq!(request_repo, "org/repo");
+        assert_eq!(artifact_type, ObjectType::Pack);
+        assert_eq!(request_type, ObjectType::Pack);
+        assert_ne!(artifact_id, request_id);
     }
 
     #[test]

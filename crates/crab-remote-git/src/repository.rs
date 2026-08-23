@@ -63,6 +63,17 @@ impl RepositoryIdentity {
     pub const fn placement_generation(&self) -> u64 {
         self.placement_generation
     }
+
+    pub(crate) fn hash_cache_identity(&self, hash: &mut blake3::Hasher) {
+        for component in [
+            self.provider_namespace.as_bytes(),
+            self.repository_namespace.as_bytes(),
+        ] {
+            hash.update(&(component.len() as u64).to_be_bytes());
+            hash.update(component);
+        }
+        hash.update(&self.placement_generation.to_be_bytes());
+    }
 }
 
 impl fmt::Debug for RepositoryIdentity {
@@ -87,7 +98,7 @@ fn validate_identity_component(component: &'static str, value: &str) -> Result<(
 }
 
 /// Limits applied independently to each decoded Git object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectLimits {
     pub max_packed_entry_bytes: u64,
     pub max_inflated_entry_bytes: u64,
@@ -113,7 +124,7 @@ impl Default for ObjectLimits {
 }
 
 /// Aggregate limits charged across one repository operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OperationLimits {
     /// Maximum wall time from locator open through semantic completion.
     pub max_duration: Duration,
@@ -157,7 +168,7 @@ impl Default for OperationLimits {
 }
 
 /// Validated behavior and resource limits for opening a repository.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct RepositoryOptions {
     object: ObjectLimits,
     operation: OperationLimits,
@@ -250,7 +261,7 @@ fn validate_non_zero(name: &'static str, value: u64) -> Result<()> {
 /// caller-constructed coverage. Every later operation is pinned to this state.
 #[derive(Clone)]
 pub struct RemoteGitRepository {
-    state: Arc<RepositoryState>,
+    pub(crate) state: Arc<RepositoryState>,
 }
 
 impl fmt::Debug for RemoteGitRepository {

@@ -43,6 +43,8 @@ pub enum CacheOutcome {
     Hit,
     /// Requested immutable value was absent.
     Miss,
+    /// A caller joined production already owned by another caller.
+    Coalesced,
     /// One or more values were evicted to preserve configured bounds.
     Eviction,
 }

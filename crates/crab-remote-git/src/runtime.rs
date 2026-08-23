@@ -17,8 +17,9 @@ use crate::cache::BoundedLru;
 use crate::objects::RawTreeEntry;
 use crate::reader::{GitObject, PackIndex, PackedEntry};
 use crate::{
-    AnnotatedTag, Blame, CacheOutcome, Commit, Error, GitPath, MetricKind, MetricObservation,
-    NoopMetrics, RemoteGitMetrics, RepositoryIdentity, Result,
+    AnnotatedTag, Blame, CacheOutcome, Commit, Error, GeneratedPack, GeneratedPackCacheKey,
+    GitPath, MetricKind, MetricObservation, NoopMetrics, RemoteGitMetrics, RepositoryIdentity,
+    RepositoryOptions, Result,
 };
 
 /// Process-wide bounds for remote Git caches and execution admission.
@@ -101,6 +102,8 @@ pub struct RuntimeSnapshot {
     pub active_object_flights: usize,
     /// Distinct immutable pack-index loads currently executing.
     pub active_pack_index_flights: usize,
+    /// Distinct generated response packs currently executing.
+    pub active_generated_pack_flights: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -202,6 +205,12 @@ struct PackIndexFlightKey {
     max_source_bytes: u64,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GeneratedPackFlightKey {
+    request: GeneratedPackCacheKey,
+    options: RepositoryOptions,
+}
+
 #[derive(Clone)]
 struct CachedManifest {
     manifest: Manifest,
@@ -232,6 +241,8 @@ type SharedPackedResult = std::result::Result<Arc<PackedEntry>, Arc<Error>>;
 type PackedFlight = watch::Receiver<Option<SharedPackedResult>>;
 type SharedPackIndexResult = std::result::Result<Arc<PackIndex>, Arc<Error>>;
 type PackIndexFlight = watch::Receiver<Option<SharedPackIndexResult>>;
+type SharedGeneratedPackResult = std::result::Result<Arc<GeneratedPack>, Arc<Error>>;
+type GeneratedPackFlight = watch::Receiver<Option<SharedGeneratedPackResult>>;
 
 #[derive(Clone)]
 enum ParsedObject {
@@ -267,6 +278,7 @@ pub struct RemoteGitRuntime {
     decode: Arc<Semaphore>,
     object_flight_admission: Arc<Semaphore>,
     pack_index_flight_admission: Arc<Semaphore>,
+    generated_pack_flight_admission: Arc<Semaphore>,
     object_cache: Mutex<BoundedLru<ObjectCacheKey, Arc<GitObject>>>,
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
@@ -276,6 +288,7 @@ pub struct RemoteGitRuntime {
         Mutex<BoundedLru<InventoryCacheKey, Arc<HashMap<MerkleHash, GitPackInventoryEntry>>>>,
     packed_flights: Mutex<HashMap<PackedFlightKey, PackedFlight>>,
     pack_index_flights: Mutex<HashMap<PackIndexFlightKey, PackIndexFlight>>,
+    generated_pack_flights: Mutex<HashMap<GeneratedPackFlightKey, GeneratedPackFlight>>,
     negative_cache: Mutex<BoundedLru<ObjectCacheKey, Instant>>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
@@ -298,6 +311,9 @@ impl RemoteGitRuntime {
             decode: Arc::new(Semaphore::new(options.max_decode_concurrency)),
             object_flight_admission: Arc::new(Semaphore::new(options.max_object_flights)),
             pack_index_flight_admission: Arc::new(Semaphore::new(options.max_pack_index_flights)),
+            generated_pack_flight_admission: Arc::new(Semaphore::new(
+                options.max_decode_concurrency,
+            )),
             object_cache: Mutex::new(BoundedLru::new(
                 options.max_object_cache_entries,
                 options.max_object_cache_bytes,
@@ -324,6 +340,7 @@ impl RemoteGitRuntime {
             )),
             packed_flights: Mutex::new(HashMap::new()),
             pack_index_flights: Mutex::new(HashMap::new()),
+            generated_pack_flights: Mutex::new(HashMap::new()),
             negative_cache: Mutex::new(BoundedLru::new(
                 options.max_negative_cache_entries,
                 options.max_negative_cache_bytes,
@@ -380,6 +397,7 @@ impl RemoteGitRuntime {
             negative_bytes,
             active_object_flights: self.packed_flights.lock().await.len(),
             active_pack_index_flights: self.pack_index_flights.lock().await.len(),
+            active_generated_pack_flights: self.generated_pack_flights.lock().await.len(),
         }
     }
 
@@ -807,6 +825,105 @@ impl RemoteGitRuntime {
                     if changed.is_err() {
                         return Err(Error::InternalInvariant {
                             invariant: "pack-index flight ended without a result",
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn generate_pack_singleflight<F, Fut>(
+        self: &Arc<Self>,
+        key: GeneratedPackCacheKey,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+        work: F,
+    ) -> Result<Arc<GeneratedPack>>
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<GeneratedPack>> + Send + 'static,
+    {
+        let flight_key = GeneratedPackFlightKey {
+            request: key,
+            options,
+        };
+        let mut work = Some(work);
+        let mut coalesced = false;
+        let mut receiver = if let Some(receiver) = self
+            .generated_pack_flights
+            .lock()
+            .await
+            .get(&flight_key)
+            .cloned()
+        {
+            coalesced = true;
+            receiver
+        } else {
+            let admission = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                permit = Arc::clone(&self.generated_pack_flight_admission).acquire_owned() => {
+                    permit.map_err(|_| Error::Cancelled)?
+                }
+            };
+            let mut flights = self.generated_pack_flights.lock().await;
+            if let Some(receiver) = flights.get(&flight_key) {
+                coalesced = true;
+                drop(admission);
+                receiver.clone()
+            } else {
+                let (sender, receiver) = watch::channel(None);
+                flights.insert(flight_key.clone(), receiver.clone());
+                let runtime = Arc::clone(self);
+                let task_key = flight_key;
+                let task_work = work.take().ok_or(Error::InternalInvariant {
+                    invariant: "new generated-pack flight has no work",
+                })?;
+                self.tasks.spawn(async move {
+                    let _admission = admission;
+                    let result = task_work(runtime.background_cancellation())
+                        .await
+                        .map(Arc::new)
+                        .map_err(Arc::new);
+                    runtime
+                        .generated_pack_flights
+                        .lock()
+                        .await
+                        .remove(&task_key);
+                    let _ = sender.send(Some(result));
+                });
+                receiver
+            }
+        };
+        if coalesced {
+            self.metrics.record(MetricObservation {
+                kind: MetricKind::Cache,
+                value: 1,
+                duration: None,
+                outcome: None,
+                cache: Some(CacheOutcome::Coalesced),
+            });
+        }
+
+        loop {
+            let completed = receiver.borrow().clone();
+            if let Some(result) = completed {
+                drop(receiver);
+                return match result {
+                    Ok(pack) => Ok(pack),
+                    Err(source) => match Arc::try_unwrap(source) {
+                        Ok(error) => Err(error),
+                        Err(source) => Err(Error::SharedRead { source }),
+                    },
+                };
+            }
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                changed = receiver.changed() => {
+                    if changed.is_err() {
+                        return Err(Error::InternalInvariant {
+                            invariant: "generated-pack flight ended without a result",
                         });
                     }
                 }

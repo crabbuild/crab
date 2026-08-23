@@ -3,7 +3,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flate2::{Compression, write::ZlibEncoder};
 use gix_hash::ObjectId;
@@ -19,12 +20,56 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // whole batch. The operation's object and byte budgets still bound residency.
 const OBJECT_BATCH_SIZE: usize = 10_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
+const GENERATED_PACK_CACHE_VERSION: u32 = 1;
+const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
+const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
+const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(60);
+const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(20);
+const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(100);
+
+/// Immutable key for one authorization- and generation-bound response pack.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedPackCacheKey {
+    digest: [u8; 32],
+    selection_digest: [u8; 32],
+}
+
+impl GeneratedPackCacheKey {
+    fn hex(self) -> String {
+        self.digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn matches_selection(self, object_ids: &[ObjectId]) -> bool {
+        self.selection_digest == selected_object_digest(object_ids)
+    }
+}
+
+impl std::fmt::Debug for GeneratedPackCacheKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GeneratedPackCacheKey(<redacted>)")
+    }
+}
+
+#[derive(Debug)]
+struct GeneratedPackDescriptor {
+    version: u32,
+    request_hash: String,
+    content_hash: String,
+    checksum: String,
+    size: u64,
+    object_count: u32,
+}
 
 /// A temporary, checksummed Git pack generated from one pinned snapshot.
+#[derive(Clone)]
 pub struct GeneratedPack {
-    file: NamedTempFile,
+    file: Arc<NamedTempFile>,
     size: u64,
     checksum: [u8; 20],
+    content_hash: [u8; 32],
     object_count: u32,
 }
 
@@ -72,6 +117,13 @@ impl GeneratedPack {
             .collect()
     }
 
+    fn content_hash_hex(&self) -> String {
+        self.content_hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     fn verify_checksum(&self) -> Result<()> {
         let mut file = std::fs::File::open(self.file.path()).map_err(io_error)?;
         if self.size < 20 {
@@ -84,6 +136,7 @@ impl GeneratedPack {
         }
         let mut body = Read::by_ref(&mut file).take(self.size - 20);
         let mut hash = Sha1::new();
+        let mut content_hash = blake3::Hasher::new();
         let mut chunk = [0u8; 64 * 1024];
         loop {
             let read = body.read(&mut chunk).map_err(io_error)?;
@@ -91,11 +144,16 @@ impl GeneratedPack {
                 break;
             }
             hash.update(&chunk[..read]);
+            content_hash.update(&chunk[..read]);
         }
         let mut trailer = [0u8; 20];
         file.read_exact(&mut trailer).map_err(io_error)?;
+        content_hash.update(&trailer);
         let actual: [u8; 20] = hash.finalize().into();
-        if actual != trailer || actual != self.checksum {
+        if actual != trailer
+            || actual != self.checksum
+            || content_hash.finalize().as_bytes() != &self.content_hash
+        {
             return Err(Error::Metadata(
                 crab_metadata::error::MetadataError::CorruptObject {
                     path: self.file.path().display().to_string(),
@@ -133,6 +191,26 @@ impl GeneratedPack {
 }
 
 impl RemoteGitRepository {
+    /// Bind canonical request semantics and object selection to this pinned
+    /// repository and authorization state.
+    #[must_use]
+    pub fn generated_pack_cache_key(
+        &self,
+        authorization_digest: [u8; 32],
+        request_digest: [u8; 32],
+        object_ids: &[ObjectId],
+        thin_pack: bool,
+    ) -> GeneratedPackCacheKey {
+        generated_pack_cache_key(
+            &self.state.identity,
+            &self.state.git_validation_digest,
+            authorization_digest,
+            request_digest,
+            object_ids,
+            thin_pack,
+        )
+    }
+
     /// Generate a self-contained pack from verified object IDs in this pinned
     /// repository generation. An exact single-pack closure reuses its verified
     /// immutable pack; other selections are read and written in bounded batches.
@@ -199,6 +277,477 @@ impl RemoteGitRepository {
         };
         operation.finish(result).await
     }
+
+    /// Reuse or publish one immutable generation- and authorization-bound pack.
+    ///
+    /// Callers must use this only for no-have requests. Incremental fetches
+    /// retain their request-local negotiation and are never artifact cached.
+    pub async fn generate_pack_cached(
+        &self,
+        object_ids: &[ObjectId],
+        cache_key: GeneratedPackCacheKey,
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
+        if !cache_key.matches_selection(object_ids) {
+            return Err(Error::InternalInvariant {
+                invariant: "generated pack cache key does not match object selection",
+            });
+        }
+        if let Some(pack) =
+            load_cached_pack(self, cache_key, object_ids.len(), cancellation).await?
+        {
+            record_generated_pack_cache(self, crate::CacheOutcome::Hit, 1);
+            return Ok(pack);
+        }
+        record_generated_pack_cache(self, crate::CacheOutcome::Miss, 1);
+        let repository = self.clone();
+        let object_ids = object_ids.to_vec();
+        let runtime = Arc::clone(&self.state.runtime);
+        let generated = runtime
+            .generate_pack_singleflight(
+                cache_key,
+                self.state.options,
+                cancellation,
+                move |background_cancellation| async move {
+                    produce_cached_pack(
+                        &repository,
+                        &object_ids,
+                        cache_key,
+                        &background_cancellation,
+                    )
+                    .await
+                },
+            )
+            .await?;
+        Ok(generated.as_ref().clone())
+    }
+}
+
+fn generated_pack_cache_key(
+    identity: &crate::RepositoryIdentity,
+    git_validation_digest: &str,
+    authorization_digest: [u8; 32],
+    request_digest: [u8; 32],
+    object_ids: &[ObjectId],
+    thin_pack: bool,
+) -> GeneratedPackCacheKey {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.generated-pack.request.v1\0");
+    identity.hash_cache_identity(&mut hash);
+    hash.update(git_validation_digest.as_bytes());
+    hash.update(&authorization_digest);
+    hash.update(&request_digest);
+    hash.update(&[u8::from(thin_pack)]);
+    let selection_digest = selected_object_digest(object_ids);
+    hash.update(&selection_digest);
+    GeneratedPackCacheKey {
+        digest: *hash.finalize().as_bytes(),
+        selection_digest,
+    }
+}
+
+fn selected_object_digest(object_ids: &[ObjectId]) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.generated-pack.selection.v1\0");
+    hash.update(&(object_ids.len() as u64).to_be_bytes());
+    for oid in object_ids {
+        hash.update(oid.as_bytes());
+    }
+    *hash.finalize().as_bytes()
+}
+
+async fn produce_cached_pack(
+    repository: &RemoteGitRepository,
+    object_ids: &[ObjectId],
+    cache_key: GeneratedPackCacheKey,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    let deadline =
+        tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
+    let resource = format!("generated-pack-{}", cache_key.hex());
+    let mut recorded_waiter = false;
+    loop {
+        if let Some(pack) =
+            load_cached_pack(repository, cache_key, object_ids.len(), cancellation).await?
+        {
+            return Ok(pack);
+        }
+        let acquire = crab_coordination::PushLock::acquire_internal(
+            repository.state.store.inner(),
+            repository.state.layout.repo_prefix(),
+            &resource,
+            GENERATED_PACK_LEASE_TTL,
+        );
+        let lock = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(Error::Timeout { operation: "upload-pack" });
+            }
+            result = acquire => match result {
+                Ok(lock) => lock,
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    if !recorded_waiter {
+                        record_generated_pack_cache(repository, crate::CacheOutcome::Coalesced, 1);
+                        recorded_waiter = true;
+                    }
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Err(Error::Cancelled),
+                        () = tokio::time::sleep_until(deadline) => {
+                            return Err(Error::Timeout { operation: "upload-pack" });
+                        }
+                        () = tokio::time::sleep(GENERATED_PACK_LEASE_POLL) => {}
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        return produce_cached_pack_under_lease(
+            repository,
+            object_ids,
+            cache_key,
+            lock,
+            cancellation,
+        )
+        .await;
+    }
+}
+
+async fn produce_cached_pack_under_lease(
+    repository: &RemoteGitRepository,
+    object_ids: &[ObjectId],
+    cache_key: GeneratedPackCacheKey,
+    mut lock: crab_coordination::PushLock,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    let producer = async {
+        if let Some(pack) =
+            load_cached_pack(repository, cache_key, object_ids.len(), cancellation).await?
+        {
+            return Ok(pack);
+        }
+        let generated = repository.generate_pack(object_ids, cancellation).await?;
+        publish_cached_pack(repository, cache_key, &generated, cancellation).await?;
+        Ok(generated)
+    };
+    tokio::pin!(producer);
+    let mut renewal = tokio::time::interval(GENERATED_PACK_LEASE_RENEWAL);
+    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    renewal.tick().await;
+    let result = loop {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => break Err(Error::Cancelled),
+            result = &mut producer => break result,
+            _ = renewal.tick() => {
+                if let Err(error) = lock.renew().await {
+                    break Err(error.into());
+                }
+            }
+        }
+    };
+    if lock.release().await.is_err() {
+        tracing::warn!(
+            telemetry_event = "generated_pack_lease_release",
+            "generated response-pack lease release failed"
+        );
+    }
+    result
+}
+
+fn record_generated_pack_cache(
+    repository: &RemoteGitRepository,
+    cache: crate::CacheOutcome,
+    value: u64,
+) {
+    repository
+        .state
+        .runtime
+        .metrics()
+        .record(crate::MetricObservation {
+            kind: crate::MetricKind::Cache,
+            value,
+            duration: None,
+            outcome: None,
+            cache: Some(cache),
+        });
+    tracing::info!(
+        target: "crab_remote_git::telemetry",
+        telemetry_event = "generated_pack_cache",
+        cache_event = ?cache,
+        value,
+        "generated response-pack cache event"
+    );
+}
+
+async fn load_cached_pack(
+    repository: &RemoteGitRepository,
+    cache_key: GeneratedPackCacheKey,
+    expected_objects: usize,
+    cancellation: &CancellationToken,
+) -> Result<Option<GeneratedPack>> {
+    let request_hash = cache_key.hex();
+    let descriptor_path = repository
+        .state
+        .layout
+        .generated_pack_descriptor_path(&request_hash);
+    let metadata = match repository.state.store.head(&descriptor_path).await {
+        Ok(metadata) => metadata,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.size > GENERATED_PACK_DESCRIPTOR_MAX_BYTES {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let (bytes, _) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        result = repository.state.store.get_with_etag(&descriptor_path) => result?,
+    };
+    let descriptor = decode_generated_pack_descriptor(&bytes)?;
+    if descriptor.version != GENERATED_PACK_CACHE_VERSION
+        || descriptor.request_hash != request_hash
+        || descriptor.content_hash.len() != 64
+        || descriptor.checksum.len() != 40
+        || descriptor.size < 32
+        || u64::from(descriptor.object_count) != u64::try_from(expected_objects).unwrap_or(u64::MAX)
+        || u64::from(descriptor.object_count)
+            > repository
+                .state
+                .options
+                .operation_limits()
+                .max_logical_objects
+    {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let maximum = repository
+        .state
+        .options
+        .operation_limits()
+        .max_response_bytes;
+    if descriptor.size > maximum {
+        return Err(Error::LimitExceeded {
+            limit: "pack response bytes",
+            actual: descriptor.size,
+            maximum,
+        });
+    }
+    let checksum = decode_hex::<20>(&descriptor.checksum).ok_or(Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    })?;
+    let content_hash = decode_hex::<32>(&descriptor.content_hash).ok_or(Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    })?;
+    let artifact_path = repository
+        .state
+        .layout
+        .generated_pack_artifact_path(&descriptor.content_hash);
+    let file = NamedTempFile::new().map_err(io_error)?;
+    let downloaded = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        result = repository.state.store.download_to_path(&artifact_path, file.path()) => result?,
+    };
+    if downloaded != descriptor.size {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let path = file.path().to_owned();
+    let token = cancellation.clone();
+    tokio::task::spawn_blocking(move || {
+        inspect_cached_pack(
+            &path,
+            descriptor.size,
+            descriptor.object_count,
+            checksum,
+            content_hash,
+            &token,
+        )
+    })
+    .await
+    .map_err(|source| Error::DecodeTask { source })??;
+    Ok(Some(GeneratedPack {
+        file: Arc::new(file),
+        size: descriptor.size,
+        checksum,
+        content_hash,
+        object_count: descriptor.object_count,
+    }))
+}
+
+async fn publish_cached_pack(
+    repository: &RemoteGitRepository,
+    cache_key: GeneratedPackCacheKey,
+    generated: &GeneratedPack,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    generated.verify_checksum()?;
+    let request_hash = cache_key.hex();
+    let content_hash = generated.content_hash_hex();
+    let artifact_path = repository
+        .state
+        .layout
+        .generated_pack_artifact_path(&content_hash);
+    repository
+        .state
+        .store
+        .put_multipart_file_retry(
+            &artifact_path,
+            generated.path(),
+            generated.size,
+            generated.content_hash,
+            GENERATED_PACK_UPLOAD_PART_BYTES,
+            cancellation,
+            None,
+        )
+        .await?;
+    let descriptor = serde_json::json!({
+        "version": GENERATED_PACK_CACHE_VERSION,
+        "request_hash": request_hash.clone(),
+        "content_hash": content_hash,
+        "checksum": generated.checksum_hex(),
+        "size": generated.size,
+        "object_count": generated.object_count,
+    });
+    let bytes = serde_json::to_vec(&descriptor).map_err(|_| Error::InternalInvariant {
+        invariant: "generated pack descriptor serialization failed",
+    })?;
+    if bytes.len() as u64 > GENERATED_PACK_DESCRIPTOR_MAX_BYTES {
+        return Err(Error::InternalInvariant {
+            invariant: "generated pack descriptor exceeds its fixed bound",
+        });
+    }
+    let descriptor_path = repository
+        .state
+        .layout
+        .generated_pack_descriptor_path(&request_hash);
+    match repository
+        .state
+        .store
+        .create_strict(&descriptor_path, bytes.into())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(crab_storage::StorageError::StateConflict { .. }) => {
+            match load_cached_pack(
+                repository,
+                cache_key,
+                generated.object_count as usize,
+                cancellation,
+            )
+            .await?
+            {
+                Some(_) => Ok(()),
+                None => Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::PackEntry,
+                }),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<GeneratedPackDescriptor> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    })?;
+    let object = value.as_object().ok_or(Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    })?;
+    if object.len() != 6 {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let number = |name: &str| object.get(name).and_then(serde_json::Value::as_u64);
+    let string = |name: &str| object.get(name).and_then(serde_json::Value::as_str);
+    let corrupt = || Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    };
+    Ok(GeneratedPackDescriptor {
+        version: u32::try_from(number("version").ok_or_else(corrupt)?).map_err(|_| corrupt())?,
+        request_hash: string("request_hash").ok_or_else(corrupt)?.to_owned(),
+        content_hash: string("content_hash").ok_or_else(corrupt)?.to_owned(),
+        checksum: string("checksum").ok_or_else(corrupt)?.to_owned(),
+        size: number("size").ok_or_else(corrupt)?,
+        object_count: u32::try_from(number("object_count").ok_or_else(corrupt)?)
+            .map_err(|_| corrupt())?,
+    })
+}
+
+fn inspect_cached_pack(
+    path: &std::path::Path,
+    expected_size: u64,
+    expected_objects: u32,
+    expected_checksum: [u8; 20],
+    expected_content_hash: [u8; 32],
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let mut file = std::fs::File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() != expected_size {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).map_err(io_error)?;
+    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    let object_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    if &header[..4] != b"PACK" || !matches!(version, 2 | 3) || object_count != expected_objects {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let mut sha1 = Sha1::new();
+    let mut blake3 = blake3::Hasher::new();
+    let mut chunk = [0u8; 1024 * 1024];
+    {
+        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let read = body.read(&mut chunk).map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            sha1.update(&chunk[..read]);
+            blake3.update(&chunk[..read]);
+        }
+    }
+    let mut trailer = [0u8; 20];
+    file.read_exact(&mut trailer).map_err(io_error)?;
+    blake3.update(&trailer);
+    let actual_sha1: [u8; 20] = sha1.finalize().into();
+    if actual_sha1 != trailer
+        || trailer != expected_checksum
+        || blake3.finalize().as_bytes() != &expected_content_hash
+    {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    Ok(())
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N.saturating_mul(2) {
+        return None;
+    }
+    let mut output = [0u8; N];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let start = index.saturating_mul(2);
+        *byte = u8::from_str_radix(value.get(start..start + 2)?, 16).ok()?;
+    }
+    Some(output)
 }
 
 async fn try_reuse_single_pack(
@@ -234,7 +783,7 @@ async fn try_reuse_single_pack(
         .await?;
     let path = file.path().to_owned();
     let token = cancellation.clone();
-    let checksum = tokio::task::spawn_blocking(move || {
+    let (checksum, content_hash) = tokio::task::spawn_blocking(move || {
         inspect_reused_pack(
             &path,
             inventory.pack_id,
@@ -268,9 +817,10 @@ async fn try_reuse_single_pack(
         "remote Git response pack reused"
     );
     Ok(Some(GeneratedPack {
-        file,
+        file: Arc::new(file),
         size: inventory.pack_size,
         checksum,
+        content_hash,
         object_count,
     }))
 }
@@ -282,7 +832,7 @@ fn inspect_reused_pack(
     expected_objects: u64,
     expected_checksum: [u8; 20],
     cancellation: &CancellationToken,
-) -> Result<[u8; 20]> {
+) -> Result<([u8; 20], [u8; 32])> {
     if expected_size < 32 {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
@@ -329,15 +879,20 @@ fn inspect_reused_pack(
     file.read_exact(&mut trailer).map_err(io_error)?;
     blake3.update(&trailer);
     let actual_sha1: [u8; 20] = sha1.finalize().into();
+    let actual_blake3 = *blake3.finalize().as_bytes();
     if actual_sha1 != trailer
         || trailer != expected_checksum
-        || blake3.finalize().to_hex().as_str() != pack_id.to_string()
+        || actual_blake3
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            != pack_id.to_string()
     {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
         });
     }
-    Ok(trailer)
+    Ok((trailer, actual_blake3))
 }
 
 async fn generate_pack_with_operation(
@@ -494,6 +1049,7 @@ impl PackAssemblyStats {
 struct PackWriter {
     file: NamedTempFile,
     hash: Sha1,
+    content_hash: blake3::Hasher,
     object_count: u32,
     max_bytes: u64,
 }
@@ -509,10 +1065,12 @@ impl PackWriter {
         }
         let mut file = NamedTempFile::new().map_err(io_error)?;
         let mut hash = Sha1::new();
+        let mut content_hash = blake3::Hasher::new();
         {
             let mut sink = HashingWriter {
                 file: file.as_file_mut(),
                 hash: &mut hash,
+                content_hash: &mut content_hash,
                 written: 0,
                 max_bytes: Some(max_bytes - 20),
             };
@@ -524,6 +1082,7 @@ impl PackWriter {
         Ok(Self {
             file,
             hash,
+            content_hash,
             object_count,
             max_bytes,
         })
@@ -539,6 +1098,7 @@ impl PackWriter {
         let mut sink = HashingWriter {
             file: self.file.as_file_mut(),
             hash: &mut self.hash,
+            content_hash: &mut self.content_hash,
             written,
             max_bytes: Some(self.max_bytes - 20),
         };
@@ -587,6 +1147,8 @@ impl PackWriter {
             return Err(Error::Cancelled);
         }
         let checksum: [u8; 20] = self.hash.finalize().into();
+        self.content_hash.update(&checksum);
+        let content_hash = *self.content_hash.finalize().as_bytes();
         let body_size = self.file.as_file().metadata().map_err(io_error)?.len();
         self.file
             .as_file_mut()
@@ -606,9 +1168,10 @@ impl PackWriter {
             .seek(SeekFrom::Start(0))
             .map_err(io_error)?;
         let pack = GeneratedPack {
-            file: self.file,
+            file: Arc::new(self.file),
             size,
             checksum,
+            content_hash,
             object_count: self.object_count,
         };
         pack.verify_checksum()?;
@@ -667,6 +1230,7 @@ fn write_pack_header(writer: &mut impl Write, type_code: u8, size: u64) -> io::R
 struct HashingWriter<'a> {
     file: &'a mut std::fs::File,
     hash: &'a mut Sha1,
+    content_hash: &'a mut blake3::Hasher,
     written: u64,
     max_bytes: Option<u64>,
 }
@@ -683,6 +1247,7 @@ impl Write for HashingWriter<'_> {
         }
         self.file.write_all(bytes)?;
         self.hash.update(bytes);
+        self.content_hash.update(bytes);
         self.written = self.written.saturating_add(bytes.len() as u64);
         Ok(bytes.len())
     }
@@ -736,6 +1301,29 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
+    #[test]
+    fn generated_pack_key_binds_repository_identity_and_manifest_digest() {
+        let identity =
+            crate::RepositoryIdentity::new("memory", "org/repo", 1).expect("repository identity");
+        let moved_identity = crate::RepositoryIdentity::new("memory", "org/repo", 2)
+            .expect("moved repository identity");
+        let objects = [ObjectId::from([1; 20])];
+        let key = |identity, validation_digest| {
+            generated_pack_cache_key(
+                identity,
+                validation_digest,
+                [2; 32],
+                [3; 32],
+                &objects,
+                false,
+            )
+        };
+
+        let base = key(&identity, "validation-a");
+        assert_ne!(base, key(&moved_identity, "validation-a"));
+        assert_ne!(base, key(&identity, "validation-b"));
+    }
+
     fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {
         let oid = ObjectId::from([oid; 20]);
         let base_oid = base_oid.map(|base| ObjectId::from([base; 20]));
@@ -788,10 +1376,12 @@ mod tests {
     fn pack_object_contains_raw_git_payload_without_loose_header() {
         let mut file = NamedTempFile::new().expect("temporary pack object");
         let mut hash = Sha1::new();
+        let mut content_hash = blake3::Hasher::new();
         {
             let mut sink = HashingWriter {
                 file: file.as_file_mut(),
                 hash: &mut hash,
+                content_hash: &mut content_hash,
                 written: 0,
                 max_bytes: None,
             };
@@ -839,6 +1429,7 @@ mod tests {
         let mut sink = HashingWriter {
             file: writer.file.as_file_mut(),
             hash: &mut writer.hash,
+            content_hash: &mut writer.content_hash,
             written,
             max_bytes: Some(maximum - 20),
         };

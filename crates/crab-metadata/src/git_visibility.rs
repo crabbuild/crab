@@ -643,6 +643,29 @@ impl GitVisibilityIndex {
             .sum()
     }
 
+    /// Return a stable digest of the object authorization union for selected refs.
+    ///
+    /// Ref names are deliberately excluded so reusable artifacts reveal only
+    /// the immutable object authorization set, not mutable repository labels.
+    #[must_use]
+    pub fn authorization_digest_for_refs<'a, I>(&self, refs: I) -> [u8; 32]
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let union = self.union_for_refs(refs);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"crab.git-visibility.authorization.v1\0");
+        hash.update(self.git_validation_digest.as_bytes());
+        for position in bitmap_positions(&union) {
+            if let Ok(position) = usize::try_from(position)
+                && let Some(oid) = self.objects.get(position)
+            {
+                hash.update(oid);
+            }
+        }
+        *hash.finalize().as_bytes()
+    }
+
     /// Return whether an object is proven reachable from one of the supplied refs.
     #[must_use]
     pub fn contains_for_refs<'a, I>(&self, refs: I, oid: &GitVisibilityOid) -> bool
@@ -1902,6 +1925,30 @@ mod tests {
         assert_eq!(
             index.object_count_for_refs(["refs/heads/main", "refs/heads/main"]),
             2
+        );
+    }
+
+    #[test]
+    fn authorization_digest_tracks_object_union_without_ref_names() {
+        let index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            BTreeMap::from([
+                ("refs/heads/main".to_owned(), vec!["1".repeat(40)]),
+                ("refs/heads/alias".to_owned(), vec!["1".repeat(40)]),
+                ("refs/heads/private".to_owned(), vec!["2".repeat(40)]),
+            ]),
+        )
+        .expect("valid visibility index");
+
+        assert_eq!(
+            index.authorization_digest_for_refs(["refs/heads/main"]),
+            index.authorization_digest_for_refs(["refs/heads/alias"])
+        );
+        assert_ne!(
+            index.authorization_digest_for_refs(["refs/heads/main"]),
+            index.authorization_digest_for_refs(["refs/heads/main", "refs/heads/private"])
         );
     }
 
