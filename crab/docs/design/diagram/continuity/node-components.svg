@@ -9,7 +9,7 @@
     <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#fb923c"/></marker>
   </defs>
   <style>
-      text{font-family:'JetBrains Mono','SF Mono','Cascadia Code',monospace}.title{font-size:22px;font-weight:700;fill:#f8fafc}.subtitle{font-size:10px;fill:#94a3b8}.region{fill:none;stroke-width:1;stroke-dasharray:8 4}.region-label{font-size:10px;font-weight:600}.name{font-size:11px;font-weight:600;fill:#f8fafc;text-anchor:middle}.copy{font-size:8.5px;fill:#94a3b8;text-anchor:middle}.tiny{font-size:8px;fill:#94a3b8}.box{stroke-width:1.5}.arrow-label{font-size:8px;fill:#cbd5e1;text-anchor:middle}.legend{font-size:8px;fill:#cbd5e1}
+      text{font-family:monospace}.title{font-size:22px;font-weight:700;fill:#f8fafc}.subtitle{font-size:10px;fill:#94a3b8}.region{fill:none;stroke-width:1;stroke-dasharray:8 4}.region-label{font-size:10px;font-weight:600}.name{font-size:11px;font-weight:600;fill:#f8fafc;text-anchor:middle}.copy{font-size:8.5px;fill:#94a3b8;text-anchor:middle}.tiny{font-size:8px;fill:#94a3b8}.box{stroke-width:1.5}.arrow-label{font-size:8px;fill:#cbd5e1;text-anchor:middle}.legend{font-size:8px;fill:#cbd5e1}
   </style>
   <rect width="1600" height="1100" fill="#0f172a"/><rect width="1600" height="1100" fill="url(#grid)"/>
   <text x="40" y="46" class="title">Crab Continuity node · component boundaries</text>
@@ -24,22 +24,22 @@
   <!-- Connections -->
   <path d="M190 245H330" fill="none" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-cyan)"/>
   <path d="M190 365H330" fill="none" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-cyan)"/>
-  <path d="M190 720H350" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
+  <path d="M190 720H315V680H350" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
   <path d="M490 245H545" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   <path d="M490 365H545" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   <path d="M725 245H785" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   <path d="M725 365H785" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   <path d="M965 245H1015" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   <path d="M965 365H1015" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
-  <path d="M1105 445V500H680V445" fill="none" stroke="#a78bfa" stroke-width="1.4" marker-end="url(#arrow-violet)"/>
+  <path d="M1015 420H990V470H635V400" fill="none" stroke="#a78bfa" stroke-width="1.4" marker-end="url(#arrow-violet)"/>
   <path d="M1195 245H1360" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
   <path d="M1195 365H1360" fill="none" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
   <path d="M590 680H650" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
   <path d="M830 680H890" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
   <path d="M1070 680H1130" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
-  <path d="M740 760V820H1105V445" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow-orange)"/>
-  <path d="M980 760V820H680V445" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow-orange)"/>
-  <path d="M1210 680H1380V580" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <path d="M740 645V570H1230V305H1105V290" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow-orange)"/>
+  <path d="M980 645V535H1150V445" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow-orange)"/>
+  <path d="M1210 845H1300V720H1360" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
 
   <!-- External inputs -->
   <g><rect x="65" y="210" width="125" height="70" rx="7" fill="#0f172a"/><rect x="65" y="210" width="125" height="70" rx="7" class="box" fill="rgba(8,51,68,.4)" stroke="#22d3ee"/><text x="127.5" y="240" class="name">Git read</text><text x="127.5" y="259" class="copy">clone / fetch</text></g>
