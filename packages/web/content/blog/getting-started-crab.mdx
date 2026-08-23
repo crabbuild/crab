@@ -1,235 +1,160 @@
 ---
-title: "Getting Started with Crab in 5 Minutes"
-description: "Install Crab, push a large file to cloud storage, and clone it on another machine — all in under five minutes with standard git commands."
-date: "2025-08-25"
+title: "How do you set up a Crab repository?"
+description: "Install Crab, connect a Git repository to object storage, track a large-file pattern, push, clone, and hydrate."
+date: "2026-05-22"
 author: "Crab Team"
 category: "tutorial"
 tags: ["beginner", "getting-started", "tutorial"]
-excerpt: "A step-by-step guide to installing Crab, initializing a repository, pushing a large file to S3, and cloning it elsewhere — with copy-paste commands and expected output."
+excerpt: "A compact first workflow from an existing Git repository to a verified Crab clone."
 level: "beginner"
 path: "first-workflow"
 order: 1
-concepts: ["install", "init", "push", "clone"]
-prerequisites: ["What Is Crab?"]
-outcome: "Install Crab, initialize a repository, push a large file, and clone it on another machine."
+concepts: ["install", "configure", "push", "clone"]
+prerequisites: ["What is Crab, and when should you use it?"]
+outcome: "Create and verify a working Crab repository backed by object storage."
 diagramType: "Command flow"
+meta:
+  contentType: "Tutorial"
+  goal: "Take a reader from an existing Git repository to a working Crab push and hydrated clone."
+  audience: "Developers trying Crab for the first time."
 ---
 
+This tutorial connects an existing Git repository to an S3 path, tracks model files, pushes one commit, and verifies the result from a fresh clone. Replace the sample bucket and repository names with resources you control.
+
 <FlowSteps
-  title="The five-minute path"
+  title="The first repository loop"
   steps={[
-    "Install the Crab binary and verify the Git remote helper is available.",
-    "Initialize a repository against your cloud bucket.",
-    "Track and commit a large file using normal Git commands.",
-    "Push through Crab so large-file bytes land in object storage.",
-    "Clone elsewhere and hydrate the file to prove the workflow end to end."
+    "Install Crab and confirm the CLI is available.",
+    "Configure the repository against an object-storage path.",
+    "Track a large-file pattern and commit the generated attributes.",
+    "Ship a large file through Crab.",
+    "Clone pointers first, then hydrate the file."
   ]}
 />
 
-## What You'll Build
+## Before you begin
 
-By the end of this tutorial you'll have a working Crab repository with a large file stored in your own cloud bucket. You'll push it from one machine and clone it on another — no servers, no configuration files, no LFS endpoints.
+You need Git, an existing repository, and credentials that can read and write the target bucket path. Crab supports S3, Google Cloud Storage, and Azure Blob Storage; the example uses S3.
 
-The whole thing takes about five minutes.
-
-## Prerequisites
-
-You need two things before starting:
-
-- **Git** installed (any recent version)
-- **A cloud storage bucket** — an AWS S3 bucket, Google Cloud Storage bucket, or Azure Blob container that you can write to
-
-Make sure your cloud credentials are configured in your environment. For AWS, that means `~/.aws/credentials` or the standard `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables are set.
-
-## Step 1: Install Crab
-
-Run the installer:
+Install the CLI and confirm its version:
 
 ```bash
 curl -fsSL https://crab.build/install.sh | bash
-```
-
-Expected output:
-
-```
-==> Downloading crab v1.0.15 for darwin-aarch64
-==> Installing to /Users/you/.crab/bin
-==> Created symlink: git-remote-crab -> crab
-Installed crab v1.0.15
-```
-
-Verify the installation:
-
-```bash
 crab --version
 ```
 
-```
-crab 1.0.15
-```
+## Configure the repository
 
-That single binary handles everything — the CLI commands and the git remote helper. No background services, no daemons.
-
-## Step 2: Initialize a Repository
-
-Create a new git repository and tell Crab which bucket to use:
+Run `crab configure` from the repository root. It connects the remote and installs the Git filter configuration used for tracked files.
 
 ```bash
-mkdir my-project && cd my-project
-git init
-crab init crab://my-bucket/my-project
-crab setup
+cd vision-search
+crab configure s3://team-data/vision-search
+crab doctor
 ```
 
-Expected output:
+`crab doctor` checks the local setup, remote discovery, credentials, and object-store access. Fix any reported error before adding data.
 
-```
-Initialized crab remote: crab://my-bucket/my-project
-Remote 'origin' configured.
-```
+## Choose which files Crab tracks
 
-This adds a git remote pointing at your bucket. Under the hood, it's just a standard git remote URL that the `git-remote-crab` helper knows how to handle.
-
-## Step 3: Add a Large File
-
-Let's create a sample large file (or use one you already have — a model checkpoint, dataset, video, anything):
+Track patterns, not individual versions of the same asset type. Quote the glob so your shell does not expand it before Crab receives it.
 
 ```bash
-# Create a 500 MB test file
-dd if=/dev/urandom of=model.bin bs=1m count=500
+crab track '*.safetensors'
+git add .gitattributes
+git commit -m "Track model files with Crab"
 ```
 
-Now track it with Crab and commit:
+The generated `.gitattributes` rule sends matching files through Crab's clean and smudge integration. Files that do not match remain ordinary Git blobs.
+
+## Inspect the repository configuration
+
+Before adding a large file, review the state that setup created. This separates configuration errors from data-transfer errors later in the tutorial.
 
 ```bash
-crab add model.bin
-git add .
-git commit -m "Add model checkpoint"
+git remote -v
+git config --local --get-regexp '^filter\.crab\.'
+git check-attr filter diff merge -- models/example.safetensors
+crab track
 ```
 
-Expected output:
+The remote should name the intended repository path. Git should report the Crab filter for the sample model path. `crab track` should list the pattern you added.
 
-```
-[crab] Chunking model.bin (500.0 MB)
-[crab] 847 chunks, 492.3 MB unique data
-[master (root-commit) a3f1c2d] Add model checkpoint
- 2 files changed, 1 insertion(+)
- create mode 100644 .crabconfig
- create mode 100644 model.bin
-```
+Keep `.gitattributes` in Git history because it determines path representation for every contributor. Keep object-store credentials outside the repository. Crab discovers credentials from the configured provider flow rather than committing secrets with project configuration.
 
-The `crab add` command splits your file into content-defined chunks and stages the unique data. Git sees a lightweight pointer file — the actual bytes live in Crab's staging area, ready to upload.
+## Add and ship a large file
 
-## Step 4: Push to Cloud Storage
+Copy a model into the repository, then let `crab ship` stage, commit, and push the selected path.
 
 ```bash
-git push origin main
+cp /path/to/model-v1.safetensors models/model-v1.safetensors
+crab ship models/model-v1.safetensors -m "Add model v1"
 ```
 
-Expected output:
+<FirstRepositoryDiagram />
 
-```
-Enumerating objects: 4, done.
-Counting objects: 100% (4/4), done.
-Writing objects: 100% (4/4), 312 bytes | 312.00 KiB/s, done.
-[crab] Uploading 492.3 MB (847 chunks, 12 xorbs)
-[crab] ████████████████████████████████ 100% (52.4 MB/s)
-[crab] Push complete: crab://my-bucket/my-project
-To crab://my-bucket/my-project
- * [new branch]      main -> main
-```
+Crab stages the file through its filter, uploads new large-file data and metadata, pushes the Git objects, and moves the remote ref only after the referenced data is durable.
 
-Your file is now stored as deduplicated, compressed chunks in your S3 bucket. Git handled the refs and commit objects as usual — Crab handled the large-file data.
+## Publish a second version to exercise reuse
 
-## Step 5: Clone on Another Machine
-
-On a different machine (or a different directory to simulate it), clone the repository:
+An initial push proves storage and permissions, but it does not show deduplication. Create a realistic second version that changes a limited region without recompressing or encrypting the complete file.
 
 ```bash
-crab clone crab://my-bucket/my-project my-project-clone
-cd my-project-clone
+cp /path/to/model-v2.safetensors models/model-v2.safetensors
+crab ship models/model-v2.safetensors -m "Add model v2"
+crab stat perf
 ```
 
-Expected output:
+Review the reported transfer and deduplication counters. The amount of reused data depends on shared bytes between the files. A different file name does not prevent reuse because chunk identity comes from content.
 
-```
-Cloning into 'my-project-clone'...
-[crab] Fetching refs from crab://my-bucket/my-project
-[crab] Downloading file data...
-[crab] ████████████████████████████████ 100% (78.2 MB/s)
-[crab] Hydrating 1 file (500.0 MB)
-Done. Repository ready at my-project-clone/
-```
+If the second version uploads nearly all bytes, inspect the file format before assuming configuration is wrong. Some serializers reorder data, add nondeterministic fields, or recompress the complete container after a small logical change.
 
-Verify the file is intact:
+## Verify from a fresh clone
+
+Clone with Crab so the repository can check out pointers without downloading every large file immediately.
 
 ```bash
-ls -lh model.bin
+cd ..
+crab clone crab://team-data/vision-search vision-search-check
+cd vision-search-check
+crab status
+crab hydrate 'models/model-v1.safetensors'
+crab status
 ```
 
+After hydration, the working-tree file contains its original bytes. Git history still contains the compact pointer used to locate and verify those bytes.
+
+## Read common failures by boundary
+
+Setup problems become easier to diagnose when you classify the failing boundary:
+
+| Symptom | Boundary to inspect |
+| --- | --- |
+| `crab doctor` cannot access the remote | Provider credentials, bucket name, and prefix policy |
+| `git check-attr` does not report Crab | `.gitattributes` pattern and committed setup |
+| Git stages the complete large file | Filter installation and path matching |
+| Push reports a missing recipe | Local staging state and the earlier clean operation |
+| Clone succeeds but hydration fails | Remote shard, xorb, archive state, or read permission |
+| Hydrated hash differs | Stop and run `crab fsck`; do not publish the result |
+
+Do not respond to an access error by widening the bucket policy to every object. Scope permissions to the repository prefix and required provider operations. `crab doctor` gives a narrower signal after each policy change.
+
+## Prepare automation after the manual path works
+
+Continuous integration should install Crab, obtain short-lived credentials, clone lazily, and hydrate a declared working set. A committed manifest makes that set reviewable.
+
+```bash
+crab clone crab://team-data/vision-search ci-worktree
+cd ci-worktree
+crab hydrate --manifest .crab/manifests/ci.txt
+crab fsck
 ```
--rw-r--r--  1 user  staff   500M Aug 25 10:32 model.bin
-```
 
-Your 500 MB file is back, byte-for-byte identical to the original.
+Avoid `crab hydrate --all` in automation unless the job consumes every managed file. Narrow hydration reduces transfer, runner disk usage, and accidental restore requests for archived xorbs.
 
-## How It Works
+<TakeawayBox title="Success means two paths agree">
+  The Git commit is visible, the large-file objects are durable, and a fresh
+  clone can reconstruct the tracked file.
+</TakeawayBox>
 
-Here's what happened across those five steps:
-
-<svg viewBox="0 0 820 120" width="100%" role="img" aria-label="Crab workflow: install, init, add, push, clone">
-  <defs>
-    <marker id="gs-arrow" viewBox="0 0 7 5" refX="7" refY="2.5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
-
-  <rect x="0" y="30" width="130" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="65" y="55" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Install"}</text>
-  <text x="65" y="75" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Single binary"}</text>
-
-  <line x1="135" y1="60" x2="165" y2="60" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#gs-arrow)"/>
-
-  <rect x="170" y="30" width="130" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="235" y="55" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Init"}</text>
-  <text x="235" y="75" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Point to bucket"}</text>
-
-  <line x1="305" y1="60" x2="335" y2="60" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#gs-arrow)"/>
-
-  <rect x="340" y="30" width="130" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="405" y="55" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Add"}</text>
-  <text x="405" y="75" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk & stage"}</text>
-
-  <line x1="475" y1="60" x2="505" y2="60" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#gs-arrow)"/>
-
-  <rect x="510" y="30" width="130" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="575" y="55" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Push"}</text>
-  <text x="575" y="75" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Upload to S3"}</text>
-
-  <line x1="645" y1="60" x2="675" y2="60" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#gs-arrow)"/>
-
-  <rect x="680" y="30" width="130" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="745" y="55" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Clone"}</text>
-  <text x="745" y="75" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Reconstruct files"}</text>
-</svg>
-
-1. **Install** placed a single binary on your machine. That binary acts as both the `crab` CLI and the `git-remote-crab` helper that git calls automatically.
-
-2. **Init** configured a git remote pointing at your cloud bucket. No server to provision, no SSH keys to exchange with a hosting provider.
-
-3. **Add** split your file into variable-size chunks using content-defined boundaries. This means if you later change part of the file, only the affected chunks get re-uploaded — not the whole thing.
-
-4. **Push** uploaded the unique chunks as compressed archives (called xorbs) directly to your bucket. Git handled the commit graph normally; Crab handled the large-file data.
-
-5. **Clone** downloaded the commit history and file data from the bucket, then reconstructed your file from its chunks — verified byte-for-byte with cryptographic hashes.
-
-## What's Next
-
-You now have a working Crab setup. Here are some things to try:
-
-- **Modify and push again** — change part of `model.bin` and push. You'll see that only the changed chunks upload (deduplication in action).
-- **Add more files** — `crab add` works on any file. Track datasets, videos, compiled assets — anything too large for vanilla git.
-- **Lazy checkout** — for very large repos, use `crab clone --lazy` to download only pointer files initially, then hydrate individual files on demand with `crab hydrate`.
-- **Mount as a virtual filesystem** — `crab mount` exposes your repo through FUSE, so files appear on disk but download transparently when accessed.
-
-That's it. Five commands, five minutes, and your large files live in cloud storage with full git history — no servers required.
+For a more explicit verification workflow, continue with [How do you verify your first Crab push?](/blog/first-crab-push). For command options, use the [`crab configure`](/docs/cli/reference/crab-configure), [`crab track`](/docs/cli/reference/crab-track), and [`crab hydrate`](/docs/cli/reference/crab-hydrate) references.

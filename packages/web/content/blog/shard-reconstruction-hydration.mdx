@@ -1,254 +1,142 @@
 ---
-title: "Shard Reconstruction: How Crab Rebuilds Files from Chunks"
-description: "How Crab puts your files back together perfectly every time — from pointer blobs through file-index, shard, and xorb lookups to byte-identical reconstruction."
-date: "2025-08-04"
+title: "How does Crab rebuild a file from chunks?"
+description: "Trace hydration from a Git pointer through shard terms and xorb ranges to an atomically replaced, verified file."
+date: "2026-07-03"
 author: "Crab Team"
 category: "architecture"
 tags: ["hydration", "shard", "xorb", "blake3", "reconstruction"]
-excerpt: "When you hydrate a file, Crab follows a chain of lookups — pointer → file-index → shard → xorb — to locate every chunk, downloads them in parallel, and reassembles the original bytes with cryptographic verification. Here's how it works."
+excerpt: "Hydration resolves every chunk, plans bounded range reads, assembles bytes in recipe order, and verifies the result before replacement."
 level: "deep-dive"
 path: "core-internals"
 order: 4
 concepts: ["hydration", "shard", "xorb", "verification"]
-prerequisites: ["Crab's Multi-Layer Caching Architecture"]
-outcome: "Understand how Crab reconstructs original bytes from pointer metadata, shards, xorbs, and verified chunks."
-diagramType: "Hydration lookup chain"
+prerequisites: ["How does Crab avoid repeated object-store reads?"]
+outcome: "Explain the complete reconstruction and verification path for one Crab pointer."
+diagramType: "Hydration proof pipeline"
+meta:
+  contentType: "Conceptual"
+  goal: "Explain why hydration is both a download plan and an integrity proof."
+  audience: "Developers investigating checkout behavior, corruption, or read performance."
 ---
 
-<FlowSteps
-  title="Hydration lookup chain"
-  steps={[
-    "Read the small pointer blob stored in the Git working tree.",
-    "Resolve the file-index recipe that lists the chunks in order.",
-    "Ask the shard index where each chunk is packed.",
-    "Fetch byte ranges from xorbs in parallel.",
-    "Verify BLAKE3 hashes and write the original file bytes."
-  ]}
-/>
+A Crab pointer contains the file identity and size, but not the file bytes. Hydration resolves that identity into a complete ordered recipe, finds each chunk inside immutable xorbs, and verifies the assembled file before replacing the pointer.
 
-## How Crab Puts Your Files Back Together Perfectly Every Time
+<HydrationPlanDiagram />
 
-When you clone a Crab repository, your working directory contains small placeholder files called pointer blobs — think of them as bookmarks that say "the real content lives over there." When you actually need a file, opening a model or running a build, Crab **hydrates** it. That means following a recipe to reassemble the ingredients: locating every chunk, downloading them in parallel, and rebuilding the exact original bytes.
+## The pointer names the expected result
 
-It's similar to how a streaming service works. You don't download the entire library — you stream the specific film you want, assembled from chunks stored across servers. Crab does the same thing for your large files, with one extra promise: every byte is cryptographically verified before you see it.
+The Git blob records a BLAKE3 file hash, decimal byte size, and optional shard hint. These fields define what a successful hydration must produce.
 
-## TL;DR
+```text
+version https://crab.dev/spec/v1
+file-hash <64 hexadecimal characters>
+size <decimal bytes>
+shard-hint <optional 64-character hash>
+```
 
-- **Four lookups, one outcome.** Pointer → file-index → shard → xorb. Each layer is independently cacheable.
-- **Parallel by design.** Chunks are fetched concurrently, grouped by location to minimize round-trips.
-- **Bounded memory.** Even a 10 GB file uses tens of MB of RAM during reconstruction.
-- **Byte-identical, guaranteed.** Blake3 verification means no silent corruption, ever.
+The hint can shorten lookup, but correctness cannot depend on a stale hint. Crab still resolves canonical metadata for the requested file identity.
 
+## A recipe can span files, revisions, and xorbs
 
-<svg viewBox="0 0 720 220" width="100%" role="img" aria-label="The reconstruction chain: a pointer blob is resolved through the file-index, then the shard index, then the xorb download, producing a verified file output">
-  <defs>
-    <marker id="arrow-recon-chain" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+Imagine a file recipe with four ordered chunks: `A`, `B`, `C`, and `D`. Shard metadata may locate `A` and `C` in one older xorb, `B` in a newer xorb, and `D` in the local verified cache.
 
-  {/* Title */}
-  <text x="360" y="28" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"The Reconstruction Chain"}</text>
+The recipe does not require chunks to share an upload or commit. Content identity lets the file reuse any durable matching chunk. Reconstruction order comes from the recipe, not object creation time.
 
-  {/* Box 1: Pointer Blob */}
-  <rect x="20" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="100" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Pointer Blob"}</text>
-  <text x="100" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"~200 bytes"}</text>
-  <text x="100" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"file hash, size"}</text>
+```text
+file recipe:  A → B → C → D
+xorb 17:      A, C, unrelated chunk E
+xorb 42:      B, unrelated chunk F
+local cache:  D
+```
 
-  {/* Arrow 1 */}
-  <line x1="180" y1="100" x2="200" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+The planner turns this logical order into physical reads, then the assembler restores the logical order after data arrives.
 
-  {/* Box 2: File-Index */}
-  <rect x="200" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="280" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"File-Index"}</text>
-  <text x="280" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"the recipe"}</text>
-  <text x="280" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"ordered chunks"}</text>
+## Shard terms locate every chunk
 
-  {/* Arrow 2 */}
-  <line x1="360" y1="100" x2="380" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+The file recipe lists chunks in reconstruction order. Shard metadata maps those chunk identities to xorb objects and byte ranges.
 
-  {/* Box 3: Shard Index */}
-  <rect x="380" y="60" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="460" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Shard Index"}</text>
-  <text x="460" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"the warehouse map"}</text>
-  <text x="460" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"chunk → location"}</text>
+A complete plan must cover every chunk for the file version. Missing or conflicting terms are an error; Crab does not create a shorter file and call the hydration complete.
 
-  {/* Arrow 3 */}
-  <line x1="540" y1="100" x2="560" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+Shard lookup can use the optional pointer hint to begin near likely metadata. If the hint does not contain every term, Crab continues through canonical index state.
 
-  {/* Box 4: Xorb Download */}
-  <rect x="560" y="60" width="140" height="80" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="630" y="92" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb Fetch"}</text>
-  <text x="630" y="112" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel ranges"}</text>
-  <text x="630" y="130" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"from cloud storage"}</text>
+Each resolved term includes enough information to locate and verify its chunk. A term that names a missing xorb range fails before final publication to the worktree.
 
-  {/* Down arrow to verified file */}
-  <line x1="630" y1="140" x2="630" y2="170" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-chain)"/>
+## The planner groups remote work
 
-  {/* Box 5: Verified file */}
-  <rect x="540" y="172" width="180" height="36" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="630" y="195" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"✓ Blake3-verified file"}</text>
-</svg>
+Chunks that belong to the same xorb can share a range request when their locations are compatible. Crab groups the terms by xorb, coalesces compatible ranges, and fetches independent work with bounded concurrency.
 
+Local cache hits can remove ranges from the remote plan. Archived xorbs may require a restore before their ranges become readable, and `crab hydrate --restore` makes that policy explicit.
 
-## Step 1: The Recipe (File-Index)
+Bounded concurrency protects the client while several ranges are in flight. The reader limits simultaneous requests, decompression, and buffered output rather than loading the complete file into memory.
 
-Reconstruction works like following a recipe. The pointer blob is your table of contents entry — it tells you which recipe to look up. The **file-index** is the actual recipe: given a file's identity (its Blake3 hash), it returns the exact list of ingredients (chunks) needed, in the order they must be combined.
+Coalescing also has a boundary. Crab can join nearby ranges when the extra bytes cost less than another request, but it should not download an entire large xorb for one distant chunk by default.
 
-Each entry says: take chunk A, then chunk B, then chunk C, concatenate them in order, and you get the original bytes back.
+## Archived data introduces a waiting state
 
-It's similar to a music playlist. The playlist doesn't contain the songs — it contains an ordered list of references. The file-index doesn't contain your data — it contains an ordered list of chunk hashes that, when assembled, reproduce your file perfectly.
+Some storage classes cannot serve a range read until the provider restores the object. Hydration can request restoration, wait for readability, and then resume the same verified reconstruction plan.
 
-### Why This Indirection Matters
+`--no-restore` changes that policy into an immediate error. This option fits latency-sensitive automation that must not wait or incur an unplanned retrieval charge.
 
-The file-index stores chunk hashes, not physical locations. So when Crab reorganizes storage (repacking xorbs for efficiency), the file-index doesn't need updating. The recipe stays the same even when the ingredients move to different shelves.
+The pointer and recipe remain valid while the xorb is archived. Archive state changes availability and cost, not content identity.
 
-For a 4 GB file split into roughly 64 KB chunks, the file-index contains around 65,000 entries — about 2.3 MB of metadata. Small enough to download quickly, detailed enough to reconstruct any file.
+## Assembly follows recipe order
 
-## Step 2: Finding the Ingredients (Shard Resolution)
+Download completion order does not define file order. The assembler writes verified chunks according to the file recipe, even when later ranges arrive first.
 
-The file-index tells Crab **what** chunks it needs. The shard index answers **where** they live — which xorb archive contains each chunk, and at what byte offset.
+The output is built away from the committed pointer path. Only a complete, verified result can replace the working-tree pointer, which prevents a cancelled or failed hydration from appearing successful.
 
-Think of it like a warehouse inventory system. You have your shopping list (chunk hashes from the file-index), and the shard is the warehouse map telling you which aisle and shelf each item is on.
+## Verification closes the loop
 
-Crab resolves all chunks in a single batch pass through the shard's sorted index. That's much faster than looking up each chunk individually — one scan handles thousands of chunks at once.
+Chunk identities detect incorrect range content. The final BLAKE3 file hash and expected size verify the assembled result as a whole.
 
-### Chunks Across Time
+This contract is binary: hydration returns the byte-identical original or an error. A corrupted cache entry, incomplete range, missing shard term, or wrong final hash cannot produce a successful materialized file.
 
-A single file's chunks might live in xorbs from completely different time periods. Imagine a 1 GB model file you first pushed six months ago. Most of its chunks are in old xorbs from that original push. Last week you tweaked a few layers — those new chunks landed in a fresh xorb. The shard unifies all of this. It doesn't care when a chunk was uploaded; it just knows where everything is right now.
+## Atomic replacement protects local work
 
-<Callout type="warning" title="Missing chunks = hard error">
-If any chunk can't be found, Crab refuses to produce a partial file. A missing chunk indicates something went wrong during the original push — Crab will never give you a corrupted or incomplete file.
-</Callout>
+Crab assembles hydrated output away from the committed pointer path. It verifies chunk identities, final size, and full-file hash before replacing the pointer.
 
+A cancelled process can leave temporary local work, but it must not leave a truncated file at the tracked path. Cleanup removes or ignores incomplete temporary output on the next operation.
 
-## Step 3: Smart Downloading
+Hydration also checks working-tree state before replacement. A locally modified materialized file should not be overwritten as though it were an unchanged pointer.
 
-Once Crab knows where every chunk lives, it plans downloads intelligently rather than fetching each chunk individually. The goal is fewer round-trips, parallel work, and bounded memory.
+## Failure signals identify the broken layer
 
-<svg viewBox="0 0 720 360" width="100%" role="img" aria-label="Download planner: chunks are grouped by xorb, fetched in parallel, then streamed through a bounded channel into the assembler before the verified file is written">
-  <defs>
-    <marker id="arrow-recon-dl" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+| Failure | Likely boundary | Safe response |
+| --- | --- | --- |
+| Pointer parse error | Git blob or path selection | Inspect the committed blob and tracking rule |
+| File recipe not found | File index or retained metadata | Sync metadata and run `crab fsck` |
+| Missing chunk term | Shard closure | Stop hydration and repair repository metadata |
+| Xorb range unavailable | Object access, deletion, or archive state | Restore access or archived data |
+| Chunk hash mismatch | Cache, range response, or stored object | Discard cached bytes and verify origin |
+| Final file hash mismatch | Recipe order or assembled content | Keep the pointer and report integrity failure |
 
-  {/* Title */}
-  <text x="360" y="28" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"From Plan to Bytes"}</text>
+Do not work around an integrity error by copying the temporary output into place. Preserve the pointer and diagnostic evidence until the repository boundary is repaired.
 
-  {/* Row 1: Planner */}
-  <rect x="260" y="50" width="200" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="360" y="73" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Download Planner"}</text>
-  <text x="360" y="91" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"group + coalesce ranges"}</text>
+<GitArchitecturePlayer story="hydrate" />
 
-  {/* Three downward arrows from planner to xorb fetchers */}
-  <line x1="360" y1="100" x2="160" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-  <line x1="360" y1="100" x2="360" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-  <line x1="360" y1="100" x2="560" y2="140" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
+## Selective hydration uses the same proof
 
-  {/* Row 2: Three parallel xorb fetchers */}
-  <rect x="60" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="160" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb A range"}</text>
-  <text x="160" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
-
-  <rect x="260" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="360" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb B range"}</text>
-  <text x="360" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
-
-  <rect x="460" y="150" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="560" y="173" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Xorb C range"}</text>
-  <text x="560" y="191" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"parallel fetch"}</text>
-
-  {/* Three arrows converging to bounded channel */}
-  <line x1="160" y1="200" x2="320" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-  <line x1="360" y1="200" x2="360" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-  <line x1="560" y1="200" x2="400" y2="240" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-
-  {/* Row 3: Bounded channel */}
-  <rect x="240" y="250" width="240" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2"/>
-  <text x="360" y="273" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Bounded Channel"}</text>
-  <text x="360" y="291" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"cap ≈ 32 chunks (~4 MB)"}</text>
-
-  {/* Arrow to assembler */}
-  <line x1="360" y1="300" x2="360" y2="320" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-recon-dl)"/>
-
-  {/* Row 4: Streaming assembler */}
-  <rect x="240" y="322" width="240" height="30" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2"/>
-  <text x="360" y="342" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Streaming Assembler + Blake3"}</text>
-</svg>
-
-
-**Grouping.** If 50 chunks live in the same xorb, Crab fetches them as one contiguous byte range instead of making 50 separate requests. If two chunks are close together (gap under ~64 KB), it merges them into a single request and discards the gap bytes — still cheaper than a separate round-trip.
-
-**Parallel fetching.** Up to 8 download tasks run concurrently, each pulling ranges from different xorbs. Downloaded chunks are decompressed and sent through a bounded channel to the assembler.
-
-**Bounded memory.** The channel holds at most 32 chunks (~4 MB). If the assembler can't write fast enough, downloaders pause automatically. That means even a 10 GB file uses only tens of MB of RAM during reconstruction — file size doesn't matter.
-
-## Step 4: Verification and Atomic Assembly
-
-This is where Crab's "no compromises" philosophy shows up. Every reconstructed file is verified with Blake3 hashing — the same algorithm used throughout Crab's storage engine.
-
-The verification is **streaming**. As each chunk is written to a temporary file, the same bytes are fed to a Blake3 hasher. By the time the last chunk is written, the hash is already computed. There's no separate verification pass — it happens during assembly at no extra cost.
+Patterns only choose which pointers enter the pipeline. They do not weaken reconstruction or verification.
 
 ```bash
-$ crab hydrate models/checkpoint.bin
-Resolving chunks... ~12k chunks across ~20 xorbs
-Downloading...    ████████████████████████  100%  (1.2 GB)
-Verified ✓        Blake3 hash matches pointer
+crab hydrate '*.safetensors'
+crab hydrate --manifest .crab/manifests/ci.txt
+crab hydrate --all
 ```
 
-If the hash matches, the temporary file is atomically renamed to the final path. One instant it's a pointer blob, the next it's your full file. No process ever sees a half-written file.
+Already hydrated files can be skipped. Clean committed files can later return to pointers with `crab dehydrate`, freeing local disk while preserving remote data.
 
-If the hash doesn't match, the temporary file is deleted and Crab returns an error. This would indicate a storage corruption bug, but the check is non-negotiable: data integrity isn't optional.
+## Verify hydration independently
 
-<Callout type="note" title="Blake3 is fast">
-Blake3 hashes at over 1 GB/s per core. Since it's computed incrementally during the write, verification adds essentially zero time. A 4 GB file verifies in roughly the same time it takes to write the file to disk.
-</Callout>
+Save a cryptographic hash before the original push, then compare it after hydration on a separate machine. An isolated cache ensures the test reads canonical remote dependencies.
 
-## Caching Makes It Faster Over Time
+Run `crab fsck` after representative hydrations. The file hash proves one output; repository integrity checks cover broader metadata and storage relationships.
 
-Downloaded chunks are cached locally at `~/.cache/crab/chunks/`, keyed by content hash. That means:
+For performance evidence, record file size, number of chunks, number of xorbs, coalesced range count, cache bytes, origin bytes, and total duration. These measurements show whether the bottleneck is lookup, retrieval, assembly, or verification.
 
-- **Second hydration is faster.** If you dehydrate and re-hydrate, most chunks come from local cache instead of cloud storage.
-- **Related files share chunks.** Thanks to deduplication, files with overlapping content (like model versions) share cached chunks.
-- **Cross-repo benefits.** The cache is shared across all your Crab repositories.
+<TakeawayBox title="Hydration has one valid result">
+  Resolve every term, read the required ranges, assemble in recipe order, and
+  publish only after the final identity matches.
+</TakeawayBox>
 
-After the first full hydration of a project, later operations can reuse cached chunks instead of fetching them again. Iterative workflows like hydrate → edit → dehydrate → hydrate usually get faster as more of the working set is already local.
-
-## Selective Hydration: Only What You Need
-
-You don't have to hydrate everything. For a repo with 10,000 tracked files where you only need 50, selective hydration cuts wait time by orders of magnitude.
-
-When hydrating multiple files, they share the download pool and chunk cache. Chunks needed by several files are downloaded once and reused — the planner deduplicates requests automatically.
-
-
-## What Happens When Things Go Wrong
-
-Reconstruction is designed to be resilient at every level. Here's what Crab does when each layer hits trouble:
-
-| Failure | What Crab Does |
-|---------|---------------|
-| Network timeout on a chunk | Retries with exponential backoff (up to 3 attempts) |
-| Corrupted download | Re-fetches from scratch, bypasses cache for that chunk |
-| Blake3 mismatch on final file | Discards temp file, re-hydrates with cache bypass |
-| Process interrupted (Ctrl+C) | Temp file cleaned up; cached chunks preserved for next attempt |
-
-The key principle: every operation is idempotent. You can interrupt and retry hydration as many times as you want — partial progress is preserved in the chunk cache, and the final result is always verified end-to-end.
-
-```json
-{
-  "file": "models/checkpoint.bin",
-  "chunks_resolved": 12047,
-  "xorbs_touched": 19,
-  "bytes_downloaded": 412905472,
-  "cache_hits": 0.61,
-  "verified": true
-}
-```
-
-## What This Means for You
-
-Reconstruction is the part of Crab you'll never have to think about — and that's the point. You run `crab hydrate`, and the right bytes show up at the right path. Behind the scenes, four lookups, parallel downloads, bounded memory, and cryptographic verification all conspire to make sure the file is exactly what you pushed.
-
-Curious about the other side of the round-trip? Read about [how Crab dedups your data on push](/blog/xet-protocol-deduplication) or [how lazy checkout keeps clones fast on multi-TB repos](/blog/lazy-checkout-fuse).
+For the complete code-and-data story, continue with [How does Crab keep one history across two data paths?](/blog/crab-interpreted-one-history-two-data-paths).

@@ -1,209 +1,120 @@
 ---
-title: "Crab's Multi-Layer Caching Architecture"
-description: "How Crab uses local chunk, xorb, shard, and metadata caches to reduce repeated network work while keeping object-store reads verifiable."
-date: "2025-06-30"
+title: "How does Crab avoid repeated object-store reads?"
+description: "See how verified local data, staging, metadata indexes, and an optional shared cache reduce object-store traffic."
+date: "2026-06-26"
 author: "Crab Team"
 category: "architecture"
-tags: ["caching", "performance", "xorb", "s3"]
-excerpt: "Crab uses layered local caches and metadata warming so repeated hydrations, diffs, and reads avoid unnecessary object-store round-trips."
+tags: ["caching", "performance", "xorb", "object-storage"]
+excerpt: "Crab resolves immutable data locally when possible and falls back to canonical object storage when proof is missing."
 level: "intermediate"
 path: "core-internals"
 order: 3
-concepts: ["cache", "range reads", "metadata warming", "object storage"]
-prerequisites: ["Inside Crab's 14-Step Push Pipeline"]
-outcome: "Learn where Crab caches data and metadata so repeated operations avoid unnecessary network work."
+concepts: ["cache", "range reads", "metadata indexes", "object storage"]
+prerequisites: ["What happens during a Crab push?"]
+outcome: "Explain which cache can accelerate a read and why cache state cannot replace remote proof."
 diagramType: "Cache hierarchy"
+meta:
+  contentType: "Conceptual"
+  goal: "Explain caching as verified reuse rather than a collection of opaque layers."
+  audience: "Developers diagnosing hydration performance or object-store traffic."
 ---
 
-## How Crab Avoids Repeating Network Work
+Crab's origin is object storage, but repeated work should not require repeated origin reads. Local data and metadata caches shorten the path while content identities keep the result verifiable.
 
-Every byte of your Crab repository lives in cloud storage. There is no server between you and S3, so when Crab needs data it either finds it locally or fetches it from the bucket. The cache's job is to make that second option rare for data and metadata you have already touched.
+<CacheHierarchyDiagram />
 
-It works the same way a CPU keeps your laptop responsive: the data you touch most often stays in the closest, fastest layer, and only the rare miss reaches all the way out to main memory. Or, if you prefer kitchens to chips: counter, fridge, pantry, grocery store. The closer the layer, the cheaper the lookup.
+## Metadata answers where; cached data answers whether to download
 
-## What You'll Learn
+Hydration begins with a file pointer and reconstruction metadata. The file index and shards identify the ordered chunks, their xorb objects, and their byte ranges.
 
-- Why most Crab operations resolve entirely from your local disk
-- How four cache layers cooperate to minimise network calls
-- Why the cache repairs itself instead of needing manual cleanup
-- How push-time warming avoids round-tripping data you just uploaded
+The local cache can then satisfy xorb data that the machine has already fetched. If a required range is absent, Crab reads the canonical object from the origin and can retain the verified result for later work.
 
-## Key Takeaways
+These are related but different responsibilities. Metadata resolves placement. The data cache avoids downloading known immutable bytes again.
 
-- **Four layers, one rule** — check local state before the object store. L1 → L2 → L3 → remote, in that order.
-- **Self-healing** — Blake3 verification on every read catches and replaces corrupted entries automatically.
-- **Lower cold-start cost** — metadata warming means the first hydrate can spend less time asking where chunks live.
-- **Push-to-cache** — bytes you just uploaded are immediately available locally, no round-trip to the cloud.
+## A cold hydration fills several caches
 
----
+Consider a pointer whose recipe references twelve chunks across three xorbs. The first hydration may need shard metadata, xorb range reads, decompression, and final file verification.
 
-## How the Four Layers Fit Together
+Crab can retain verified xorb data and metadata after that read. A second hydration on the same machine can resolve the pointer with fewer origin operations. A different file that references six of the same chunks may reuse the same cached xorb ranges.
 
-When Crab needs data — for a hydrate, a diff, a checkout, a FUSE read — it checks four places in order, fastest first. Most of the time it never makes it past the second layer.
+The working-tree file is not the cache entry. Dehydrating the path removes materialized content but does not require Crab to discard separately managed cache data.
 
-<svg viewBox="0 0 720 540" width="100%" role="img" aria-label="Cache waterfall diagram. A data request flows top-down through four layers: L1 chunk cache, L2 staging area, L3 metadata index, and L4 remote object storage. Hits at any layer return immediately; misses fall through to the next layer, and remote fetches are written back into L1.">
-  <defs>
-    <marker id="arrow-caching" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+## Local staging can satisfy recent content
 
-  {/* Request */}
-  <rect x="260" y="20" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="360" y="51" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Data Request"}</text>
+Staging contains chunks and recipes produced by clean operations before or during a push. When the same process or repository needs those bytes again, Crab can reuse them without round-tripping through object storage.
 
-  {/* Arrow → L1 */}
-  <line x1="360" y1="70" x2="360" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-caching)" />
+Staging is not a substitute for publication. A remote reader can rely only on objects and metadata that the push proved durable.
 
-  {/* L1 */}
-  <rect x="180" y="100" width="360" height="70" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="360" y="128" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"L1 — Chunk Cache"}</text>
-  <text x="360" y="152" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"~/.cache/crab — kitchen counter"}</text>
-  <text x="600" y="140" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"hit ✓"}</text>
+Staging can also bridge repeated Git filter operations before push. If a tool asks Git to clean the same content again, the session and staging indexes can avoid repeating chunk work.
 
-  {/* Arrow L1 → L2 */}
-  <line x1="360" y1="170" x2="360" y2="200" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-caching)" />
-  <text x="384" y="190" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"miss"}</text>
+This reuse remains local to the repository operation. Another machine cannot resolve the pointer until a successful push publishes its shared dependencies.
 
-  {/* L2 */}
-  <rect x="180" y="200" width="360" height="70" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="360" y="228" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"L2 — Staging Area"}</text>
-  <text x="360" y="252" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{".crab/staging — pantry"}</text>
-  <text x="600" y="240" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"hit ✓"}</text>
+## Immutable identity makes cache reuse safe
 
-  {/* Arrow L2 → L3 */}
-  <line x1="360" y1="270" x2="360" y2="300" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-caching)" />
-  <text x="384" y="290" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"miss"}</text>
+Xorbs and chunks are content-addressed. A cache entry is useful because Crab can connect it to the expected identity, not because the file happens to exist at a familiar path.
 
-  {/* L3 */}
-  <rect x="180" y="300" width="360" height="70" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="360" y="328" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"L3 — Metadata Index"}</text>
-  <text x="360" y="352" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"cached shard map — shopping list"}</text>
-  <text x="600" y="340" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"resolves"}</text>
+Corrupt or incomplete data must fail verification and return to the canonical read path. Hydration does not expose a partially reconstructed file as a successful result.
 
-  {/* Arrow L3 → L4 */}
-  <line x1="360" y1="370" x2="360" y2="400" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-caching)" />
-  <text x="384" y="390" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"miss"}</text>
+## Content addressing changes invalidation
 
-  {/* L4 */}
-  <rect x="180" y="400" width="360" height="70" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" strokeDasharray="6 3" />
-  <text x="360" y="428" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"L4 — Remote Fetch"}</text>
-  <text x="360" y="452" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"S3 range request — grocery store"}</text>
+Mutable caches need invalidation when the value behind a key changes. A content-addressed xorb has a different rule: the key names immutable content, so a valid cached value never becomes an older version of that key.
 
-  {/* Write-back arrow from L4 → L1 */}
-  <path d="M180,435 L120,435 L120,135 L180,135" fill="none" stroke="var(--primary)" strokeWidth="2" strokeDasharray="4 4" markerEnd="url(#arrow-caching)" />
-  <text x="80" y="285" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="12" textAnchor="middle" transform="rotate(-90, 80, 285)">{"write-back"}</text>
+Crab still needs eviction, corruption handling, and metadata generation checks. Eviction controls disk capacity. Hash verification detects wrong bytes. Generation-aware metadata prevents a stale index view from hiding newer canonical state.
 
-  {/* Footer */}
-  <text x="360" y="510" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"For active development, layers L1 and L2 resolve the vast majority of requests."}</text>
-</svg>
+This model reduces invalidation complexity, but it does not eliminate authority checks. A locally known chunk cannot prove that the remote repository published the same dependency.
 
-The waterfall is strict: a hit at any layer returns immediately, and only a complete miss reaches the network. When L4 does run, the bytes it pulls back get written into L1 before they're returned, so the next request takes the fast path.
+## Range planning reduces request fan-out
 
----
+A file recipe may reference dozens of chunks inside the same xorb. Fetching each chunk with a separate request would make request overhead dominate the data transfer.
 
-## L1 — The Chunk Cache (Kitchen Counter)
+Crab groups required chunks by xorb and coalesces compatible byte ranges. It can fetch independent xorb ranges concurrently while keeping memory and I/O bounded.
 
-The primary cache lives at `~/.cache/crab/`. It's a content-addressed disk cache that stores individual chunks, shard indexes, and full xorb archives — the compressed bundles Crab ships across the wire. Think of it as the kitchen counter: ingredients you reach for every day are right there.
+## A shared cache is optional
 
-Every read is verified against a Blake3 hash. If a chunk is corrupted by a bad disk write or an interrupted download, Crab notices, evicts the bad entry, and re-fetches it. There's no manual cleanup step — the cache heals itself as a side effect of being used.
+The default local cache serves one machine. Teams can also deploy the optional Crab cache service so developers and CI runners share recently used objects before falling back to cloud storage.
 
-It also stays small on its own. The cache uses LRU eviction, where every successful read updates the entry's timestamp. When the cache grows past its size budget, the coldest files get removed first. Data from your active branch stays warm; the experiment you abandoned three months ago drops off naturally.
+The shared service is an acceleration layer, not the repository's source of truth. If it is unavailable or misses an object, canonical object storage remains the durable origin.
 
-```toml
-[cache]
-# Maximum cache size on disk (default: 10 GB)
-chunk_max_bytes = 10_737_418_240
+## Decide whether a shared cache pays for itself
 
-# Override location — handy on CI runners or fast NVMe drives
-root = "/fast-nvme/.cache/crab"
+A shared cache helps when several machines read the same active data set. Developer teams, repeated continuous integration jobs, and regional training workers can avoid duplicate object-store reads.
 
-[cache.warming]
-prefetch_shards = true
-prefetch_concurrency = 8
+It helps less when every job reads unique content or already runs near the bucket. The service also needs capacity planning, authentication, health checks, and eviction policy.
+
+Compare these measurements before deployment:
+
+- **Origin bytes avoided**: data served by the shared cache instead of object storage
+- **Request reduction**: origin operations removed from repeated hydration
+- **Cache hit rate**: hits divided by eligible lookups, segmented by workload
+- **Added latency**: cache lookup time on hits and misses
+- **Operating cost**: compute, local solid-state drive capacity, and network transfer
+
+Treat a high hit rate carefully. Tiny metadata hits can dominate count while large xorb misses dominate bytes and cost.
+
+## Inspect and reset local cache state
+
+Use the cache commands to observe local behavior or reclaim disk space:
+
+```bash
+crab cache stats
+crab cache clean
 ```
 
-<Callout type="tip" title="Self-healing by design">
-You never need to manually clear or rebuild the cache. Hash verification turns corruption into a quiet refetch instead of a confusing error.
-</Callout>
+Cleaning the cache does not delete repository data. It removes local copies that Crab can fetch again from the origin.
 
----
+## Diagnose performance from the miss path
 
-## L2 — The Staging Area (Pantry)
+Begin with `crab cache stats`, then compare a cold and warm hydration of the same file. Record elapsed time, bytes read from origin, cache bytes read, request count, and verification failures.
 
-The staging area at `.crab/staging/` exists primarily to buffer chunks before a push, but it doubles as a powerful implicit cache. Picture pushing a 2 GB model file: the chunks are staged locally, then uploaded to S3, but the local copies don't disappear the moment the upload finishes.
+If metadata lookup dominates, warming xorb data alone will not help. Inspect shard synchronization and chunk-index state. If origin range reads dominate, inspect xorb grouping, cache capacity, and access locality.
 
-If a teammate clones the repo an hour later and you need to verify something in that same file, Crab checks the staging area's index first. If the chunks are still there — and they usually are — it reads them locally without touching the network. It's the pantry: not as immediate as the counter, but still in your house.
+A warm run that remains slow may be doing required final assembly and hashing. Cache eliminates remote work, not the byte processing needed to produce and verify the output file.
 
-The staging area also catches the middle case during dedup checks on push. Crab's three-tier dedup check looks like this:
+Use cache cleaning only as a controlled diagnostic or disk-reclamation action. Repeatedly clearing healthy cache state makes every workload look cold and hides the benefit you are trying to measure.
 
-| Check | Where it looks | Cost |
-|-------|---------------|------|
-| Session dedup | In-memory hash set | Free (RAM lookup) |
-| Staging dedup | Local SQLite index | Fast (disk read) |
-| Global dedup | Remote shard index | Slow (network call) |
+<TakeawayBox title="Cache is acceleration, not authority">
+  Local and shared caches reduce latency and requests. Canonical object
+  storage and verified content identities remain the correctness boundary.
+</TakeawayBox>
 
-Most chunks short-circuit at one of the first two checks, so the global lookup stays rare and the network stays quiet.
-
----
-
-## L3 — Metadata Warming (Shopping List)
-
-Here's a problem fresh clones run into. Before any actual data transfer can begin, Crab needs to know *where* every chunk lives in cloud storage. With no local metadata that means hundreds of sequential lookups just to build the map — pure latency, before a single byte of useful data moves.
-
-Crab works around this by warming metadata in the background during clone. While you're getting set up, it prefetches shard indexes and file-index entries. By the time you run your first `crab hydrate`, many of the "where is everything?" questions are already answered locally and the network can spend more time on actual file content.
-
-The difference shows up clearly the first time you hydrate after a fresh clone:
-
-| | Without warming | With warming |
-|---|---|---|
-| Metadata lookups | Many sequential fetches | Often reduced by warmed shard metadata |
-| Data transfer starts | After metadata resolution | Earlier when required shards are already cached |
-| Bottleneck | Network latency | Network bandwidth |
-
-It's the difference between wandering every aisle of the store looking for ingredients and walking in with a shopping list already written.
-
----
-
-## L4 — Remote Fetch With Push-to-Cache
-
-L4 is the fall-through layer: a range request to S3 (or GCS, or Azure) for the bytes nothing else had. It's the only layer that actually moves data over the network, which is exactly why the layers above it work so hard to avoid it.
-
-The most wasteful pattern any storage system can fall into is uploading data and then immediately downloading it again. You just had those bytes in memory — fetching them from the cloud a moment later is pure waste. Crab eliminates the round-trip entirely: at the end of every successful push, uploaded xorbs are written directly into L1.
-
-This is safe because xorbs are immutable and content-addressed. There's no stale-cache problem — the content can't change. Freshly-pushed data lands at the "most recently used" end of the LRU, so it stays warm for the operations that follow.
-
-A simplified version of the eviction logic looks like this:
-
-```rust
-// Conceptual: keep cache under budget, drop coldest entries first.
-fn evict_to_budget(cache: &mut Cache, budget_bytes: u64) {
-    while cache.total_bytes() > budget_bytes {
-        let coldest = cache.entries_by_atime().next();
-        match coldest {
-            Some(entry) if entry.is_pinned() => break,
-            Some(entry) => cache.remove(&entry.key),
-            None => break,
-        }
-    }
-}
-```
-
-The actual implementation is more careful — it batches removals, fsyncs metadata, and cooperates with concurrent reads — but the core idea is the same. Old, untouched entries make room for new ones, and freshly pushed xorbs start at the warm end of the queue.
-
-<Callout type="note" title="The principle">
-**Avoid repeating work.** Between the chunk cache, staging area, metadata warming, and push-to-cache, warm paths can avoid object-store reads. Cold paths still fetch from the bucket, then populate local cache for the next request.
-</Callout>
-
----
-
-## What This Means in Practice
-
-For a typical development workflow, the layers compound:
-
-1. **You clone a repo.** L3 metadata warming prefetches shard indexes in the background.
-2. **You hydrate files.** Chunks resolve from the warmed L3 map, and downloads are bandwidth-bound from the very first byte.
-3. **You make changes and push.** Only new chunks upload (dedup handles the rest), and those chunks land in L1 on the way out.
-4. **You hydrate or diff later.** Warm chunks and metadata resolve locally; cold ranges fall through to the object store and then become cacheable.
-
-After the initial clone and first reads, everyday operations touch S3 less often. The cache layers cooperate so that remote fetch becomes the exception for warm working sets, not the default for every operation.
+Continue with [How does Crab rebuild a file from chunks?](/blog/shard-reconstruction-hydration) to see how metadata and range reads become one verified file.

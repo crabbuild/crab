@@ -22,6 +22,7 @@ import {
   type BlogLearningPathKey,
   type BlogPostMeta,
 } from "@/lib/blog"
+import { formatBlogDate } from "@/lib/blog-date"
 import { cn } from "@/lib/utils"
 
 const categoryIcons: Record<string, typeof Package> = {
@@ -94,11 +95,7 @@ function PostCard({ post }: { post: BlogPostMeta }) {
           )}
           <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
             <time dateTime={post.date}>
-              {new Date(post.date).toLocaleDateString("en-US", {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-              })}
+              {formatBlogDate(post.date, "short")}
             </time>
             <span className="flex items-center gap-1">
               <Clock size={12} />

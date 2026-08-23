@@ -1,223 +1,156 @@
 ---
-title: "Cost Optimization: S3 Storage Classes and Request Budgets"
-description: "How Crab keeps cloud storage costs predictable with xorb-scoped lifecycle rules, request batching, and checks that keep metadata hot."
-date: "2025-08-11"
+title: "How do you control Crab object-storage cost?"
+description: "Model stored bytes, requests, retrieval, and transfer, then apply deduplication, packing, lifecycle, and cache policies in the right order."
+date: "2026-08-07"
 author: "Crab Team"
 category: "architecture"
-tags: ["s3", "cost", "storage", "lifecycle"]
-excerpt: "Crab keeps storage costs predictable by moving eligible xorbs to cheaper tiers and packing chunks so large-file repositories avoid per-chunk request bills."
+tags: ["cost", "object-storage", "lifecycle", "tiering"]
+excerpt: "Crab cost follows unique bytes, object-store operations, retrieval, and transfer. Each lever targets a different term."
 level: "intermediate"
 path: "advanced-operations"
 order: 4
-concepts: ["S3", "lifecycle rules", "xorb tiering", "request batching"]
-prerequisites: ["Garbage Collection in a Serverless World"]
-outcome: "See which storage and request patterns keep large-file repositories economically predictable."
+concepts: ["cost model", "lifecycle rules", "xorb tiering", "request batching"]
+prerequisites: ["How does Crab reclaim unreferenced data safely?"]
+outcome: "Create a provider-aware cost plan without archiving metadata or relying on stale price examples."
 diagramType: "Storage lifecycle"
+meta:
+  contentType: "How-to guide"
+  goal: "Connect each object-storage cost term to a measurable Crab control."
+  audience: "Repository operators responsible for cloud cost and access latency."
 ---
 
-<TakeawayBox title="Cost model">
-  Crab reduces storage bills by making old data cheap and request volume small:
-  lifecycle rules move cold objects to lower-cost classes, while chunk packing
-  turns thousands of tiny writes into a small number of object-store requests.
-</TakeawayBox>
+A Crab storage bill has four main terms: bytes stored by class, object requests, cold-data retrieval, and network transfer. Deduplication, xorb packing, caching, garbage collection, and tiering each change a different term.
 
-## How Crab Keeps Your Cloud Storage Bill Low
+<StorageTierDiagram />
 
-Crab stores repository data in cloud object storage like S3. No servers, no databases — just your files in the cloud. That's great for simplicity, but storage bills can grow fast when you're dealing with terabytes of ML models, game assets, or media files.
+## Start with a formula, not a provider price table
 
-Here's the useful pattern: a lot of repository data gets colder over time. It was pushed weeks or months ago and nobody has touched it since. Crab uses lifecycle rules to move eligible xorbs — the packed large-file data objects under `.crab/xorbs/` — to cheaper storage tiers while keeping metadata hot.
-
-The exact savings depend on provider, access pattern, object age, and retrieval frequency. For repositories with a long cold tail, tiering can make storage costs track active data instead of total history.
-
-## TL;DR
-
-- Crab generates lifecycle rules scoped to `.crab/xorbs/`; refs, manifests, shards, and file indexes stay in the hot tier.
-- Request batching packs many chunks into each xorb, so request count scales with packed objects instead of every chunk.
-- `crab tier plan` previews the rules; `crab tier plan --apply` applies them with provider safeguards.
-- Recently pushed data stays hot, while older xorbs can move to lower-cost tiers where retrieval tradeoffs are explicit.
-
----
-
-## The Savings at a Glance
-
-Here's what tiering can look like for an example S3 repository whose old xorbs are rarely read:
-
-| Repo Size | Standard Storage | With Crab Tiering | Monthly Savings | Annual Savings |
-|-----------|-----------------|-------------------|-----------------|----------------|
-| 100 GB | $2.30/mo | $1.00/mo | $1.30 | $15.60 |
-| 1 TB | $23.00/mo | $10.01/mo | $12.99 | $155.76 |
-| 10 TB | $230.00/mo | $97.25/mo | $132.75 | $1,593.00 |
-
-At larger scales, the same pattern compounds. The savings come from two places: cheaper storage tiers for cold xorbs, and fewer API requests because chunks are packed before upload.
-
----
-
-## Hot, Warm, and Cold — Like Cheaper Shelves
-
-Think of S3 storage classes as shelves in a warehouse:
-
-- **Hot (Standard)** — the front shelf, instant access, most expensive.
-- **Warm (Standard-IA)** — a back shelf, still fast, roughly 45% cheaper.
-- **Cold (Glacier Instant Retrieval)** — deep storage, millisecond access, roughly 83% cheaper.
-
-Crab's lifecycle plan moves eligible xorbs through these tiers based on age. Fresh data stays hot because you are more likely to need it soon. Old packed data can slide to cheaper shelves while the metadata that powers lookup stays in Standard.
-
-<svg viewBox="0 0 800 280" width="100%" role="img" aria-label="Storage tier transition timeline showing data moving from hot to warm to cold storage over time">
-  <defs>
-    <marker id="arrow-cost" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
-
-  {/* Hot tier */}
-  <rect x="80" y="60" width="180" height="110" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <rect x="80" y="60" width="180" height="30" rx="8" fill="var(--muted)" />
-  <text x="170" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Hot (Standard)"}</text>
-  <text x="170" y="115" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"$0.023/GB"}</text>
-  <text x="170" y="138" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Days 0–30"}</text>
-  <text x="170" y="158" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Instant access"}</text>
-
-  {/* Warm tier */}
-  <rect x="310" y="60" width="180" height="110" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <rect x="310" y="60" width="180" height="30" rx="8" fill="var(--muted)" />
-  <text x="400" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Warm (Standard-IA)"}</text>
-  <text x="400" y="115" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"$0.0125/GB"}</text>
-  <text x="400" y="138" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Days 30–90"}</text>
-  <text x="400" y="158" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"~45% cheaper"}</text>
-
-  {/* Cold tier */}
-  <rect x="540" y="60" width="180" height="110" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <rect x="540" y="60" width="180" height="30" rx="8" fill="var(--muted)" />
-  <text x="630" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Cold (Glacier IR)"}</text>
-  <text x="630" y="115" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"$0.004/GB"}</text>
-  <text x="630" y="138" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Days 90+"}</text>
-  <text x="630" y="158" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"~83% cheaper"}</text>
-
-  {/* Transition arrows between tiers */}
-  <line x1="266" y1="115" x2="304" y2="115" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-cost)" />
-  <line x1="496" y1="115" x2="534" y2="115" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-cost)" />
-
-  {/* Timeline */}
-  <line x1="80" y1="210" x2="730" y2="210" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-cost)" />
-  <line x1="170" y1="200" x2="170" y2="220" stroke="var(--border)" strokeWidth="2" />
-  <text x="170" y="240" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Day 0"}</text>
-  <line x1="400" y1="200" x2="400" y2="220" stroke="var(--border)" strokeWidth="2" />
-  <text x="400" y="240" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Day 30"}</text>
-  <line x1="630" y1="200" x2="630" y2="220" stroke="var(--border)" strokeWidth="2" />
-  <text x="630" y="240" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Day 90"}</text>
-  <text x="400" y="265" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Time since upload"}</text>
-</svg>
-
-The key insight: a freshly pushed file usually has a higher read probability than a file nobody has touched in months. This "write once, read rarely" pattern is what makes tiering useful for old model checkpoints, media assets, and historical build artifacts.
-
-Crab uses this pattern to reduce cost while keeping the operational path simple. New pushes land in Standard for fast access. A lifecycle rule can move old xorbs to Standard-IA and then Glacier Instant Retrieval. If you choose deeper archive classes, Crab's restore path has to account for provider restore latency instead of treating the object as immediately readable.
-
----
-
-## How Crab Slashes Request Costs
-
-Storage pricing is only half the equation. S3 also charges per API request. Every PUT (upload), GET (download), and LIST (browse) costs money. At scale, a naive implementation would generate enormous request bills.
-
-The trick is **packing**. Instead of uploading each chunk individually, Crab packs roughly 1,000 chunks into a single archive — a xorb — and uploads that as one object. Think of it like shipping: instead of mailing 1,000 individual letters, you pack them into one box and ship once.
+Provider prices vary by region, account, storage class, and date. Use the current calculator and contract for your bucket, then model the workload with this shape:
 
 ```text
-Request Cost Comparison (1 TB repository)
-═══════════════════════════════════════════════════════════
-                      Per-Chunk PUTs    Xorb-Packed PUTs
-─────────────────────────────────────────────────────────
-  Objects uploaded:   16,000,000        16,000
-  PUT requests:       16,000,000        16,000
-  PUT cost:           $80.00            $0.08
-─────────────────────────────────────────────────────────
-  Savings:                              99.9%
-═══════════════════════════════════════════════════════════
+monthly cost ≈
+  stored GB by class × storage rate
+  + write, list, and read requests × request rate
+  + restored or retrieved GB × retrieval rate
+  + transferred GB × network rate
+  + minimum-retention or early-deletion charges
 ```
 
-On the read side, Crab uses a small local lookup table — the shard index — that maps chunk hashes to their xorb locations. This eliminates the most expensive S3 operations entirely:
+A cheaper storage class can cost more overall when each monthly workflow rereads the working set or deletes objects before the class minimum.
 
-- **Zero LIST calls.** Crab never asks S3 "what objects do you have?" The shard already knows.
-- **Targeted GETs only.** Each read fetches the exact bytes needed from a specific xorb, nothing more.
-- **No HEAD checks.** The shard resolves existence without querying S3.
+## Build one row per data temperature
 
-For a 1 TB repo with daily 5 GB pushes, request costs can stay in the "rounding error" range instead of becoming the dominant part of the bill. The important point is not the exact cents; it is that xorb packing prevents request count from scaling with every individual chunk.
+Separate hot, warm, and archival xorbs instead of averaging the complete repository into one access rate. Each group has a different storage rate, read frequency, retrieval charge, and restore-time objective.
 
-The shard index also makes deduplication cheap. Before uploading a new chunk, Crab checks the local shard to see if an identical chunk already exists in storage. If it does, the upload is skipped entirely. No bytes leave your machine, no PUT request is sent, and the existing xorb is referenced instead. For repos with overlapping content — versioned model checkpoints, rebuilt artifacts, edited media files — this avoids paying twice for the same data.
+| Input | Hot set | Warm set | Archive set |
+| --- | --- | --- | --- |
+| Stored GB | `gb_hot` | `gb_warm` | `gb_archive` |
+| Monthly reads | `reads_hot` | `reads_warm` | `reads_archive` |
+| Retrieved GB | Direct-read bytes | Direct or metered bytes | Restored bytes |
+| Required latency | Interactive | Batch-compatible | Restore-compatible |
+| Minimum retention | Provider class rule | Provider class rule | Provider class rule |
 
----
+Multiply each set by its current regional prices, then add request and transfer terms. This model makes a cold-tail policy visible instead of hiding it inside one storage total.
 
-## Setting It Up (One Command)
+Run a sensitivity check as well. Double the archive read frequency, increase the hot set by one release cycle, and model an early-delete event. The policy should remain acceptable under plausible workload changes.
 
-Crab keeps the tiering surface small. Everything starts in Standard, and `crab tier plan` generates provider-specific lifecycle rules for the xorb prefix. You do not need to write lifecycle XML or JSON by hand, but applying the plan is still an explicit operational step.
+## Measure local and remote bytes
 
-If you want to see your savings or fine-tune the setup, three commands give you full visibility:
+Use Crab's inventory before changing policy:
 
 ```bash
-# See your current costs and projected savings
-crab doctor --cost
-
-# Preview lifecycle rules (doesn't change anything)
-crab tier plan
-
-# Apply rules — transitions happen automatically from here
-crab tier plan --apply
+crab du
+crab du --remote
+crab optimize repo --json
 ```
 
-Once applied, S3 handles every transition in the background. You never think about it again.
+Record total remote bytes, object counts, age distribution, retrieval frequency, and the size of the active working set. Compare that baseline after each change.
 
-There's one important safety detail. Crab's garbage collector (which cleans up unreferenced data) must run before lifecycle transitions kick in. Otherwise you'd pay early-deletion fees on data that was going to be cleaned up anyway. `crab tier plan` validates this automatically and refuses to apply conflicting rules.
+Provider billing and Crab inventory answer different questions. Billing shows charged usage. `crab du --remote` shows repository storage. Access logs and cache metrics show which bytes created requests and transfer.
 
-<Callout type="note" title="Metadata stays fast">
-Only data files (xorbs) move to cheaper tiers. Metadata like manifests, shards, and file indexes stay in Standard permanently — they're tiny, accessed frequently, and cheap to keep hot. Operations like `crab status` and shard syncs stay snappy.
-</Callout>
+Keep the observation window long enough to include releases, training cycles, and recovery drills. A quiet week can make active data look archival when the monthly workflow still needs it.
 
----
+## Reduce unique bytes before moving them
 
-## When Tiering Doesn't Help
+Content-defined chunking prevents known chunks from uploading again. Garbage collection removes objects that are no longer protected by any retained root. These controls reduce the number of billable bytes.
 
-Tiering isn't magic. It works best when old data is rarely accessed. A few scenarios where it's less effective:
+Packing and repacking target request economics. Larger well-formed xorbs let groups of chunks share object writes and coalesced range reads, which avoids a request per chunk.
 
-- **Flat access patterns.** If old data gets read as often as new data (a training dataset re-read weekly, for example), retrieval fees can offset the storage discount.
-- **Very small repos.** Savings on 10 GB aren't worth thinking about — maybe $0.15/month.
-- **High retrieval frequency.** Constantly pulling old versions can offset storage savings.
+Preview combined recommendations before applying layout changes:
 
-Crab handles this conservatively. Preview the lifecycle plan before applying it, keep garbage collection ahead of cold-tier transitions, and revisit the plan when your access pattern changes.
+```bash
+crab optimize plan --include-xorbs --profile ml --json
+crab optimize xorbs --profile ml --dry-run
+```
 
----
+Layout optimization can trade one term against another. Repacking may create temporary additional bytes while new objects upload. Larger xorbs can reduce requests but may increase extra range bytes for sparse reads.
 
-## The Complete Cost Picture
+Record both the steady-state estimate and migration cost. A policy that saves a small monthly amount may not repay its rewrite, transfer, and early-deletion charges within the repository's lifetime.
 
-For a typical 1 TB repository:
+## Tier only immutable data objects
 
-| Component | Without Tiering | With Tiering |
-|-----------|----------------|-------------|
-| Storage | $23.00/mo | $10.01/mo |
-| Requests | $0.015/mo | $0.027/mo |
-| **Total** | **$23.02/mo** | **$10.04/mo** |
-| **Annual** | **$276.24** | **$120.48** |
+Crab lifecycle plans scope transitions to `.crab/xorbs/`. Refs, manifests, shards, file indexes, and Git packs remain in readable storage because repository discovery and hydration planning depend on them.
 
-Annual savings in this example: **$155.76**. A 10 TB repository with the same access pattern saves roughly ten times that, but teams should treat the table as a planning model, not a guarantee.
+The default tier schedule is opt-in: warm-class transition after 30 days and deep-cold transition after 180 days. Treat those values as a starting point, then adjust them to measured access and provider retention rules.
 
-The slight increase in request costs (from $0.015 to $0.027) comes from retrieval fees on warm and cold data. Storage savings dwarf this by orders of magnitude.
+```bash
+crab tier plan
+crab tier plan --apply --merge
+```
 
-<Callout type="tip" title="Backfill imports save even more">
-Migrating from Git LFS? Use the `--backfill` flag. Imported data skips the hot tier entirely (it's historical — you probably won't read it soon), saving roughly $5.25/month per 500 GB from day one.
-</Callout>
+`--merge` preserves unrelated lifecycle rules and replaces only Crab-managed rules. An apply writes a backup so the prior configuration can be restored.
 
----
+Keep metadata out of archive rules. A small metadata object can sit on the critical path for every ref list or hydration plan. Its storage savings are negligible compared with restore latency and request failure risk.
 
-## Key Takeaways
+Review provider lifecycle precedence when the bucket already has infrastructure-managed rules. Merge mode protects unrelated rules, but overlapping prefixes or broader provider rules can still affect Crab objects.
 
-<Cards>
-<Card title="Cold Data Costs Less">
-Tiering exploits the write-once, read-rarely pattern. Cold xorbs can move to lower-cost classes while hot metadata stays in Standard.
-</Card>
-<Card title="Negligible Request Costs">
-Xorb packing cuts PUT requests by ~99.9%, and shard-based resolution removes LIST calls entirely. Total request bill stays under a few cents per month.
-</Card>
-<Card title="Explicit Lifecycle Plan">
-Fresh repos start in Standard. `crab tier plan` shows the rules, and `crab tier plan --apply` installs them when you are ready.
-</Card>
-<Card title="Restore Tradeoffs Stay Visible">
-Recently pushed data stays hot. If you choose archive classes, Crab treats restore latency as an explicit part of hydration.
-</Card>
-</Cards>
+## Include restore time in the policy
+
+Archive classes may require a restore before hydration can read an xorb. That changes both latency and retrieval cost.
+
+```bash
+crab hydrate --all --restore
+crab hydrate --all --no-restore
+```
+
+Use `--no-restore` for jobs that should fail instead of waiting or incurring restore cost. Reserve archive tiers for data whose recovery-time objective can tolerate the provider's delay.
+
+## Assign a request budget by workflow
+
+Storage cost receives attention because it scales with total bytes, but request cost can dominate small-object layouts and repeated metadata scans.
+
+Set budgets for common workflows:
+
+- **Push**: object checks, xorb writes, shard writes, Git-pack writes, and ref operations
+- **Lazy clone**: ref reads, Git-pack reads, and metadata synchronization
+- **Hydration**: shard reads, xorb range reads, restore requests, and verification work
+- **Garbage collection**: namespace listings, metadata reads, object deletes, and reconciliation
+- **Mount**: metadata lookup plus range reads driven by application access
+
+Measure operations per completed workflow, not per command invocation. One hydration command can read several xorbs, and one xorb range can satisfy several chunks.
+
+Request batching and range coalescing should lower operations without downloading excessive unused bytes. Track both request count and transferred bytes to expose that tradeoff.
+
+## Use caching for repeated reads
+
+A local cache removes repeat downloads on one machine. The optional shared cache service can remove repeat origin reads across developers and CI runners.
+
+Caching does not reduce stored origin bytes, and it introduces its own capacity and operations cost. Measure cache hit rate and transfer savings before treating it as a cost win.
+
+## Review cost as a recurring repository operation
+
+Run a monthly review with repository inventory, provider billing, cache metrics, lifecycle transitions, restores, and garbage-collection results. Compare the same normalized workflow measures each month.
+
+Investigate changes by term. Growing unique bytes may reflect new data or expired deduplication assumptions. Growing reads may reflect a wider working set, cache eviction, or more workers. Growing retrieval charges may indicate that tier transitions happen too early.
+
+Document every applied lifecycle plan and retain its generated backup. Cost controls change availability behavior, so rollback evidence belongs beside the financial estimate.
+
+The review should end with one of three decisions: keep the policy, change a measured threshold, or collect more access evidence. Avoid changing several controls at once because the next bill will not reveal which control caused the result.
+
+<TakeawayBox title="Match the lever to the term">
+  Deduplication and GC reduce bytes. Packing reduces requests. Caching reduces
+  repeated reads. Tiering trades access latency and retrieval cost for a lower
+  storage rate.
+</TakeawayBox>
+
+Review the [`crab tier`](/docs/cli/reference/crab-tier) and [`crab optimize`](/docs/cli/reference/crab-optimize) references before applying provider changes.

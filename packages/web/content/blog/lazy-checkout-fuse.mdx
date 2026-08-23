@@ -1,219 +1,158 @@
 ---
-title: "Lazy Checkout & FUSE: Working with Terabyte Repos"
-description: "Work with terabyte-scale repositories by cloning pointer metadata first, then hydrating or mounting large-file content only when you need it."
-date: "2025-07-07"
+title: "How do you work with a repository larger than your disk?"
+description: "Choose pointer-only clones, selective hydration, or an on-demand mount for repositories whose full content exceeds local storage."
+date: "2026-07-24"
 author: "Crab Team"
 category: "tutorial"
-tags: ["fuse", "hydration", "lazy-checkout", "large-files"]
-excerpt: "Crab keeps clones light with pointer blobs, lets you hydrate selected files, and can expose large content through FUSE so bytes move only when work demands them."
+tags: ["mount", "hydration", "lazy-checkout", "large-files"]
+excerpt: "Keep Git history local, then materialize known files or serve unpredictable reads through a virtual filesystem."
 level: "intermediate"
 path: "advanced-operations"
 order: 2
-concepts: ["lazy checkout", "FUSE", "hydration", "range reads"]
-prerequisites: ["Shard Reconstruction: How Crab Rebuilds Files from Chunks"]
-outcome: "Learn how Crab makes massive repositories practical by downloading large-file content only when needed."
-diagramType: "Lazy hydration flow"
+concepts: ["lazy checkout", "mount", "hydration", "range reads"]
+prerequisites: ["How does Crab rebuild a file from chunks?"]
+outcome: "Select and operate the right materialization strategy for a large repository."
+diagramType: "Access strategy comparison"
+meta:
+  contentType: "Tutorial"
+  goal: "Help readers choose between pointers, hydration, and mounts based on access shape."
+  audience: "Developers working with repositories that exceed local disk or transfer budgets."
 ---
 
-## Clone Pointers First — Download Content When You Use It
+A Crab clone leaves managed large files as pointers by default. You can keep them that way for Git operations, hydrate a known working set, or mount a repository so files resolve when applications read them.
 
-Imagine cloning a repository with 50 GB of model weights, 200 GB of training data, and hundreds of gigabytes of assets without pulling every byte onto your laptop first. That's what Crab's lazy checkout is for.
+<LazyCheckoutDiagram />
 
-Traditional git downloads everything before you can work. Crab flips this around: cloning pulls only tiny pointer files, then real content arrives on demand — either when you ask for it explicitly, or transparently through a virtual filesystem.
+## Keep pointers when you need history, not bytes
 
-## Key Takeaways
-
-- **Lightweight clone.** Crab replaces large files with small pointers, so clone time follows metadata size instead of total content size.
-- **Selective hydration.** Use `crab hydrate 'pattern'` to download only the files you actually need.
-- **Virtual filesystem.** `crab mount` makes every file appear real — content streams in transparently when something reads it.
-- **Safe round-trip.** `crab dehydrate` frees disk space without touching uncommitted work.
-
----
-
-## From Clone to Working: The Decision Tree
-
-When you clone a Crab repository, your working tree contains small pointer files instead of actual content. From there, you pick how to access the real data.
-
-<svg viewBox="0 0 800 360" width="100%" role="img" aria-label="Decision tree showing clone produces pointer blobs, then three branches: hydrate to download specific files, mount to expose a virtual filesystem, or work with pointers directly for fast git operations.">
-  <defs>
-    <marker id="arrow-lc-decision" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
-
-  {/* Clone box */}
-  <rect x="40" y="140" width="160" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="120" y="167" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"git clone"}</text>
-  <text x="120" y="187" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"metadata first"}</text>
-
-  {/* Arrow from clone to pointers */}
-  <line x1="200" y1="170" x2="260" y2="170" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-decision)" />
-
-  {/* Pointers box */}
-  <rect x="270" y="140" width="160" height="60" rx="8" fill="var(--muted)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="350" y="167" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Pointer Blobs"}</text>
-  <text x="350" y="187" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"~200 bytes each"}</text>
-
-  {/* Choose label */}
-  <text x="490" y="165" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12" fontStyle="italic">{"choose"}</text>
-
-  {/* Branch arrows from pointers right edge */}
-  <line x1="430" y1="155" x2="540" y2="70" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-decision)" />
-  <line x1="430" y1="170" x2="540" y2="170" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-decision)" />
-  <line x1="430" y1="185" x2="540" y2="270" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-decision)" />
-
-  {/* Hydrate box */}
-  <rect x="550" y="40" width="220" height="60" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="660" y="67" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"crab hydrate"}</text>
-  <text x="660" y="87" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"download specific files"}</text>
-
-  {/* Mount box */}
-  <rect x="550" y="140" width="220" height="60" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="660" y="167" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"crab mount"}</text>
-  <text x="660" y="187" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"virtual filesystem, on demand"}</text>
-
-  {/* Work with pointers box */}
-  <rect x="550" y="240" width="220" height="60" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="660" y="267" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Stay on pointers"}</text>
-  <text x="660" y="287" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="12">{"git ops at full speed"}</text>
-</svg>
-
----
-
-## Pointers: Why Cloning Stays Light
-
-A pointer blob is a small text file that stands in for a large file. Whether the original is 100 KB or 50 GB, the pointer stays tiny compared with the content. It records the content hash, the original file size, the shard location, and the chunk count. That's everything Crab needs to reconstruct the file later.
-
-Think of it like a library card catalog entry. The card tells you exactly where the book lives and how thick it is, without being the book itself. Git treats these pointers as regular files, so commit, branch, merge, and diff work against the lightweight representation until you ask for real content.
-
----
-
-## Download Only What You Need
-
-Hydration replaces a pointer with the real file content. You tell Crab which files you want using glob patterns, and it pulls them in parallel — up to 32 chunk fetches at a time. Behind the scenes, Crab reads the pointer, looks up the chunks that make up the file, downloads and decompresses them, then verifies the result with a Blake3 checksum. If anything doesn't match, you get an error rather than corrupted data.
+A lazy clone downloads the Git history and Crab metadata needed to identify tracked files. It does not materialize every large file.
 
 ```bash
-# Hydrate by pattern, or everything except a few extensions
-$ crab hydrate 'models/**/*.safetensors'
-$ crab hydrate 'data/train-*.parquet'
-$ crab hydrate --all --exclude '*.mp4'
-
-# Example output
-$ crab hydrate '*.bin'
-Resolving pointers... 12 files matched
-Downloading chunks...
-  model-v2.bin     [████████████████] 847/847 chunks (49.8 GB)
-  embeddings.bin   [████████████████] 234/234 chunks (12.1 GB)
-  tokenizer.bin    [████████████████]  18/18  chunks (890 MB)
-Hydrated 12 files (129.4 GB) in 4m 32s
-Verified: all blake3 checksums match ✓
-
-# Free disk space when you're done — uncommitted work is never touched
-$ crab dehydrate --all
-Dehydrating...
-  Replaced 14,829 files with pointer blobs
-  Freed 1.19 TB of local disk space
-  Skipped: src/model.py (modified), data/config.yaml (staged)
+crab clone crab://team-data/vision-search
+cd vision-search
+crab status
 ```
 
-The hydrate / dehydrate cycle has three properties worth calling out:
+This mode fits code review, branch inspection, metadata-only automation, and any task that needs only a small subset of assets.
 
-- **Idempotent.** Dehydrating a file that's already a pointer is a no-op.
-- **Reversible.** Re-hydrating a hydrated file just verifies the hash.
-- **Non-destructive.** Dirty files in your working tree are never overwritten.
+## A pointer checkout still has complete identity
 
----
+The working-tree pointer is not an incomplete file version. It records the hash and size of the committed full file, plus metadata that helps Crab locate its recipe.
 
-## FUSE: Files Appear Real, Download on Demand
+Git commands can compare pointer blobs, switch branches, and merge path identity without materializing every managed file. Tools that need the actual format must hydrate or read through a mount.
 
-Sometimes you don't know which files you'll need up front. Maybe your IDE wants to index the whole repo, or a test suite touches files unpredictably. That's where FUSE comes in.
+Use `crab status` to distinguish pointers, clean hydrated files, and modified materialized files. File size alone is not a safe indicator because a small application file could resemble a pointer in size.
 
-**Virtual filesystem = files appear real but download on demand.** The kernel routes file reads through Crab's handler. Directory listings come back instantly from pointer metadata. Only when a program actually reads file *content* does Crab pull data from cloud storage.
+## Hydrate a predictable working set
+
+When you know the paths a task needs, hydrate them explicitly:
 
 ```bash
-# Mount the repo as a virtual filesystem (read-only)
-$ crab mount ./my-repo /mnt/crab-repo --ref main
-Mounting my-repo at /mnt/crab-repo (ref: main)
-Snapshot: 14,832 files, 2.3 TB total size
-Mount ready.
-
-# Files look normal — sizes, timestamps, permissions all present
-$ ls -lh /mnt/crab-repo/models/
--rw-r--r-- 1 user staff  49G Jul  1 10:23 model-v2.bin
--rw-r--r-- 1 user staff  12G Jul  1 10:23 embeddings.bin
--rw-r--r-- 1 user staff 890M Jul  1 10:23 tokenizer.bin
-
-# Reading triggers a transparent download — only the chunks you touch:
-$ head -c 1024 /mnt/crab-repo/models/tokenizer.bin | xxd | head -1
-00000000: 7b22 6d6f 6465 6c5f 7479 7065 223a 2022  {"model_type": "
+crab hydrate 'models/current/**'
+crab hydrate --manifest .crab/manifests/training.txt
 ```
 
-The mount is range-aware. Reading bytes 1000–2000 only fetches the chunks covering that range, not the whole file. Downloaded chunks get cached locally — by default a 10 GB LRU cache — so repeated reads are fast.
+Hydration uses the normal pointer-to-shard-to-xorb proof pipeline. Already materialized files are skipped, and local cache state can satisfy bytes fetched by earlier tasks.
 
-<Callout type="tip" title="When to use FUSE vs hydration">
-Use **FUSE** for exploration, IDE indexing, and unpredictable access patterns. Use **explicit hydration** for production workloads, CI pipelines, and anywhere you need predictable performance. In containers without FUSE support, hydration is your only option.
-</Callout>
+You can also select content during clone:
 
----
+```bash
+crab clone crab://team-data/vision-search \
+  --include 'configs/**' \
+  --include 'models/current/**'
+```
 
-## The Complete Picture
+## Commit working-set manifests
 
-Whichever path you take, the underlying mechanism is the same: pointer → chunk lookup → parallel download → decompress → verify → serve. Every byte is cryptographically verified before it reaches your application.
+A manifest turns local capacity policy into reviewable repository data. Each line names a path or glob required by a task, environment, or pipeline.
 
-<svg viewBox="0 0 800 420" width="100%" role="img" aria-label="End-to-end flow: clone produces pointers, hydrate or mount triggers parallel chunk download, then chunks are decompressed, verified with Blake3, and served to the application.">
-  <defs>
-    <marker id="arrow-lc-flow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+```text
+# .crab/manifests/training.txt
+configs/**
+models/current/*.safetensors
+data/tokenizers/**
+```
 
-  {/* Step 1: Clone */}
-  <rect x="300" y="20" width="200" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="400" y="50" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Clone pointers"}</text>
+Hydrate the committed manifest directly:
 
-  <line x1="400" y1="70" x2="400" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
+```bash
+crab hydrate --manifest-ref HEAD:.crab/manifests/training.txt
+```
 
-  {/* Step 2: Pointers */}
-  <rect x="300" y="110" width="200" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="400" y="140" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Working tree: pointers"}</text>
+The commit now identifies both file versions and the intended working set. A branch can update the manifest when its training inputs change.
 
-  {/* Branch left: hydrate */}
-  <line x1="340" y1="160" x2="220" y2="200" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
-  {/* Branch right: mount */}
-  <line x1="460" y1="160" x2="580" y2="200" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
+Keep manifests narrow. A broad `**` pattern can turn a selective job into a full-repository download and trigger restores for archived data.
 
-  {/* Hydrate */}
-  <rect x="100" y="210" width="220" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="210" y="240" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"crab hydrate 'pattern'"}</text>
+## Dehydrate clean files to recover space
 
-  {/* Mount */}
-  <rect x="480" y="210" width="220" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="590" y="240" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"crab mount"}</text>
+Dehydration replaces a clean committed file with its pointer. Modified files are skipped so local edits are not discarded.
 
-  {/* Converge to download */}
-  <line x1="220" y1="260" x2="350" y2="300" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
-  <line x1="580" y1="260" x2="450" y2="300" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
+```bash
+crab dehydrate 'models/archive/**'
+crab status
+```
 
-  {/* Step 3: Download */}
-  <rect x="280" y="310" width="240" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="400" y="340" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Parallel chunk download"}</text>
+The remote objects remain unchanged and can hydrate again later.
 
-  <line x1="400" y1="360" x2="400" y2="385" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-lc-flow)" />
+Dehydration skips modified files because replacing them would discard local data. Review `crab status`, commit or move the edits, then retry the selected paths.
 
-  {/* Step 4: Verify + serve */}
-  <rect x="260" y="390" width="280" height="40" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="400" y="415" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Decompress → Verify (Blake3) → Serve"}</text>
-</svg>
+Prefetch profiles may protect files from routine dehydration. Use `--ignore-profiles` only when you intend to remove those materialized copies as well.
 
----
+## Mount for unpredictable reads
 
-## Quick Reference
+A mount presents a repository snapshot as a filesystem and resolves file content on demand. The automatic backend prefers NFS when available; `--backend=fuse` selects the FUSE adapter and requires FUSE support on the machine.
 
-| Command | What it does |
-|---------|-------------|
-| `crab hydrate 'pattern'` | Download and materialize files matching the glob |
-| `crab hydrate --all` | Materialize everything |
-| `crab dehydrate --all` | Replace tracked files with pointers, freeing disk |
-| `crab mount ./repo /mnt` | Mount as a virtual filesystem, read-only and on demand |
+```bash
+crab mount \
+  --repo crab://team-data/vision-search \
+  --mountpoint /mnt/vision-search \
+  --read-only
+```
 
-A terabyte repository no longer has to materialize every large file before you can start navigating it. The actual content flows on demand — whether you pull it with `crab hydrate` or let FUSE fetch it transparently. Either way, you get byte-identical reconstruction backed by cryptographic verification.
+Read-only mounts fit analysis tools that discover files dynamically. Writable mounts use a local copy-on-write overlay; changes do not enter Git history until an explicit mount commit.
+
+```bash
+crab mount diff --mountpoint /mnt/vision-search
+crab mount commit --mountpoint /mnt/vision-search \
+  -m "Update generated artifacts" \
+  --push
+```
+
+The overlay separates filesystem writes from the mounted base snapshot. `crab mount diff` shows local changes, while `crab mount export` copies them to a normal directory for inspection.
+
+Before commit, Crab freezes writes, checks that the mounted base ref has not moved, and creates a Git commit. A failed push preserves the local commit and overlay recovery state rather than reporting that remote publication succeeded.
+
+## Mount backends share the repository contract
+
+Automatic mode prefers the available Network File System (NFS) path. `--backend=fuse` selects Filesystem in Userspace (FUSE) and requires the platform adapter.
+
+Backend choice affects installation, caching, and filesystem behavior. It does not change pointer identity, shard resolution, xorb verification, or ref consistency.
+
+Use a read-only mount for analysis and serving workloads. Use a writable overlay only when the application must edit through filesystem calls and your workflow includes explicit review and commit.
+
+## Choose from the access pattern
+
+| Workload | Best starting mode |
+| --- | --- |
+| Inspect commits or edit source only | Pointer-only clone |
+| Train with a known model and dataset set | Selective hydration |
+| CI job with a committed input list | Manifest hydration |
+| Browse a data lake with unpredictable access | Read-only mount |
+| Edit through filesystem tools | Writable mount with explicit commit |
+
+## Budget disk and transfer from the working set
+
+Estimate local capacity from the largest concurrent working set, not total repository history. Include hydrated files, temporary reconstruction output, local cache, mount overlay, and application scratch space.
+
+For continuous integration, set manifests by job. A lint job may need no managed data. A model test may need one checkpoint. A release job may need a complete declared artifact set.
+
+Measure cold and warm runs separately. The first read includes origin transfer and cache population. Later reads may use local or shared cache, but final assembly and verification still process the requested bytes.
+
+When a workload reads the complete repository every time, lazy checkout cannot remove that transfer. Its value appears when access is selective, repeated, or unpredictable enough for on-demand range reads.
+
+<TakeawayBox title="Materialization is a policy choice">
+  The committed pointer identity stays the same. Choose when full bytes become
+  local based on the task's access pattern.
+</TakeawayBox>
+
+For exact mount management commands, see the [`crab mount`](/docs/cli/reference/crab-mount) reference.

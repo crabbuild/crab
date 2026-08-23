@@ -28,6 +28,7 @@ import {
   type BlogLearningPathKey,
   type BlogPostMeta,
 } from "@/lib/blog"
+import { formatBlogDate } from "@/lib/blog-date"
 import { blogSource } from "@/lib/blog-source"
 import { getBlogPost, getBlogPosts } from "@/lib/blog-posts"
 import { createPageMetadata } from "@/lib/metadata"
@@ -150,11 +151,7 @@ export default async function BlogPostPage({
 
               <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
                 <time dateTime={currentPost.date}>
-                  {new Date(currentPost.date).toLocaleDateString("en-US", {
-                    year: "numeric",
-                    month: "long",
-                    day: "numeric",
-                  })}
+                  {formatBlogDate(currentPost.date)}
                 </time>
                 <span aria-hidden="true">·</span>
                 <span>{currentPost.author.name}</span>

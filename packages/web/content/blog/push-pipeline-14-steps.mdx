@@ -1,255 +1,113 @@
 ---
-title: "Inside Crab's 14-Step Push Pipeline"
-description: "What happens when Crab pushes: local staging, dedup classification, xorb upload, metadata publication, and atomic ref finalization."
-date: "2025-06-23"
+title: "What happens during a Crab push?"
+description: "Step through the fourteen stages that discover dependencies, upload immutable objects, prove closure, and publish one ref transaction."
+date: "2026-06-19"
 author: "Crab Team"
 category: "architecture"
 tags: ["push", "pipeline", "deduplication", "xorb", "consistency"]
-excerpt: "Crab's push pipeline breaks into local staging, dedup-aware upload, metadata publication, and atomic finalization. Here's where recovery and consistency boundaries live."
+excerpt: "A Crab push prepares thirteen stages of immutable state before the fourteenth stage changes branch visibility."
 level: "deep-dive"
 path: "core-internals"
 order: 2
 concepts: ["push", "staging", "dedup upload", "atomic refs"]
-prerequisites: ["How Crab Avoids Storing Duplicate Data"]
-outcome: "Trace a push from staged chunks through metadata publication and atomic ref update, including where recovery happens."
-diagramType: "Fourteen-step pipeline"
+prerequisites: ["How does Crab avoid storing duplicate data?"]
+outcome: "Locate the durability, recovery, and concurrency boundaries in a Crab push."
+diagramType: "Interactive transaction trace"
+meta:
+  contentType: "Conceptual"
+  goal: "Make the push transaction understandable as preparation, proof, and publication."
+  audience: "Developers operating Crab or reviewing its consistency model."
 ---
 
-<FlowSteps
-  title="The push pipeline at system level"
-  steps={[
-    "Stage large-file content locally and replace Git blobs with lightweight pointers.",
-    "Classify chunks against known content so only new bytes need upload.",
-    "Pack and upload new xorbs with resumable progress tracking.",
-    "Publish metadata before refs so readers never observe missing data.",
-    "Finalize with an atomic ref update or fail cleanly with nothing half-visible."
-  ]}
-/>
+A Crab push is a transaction assembled from immutable object uploads and one final ref update. The client can retry preparation work, but it must not expose the new commit until every Git and large-file dependency is durable.
 
-## What Happens When You Push — and Why It's Safe
+<BlogProcessPlayer story="pipeline" />
 
-Every time you `git push` a Crab repository, your files travel through a pipeline that chunks, deduplicates, uploads, and atomically publishes your changes to cloud storage. There's no server coordinating any of it — just your machine talking directly to S3, GCS, or Azure Blob.
+## Stages 1–4 define the intended state
 
-Internally, the pipeline has 14 steps. You don't need to remember any of them. What matters is the design promise: **nothing can go wrong in a way that loses data or corrupts your repository**. If your laptop reboots mid-push, you pick up exactly where you left off. If two teammates push at the same time, one wins cleanly and the other rebases. There is no in-between state for anyone to observe.
+The push begins by resolving the source, destination, and expected old object ID. It acquires a short lock for the destination ref, walks the reachable Git graph, and resolves every Crab pointer in that graph.
 
-This post groups those 14 steps into three phases you can actually picture, then walks through what each phase is responsible for and why it's safe to fail in the middle of any of them.
+This is the rejection boundary for incomplete local state. A pointer without staged content or durable remote proof cannot enter a publishable plan.
 
-## What You'll Learn
+The discovery walk treats ordinary Git blobs and Crab pointers differently after Git identifies them. Ordinary blobs need Git-pack connectivity. Crab pointers add a second dependency closure through file recipes, shards, and xorbs.
 
-- How Crab breaks a push into three phases that map to local prep, network upload, and atomic publish
-- Why most of your data never needs uploading at all (deduplication)
-- How content-addressed storage and compare-and-swap make every failure mode recoverable
+A source-only push can therefore complete without creating xorb or shard data. A mixed push prepares both lanes but still publishes one destination ref transaction.
 
-## TL;DR
+## Stages 5–7 decide what must be created
 
-- **Phase 1 (Local):** `crab add` chunks your files and stores them on disk. No network calls — a 4 GB file stages in seconds.
-- **Phase 2 (Upload):** Only new, unique chunks go up. Typical pushes ship 5–20% of the raw bytes you added.
-- **Phase 3 (Finalize):** Metadata and refs are published atomically. A push is either fully visible or invisible — never half-applied.
-- **Crash-safe:** A write journal tracks progress so an interrupted push resumes without re-uploading what already made it.
+Crab classifies chunks as known or new, builds a standard Git pack for reachable Git objects, and packs new chunks into xorbs. Existing chunks can be reused only when canonical metadata proves their remote location.
 
----
+Staged xorbs must flush before the push can continue to publication. This ordering prevents a file recipe from referring to bytes that exist only in a short-lived local process.
 
-## The Three Phases at a Glance
+Classification can reuse chunks from the same add session, earlier local work, or canonical remote indexes. The source of the hint changes lookup cost, but the publication proof still requires a durable remote location.
 
-Think of a Crab push like mailing a package. First you pack the box on your kitchen counter (local staging). Then you ship only the items the recipient doesn't already have (smart upload). Finally the recipient signs for delivery and the order is officially complete (atomic finalization). If anything goes wrong, the box never disappears — you simply re-attempt delivery.
+The Git pack remains compatible Git data. Crab does not embed large-file xorbs inside that pack because Git clients and object storage have different access and lifecycle requirements.
 
-<svg viewBox="0 0 900 320" width="100%" role="img" aria-label="Crab push pipeline showing three phases: Local Staging, Smart Upload, and Atomic Finalization flowing left to right">
-  <defs>
-    <marker id="arrow-push-pipeline-flow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+## Stages 8–10 make immutable dependencies durable
 
-  {/* Phase 1: Local Staging */}
-  <rect x="10" y="10" width="260" height="300" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="40" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Phase 1: Stage Locally"}</text>
-  <text x="140" y="60" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"crab add + git commit"}</text>
+The client uploads the Git pack and xorbs with bounded concurrency. It then creates and uploads shard metadata that records complete reconstruction terms for each file.
 
-  <rect x="30" y="80" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="107" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Chunk files (CDC)"}</text>
+An interruption here can leave an unreferenced immutable object. That object is safe because no visible ref names it. A later retry can reuse it, and garbage collection can reclaim it after the grace period if it remains unreachable.
 
-  <rect x="30" y="134" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="161" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Save chunks to staging DB"}</text>
+The write journal records enough progress to distinguish completed uploads from pending work. A retry can skip immutable objects that canonical storage already contains.
 
-  <rect x="30" y="188" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="215" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Generate pointer blobs"}</text>
+Retry safety depends on immutable identity. Repeating an upload for the same content cannot replace a different object's meaning. Mutable state remains concentrated in the final ref decision.
 
-  <rect x="30" y="242" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="140" y="269" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Update index + commit"}</text>
+## Stages 11–12 prove closure
 
-  {/* Arrow 1→2 */}
-  <line x1="270" y1="160" x2="310" y2="160" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-pipeline-flow)" />
+Before publishing, Crab proves two closures. Git connectivity confirms that the proposed commit graph is complete at the origin. Pointer closure confirms that every Crab pointer resolves through durable metadata to durable xorb bytes.
 
-  {/* Phase 2: Smart Upload */}
-  <rect x="320" y="10" width="260" height="300" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="40" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Phase 2: Upload Smart"}</text>
-  <text x="450" y="60" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"git push → git-remote-crab"}</text>
+This proof uses canonical storage state. A local cache can accelerate the checks, but it cannot substitute for the remote dependency contract.
 
-  <rect x="340" y="80" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="107" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Sync dedup index"}</text>
+Closure proof also protects readers in other regions or machines. The writer's local cache may contain every required byte while the shared origin is incomplete. Publication waits for the shared state, not the writer's ability to reconstruct locally.
 
-  <rect x="340" y="134" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="161" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Classify chunks (A / B / C)"}</text>
+## Stages 13–14 decide visibility
 
-  <rect x="340" y="188" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="215" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Pack new chunks into xorbs"}</text>
+The push compares the branch's current value with the expected old object ID. If another writer changed the ref, the stale push is rejected instead of overwriting newer history.
 
-  <rect x="340" y="242" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="269" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Parallel upload + resume"}</text>
+Only after that comparison succeeds does Crab append the ref transaction that makes the new tip visible. The lock can then be released.
 
-  {/* Arrow 2→3 */}
-  <line x1="580" y1="160" x2="620" y2="160" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-pipeline-flow)" />
+## Locking and compare-and-swap solve different problems
 
-  {/* Phase 3: Atomic Finalization */}
-  <rect x="630" y="10" width="260" height="300" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="760" y="40" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Phase 3: Publish Atomically"}</text>
-  <text x="760" y="60" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Compare-and-swap finalize"}</text>
+The ref lock reduces duplicate work by keeping same-ref writers from performing contested publication concurrently. Lease expiration means the lock cannot provide permanent correctness on its own.
 
-  <rect x="650" y="80" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="760" y="107" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Build new shard"}</text>
+Compare-and-swap checks the expected old object ID at the visibility boundary. A writer with an expired lease or stale plan cannot overwrite a branch that changed after discovery.
 
-  <rect x="650" y="134" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="760" y="161" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Upload file index"}</text>
+Different refs can progress in parallel because their visibility decisions are independent. They may still reuse the same immutable Git packs or xorbs.
 
-  <rect x="650" y="188" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="760" y="215" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Manifest CAS"}</text>
+<TakeawayBox title="One publication point">
+  Git packs, xorbs, shards, and closure proofs prepare the update. The ref
+  transaction is the only step that makes the new commit visible to readers.
+</TakeawayBox>
 
-  <rect x="650" y="242" width="220" height="44" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="760" y="269" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Ref CAS — push visible"}</text>
-</svg>
+## Recovery follows the last durable boundary
 
----
+The write journal records progress for interrupted operations. A retry can determine which immutable uploads already completed and continue without pretending that the ref moved.
 
-## Phase 1: Stage Locally — No Network Needed
+A failure after the ref transaction is different: the update is visible and its dependencies were already proven. Cleanup releases the lock and closes local staging, but it does not roll back a complete published state.
 
-**When:** During `crab add` and `git commit`. Entirely on your machine.
+## Failure location determines visible state
 
-When you run `crab add large-model.bin`, Crab splits the file into variable-size chunks using content-defined chunking (CDC). Think of it like finding natural paragraph breaks in a book — boundaries are determined by the bytes themselves, not fixed offsets. The practical benefit: a small edit only changes one or two chunks instead of shifting every chunk after the edit point.
+| Failure point | Durable side effect | Visible ref result | Retry action |
+| --- | --- | --- | --- |
+| Before discovery completes | None required | Old ref remains | Fix local input and restart |
+| During xorb or pack upload | Some immutable objects may exist | Old ref remains | Restore access and reuse completed uploads |
+| During shard publication | Data objects may exist | Old ref remains | Publish missing metadata and prove closure |
+| During expected-old comparison | All dependencies may exist | Stale edit is rejected | Fetch and reconcile history |
+| After ref transaction | Complete update exists | New ref is visible | Finish cleanup; do not roll back dependencies |
 
-These chunks get hashed and stored in a local staging database (a SlateDB instance under `.crab/staging/`). Crab then writes a tiny pointer blob — under 1 KB — that records the file's chunk list and overall content hash. Git commits this pointer instead of the multi-gigabyte original, which is why your repo stays small.
+The table explains why object inventory can contain data that no branch currently reaches. Immutable upload is preparation, not publication.
 
-The key insight is that **nothing leaves your machine yet**. A 4 GB checkpoint stages in seconds because there's no upload to wait for. You can stage a hundred files, change your mind, run `crab add` again, and never burn a single byte of bandwidth.
+## The user-facing failures are specific
 
----
+A missing recipe fails during discovery. An object-store error fails during upload. A closure failure blocks publication. A compare-and-swap conflict rejects the stale ref edit. These outcomes all preserve the previous complete branch view.
 
-## Phase 2: Upload Only What's Actually New
+## Verify the transaction from another client
 
-**When:** During `git push`, handled by the `git-remote-crab` helper that git invokes for `crab://` URLs.
+The writer can inspect local status and logs, but another client supplies stronger evidence. Fetch the destination ref from an empty or isolated cache, then hydrate representative managed paths.
 
-This is where deduplication earns its keep. Before uploading anything, Crab pulls down a compact index of chunks already stored remotely and walks every local chunk against it. Each chunk falls into one of three buckets:
+Record the new commit object ID, ref result, pointer count, hydration hashes, and `crab fsck` result. For concurrent-push testing, start two edits from the same old tip and confirm that one stale writer receives a conflict.
 
-```text
-Push Classification Summary
-════════════════════════════════════════════════════════════
-  Chunks scanned:     2,341
-  ────────────────────────────────────────────────────────
-  Category A (new):              187   (8.0%)   → upload
-  Category B (session-dedup):     54   (2.3%)   → skip
-  Category C (global-dedup):   2,100   (89.7%)  → skip
-  ────────────────────────────────────────────────────────
-  Upload required:    187 chunks (~11.7 MB)
-  Upload avoided:   2,154 chunks (~134.6 MB)
-════════════════════════════════════════════════════════════
-```
+This evidence reaches beyond a successful process exit. It proves that the visible ref, Git closure, Crab metadata, and immutable data agree from a reader's perspective.
 
-In this real-world example, **92% of the pushed data was already in the cloud** from previous pushes. Only 11.7 MB actually traveled over the network — versus 146 MB if every chunk had been uploaded blindly.
-
-Category A chunks (genuinely new bytes) get packed into compressed bundles called xorbs, each around 64 MB, and uploaded to object storage in parallel. If a previous push was interrupted partway through, Crab's write journal already knows which xorbs landed successfully. Those get skipped on the retry without you doing anything.
-
----
-
-## Phase 3: Publish Atomically So Readers Never See Half a Push
-
-**When:** After every xorb is safely persisted in object storage.
-
-With your data uploaded, Crab builds two pieces of metadata: a shard that maps files to their chunks, and a file index that lets readers look up files by name. Both are uploaded as immutable, content-addressed objects. So far, nothing visible has changed — readers still see the previous repository state.
-
-The push only becomes visible at the very last step: a compare-and-swap (CAS) update of the ref. CAS is the same primitive databases use for safe concurrent writes. Crab reads the current ref, prepares the new value, and writes it only if nobody else changed it in the meantime:
-
-```text
-if current_ref == expected_old_value:
-    current_ref = new_value     ← push succeeds, changes go live
-else:
-    reject                      ← someone else pushed first; you rebase
-```
-
-Before this single instant, the world sees the old state. After it, the world sees your complete changes. There is no observable in-between, which is what "atomic" actually means in practice.
-
-<Callout type="tip" title="What if the CAS fails?">
-Your uploaded xorbs are still valid and content-addressed. After you `git pull --rebase` and try again, the next push deduplicates against everything you already uploaded — only the metadata and ref need to be redone, which usually takes seconds.
-</Callout>
-
----
-
-## Why Every Failure Mode Is Recoverable
-
-The pipeline is designed so a crash at any point leaves the system in a state you can simply retry from. Each phase has a clear recovery story:
-
-- **Crash during Phase 1?** Local staging is just files in a SlateDB instance. Re-run `crab add` and Crab picks up where it stopped — chunking is deterministic, so identical inputs produce identical chunks.
-- **Crash during Phase 2?** The write journal records each xorb upload as it completes. The next push reads the journal, skips finished xorbs, and resumes from the first unfinished one.
-- **Crash during Phase 3?** Xorbs are immutable and content-addressed, so they're harmless sitting in storage. The ref hasn't moved yet, which means no reader is seeing partial state. Retrying simply redoes the metadata and CAS.
-
-Every operation along the way is idempotent. Hashing the same bytes always produces the same chunk hash. Uploading the same xorb twice is a content-equivalent no-op. CAS either commits cleanly or fails cleanly — there is no fuzzy middle.
-
-<svg viewBox="0 0 720 200" width="100%" role="img" aria-label="Crash recovery flow: process crashes after partial upload, the next push reads the write journal, skips already-uploaded xorbs, uploads the remainder, and finalizes">
-  <defs>
-    <marker id="arrow-push-pipeline-recovery" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
-
-  <rect x="20" y="60" width="140" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="90" y="95" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Crash"}</text>
-  <text x="90" y="115" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"3 of 5 xorbs sent"}</text>
-
-  <line x1="160" y1="100" x2="200" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-pipeline-recovery)" />
-
-  <rect x="200" y="60" width="140" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="270" y="95" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Next push"}</text>
-  <text x="270" y="115" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"reads journal"}</text>
-
-  <line x1="340" y1="100" x2="380" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-pipeline-recovery)" />
-
-  <rect x="380" y="60" width="140" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="450" y="95" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Skip 1–3"}</text>
-  <text x="450" y="115" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"already uploaded"}</text>
-
-  <line x1="520" y1="100" x2="560" y2="100" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-push-pipeline-recovery)" />
-
-  <rect x="560" y="60" width="140" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="630" y="95" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Upload 4–5"}</text>
-  <text x="630" y="115" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"finalize ref"}</text>
-</svg>
-
----
-
-## How Concurrent Pushes Stay Consistent
-
-Multiple people can push to the same repository simultaneously without coordinating through a server. The pipeline handles the race naturally because every contested step uses content-addressed objects or CAS, never blind overwrites.
-
-- **Xorb uploads** never conflict. They're content-addressed — two people uploading identical bytes simply land the same object at the same key, and S3 sees that as one write either way.
-- **Metadata updates** use CAS. If two pushes race, exactly one wins the metadata round and the other retries against the merged state.
-- **Ref updates** use CAS. The losing push pulls, rebases, and re-pushes. Because all its uploaded xorbs are still valid, the retry is fast — just rebuild metadata and re-attempt the ref CAS.
-
-The worst case is a rejected push that asks you to rebase. Even in that scenario, no bandwidth is wasted: the next push deduplicates against everything already uploaded, including your own previous attempt.
-
----
-
-## What This Means for You
-
-You don't need to memorize 14 steps to use Crab safely. The mental model that fits in your head is the three phases above: stage locally, upload only what's new, publish atomically. The rest is the pipeline keeping its promises behind the scenes.
-
-<Cards>
-<Card title="Local-First">
-Staging is instant and offline. Nothing crosses the network during `crab add` or `git commit`.
-</Card>
-<Card title="Minimal Uploads">
-High-overlap changes skip known chunks. Only genuinely new data crosses the wire.
-</Card>
-<Card title="Crash-Safe">
-The write journal lets interrupted pushes resume in seconds without re-uploading completed xorbs.
-</Card>
-<Card title="Atomic Visibility">
-The ref CAS is the single point a push becomes visible. Readers never see partial state.
-</Card>
-</Cards>
+Next, [see how local caches reduce the reads that prepare and verify these stages](/blog/multi-layer-caching).

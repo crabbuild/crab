@@ -1,238 +1,125 @@
 ---
-title: "Distributed Locking and Consistency in Crab"
-description: "How Crab coordinates concurrent pushes without a central server: lease locks reduce wasted work, journals support recovery, and compare-and-swap protects refs."
-date: "2025-07-14"
+title: "How does Crab keep concurrent pushes consistent?"
+description: "See how ref-scoped leases, expected-old comparisons, immutable uploads, and journals prevent concurrent writers from losing history."
+date: "2026-07-17"
 author: "Crab Team"
 category: "architecture"
 tags: ["concurrency", "consistency", "locking", "push"]
-excerpt: "With no server to serialize writes, Crab combines lease-based locks, write journals, and compare-and-swap ref updates so concurrent pushes fail cleanly instead of overwriting work."
+excerpt: "A lock reduces contested work, while the expected-old ref transaction provides the final lost-update protection."
 level: "deep-dive"
 path: "advanced-operations"
 order: 1
 concepts: ["concurrency", "lease locks", "compare-and-swap", "journals"]
-prerequisites: ["Inside Crab's 14-Step Push Pipeline"]
-outcome: "Reason about concurrent push safety: what locks optimize, what CAS guarantees, and how journals make retries recoverable."
-diagramType: "Concurrent push flow"
+prerequisites: ["What happens during a Crab push?"]
+outcome: "Explain which mechanism provides liveness, recovery, and final ref correctness."
+diagramType: "Interactive concurrent push trace"
+meta:
+  contentType: "Conceptual"
+  goal: "Separate the roles of locking, immutable storage, journaling, and compare-and-swap."
+  audience: "Operators and developers reasoning about concurrent writers."
 ---
 
-<FlowSteps
-  title="Consistency rule of thumb"
-  steps={[
-    "Acquire a short lease so two writers do not waste upload work.",
-    "Upload data and metadata before changing the visible Git ref.",
-    "Use compare-and-swap so a stale writer cannot overwrite a newer branch head.",
-    "Record progress in a journal so interrupted pushes can resume.",
-    "Release the lease or let it expire safely if the client disappears."
-  ]}
-/>
+Without a central Git server, no permanent process serializes branch updates. Crab coordinates clients with a ref-scoped lease, immutable object uploads, a write journal, and an expected-old ref transaction.
 
-## Multiple People Can Push Safely at the Same Time
+<BlogProcessPlayer story="locking" />
 
-Two teammates hit `git push` to the same branch within the same minute. One will win, one will need to rebase — and neither should ever silently lose work. Traditional git hosting solves this with a central server that accepts one push and rejects the other.
+## The lock reduces wasted contention
 
-Crab doesn't have a server. Your repository lives entirely in cloud object storage — S3, GCS, or Azure. So how does it keep things safe when several people push at once?
+A push acquires a renewable lease for its destination ref. A second writer targeting the same ref waits instead of repeating all contested discovery and publication work at the same time.
 
-The answer is three small mechanisms working together: a **push lock** that prevents wasted uploads, a **write journal** that survives crashes, and a **compare-and-swap** ref update that makes the final commit atomic. None of them need a server.
+The scope matters. Writers targeting different refs can continue independently. Every acquired lease must be released on a normal exit, and expiration allows progress if a client disappears.
 
-## What You'll Learn (TL;DR)
+The lease is not the final correctness proof. Networks pause, processes stall, and leases can expire. Ref correctness must survive those events.
 
-- **No silent overwrites.** Crab uses compare-and-swap (CAS) so the last writer never silently wins. It works the same way Google Docs flags a conflict when two people edit the same paragraph.
-- **No wasted uploads.** A short-lived lock — like reserving a meeting room before booking it — stops two people from uploading hundreds of megabytes only to have one rejected.
-- **Crash-safe.** A local write journal records what's already uploaded, so an interrupted push resumes instead of starting over.
-- **No external services.** Everything runs on the object store's built-in conditional write primitives. No ZooKeeper, no etcd, no DynamoDB.
+## Same-ref and different-ref writers behave differently
 
----
+Alice and Bob can upload immutable data concurrently when they target different branches. Their ref transactions name separate keys, so neither branch decision needs to serialize the other.
 
-## How a Safe Push Works, Step by Step
+When both target `main`, the first lease holder performs the contested publication work. The second writer waits, then must observe the branch state after the first writer finishes.
 
-Every push follows a strict order: acquire a lock, upload your data, update the ref atomically, then release the lock. If anything fails midway, the system recovers without leaving the repo in a broken state.
+Shared immutable objects can still help both writers. If their files contain identical chunks, one writer's completed xorb upload may satisfy part of the other's later closure proof.
 
-<svg viewBox="0 0 800 320" width="100%" role="img" aria-label="Sequence diagram showing the four-step push flow: acquire lock, upload data, compare-and-swap update of the ref, then release lock, with a write journal tracking progress underneath">
-  <defs>
-    <marker id="arrow-locking-flow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+## Immutable uploads are safe before the decision
 
-  {/* Step 1 */}
-  <rect x="40" y="50" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="120" y="80" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"STEP 1"}</text>
-  <text x="120" y="105" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Acquire Lock"}</text>
+Git packs, xorbs, and shards are immutable. A writer can upload them while readers continue to see the old branch tip.
 
-  <line x1="200" y1="90" x2="240" y2="90" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-flow)" />
+If the writer later loses the race, those objects do not corrupt history because no committed ref transaction names the rejected update. Another push may reuse them, or garbage collection may reclaim them after the protection window.
 
-  {/* Step 2 */}
-  <rect x="240" y="50" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="320" y="80" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"STEP 2"}</text>
-  <text x="320" y="105" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Upload Data"}</text>
+This property narrows rollback. Crab does not need to delete every uploaded object when a ref conflict occurs. Immediate deletion could race with another writer that already reused the same immutable object.
 
-  <line x1="400" y1="90" x2="440" y2="90" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-flow)" />
+The safe response is to leave unreferenced preparation data in storage. Retained roots and the garbage-collection grace period decide when deletion becomes safe.
 
-  {/* Step 3 */}
-  <rect x="440" y="50" width="160" height="80" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="520" y="80" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"STEP 3"}</text>
-  <text x="520" y="105" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"CAS Update Ref"}</text>
+## Expected-old prevents lost updates
 
-  <line x1="600" y1="90" x2="640" y2="90" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-flow)" />
+Each ref edit carries the value the writer observed when planning the push. At publication time, Crab compares the current branch value with that expected old object ID.
 
-  {/* Step 4 */}
-  <rect x="640" y="50" width="120" height="80" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="700" y="80" textAnchor="middle" fill="var(--primary)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"STEP 4"}</text>
-  <text x="700" y="105" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Release Lock"}</text>
+If they differ, another writer changed the branch. Crab rejects the stale edit instead of silently replacing the newer tip. The writer must fetch, rebase or merge, and prepare a new update against current state.
 
-  {/* Journal track */}
-  <rect x="40" y="170" width="720" height="50" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" strokeDasharray="6 3" />
-  <text x="400" y="201" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Write journal records progress so an interrupted push can resume"}</text>
+Compare-and-swap also handles lease loss. A paused writer may resume after its lease expired and another client published. Its expected-old value still names the earlier tip, so the final transaction rejects the stale plan.
 
-  {/* Ordering rule */}
-  <rect x="40" y="250" width="720" height="50" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="400" y="281" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14" fontWeight="bold">{"Ordering rule: data before metadata, metadata before refs"}</text>
-</svg>
+<TakeawayBox title="Correctness does not depend on the lease">
+  The lease narrows contention. The expected-old comparison prevents a stale
+  writer from overwriting a newer ref.
+</TakeawayBox>
 
-That ordering rule is what makes it safe to read concurrently. Anyone who sees a ref update is guaranteed that all the data behind it already exists. There is never a window where a ref points to missing chunks.
+## The journal makes interruption legible
 
-If a push crashes between steps 2 and 3, no other client can see partial state — the ref still points at the old commit. The new data sits in the object store as orphans until either the push retries (and uses them) or garbage collection cleans them up.
+A write journal records progress through the transaction. After an interruption, Crab can distinguish uploaded immutable dependencies from the uncommitted ref edit.
 
----
+A retry can reuse durable work and repeat incomplete steps. It still has to prove closure and compare against the current ref before publication.
 
-## No Silent Overwrites with Compare-and-Swap
+The journal cannot authorize publication by itself. It records what the client attempted and which immutable work completed. Current canonical state still decides whether each dependency exists and whether the ref comparison succeeds.
 
-The most important mechanism is **compare-and-swap (CAS)**. The intuition is simple:
+## Readers observe complete states
 
-> Think of it like editing a paragraph in Google Docs. If someone else changed the same paragraph while you were typing, the doc tells you instead of silently losing their edit. CAS gives git refs the same property.
+Readers resolve the committed ref journal, not a writer's temporary plan. The old tip remains visible until the transaction that names the new tip is committed.
 
-When Crab updates a ref like `refs/heads/main`, it doesn't blindly overwrite the current value. Instead it says: "Set this ref to commit `abc123`, but **only if** it currently points to `def456`." If someone else pushed in between, the object store rejects the update. Crab then re-reads the latest state, re-applies your change on top, and tries again.
+This creates a narrow state transition:
 
-The whole pattern is a short read-modify-write loop with conflict detection:
-
-```rust
-// Simplified CAS update loop
-for attempt in 0..max_attempts {
-    let (current_value, etag) = store.get_with_etag(path).await?;
-    let new_value = apply_mutation(current_value);
-    match store.conditional_put(path, new_value, etag).await {
-        Ok(_)             => return Ok(()),  // No conflict — done.
-        Err(CasConflict)  => continue,       // Lost the race — retry with fresh state.
-        Err(e)            => return Err(e),  // Real error — bail.
-    }
-}
+```text
+before: ref A -> complete Git and Crab dependencies
+after:  ref B -> complete Git and Crab dependencies
+never:  ref B -> missing xorb or shard dependency
 ```
 
-The key detail is on the second line: every retry **re-reads** and **re-applies** the mutation. Concurrent writers therefore converge — each one folds in the other's changes before writing its own. There is no path where one writer's update silently disappears.
+Readers may begin before or after the transaction, but they resolve one committed ref state. They do not combine the old branch value with the new writer's temporary metadata.
 
-Object stores expose this primitive cheaply. S3 has conditional writes via `If-Match` ETags, GCS has generation preconditions, Azure has ETags too. Crab leans on whichever the active backend offers. No extra database, no consensus protocol, no clock sync.
+Object-store consistency and journal interpretation must preserve this rule. A reader that cannot prove a committed state returns an error instead of inventing a partial view.
 
----
+## Common interruptions preserve the previous tip
 
-## Avoiding Wasted Uploads with the Push Lock
+| Interruption | Lock outcome | Ref outcome | Recovery |
+| --- | --- | --- | --- |
+| Client exits before upload | Lease releases or expires | Old tip remains | Restart discovery |
+| Network fails during xorb upload | Lease may expire | Old tip remains | Reuse durable objects and retry |
+| Client pauses past lease expiry | Another writer may proceed | Stale compare fails | Fetch and replan |
+| Ref changes before compare | Lease holder has stale input | Push is rejected | Rebase or merge |
+| Cleanup fails after commit | Lease may need expiry | New complete tip remains | Finish cleanup without ref rollback |
 
-CAS makes the final ref update safe, but on its own it would let two people upload 500 MB of data simultaneously — and then reject one of them at the very last step. That's a slow, expensive way to discover a conflict.
+The table separates liveness from correctness. Lease cleanup determines how soon another writer can proceed. The committed ref transaction determines which history readers observe.
 
-The push lock fixes that. It's a small lease file at `{repo}/locks/refs/{branch}/lock` in the object store itself. Acquiring the lock is a conditional PUT that only succeeds when the file doesn't already exist. No external coordinator needed.
+## Respond to a conflict as a Git conflict
 
-> Think of it like reserving a meeting room before booking it. You only commit to the meeting once you know the room is yours; otherwise you'd both show up and one of you wastes the trip.
+When a push reports a stale expected value, do not delete remote state or force the ref without understanding the newer commit. Fetch the current branch, reconcile history, and retry.
 
-<svg viewBox="0 0 760 280" width="100%" role="img" aria-label="Timeline showing Alice acquiring the push lock first, completing her upload and CAS update, releasing the lock, then Bob being able to acquire it; Bob waits while Alice holds the lock instead of uploading wasted data">
-  <defs>
-    <marker id="arrow-locking-race" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="var(--primary)" />
-    </marker>
-  </defs>
+The immutable uploads from the rejected attempt are not evidence of a half-published branch. Visibility remains tied to the ref transaction.
 
-  {/* Time axis label */}
-  <text x="380" y="25" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"time →"}</text>
+Use this retry sequence:
 
-  {/* Alice row */}
-  <text x="40" y="78" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Alice"}</text>
-  <rect x="120" y="55" width="140" height="40" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="190" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Acquire lock"}</text>
-  <line x1="260" y1="75" x2="290" y2="75" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-race)" />
-  <rect x="290" y="55" width="200" height="40" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="390" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Upload + CAS ✓"}</text>
-  <line x1="490" y1="75" x2="520" y2="75" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-race)" />
-  <rect x="520" y="55" width="140" height="40" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" />
-  <text x="590" y="80" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Release lock"}</text>
+1. Record the rejected destination and expected-old object ID.
+2. Fetch the destination ref and inspect the new commits.
+3. Rebase or merge the local source and pointer changes.
+4. Restage any managed files whose content changed during reconciliation.
+5. Push again and require a fresh pointer-closure proof.
 
-  {/* Bob row */}
-  <text x="40" y="158" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="16" fontWeight="bold">{"Bob"}</text>
-  <rect x="120" y="135" width="540" height="40" rx="8" fill="var(--muted)" stroke="var(--border)" strokeWidth="2" strokeDasharray="6 3" />
-  <text x="390" y="160" textAnchor="middle" fill="var(--muted-foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Waiting — lock held by Alice"}</text>
-  <line x1="660" y1="155" x2="690" y2="155" stroke="var(--primary)" strokeWidth="2" markerEnd="url(#arrow-locking-race)" />
-  <rect x="690" y="135" width="50" height="40" rx="8" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />
-  <text x="715" y="160" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Go"}</text>
+Avoid an automatic unbounded retry loop. A repeated conflict can indicate an active writer, an expired credential flow, or a process that keeps planning from stale state.
 
-  {/* Annotation */}
-  <rect x="40" y="210" width="700" height="50" rx="8" fill="var(--card)" stroke="var(--border)" strokeWidth="2" />
-  <text x="390" y="241" textAnchor="middle" fill="var(--foreground)" fontFamily="Inter, sans-serif" fontSize="14">{"Bob never wastes bandwidth uploading data that would be rejected. If Alice crashes, the lock expires after its TTL."}</text>
-</svg>
+## Monitor leases without treating them as history
 
-The lock has four properties that keep it from becoming a liability:
+Lease metrics should include acquisition time, wait duration, renewal failures, holder age, and release outcome. These values diagnose contention and abandoned work.
 
-- **Acquisition.** A conditional PUT — only succeeds if the lock file doesn't exist yet.
-- **Heartbeat.** A background task renews the lease while the push runs, so long uploads don't hit the TTL.
-- **Expiry.** If the holder crashes or loses network, the lock falls off after its TTL (default: 5 minutes). No human intervention.
-- **Release.** A normal delete when the push finishes successfully.
+Ref metrics should separately include compare conflicts, committed transactions, rejected destinations, and recovery-journal resumes. Mixing the groups can make a healthy stale-write rejection look like lock corruption.
 
-The lock is a serialization optimization, not the safety mechanism. CAS is what guarantees correctness — even if the lock disappeared entirely, you'd still never get a silent overwrite, just more wasted uploads.
+Alert on leases that remain past their expected renewal window and on repeated same-ref conflicts. Do not alert on every immutable orphan because interrupted preparation can create safe short-lived orphans by design.
 
----
-
-## Recovering from Crashes with the Write Journal
-
-Pushes can run for a long time. A 500 MB upload over a flaky coffee-shop Wi-Fi connection can take minutes, and laptops sleep, networks drop, and processes get killed. You don't want any of that to mean "start the upload from scratch."
-
-The write journal is a tiny local file that records exactly which xorbs (Crab's compressed bundle of file chunks) and shards have been uploaded so far. When you retry a failed push, Crab reads the journal, checks that the already-uploaded data is still in the store, and resumes from the next missing piece.
-
-The journal also enforces the strict ordering Crab depends on:
-
-| Order | What happens | Why |
-|-------|-------------|-----|
-| First | Upload data (xorbs) | Data must exist before anything references it |
-| Second | Update metadata (manifests, shards) | Metadata can only point at existing data |
-| Last | CAS-update the ref | Anyone who sees the ref can trust the rest is there |
-
-Once the ref is updated and the lock released, the journal entry is deleted. The push is officially complete and forgotten.
-
----
-
-## A Real-World Race: Alice and Bob Push at Once
-
-Here's how all three mechanisms cooperate during a realistic conflict:
-
-1. **Alice acquires the lock** on `main`. Bob calls `git push` a second later, sees the lock is held, and starts polling. He has not uploaded anything yet.
-
-2. **Alice uploads, CASes, releases.** Her xorbs go up first, her shard manifest second, her ref last. The lock comes off cleanly.
-
-3. **Bob acquires the lock.** It's free now. He starts uploading. Most of his chunks are deduplicated against Alice's recent push (their branches share history), so the actual data transfer is small.
-
-4. **Bob's CAS fails.** His expected parent commit is stale — Alice's commit is now `HEAD`. He sees the same `non-fast-forward` error you'd get from any git host.
-
-5. **Bob pulls and rebases.** Alice's data is already cached locally from the metadata sync. After rebasing, Bob pushes again. The journal knows his xorbs are already uploaded, so the retry only updates the manifest and ref. Done in seconds.
-
-The experience is identical to pushing against a traditional git server. No silent overwrites, no surprises, no manual cleanup.
-
----
-
-## How the Pieces Fit Together
-
-| Mechanism | What it prevents | When it acts |
-|-----------|-----------------|--------------|
-| **Push lock** | Wasted upload bandwidth | For the duration of the push |
-| **Write journal** | Lost progress on crash | Local to each client |
-| **CAS ref update** | Silent overwrites | Final atomic commit point |
-
-Every step in the sequence is either **idempotent** (safe to retry) or **conditional** (fails cleanly on conflict). There is no two-phase commit, no distributed transaction, no consensus protocol — just the object store's conditional writes doing the heavy lifting.
-
-<Callout type="note" title="Conflict frequency in practice">
-Push conflicts are rare. The lock's 5-minute TTL means even large pushes complete inside one lease, and conflicts only arise when two developers push to the exact same branch within the same few-minute window. When they do, the resolution is the same familiar pull-and-rebase workflow you already know.
-</Callout>
-
----
-
-## Why This Design Works Without a Server
-
-**Availability over strict ordering.** Pushes to different branches never block each other. Same-branch pushes are serialized by the lock, but if the holder crashes, the system self-heals within the TTL window — no on-call paging.
-
-**No external dependencies.** The object store's conditional write primitives provide all the coordination Crab needs. That's one fewer service to operate, monitor, secure, and pay for.
-
-**Familiar conflict UX.** When conflicts do happen, they surface as the same `! [rejected] (non-fast-forward)` message developers already know from GitHub, GitLab, or any other git host. Pull, rebase, push. Same workflow, no central server needed to enforce it.
+Next, [choose how much repository content should become local](/blog/lazy-checkout-fuse).
