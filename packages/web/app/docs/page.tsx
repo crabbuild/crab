@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   ArrowRight,
   BookOpen,
@@ -15,12 +14,14 @@ import { MarketingLayout } from "@/components/marketing-layout"
 import { HeroSection } from "@/components/marketing/hero-section"
 import { Reveal } from "@/components/marketing/reveal"
 import { DocsCategoryCard } from "@/components/docs/docs-category-card"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Documentation",
   description:
     "Explore Crab documentation — CLI guides, workflows, architecture, and more.",
-}
+  path: "/docs",
+})
 
 /* ─── CLI doc categories ─── */
 

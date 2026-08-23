@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   Brain,
   Database,
@@ -34,17 +33,14 @@ import { LazyHydrateSvg } from "@/app/diagrams/lazy-hydrate-svg"
 import { EnterpriseArchitectureSvg } from "@/app/diagrams/enterprise-architecture-svg"
 import { CiTimelineSvg } from "@/app/diagrams/ci-timeline-svg"
 import { cn } from "@/lib/utils"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
-  title: "Use Cases — Crab",
+export const metadata = createPageMetadata({
+  title: "Use Cases",
   description:
     "How teams use Crab for ML/AI, data science, game development, large binary assets, enterprise, and DevOps/CI-CD workflows.",
-  openGraph: {
-    title: "Use Cases — Crab",
-    description:
-      "How teams use Crab for ML/AI, data science, game development, large binary assets, enterprise, and DevOps/CI-CD workflows.",
-  },
-}
+  path: "/use-cases",
+})
 
 // ---------- Local helpers --------------------------------------------------
 

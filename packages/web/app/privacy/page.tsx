@@ -1,21 +1,17 @@
-import type { Metadata } from "next"
 import Link from "next/link"
 import { Database, KeyRound, ShieldCheck } from "lucide-react"
 
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
+import { createPageMetadata } from "@/lib/metadata"
 
 const LAST_UPDATED = "July 6, 2026"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Privacy Policy",
   description:
     "Privacy Policy for Crab, including crab.build, the Crab CLI, downloads, support, and optional Crab services.",
-  openGraph: {
-    title: "Privacy Policy - Crab",
-    description:
-      "How Beyondnote Technology Inc handles information for Crab's website, CLI, support, downloads, and optional services.",
-  },
-}
+  path: "/privacy",
+})
 
 const sectionLinks = [
   { id: "introduction", label: "Introduction" },

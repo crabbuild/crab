@@ -1,21 +1,17 @@
-import type { Metadata } from "next"
 import Link from "next/link"
 import { Cloud, FileText, Scale } from "lucide-react"
 
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
+import { createPageMetadata } from "@/lib/metadata"
 
 const LAST_UPDATED = "July 6, 2026"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Terms of Service",
   description:
     "Terms of Service for crab.build, Crab documentation, downloads, the Crab CLI, and optional Crab services.",
-  openGraph: {
-    title: "Terms of Service - Crab",
-    description:
-      "Legal terms for Crab's website, software downloads, documentation, support, and optional services.",
-  },
-}
+  path: "/terms-of-service",
+})
 
 const sectionLinks = [
   { id: "acceptance", label: "Acceptance" },

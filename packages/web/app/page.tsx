@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   ArrowRight,
   Cloud,
@@ -26,17 +25,15 @@ import { ChunkingDiagramSvg } from "./landing-svgs"
 import { TestimonialsCarousel } from "@/components/marketing/testimonials-carousel"
 import { FAQSection } from "@/components/marketing/faq-section"
 import { InstallTabs, InstallTabIcons } from "@/components/marketing/install-tabs"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Crab — Git for any file at any scale",
   description:
     "Crab is a serverless Git remote storage solution powered by the Xet protocol for chunk-level deduplication. Version any file, any size, any number — straight into your S3, GCS, or Azure bucket.",
-  openGraph: {
-    title: "Crab — Git for any file at any scale",
-    description:
-      "Serverless Git remote powered by the Xet protocol for chunk-level deduplication. Any file, any size, any number — straight into your cloud bucket.",
-  },
-}
+  path: "/",
+  absoluteTitle: true,
+})
 
 const heroStats: ReadonlyArray<{
   end: number

@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   Cpu,
   Layers,
@@ -34,17 +33,14 @@ import { CliPushPipelineSvg } from "@/app/diagrams/cli-push-pipeline-svg"
 import { cn } from "@/lib/utils"
 
 import { InteractiveCliSandbox } from "@/components/marketing/interactive-cli-sandbox"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Crab CLI",
   description:
     "A single Rust binary that acts as a Git remote helper and filter driver for cloud object storage. Push and pull large files to S3, GCS, or Azure with standard Git commands.",
-  openGraph: {
-    title: "Crab CLI",
-    description:
-      "A single Rust binary that acts as a Git remote helper and filter driver for cloud object storage. Push and pull large files to S3, GCS, or Azure with standard Git commands.",
-  },
-}
+  path: "/cli",
+})
 
 const features = [
   {
