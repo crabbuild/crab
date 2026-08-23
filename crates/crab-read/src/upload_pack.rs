@@ -657,7 +657,6 @@ fn plan_from_visibility(
         || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
-        || request.include_tags
         || !matches!(request.filter, UploadPackFilter::None)
     {
         return Ok(None);
@@ -679,7 +678,7 @@ fn plan_from_visibility(
                 .map(|reference| reference.name.as_str())
         })
         .collect::<Option<Vec<_>>>();
-    let Some(selected_refs) = selected_refs else {
+    let Some(mut selected_refs) = selected_refs else {
         return Ok(None);
     };
 
@@ -694,6 +693,18 @@ fn plan_from_visibility(
                 reason: RepositoryStateError::VisibilityProofMismatch,
             });
         }
+    }
+
+    if request.include_tags {
+        let selected_objects = visibility.objects_for_refs(selected_refs.iter().copied());
+        selected_refs.extend(references.iter().filter_map(|reference| {
+            let peeled = reference.peeled?;
+            let peeled = peeled.to_hex().to_string();
+            (reference.name.starts_with("refs/tags/")
+                && visible.contains(reference.name.as_str())
+                && selected_objects.contains(&peeled))
+            .then_some(reference.name.as_str())
+        }));
     }
 
     let objects = visibility.objects_for_refs(selected_refs.iter().copied());
@@ -718,7 +729,7 @@ fn plan_from_visibility(
         wants: request.wants.clone(),
         common_haves: Vec::new(),
         filter: request.filter.clone(),
-        include_tags: false,
+        include_tags: request.include_tags,
         object_ids,
         required_bases: Vec::new(),
         shallow: Vec::new(),
@@ -1312,11 +1323,6 @@ mod tests {
             },
             UploadPackRequest {
                 wants: vec![oid('1')],
-                include_tags: true,
-                ..UploadPackRequest::default()
-            },
-            UploadPackRequest {
-                wants: vec![oid('1')],
                 filter: UploadPackFilter::BlobNone,
                 ..UploadPackRequest::default()
             },
@@ -1335,6 +1341,78 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn visibility_plan_adds_only_visible_tags_peeled_to_selected_objects() {
+        let references = vec![
+            RepositoryRef {
+                name: "refs/heads/main".to_owned(),
+                target: oid('1'),
+                peeled: None,
+            },
+            RepositoryRef {
+                name: "refs/tags/release".to_owned(),
+                target: oid('4'),
+                peeled: Some(oid('3')),
+            },
+            RepositoryRef {
+                name: "refs/tags/unrelated".to_owned(),
+                target: oid('5'),
+                peeled: Some(oid('2')),
+            },
+            RepositoryRef {
+                name: "refs/tags/hidden".to_owned(),
+                target: oid('6'),
+                peeled: Some(oid('3')),
+            },
+        ];
+        let proof = GitVisibilityIndex::new(
+            7,
+            "a".repeat(64),
+            "b".repeat(64),
+            [
+                (
+                    "refs/heads/main".to_owned(),
+                    vec![oid('1').to_string(), oid('3').to_string()],
+                ),
+                (
+                    "refs/tags/release".to_owned(),
+                    vec![oid('3').to_string(), oid('4').to_string()],
+                ),
+                (
+                    "refs/tags/unrelated".to_owned(),
+                    vec![oid('2').to_string(), oid('5').to_string()],
+                ),
+                (
+                    "refs/tags/hidden".to_owned(),
+                    vec![oid('3').to_string(), oid('6').to_string()],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            include_tags: true,
+            ..UploadPackRequest::default()
+        };
+        let plan = plan_from_visibility(
+            &references,
+            &[
+                "refs/heads/main".to_owned(),
+                "refs/tags/release".to_owned(),
+                "refs/tags/unrelated".to_owned(),
+            ],
+            &proof,
+            &request,
+            10,
+        )
+        .expect("valid visibility closure")
+        .expect("fresh include-tag fetch should use the visibility plan");
+
+        assert_eq!(plan.object_ids, [oid('1'), oid('3'), oid('4')]);
+        assert!(plan.include_tags);
     }
 
     #[test]
