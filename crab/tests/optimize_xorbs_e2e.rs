@@ -1,14 +1,14 @@
-//! End-to-end integration tests for the restripe subsystem.
+//! End-to-end integration tests for xorb optimization.
 //!
-//! These tests exercise the full restripe pipeline including profile
+//! These tests exercise the full xorb optimization pipeline, including profile
 //! resolution, dry-run estimation, journal lifecycle, and CLI surface.
 //! All tests are `#[ignore]`-guarded because they require either a
 //! real object store or a large fixture.
 
-use crab::restripe::inference::{self, RepoStats};
-use crab::restripe::journal::{RestripeJournal, SourceStatus};
-use crab::restripe::planner::{self, CalibrationConfig, SourceXorbMeta};
-use crab::restripe::profile::Profile;
+use crab::optimize::xorbs::inference::{self, RepoStats};
+use crab::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceStatus};
+use crab::optimize::xorbs::planner::{self, CalibrationConfig, SourceXorbMeta};
+use crab::optimize::xorbs::profile::Profile;
 
 // ---------------------------------------------------------------------------
 // 22.1: Integration test — 500 MiB fixture, ml profile, dest count
@@ -17,7 +17,7 @@ use crab::restripe::profile::Profile;
 
 #[test]
 #[ignore = "requires 500 MiB fixture and object store"]
-fn restripe_500mib_ml_profile_dest_count_within_10pct() {
+fn optimize_xorbs_500mib_ml_profile_dest_count_within_10pct() {
     // Simulate a 500 MiB fixture with 2 source xorbs of 256 MiB each.
     let profile = Profile::ml();
     let sources: Vec<SourceXorbMeta> = (0..2)
@@ -43,36 +43,36 @@ fn restripe_500mib_ml_profile_dest_count_within_10pct() {
 }
 
 // ---------------------------------------------------------------------------
-// 22.2: Hydrate post-restripe round-trip — every pre-restripe pointer
+// 22.2: Hydrate after optimization — every pre-optimization pointer
 //       byte-identical.
 // ---------------------------------------------------------------------------
 
 #[test]
 #[ignore = "requires object store and hydrate pipeline"]
-fn restripe_hydrate_round_trip_byte_identical() {
+fn optimize_xorbs_hydrate_round_trip_byte_identical() {
     // This test would:
     // 1. Push a set of files to create xorbs.
     // 2. Record the content hashes of all files.
-    // 3. Run restripe with a profile.
+    // 3. Run xorb optimization with a profile.
     // 4. Hydrate all files.
-    // 5. Verify every file's content hash matches the pre-restripe hash.
+    // 5. Verify every file's content hash matches the pre-optimization hash.
     //
     // Stub: the executor is not yet wired to real xorb I/O.
 }
 
 // ---------------------------------------------------------------------------
-// 22.3: Concurrent push + restripe — both content streams hydrate,
+// 22.3: Concurrent push + xorb optimization — both content streams hydrate,
 //       no dangling refs.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires concurrent push and restripe execution"]
-fn restripe_concurrent_push_both_hydrate() {
+#[ignore = "requires concurrent push and xorb optimization execution"]
+fn optimize_xorbs_concurrent_push_both_hydrate() {
     // This test would:
-    // 1. Start a restripe run.
+    // 1. Start an xorb optimization run.
     // 2. Concurrently push new files.
-    // 3. Wait for restripe to complete.
-    // 4. Verify both pre-restripe and pushed files hydrate correctly.
+    // 3. Wait for xorb optimization to complete.
+    // 4. Verify both pre-optimization and pushed files hydrate correctly.
     // 5. Verify no dangling refs in the file-index.
     //
     // Stub: requires full executor + push pipeline integration.
@@ -84,9 +84,9 @@ fn restripe_concurrent_push_both_hydrate() {
 
 #[test]
 #[ignore = "requires signal handling and journal resume"]
-fn restripe_abort_resume_completion() {
+fn optimize_xorbs_abort_resume_completion() {
     // This test would:
-    // 1. Start a restripe run.
+    // 1. Start an xorb optimization run.
     // 2. Send SIGTERM mid-run.
     // 3. Verify the journal has pending entries.
     // 4. Resume the run.
@@ -95,7 +95,7 @@ fn restripe_abort_resume_completion() {
     // We can test the journal part without signals:
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.db");
-    let journal = RestripeJournal::open(&path).unwrap();
+    let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
     journal.start_run("run-abort-test", "{}").unwrap();
     journal.insert_source("run-abort-test", "xorb-001").unwrap();
@@ -135,9 +135,9 @@ fn restripe_abort_resume_completion() {
 
 #[test]
 #[ignore = "requires fsck and GC integration"]
-fn restripe_drop_journal_orphans_reclaimable() {
+fn optimize_xorbs_drop_journal_orphans_reclaimable() {
     // This test would:
-    // 1. Run a partial restripe (some dest xorbs uploaded).
+    // 1. Run a partial xorb optimization (some destination xorbs uploaded).
     // 2. Drop the journal.
     // 3. Run fsck — verify orphan dest xorbs are reported.
     // 4. Run GC — verify orphans are reclaimed.
@@ -148,14 +148,14 @@ fn restripe_drop_journal_orphans_reclaimable() {
 
     // Create and populate a journal.
     {
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
         journal.start_run("run-drop-test", "{}").unwrap();
     }
 
     assert!(path.exists());
 
     // Drop it.
-    RestripeJournal::drop_journal(&path).unwrap();
+    OptimizeXorbsJournal::drop_journal(&path).unwrap();
     assert!(!path.exists());
 }
 
@@ -185,7 +185,7 @@ fn profile_inference_three_workloads() {
 fn journal_full_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.db");
-    let journal = RestripeJournal::open(&path).unwrap();
+    let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
     // Start run.
     journal

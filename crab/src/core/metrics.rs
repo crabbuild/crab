@@ -224,10 +224,10 @@ pub struct MetricsSnapshot {
     pub gc_blocked_early_delete: u64,
     /// GC objects force-deleted despite early-delete penalty.
     pub gc_force_early_delete: u64,
-    /// Xorbs processed by the restripe executor.
-    pub restripe_xorbs_processed: u64,
-    /// Corrupt source xorbs encountered during restripe.
-    pub restripe_xorbs_corrupt: u64,
+    /// Xorbs processed by the xorb optimization executor.
+    pub optimize_xorbs_processed: u64,
+    /// Corrupt source xorbs encountered during xorb optimization.
+    pub optimize_xorbs_corrupt: u64,
     /// Objects scanned by the cost inventory walker.
     pub cost_inventory_objects_scanned: u64,
 
@@ -439,8 +439,8 @@ pub struct Metrics {
     hydrate_restore_timeouts: AtomicU64,
     gc_blocked_early_delete: AtomicU64,
     gc_force_early_delete: AtomicU64,
-    restripe_xorbs_processed: AtomicU64,
-    restripe_xorbs_corrupt: AtomicU64,
+    optimize_xorbs_processed: AtomicU64,
+    optimize_xorbs_corrupt: AtomicU64,
     cost_inventory_objects_scanned: AtomicU64,
 
     // --- speculation counters ---
@@ -993,14 +993,14 @@ impl Metrics {
         self.gc_force_early_delete.fetch_add(1, Relaxed);
     }
 
-    /// Record a xorb processed by the restripe executor.
-    pub fn inc_restripe_xorbs_processed(&self) {
-        self.restripe_xorbs_processed.fetch_add(1, Relaxed);
+    /// Record a xorb processed by the xorb optimization executor.
+    pub fn inc_optimize_xorbs_processed(&self) {
+        self.optimize_xorbs_processed.fetch_add(1, Relaxed);
     }
 
-    /// Record a corrupt source xorb encountered during restripe.
-    pub fn inc_restripe_xorbs_corrupt(&self) {
-        self.restripe_xorbs_corrupt.fetch_add(1, Relaxed);
+    /// Record a corrupt source xorb encountered during xorb optimization.
+    pub fn inc_optimize_xorbs_corrupt(&self) {
+        self.optimize_xorbs_corrupt.fetch_add(1, Relaxed);
     }
 
     /// Record objects scanned by the cost inventory walker.
@@ -1289,8 +1289,8 @@ impl Metrics {
             hydrate_restore_timeouts: self.hydrate_restore_timeouts.load(Relaxed),
             gc_blocked_early_delete: self.gc_blocked_early_delete.load(Relaxed),
             gc_force_early_delete: self.gc_force_early_delete.load(Relaxed),
-            restripe_xorbs_processed: self.restripe_xorbs_processed.load(Relaxed),
-            restripe_xorbs_corrupt: self.restripe_xorbs_corrupt.load(Relaxed),
+            optimize_xorbs_processed: self.optimize_xorbs_processed.load(Relaxed),
+            optimize_xorbs_corrupt: self.optimize_xorbs_corrupt.load(Relaxed),
             cost_inventory_objects_scanned: self.cost_inventory_objects_scanned.load(Relaxed),
             speculation_hydrates_total: self.speculation_hydrates_total.load(Relaxed),
             speculation_hits_total: self.speculation_hits_total.load(Relaxed),
@@ -1827,8 +1827,8 @@ mod tests {
                 hydrate_restore_timeouts: 0,
                 gc_blocked_early_delete: 0,
                 gc_force_early_delete: 0,
-                restripe_xorbs_processed: 0,
-                restripe_xorbs_corrupt: 0,
+                optimize_xorbs_processed: 0,
+                optimize_xorbs_corrupt: 0,
                 cost_inventory_objects_scanned: 0,
                 speculation_hydrates_total: 0,
                 speculation_hits_total: 0,
@@ -2182,8 +2182,8 @@ mod tests {
         assert_eq!(zero.hydrate_restore_timeouts, 0);
         assert_eq!(zero.gc_blocked_early_delete, 0);
         assert_eq!(zero.gc_force_early_delete, 0);
-        assert_eq!(zero.restripe_xorbs_processed, 0);
-        assert_eq!(zero.restripe_xorbs_corrupt, 0);
+        assert_eq!(zero.optimize_xorbs_processed, 0);
+        assert_eq!(zero.optimize_xorbs_corrupt, 0);
         assert_eq!(zero.cost_inventory_objects_scanned, 0);
 
         m.inc_tier_plans_generated();
@@ -2199,8 +2199,8 @@ mod tests {
         m.inc_hydrate_restore_timeouts();
         m.inc_gc_blocked_early_delete();
         m.inc_gc_force_early_delete();
-        m.inc_restripe_xorbs_processed();
-        m.inc_restripe_xorbs_corrupt();
+        m.inc_optimize_xorbs_processed();
+        m.inc_optimize_xorbs_corrupt();
         m.add_cost_inventory_objects_scanned(500);
 
         let snap = m.snapshot();
@@ -2217,8 +2217,8 @@ mod tests {
         assert_eq!(snap.hydrate_restore_timeouts, 1);
         assert_eq!(snap.gc_blocked_early_delete, 1);
         assert_eq!(snap.gc_force_early_delete, 1);
-        assert_eq!(snap.restripe_xorbs_processed, 1);
-        assert_eq!(snap.restripe_xorbs_corrupt, 1);
+        assert_eq!(snap.optimize_xorbs_processed, 1);
+        assert_eq!(snap.optimize_xorbs_corrupt, 1);
         assert_eq!(snap.cost_inventory_objects_scanned, 500);
     }
 

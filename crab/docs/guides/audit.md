@@ -4,7 +4,7 @@ Inspect and verify Crab audit events.
 
 Status: local audit event records, redaction, digest and sequence verification,
 listing, and export are implemented. Release publication, repository recovery
-apply, push, replica promotion, auth token flows, tiering, restripe, and
+apply, push, replica promotion, auth token flows, tiering, xorb optimization, and
 class-aware GC append events to the local audit log.
 
 ```bash
@@ -61,6 +61,6 @@ This command group provides the local event model, digest and sequence
 verification, redaction, listing, and export foundation. The covered mutating
 operations include `release.publish`, `recover.apply`, `push`,
 `replica.promote`, `auth.login`, `auth.grant`, `auth.refresh`, `auth.logout`,
-`tier.apply`, `tier.rollback`, `restripe.start`, `restripe.finalize`, and
+`tier.apply`, `tier.rollback`, `optimize.xorbs.start`, `optimize.xorbs.finalize`, and
 `gc.force_early_delete`. Optional remote event publication is available through
 the audit subsystem.

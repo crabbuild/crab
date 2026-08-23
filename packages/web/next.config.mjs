@@ -42,7 +42,6 @@ const config = {
       { source: '/docs/cli/commands/gitiox-gc', destination: '/docs/cli/storage/garbage-collection', permanent: true },
       { source: '/docs/cli/commands/gitiox-prune', destination: '/docs/cli/storage/pruning-objects', permanent: true },
       { source: '/docs/cli/commands/gitiox-repack', destination: '/docs/cli/storage/repacking-objects', permanent: true },
-      { source: '/docs/cli/commands/gitiox-restripe', destination: '/docs/cli/storage/restriping-data', permanent: true },
       { source: '/docs/cli/commands/gitiox-tier', destination: '/docs/cli/storage/storage-tiers', permanent: true },
       // Virtual filesystem commands
       { source: '/docs/cli/commands/gitiox-mount', destination: '/docs/cli/virtual-filesystem/fuse-mount', permanent: true },

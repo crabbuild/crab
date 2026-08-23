@@ -47,7 +47,7 @@ There is no desktop application, Python package, or SDK package in this workspac
 
 - Entry: `crab/src/main.rs` — dual-mode: `git-remote-crab` remote helper + `crab` CLI.
 - Subcommands: `crab/src/cmd/` (add, clone, push, hydrate, dehydrate, gc, fsck, mount, status, doctor, and other CLI commands).
-- Product modules under `crab/src/` cover command policy, chunking/deduplication, storage, metadata, coordination, Git integration, cache, LFS, auth/read/hydration, tiering/replication, import, and restriping. Reusable contracts and mechanics belong in `crates/`.
+- Product modules under `crab/src/` cover command policy, chunking/deduplication, storage, metadata, coordination, Git integration, cache, LFS, auth/read/hydration, tiering/replication, import, and xorb optimization. Reusable contracts and mechanics belong in `crates/`.
 - Stack: Rust 2024, tokio, `object_store`, `thiserror`, `tracing`, Blake3.
 
 ### packages/web (Next.js)

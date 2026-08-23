@@ -1,5 +1,7 @@
 //! Operator workflow for repository cost optimization.
 
+pub mod xorbs;
+
 use std::process::Stdio;
 
 use clap::Parser;
@@ -119,7 +121,7 @@ pub enum OptimizeStepKind {
     CostReport,
     SafetyChecks,
     LifecycleTiering,
-    XorbRestripe,
+    OptimizeXorbs,
     CachePrune,
     ReplicaPolicy,
 }
@@ -343,7 +345,7 @@ pub fn tier_apply_command_args() -> Vec<String> {
     ]
 }
 
-/// Arguments for the xorb-restripe child command.
+/// Arguments for the xorb optimization child command.
 #[must_use]
 pub fn xorb_apply_command_args(args: &OptimizeApplyArgs) -> Vec<String> {
     let mut cmd = vec![
@@ -491,8 +493,8 @@ fn xorb_step(args: &OptimizePlanArgs) -> OptimizeStep {
     }
     if !args.include_xorbs {
         return skipped_step(
-            "xorb-restripe",
-            OptimizeStepKind::XorbRestripe,
+            "optimize-xorbs",
+            OptimizeStepKind::OptimizeXorbs,
             "Xorb rewrite",
             &command,
             true,
@@ -500,13 +502,13 @@ fn xorb_step(args: &OptimizePlanArgs) -> OptimizeStep {
         );
     }
     OptimizeStep {
-        id: "xorb-restripe".to_owned(),
-        kind: OptimizeStepKind::XorbRestripe,
+        id: "optimize-xorbs".to_owned(),
+        kind: OptimizeStepKind::OptimizeXorbs,
         title: "Xorb rewrite".to_owned(),
         command,
         mutates: true,
         status: OptimizeStepStatus::Planned,
-        detail: "requested xorb rewrite is currently blocked until file-index/shard reconciliation is implemented".to_owned(),
+        detail: "rewrite source xorbs with the selected profile, then reconcile file indexes and shard manifests".to_owned(),
     }
 }
 
@@ -736,7 +738,7 @@ mod tests {
         let xorb = payload
             .steps
             .iter()
-            .find(|step| step.id == "xorb-restripe")
+            .find(|step| step.id == "optimize-xorbs")
             .expect("xorb step");
 
         assert_eq!(xorb.status, OptimizeStepStatus::Planned);

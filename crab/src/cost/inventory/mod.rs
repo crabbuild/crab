@@ -130,7 +130,7 @@ pub const ALL_CRAB_PREFIXES: &[&str] = &[
     ".crab/tier/",
     ".crab/audit/",
     ".crab/tombstones/",
-    ".crab/restripe/",
+    ".crab/optimize/xorbs/",
     ".crab/ref-registry",
 ];
 

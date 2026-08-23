@@ -1,4 +1,4 @@
-//! Streaming source-xorb → dest-xorb pipeline for restripe operations.
+//! Streaming source-xorb → destination-xorb pipeline for optimization.
 //!
 //! The executor processes source xorbs one at a time through a bounded
 //! pipeline:
@@ -32,8 +32,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::restripe::journal::{RestripeJournal, SourceStatus};
-use crate::restripe::profile::Profile;
+use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceStatus};
+use crate::optimize::xorbs::profile::Profile;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::restore::RestoreOrchestrator;
@@ -46,7 +46,7 @@ use crab_xet::xorb::parser::XorbParser;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for the restripe executor.
+/// Configuration for the xorb optimization executor.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// Include archive-class source xorbs. When false, archive xorbs
@@ -99,7 +99,7 @@ pub struct XorbProgressEvent {
 // Executor outcome
 // ---------------------------------------------------------------------------
 
-/// Summary of a completed restripe execution.
+/// Summary of a completed xorb optimization.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExecutorOutcome {
     /// Run identifier.
@@ -129,7 +129,7 @@ pub struct ExecutorOutcome {
 // Executor
 // ---------------------------------------------------------------------------
 
-/// Execute a restripe run.
+/// Execute an xorb optimization run.
 ///
 /// Processes each pending source xorb from the journal through the
 /// download → parse → repack → upload pipeline.
@@ -153,7 +153,7 @@ pub struct ExecutorOutcome {
 /// downloading. When `config.include_cold` is false, archive xorbs
 /// are skipped instead.
 pub async fn execute(
-    journal: &RestripeJournal,
+    journal: &OptimizeXorbsJournal,
     run_id: &str,
     profile: &Profile,
     config: &ExecutorConfig,
@@ -181,7 +181,7 @@ pub async fn execute(
     let pending = journal.sources_by_status(run_id, SourceStatus::Pending)?;
 
     if pending.is_empty() {
-        info!("restripe executor: no pending source xorbs");
+        info!("xorb optimization executor: no pending source xorbs");
         return Ok(build_outcome(
             run_id,
             &profile_desc,
@@ -199,7 +199,7 @@ pub async fn execute(
     info!(
         pending = pending.len(),
         memory_budget_mib = memory_budget / (1024 * 1024),
-        "restripe executor: processing source xorbs"
+        "xorb optimization executor: processing source xorbs"
     );
 
     let compression = resolve_compression(profile);
@@ -269,7 +269,7 @@ pub async fn execute(
         bytes_read,
         bytes_written,
         elapsed_ms = elapsed.as_millis() as u64,
-        "restripe executor: complete"
+        "xorb optimization executor: complete"
     );
 
     Ok(build_outcome(
@@ -302,14 +302,14 @@ struct SingleXorbResult {
     bytes_written: u64,
 }
 
-/// Process a single source xorb through the restripe pipeline.
+/// Process a single source xorb through the optimization pipeline.
 ///
 /// Each step is designed so that a crash leaves no committed state
 /// until the final journal update. Destination xorbs uploaded before
 /// a crash become orphans reclaimed by `crab gc`.
 #[expect(clippy::too_many_arguments, reason = "pipeline step needs all context")]
 async fn process_single_xorb(
-    journal: &RestripeJournal,
+    journal: &OptimizeXorbsJournal,
     run_id: &str,
     src_hash: &str,
     profile: &Profile,
@@ -480,7 +480,7 @@ async fn process_single_xorb(
         dest_count = dest_hashes.len(),
         bytes_read = src_size,
         bytes_written = total_written,
-        "source xorb restriped"
+        "source xorb optimized"
     );
 
     Ok(SingleXorbResult {
@@ -586,21 +586,21 @@ mod tests {
 
     #[test]
     fn resolve_compression_none() {
-        let mut p = crate::restripe::profile::Profile::code();
+        let mut p = crate::optimize::xorbs::profile::Profile::code();
         p.compression = crate::core::config::CompressionConfig::None;
         assert_eq!(resolve_compression(&p), CompressionScheme::None);
     }
 
     #[test]
     fn resolve_compression_lz4() {
-        let mut p = crate::restripe::profile::Profile::code();
+        let mut p = crate::optimize::xorbs::profile::Profile::code();
         p.compression = crate::core::config::CompressionConfig::Lz4;
         assert_eq!(resolve_compression(&p), CompressionScheme::LZ4);
     }
 
     #[test]
     fn resolve_compression_zstd_defaults_to_lz4() {
-        let p = crate::restripe::profile::Profile::ml();
+        let p = crate::optimize::xorbs::profile::Profile::ml();
         assert_eq!(resolve_compression(&p), CompressionScheme::LZ4);
     }
 
@@ -622,14 +622,14 @@ mod tests {
     async fn execute_with_no_store_marks_pending_as_done() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
         journal.start_run("test-run", "{}").unwrap();
         journal.insert_source("test-run", "xorb-aaa").unwrap();
         journal.insert_source("test-run", "xorb-bbb").unwrap();
 
         let cancel = CancellationToken::new();
-        let profile = crate::restripe::profile::Profile::code();
+        let profile = crate::optimize::xorbs::profile::Profile::code();
         let config = ExecutorConfig::default();
 
         let outcome = execute(&journal, "test-run", &profile, &config, &cancel, None, None)
@@ -650,11 +650,11 @@ mod tests {
     async fn execute_with_no_pending_returns_empty_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
         journal.start_run("empty-run", "{}").unwrap();
 
         let cancel = CancellationToken::new();
-        let profile = crate::restripe::profile::Profile::code();
+        let profile = crate::optimize::xorbs::profile::Profile::code();
         let config = ExecutorConfig::default();
 
         let outcome = execute(
@@ -677,7 +677,7 @@ mod tests {
     async fn execute_cancellation_stops_between_xorbs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
         journal.start_run("cancel-run", "{}").unwrap();
         journal.insert_source("cancel-run", "xorb-001").unwrap();
@@ -687,7 +687,7 @@ mod tests {
         // Cancel immediately — the first check_cancelled should fire.
         cancel.cancel();
 
-        let profile = crate::restripe::profile::Profile::code();
+        let profile = crate::optimize::xorbs::profile::Profile::code();
         let config = ExecutorConfig::default();
 
         let result = execute(

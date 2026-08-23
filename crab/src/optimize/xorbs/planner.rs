@@ -1,6 +1,6 @@
-//! Dry-run estimator for restripe operations.
+//! Dry-run estimator for xorb optimization operations.
 //!
-//! [`estimate`] computes the expected outcome of a restripe without
+//! [`estimate`] computes the expected outcome of xorb optimization without
 //! downloading any xorb bodies. It uses HEAD / `GetObjectAttributes`
 //! to determine source xorb sizes and storage classes, then projects
 //! destination xorb counts, bytes to rewrite, wall-clock time, and
@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use serde::Serialize;
 
-use crate::restripe::profile::Profile;
+use crate::optimize::xorbs::profile::Profile;
 
 // ---------------------------------------------------------------------------
 // Calibration constants
@@ -29,7 +29,7 @@ const DEFAULT_COMPRESSION_RATIOS: &[(i32, f64)] = &[
 ];
 
 /// Default throughput in bytes/sec for estimation. Based on benchmarked
-/// single-host restripe throughput (download + decompress + recompress +
+/// single-host xorb optimization throughput (download + decompress + recompress +
 /// upload). Configurable via `CalibrationConfig`.
 const DEFAULT_THROUGHPUT_BYTES_PER_SEC: u64 = 100 * 1024 * 1024; // 100 MiB/s
 
@@ -95,7 +95,7 @@ pub struct SourceXorbMeta {
 
 /// Result of a dry-run estimation.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct RestripeEstimate {
+pub struct OptimizeXorbsEstimate {
     /// Profile name used for the estimate.
     pub profile: String,
     /// Number of source xorbs that would be processed.
@@ -117,7 +117,7 @@ pub struct RestripeEstimate {
     pub archive_source_bytes: u64,
 }
 
-/// Compute a dry-run estimate for a restripe operation.
+/// Compute a dry-run estimate for an xorb optimization operation.
 ///
 /// No writes are performed. Only HEAD and list operations are used
 /// to gather source xorb metadata.
@@ -127,7 +127,7 @@ pub fn estimate(
     sources: &[SourceXorbMeta],
     calibration: &CalibrationConfig,
     include_cold: bool,
-) -> RestripeEstimate {
+) -> OptimizeXorbsEstimate {
     let compression_ratio = lookup_compression_ratio(profile);
 
     let mut source_count: u64 = 0;
@@ -181,7 +181,7 @@ pub fn estimate(
 
     let total_cost = put_cost + storage_cost;
 
-    RestripeEstimate {
+    OptimizeXorbsEstimate {
         profile: profile_name.to_string(),
         source_count,
         source_bytes,
@@ -225,7 +225,7 @@ fn lookup_compression_ratio(profile: &Profile) -> f64 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::restripe::profile::Profile;
+    use crate::optimize::xorbs::profile::Profile;
 
     fn make_sources(count: usize, size: u64, archive: bool) -> Vec<SourceXorbMeta> {
         (0..count)

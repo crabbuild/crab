@@ -1,21 +1,21 @@
-//! Random-fixture property test against the restripe reconciliation
+//! Random-fixture property test against xorb optimization reconciliation
 //! invariant (design B5).
 //!
-//! Unlike `prop_restripe_reconcile_invariant.rs` which uses a
+//! Unlike `prop_optimize_xorbs_reconcile_invariant.rs` which uses a
 //! simplified simulation, this test generates random xorb fixtures
 //! with realistic properties (variable sizes, mixed storage classes,
 //! overlapping chunk references) and verifies the three-part invariant
 //! holds after reconciliation.
 //!
 //! The invariant states that for any file-index entry `E` present at
-//! the end of a restripe:
+//! the end of xorb optimization:
 //!
 //! 1. If `E` existed at `run.started_at` AND its xorbs were in the
 //!    source set, `E` now points at dest xorbs.
 //! 2. If `E` was added during the run by a concurrent push, `E` is
 //!    byte-identical to what the push wrote.
 //! 3. Every chunk `E` references resolves to a live xorb (either a
-//!    newly-written dest xorb or a xorb out of restripe scope).
+//!    newly-written dest xorb or a xorb outside the optimization scope).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -49,14 +49,14 @@ struct XorbFixture {
     is_archive: bool,
 }
 
-/// A simulated restripe run with random fixtures.
+/// A simulated xorb optimization run with random fixtures.
 #[derive(Debug, Clone)]
 struct RandomFixtureRun {
     /// All xorbs in the bucket at run start.
     xorbs: Vec<XorbFixture>,
     /// File-index entries at run start.
     pre_run_entries: Vec<FileEntry>,
-    /// Which xorbs are selected for restripe (subset of xorbs).
+    /// Which xorbs are selected for optimization (subset of xorbs).
     source_xorb_hashes: BTreeSet<String>,
     /// Mapping from source xorb → destination xorbs (1:N split).
     src_to_dest: HashMap<String, Vec<String>>,

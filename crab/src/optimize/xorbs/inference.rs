@@ -1,4 +1,4 @@
-//! Auto-inference of restripe profiles from repository statistics.
+//! Auto-inference of xorb optimization profiles from repository statistics.
 //!
 //! [`infer`] examines the file-index to compute a [`RepoStats`] summary,
 //! then selects the best built-in profile based on the p50 file size:
@@ -14,7 +14,7 @@
 
 use tracing::{debug, info};
 
-use crate::restripe::profile::Profile;
+use crate::optimize::xorbs::profile::Profile;
 
 /// Threshold above which the `ml` profile is selected (100 MiB).
 const ML_THRESHOLD: u64 = 100 * 1024 * 1024;
@@ -136,7 +136,7 @@ pub fn infer(stats: &RepoStats) -> Profile {
 mod tests {
     use super::*;
     use crate::core::config::CompressionConfig;
-    use crate::restripe::profile::GroupBy;
+    use crate::optimize::xorbs::profile::GroupBy;
 
     /// ML workload: large files (200+ MiB each).
     #[test]

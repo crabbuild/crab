@@ -1,13 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "OptimizeXorbsEventPayload",
-  "description": "Payload variants emitted under the `optimize.xorbs.event` schema.",
   "anyOf": [
     {
-      "$ref": "#/definitions/RestripeEstimate"
+      "$ref": "#/definitions/OptimizeXorbsEstimate"
     },
     {
-      "$ref": "#/definitions/RestripeSummary"
+      "$ref": "#/definitions/OptimizeXorbsSummary"
     },
     {
       "$ref": "#/definitions/OptimizeXorbsControlEvent"
@@ -16,10 +14,6 @@
   "definitions": {
     "OptimizeXorbsControlEvent": {
       "description": "Control event emitted by xorb optimization management operations.",
-      "type": "object",
-      "required": [
-        "event"
-      ],
       "properties": {
         "event": {
           "$ref": "#/definitions/OptimizeXorbsControlEventKind"
@@ -30,51 +24,106 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "event"
+      ],
+      "type": "object"
     },
     "OptimizeXorbsControlEventKind": {
       "description": "Control event kind for xorb optimization management operations.",
-      "type": "string",
       "enum": [
         "journal_dropped",
         "aborted"
-      ]
+      ],
+      "type": "string"
     },
-    "RestripeCounts": {
+    "OptimizeXorbsCounts": {
       "description": "Per-status counts in the summary.",
-      "type": "object",
+      "properties": {
+        "corrupt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "done": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "pending": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
       "required": [
         "corrupt",
         "done",
         "pending",
         "skipped"
       ],
-      "properties": {
-        "corrupt": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "done": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "pending": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "skipped": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        }
-      }
+      "type": "object"
     },
-    "RestripeEstimate": {
+    "OptimizeXorbsEstimate": {
       "description": "Result of a dry-run estimation.",
-      "type": "object",
+      "properties": {
+        "archive_source_bytes": {
+          "description": "Bytes in archive-class source xorbs.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "archive_source_count": {
+          "description": "Number of source xorbs in archive classes (skipped if `--include-cold=false`).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "estimated_cost_usd": {
+          "description": "Estimated provider API cost in USD (6 decimal places).",
+          "type": "string"
+        },
+        "estimated_dest_bytes": {
+          "description": "Estimated bytes after recompression.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "estimated_dest_count": {
+          "description": "Estimated number of destination xorbs.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "estimated_wall_secs": {
+          "description": "Estimated wall-clock duration in seconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "profile": {
+          "description": "Profile name used for the estimate.",
+          "type": "string"
+        },
+        "source_bytes": {
+          "description": "Total bytes across all source xorbs.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "source_count": {
+          "description": "Number of source xorbs that would be processed.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
       "required": [
         "archive_source_bytes",
         "archive_source_count",
@@ -86,104 +135,43 @@
         "source_bytes",
         "source_count"
       ],
-      "properties": {
-        "archive_source_bytes": {
-          "description": "Bytes in archive-class source xorbs.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "archive_source_count": {
-          "description": "Number of source xorbs in archive classes (skipped if `--include-cold=false`).",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "estimated_cost_usd": {
-          "description": "Estimated provider API cost in USD (6 decimal places).",
-          "type": "string"
-        },
-        "estimated_dest_bytes": {
-          "description": "Estimated bytes after recompression.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "estimated_dest_count": {
-          "description": "Estimated number of destination xorbs.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "estimated_wall_secs": {
-          "description": "Estimated wall-clock duration in seconds.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "profile": {
-          "description": "Profile name used for the estimate.",
-          "type": "string"
-        },
-        "source_bytes": {
-          "description": "Total bytes across all source xorbs.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "source_count": {
-          "description": "Number of source xorbs that would be processed.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        }
-      }
+      "type": "object"
     },
-    "RestripeSummary": {
+    "OptimizeXorbsSummary": {
       "description": "Final summary payload for `--json` / `--jsonl` output.",
-      "type": "object",
-      "required": [
-        "bytes_read",
-        "bytes_written",
-        "corrupt_list",
-        "counts",
-        "elapsed_ms",
-        "profile",
-        "run_id"
-      ],
       "properties": {
         "bytes_read": {
           "description": "Total bytes read.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "bytes_written": {
           "description": "Total bytes written.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "corrupt_list": {
           "description": "List of corrupt source xorb hashes.",
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "counts": {
-          "description": "Counts by status.",
           "allOf": [
             {
-              "$ref": "#/definitions/RestripeCounts"
+              "$ref": "#/definitions/OptimizeXorbsCounts"
             }
-          ]
+          ],
+          "description": "Counts by status."
         },
         "elapsed_ms": {
           "description": "Wall-clock duration in milliseconds.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "profile": {
           "description": "Profile used.",
@@ -193,7 +181,19 @@
           "description": "Run identifier.",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "bytes_read",
+        "bytes_written",
+        "corrupt_list",
+        "counts",
+        "elapsed_ms",
+        "profile",
+        "run_id"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "Payload variants emitted under the `optimize.xorbs.event` schema.",
+  "title": "OptimizeXorbsEventPayload"
 }

@@ -1,7 +1,7 @@
-//! Xorb-level restripe subsystem — rewrites xorbs to a target size and
+//! Xorb optimization subsystem — rewrites xorbs to a target size and
 //! grouping profile for cost and performance optimization.
 //!
-//! This is **not** `cmd::repack` (git-pack consolidation). `restripe`
+//! This is **not** `cmd::repack` (git-pack consolidation). Xorb optimization
 //! operates on content-addressed xorbs, not git packs. The existing
 //! `crab repack` command and its `RepackConfig` are untouched.
 //!
@@ -23,17 +23,17 @@ pub mod planner;
 pub mod profile;
 pub mod reconcile;
 
-/// Create an OTLP span for a restripe operation when the `otlp`
+/// Create an OTLP span for an xorb optimization operation when the `otlp`
 /// feature is enabled. Returns a span guard that should be held for
 /// the duration of the operation.
 ///
 /// When `otlp` is not enabled this is a no-op that the compiler
 /// eliminates entirely.
 #[cfg(feature = "otlp")]
-pub fn restripe_span(profile: &str, dry_run: bool) -> tracing::span::EnteredSpan {
+pub fn optimize_xorbs_span(profile: &str, dry_run: bool) -> tracing::span::EnteredSpan {
     tracing::info_span!(
-        "restripe",
-        command = "restripe",
+        "optimize.xorbs",
+        command = "optimize xorbs",
         profile = %profile,
         dry_run = %dry_run,
     )

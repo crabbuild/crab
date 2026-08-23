@@ -1,6 +1,6 @@
-//! Online reconciliation for concurrent pushes during restripe.
+//! Online reconciliation for concurrent pushes during xorb optimization.
 //!
-//! A restripe writes destination xorbs before it can know which file versions
+//! Xorb optimization writes destination xorbs before it can know which file versions
 //! are still current. This module turns the completed journal mapping into a
 //! new immutable shard snapshot, generation-pins the file-index acceleration
 //! rows to that snapshot, and then publishes the snapshot through the
@@ -20,7 +20,7 @@ use tracing::{debug, info};
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::metadata::manifest;
-use crate::restripe::journal::{RestripeJournal, SourceStatus};
+use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceStatus};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 
@@ -62,7 +62,7 @@ pub struct ReconcileOutcome {
 
 /// Build the `src_xorb → dest_xorbs` mapping from completed journal entries.
 fn build_mapping(
-    journal: &RestripeJournal,
+    journal: &OptimizeXorbsJournal,
     run_id: &str,
 ) -> Result<(HashMap<String, Vec<String>>, u64, u64)> {
     let done_sources = journal.sources_by_status(run_id, SourceStatus::Done)?;
@@ -75,7 +75,7 @@ fn build_mapping(
         if let Some(ref dest_json) = source.dest_xorbs {
             let dests: Vec<String> =
                 serde_json::from_str(dest_json).map_err(|error| CrabError::CorruptObject {
-                    path: format!("restripe journal source {}", source.src_xorb),
+                    path: format!("xorb optimization journal source {}", source.src_xorb),
                     reason: format!("invalid destination xorb list: {error}"),
                 })?;
             if !dests.is_empty() {
@@ -201,7 +201,7 @@ async fn load_mapping(
 
     for (source_text, destination_texts) in mapping {
         check_cancelled(cancel)?;
-        let source_hash = parse_hash(source_text, "restripe journal source")?;
+        let source_hash = parse_hash(source_text, "xorb optimization journal source")?;
         let source_path = router.xorb_path(&source_hash).to_string();
         let source_parser = load_xorb(store, router, source_hash).await?;
         let chunks = source_chunks(&source_parser, &source_path)?;
@@ -210,7 +210,8 @@ async fn load_mapping(
 
         for destination_text in destination_texts {
             check_cancelled(cancel)?;
-            let destination_hash = parse_hash(destination_text, "restripe journal destination")?;
+            let destination_hash =
+                parse_hash(destination_text, "xorb optimization journal destination")?;
             let info = if let Some(info) = loaded.destination_infos.get(&destination_hash) {
                 Arc::clone(info)
             } else {
@@ -267,7 +268,7 @@ async fn load_mapping(
                 return Err(CrabError::CorruptObject {
                     path: source_path.clone(),
                     reason: format!(
-                        "chunk {} changes size from {} to {} during restripe",
+                        "chunk {} changes size from {} to {} during xorb optimization",
                         chunk.hash, chunk.size, destination_ref.uncompressed_size
                     ),
                 });
@@ -309,7 +310,7 @@ struct ReconcilePlan {
 
 fn corrupt_shard(reason: impl Into<String>) -> CrabError {
     CrabError::CorruptObject {
-        path: "restripe shard reconciliation".to_owned(),
+        path: "xorb optimization shard reconciliation".to_owned(),
         reason: reason.into(),
     }
 }
@@ -391,7 +392,7 @@ fn rewrite_file_info(file: &MDBFileInfo, mapping: &LoadedMapping) -> Result<(MDB
 
     if file.metadata.contains_verification() {
         return Err(CrabError::Configuration {
-            key: "restripe reconciliation".to_owned(),
+            key: "xorb optimization reconciliation".to_owned(),
             origin: format!(
                 "cannot rewrite verification-bearing MDBFileInfo for {} without preserving its per-segment proofs",
                 file.metadata.file_hash
@@ -690,7 +691,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 // Finalize
 // ---------------------------------------------------------------------------
 
-/// Finalize a restripe run by reconciling the file-index and shard manifest.
+/// Finalize an xorb optimization run by reconciling the file-index and shard manifest.
 ///
 /// Destination xorbs are immutable. For each CAS attempt this function reads
 /// the current canonical shard set, rewrites every affected `MDBFileInfo`,
@@ -698,7 +699,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 /// finally advances the manifest. A concurrent push causes a bounded retry
 /// against the new manifest, so files added during the run are included.
 pub async fn finalize(
-    journal: &RestripeJournal,
+    journal: &OptimizeXorbsJournal,
     run_id: &str,
     store: Option<&Store>,
     router: Option<&StoreLayout>,
@@ -724,7 +725,7 @@ pub async fn finalize(
         });
     };
     let router = router.ok_or_else(|| CrabError::Configuration {
-        key: "restripe reconciliation".to_owned(),
+        key: "xorb optimization reconciliation".to_owned(),
         origin: "a store layout is required to publish the reconciled metadata".to_owned(),
     })?;
     if src_to_dest.is_empty() {
@@ -747,7 +748,7 @@ pub async fn finalize(
         let (manifest_before, etag) = manifest::read_manifest(store, router).await?;
         if manifest_before.shard_index_hash.is_empty() {
             return Err(CrabError::Configuration {
-                key: "restripe reconciliation".to_owned(),
+                key: "xorb optimization reconciliation".to_owned(),
                 origin: "the repository manifest has no canonical shard index".to_owned(),
             });
         }
@@ -766,7 +767,7 @@ pub async fn finalize(
                 entries_updated,
                 entries_unchanged,
                 cas_attempts = attempt,
-                "restripe reconciliation found no canonical file entries using source xorbs"
+                "xorb optimization reconciliation found no canonical file entries using source xorbs"
             );
             return Ok(ReconcileOutcome {
                 entries_updated,
@@ -783,7 +784,7 @@ pub async fn finalize(
                 .generation
                 .checked_add(1)
                 .ok_or_else(|| CrabError::Configuration {
-                    key: "restripe reconciliation".to_owned(),
+                    key: "xorb optimization reconciliation".to_owned(),
                     origin: "manifest generation overflow".to_owned(),
                 })?;
         let final_shards = plan
@@ -821,7 +822,7 @@ pub async fn finalize(
         let mut candidate = manifest_before;
         candidate.generation = next_generation;
         candidate.created_at = now_iso8601();
-        candidate.session_id = format!("restripe-{run_id}");
+        candidate.session_id = format!("optimize-xorbs-{run_id}");
         candidate.shard_index_hash = shard_index_hash_text;
         candidate.seal_git_validation();
 
@@ -833,7 +834,7 @@ pub async fn finalize(
                     shards_uploaded = total_uploaded,
                     shard_bytes = total_bytes,
                     cas_attempts = attempt,
-                    "restripe reconciliation complete"
+                    "xorb optimization reconciliation complete"
                 );
                 return Ok(ReconcileOutcome {
                     entries_updated,
@@ -847,7 +848,7 @@ pub async fn finalize(
             Err(CrabError::CasConflict { .. }) if attempt < MAX_CAS_ATTEMPTS => {
                 debug!(
                     attempt,
-                    "manifest changed during restripe reconciliation; retrying"
+                    "manifest changed during xorb optimization reconciliation; retrying"
                 );
             }
             Err(error) => return Err(error),
@@ -933,7 +934,7 @@ mod tests {
     async fn finalize_without_store_reports_counts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
         journal.start_run("test-reconcile", "{}").unwrap();
         journal.insert_source("test-reconcile", "xorb-001").unwrap();
@@ -980,7 +981,7 @@ mod tests {
     async fn finalize_with_empty_dest_lists_counts_zero_updates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
         journal.start_run("test-empty", "{}").unwrap();
         journal.insert_source("test-empty", "xorb-aaa").unwrap();
@@ -1007,7 +1008,7 @@ mod tests {
     fn build_mapping_extracts_src_to_dest() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
 
         journal.start_run("map-test", "{}").unwrap();
         journal.insert_source("map-test", "src-a").unwrap();

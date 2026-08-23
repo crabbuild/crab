@@ -16,7 +16,7 @@
 //!
 //! - `apply.rs` — CAS apply, backup writer, rollback.
 //! - `restore.rs` — `RestoreOrchestrator` state machine.
-//! - `audit_shim.rs` — audit event bridge for tier, restripe, and GC.
+//! - `audit_shim.rs` — audit event bridge for tier, xorb optimization, and GC.
 
 pub mod apply;
 pub mod audit_shim;

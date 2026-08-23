@@ -368,7 +368,7 @@
     <text x="980" y="1094" class="box-sub" text-anchor="middle">blocks early-delete costs</text>
     <text x="980" y="1111" class="box-sub" text-anchor="middle">requires explicit force</text>
 
-    <text x="1338" y="1070" class="box-title" text-anchor="middle">Restripe writes</text>
+    <text x="1338" y="1070" class="box-title" text-anchor="middle">Optimize xorb writes</text>
     <text x="1338" y="1094" class="box-sub" text-anchor="middle">new output class policy</text>
     <text x="1338" y="1111" class="box-sub" text-anchor="middle">standard by default</text>
 

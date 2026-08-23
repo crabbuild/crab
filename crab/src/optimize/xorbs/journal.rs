@@ -1,9 +1,9 @@
-//! WAL-mode SQLite journal for crash-safe restripe operations.
+//! WAL-mode SQLite journal for crash-safe xorb optimization operations.
 //!
 //! The journal tracks per-source-xorb progress so that a crash or
 //! SIGTERM at any point allows the next invocation to resume from
 //! where it left off. An exclusive file lock ensures only one
-//! restripe runs at a time per repository.
+//! xorb optimization run at a time per repository.
 //!
 //! Schema:
 //! ```sql
@@ -100,20 +100,20 @@ pub struct SourceRow {
     pub err_msg: Option<String>,
 }
 
-/// Restripe journal handle.
+/// OptimizeXorbs journal handle.
 ///
 /// Opens (or creates) the SQLite database at the given path in WAL
 /// mode with an exclusive lock. If another process holds the lock,
-/// returns `RestripeAlreadyInProgress`.
-pub struct RestripeJournal {
+/// returns `OptimizeXorbsAlreadyInProgress`.
+pub struct OptimizeXorbsJournal {
     conn: Connection,
     path: PathBuf,
 }
 
-impl RestripeJournal {
+impl OptimizeXorbsJournal {
     /// Open or create the journal database.
     ///
-    /// Acquires an exclusive lock. Returns `RestripeAlreadyInProgress`
+    /// Acquires an exclusive lock. Returns `OptimizeXorbsAlreadyInProgress`
     /// if another process holds the lock.
     pub fn open(path: &Path) -> Result<Self> {
         // Ensure parent directory exists.
@@ -123,7 +123,7 @@ impl RestripeJournal {
 
         let conn = Connection::open(path).map_err(|e| {
             CrabError::Internal(format!(
-                "failed to open restripe journal at {}: {e}",
+                "failed to open xorb optimization journal at {}: {e}",
                 path.display()
             ))
         })?;
@@ -141,7 +141,7 @@ impl RestripeJournal {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| CrabError::Internal(format!("failed to enable foreign keys: {e}")))?;
 
-        // Exclusive locking mode — prevents concurrent restripe runs.
+        // Exclusive locking mode prevents concurrent xorb optimization runs.
         conn.pragma_update(None, "locking_mode", "EXCLUSIVE")
             .map_err(|e| CrabError::Internal(format!("failed to set exclusive locking: {e}")))?;
 
@@ -156,13 +156,13 @@ impl RestripeJournal {
             let err_str = e.to_string();
             if err_str.contains("locked") || err_str.contains("busy") {
                 // Try to read the active run's PID for the error message.
-                return Err(CrabError::RestripeAlreadyInProgress {
+                return Err(CrabError::OptimizeXorbsAlreadyInProgress {
                     pid: 0,
                     started_at: "unknown".to_string(),
                 });
             }
             return Err(CrabError::Internal(format!(
-                "failed to acquire restripe journal lock: {e}"
+                "failed to acquire xorb optimization journal lock: {e}"
             )));
         }
 
@@ -195,10 +195,12 @@ impl RestripeJournal {
                 ON sources(run_id, status);",
         )
         .map_err(|e| {
-            CrabError::Internal(format!("failed to create restripe journal schema: {e}"))
+            CrabError::Internal(format!(
+                "failed to create xorb optimization journal schema: {e}"
+            ))
         })?;
 
-        info!(path = %path.display(), "restripe journal opened");
+        info!(path = %path.display(), "xorb optimization journal opened");
 
         Ok(Self {
             conn,
@@ -211,7 +213,7 @@ impl RestripeJournal {
         &self.path
     }
 
-    /// Start a new restripe run. Returns the run ID.
+    /// Start a new xorb optimization run. Returns the run ID.
     pub fn start_run(&self, run_id: &str, profile_json: &str) -> Result<()> {
         let now = epoch_secs();
         let pid = std::process::id();
@@ -224,7 +226,7 @@ impl RestripeJournal {
             )
             .map_err(|e| CrabError::Internal(format!("failed to insert run: {e}")))?;
 
-        debug!(run_id, pid, "restripe run started");
+        debug!(run_id, pid, "xorb optimization run started");
         Ok(())
     }
 
@@ -415,7 +417,7 @@ impl RestripeJournal {
         if path.exists() {
             std::fs::remove_file(path).map_err(|e| CrabError::Io(e))?;
         }
-        info!(path = %path.display(), "restripe journal dropped");
+        info!(path = %path.display(), "xorb optimization journal dropped");
         Ok(())
     }
 
@@ -459,10 +461,10 @@ fn epoch_secs() -> i64 {
 mod tests {
     use super::*;
 
-    fn temp_journal() -> (tempfile::TempDir, RestripeJournal) {
+    fn temp_journal() -> (tempfile::TempDir, OptimizeXorbsJournal) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let journal = RestripeJournal::open(&path).unwrap();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
         (dir, journal)
     }
 
@@ -562,10 +564,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.db");
 
-        let _j1 = RestripeJournal::open(&path).unwrap();
+        let _j1 = OptimizeXorbsJournal::open(&path).unwrap();
 
-        // Second open should fail with RestripeAlreadyInProgress.
-        let result = RestripeJournal::open(&path);
+        // Second open should fail with OptimizeXorbsAlreadyInProgress.
+        let result = OptimizeXorbsJournal::open(&path);
         assert!(result.is_err(), "second journal open should fail");
     }
 }

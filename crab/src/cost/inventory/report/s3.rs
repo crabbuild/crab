@@ -140,8 +140,8 @@ fn extract_prefix(key: &str) -> String {
     if key.starts_with(".crab/tombstones/") {
         return ".crab/tombstones/".to_string();
     }
-    if key.starts_with(".crab/restripe/") {
-        return ".crab/restripe/".to_string();
+    if key.starts_with(".crab/optimize/xorbs/") {
+        return ".crab/optimize/xorbs/".to_string();
     }
     if key.starts_with(".crab/") {
         return ".crab/other/".to_string();

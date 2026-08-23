@@ -1,10 +1,10 @@
-//! Audit seam for tier, restripe, and class-aware GC call sites.
+//! Audit seam for tier, xorb optimization, and class-aware GC call sites.
 //!
 //! Call sites:
 //! - `tier::apply` — on successful lifecycle apply.
 //! - `tier::apply::rollback` — on rollback.
 //! - `cmd/gc` — on `--force-early-delete`.
-//! - `restripe::executor` — on start and finalize.
+//! - `optimize::xorbs::executor` — on start and finalize.
 
 use std::path::PathBuf;
 
@@ -24,10 +24,10 @@ pub enum AuditOp {
     TierRollback,
     /// GC force-deleted an object inside its minimum-retention window.
     ForceEarlyDelete,
-    /// A restripe run started.
-    RestripeStart,
-    /// A restripe run finalized (reconciliation complete).
-    RestripeFinalize,
+    /// An xorb optimization run started.
+    OptimizeXorbsStart,
+    /// An xorb optimization run finalized (reconciliation complete).
+    OptimizeXorbsFinalize,
 }
 
 impl AuditOp {
@@ -36,8 +36,8 @@ impl AuditOp {
             Self::TierApply => "tier.apply",
             Self::TierRollback => "tier.rollback",
             Self::ForceEarlyDelete => "gc.force_early_delete",
-            Self::RestripeStart => "restripe.start",
-            Self::RestripeFinalize => "restripe.finalize",
+            Self::OptimizeXorbsStart => "optimize.xorbs.start",
+            Self::OptimizeXorbsFinalize => "optimize.xorbs.finalize",
         }
     }
 }

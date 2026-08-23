@@ -30,9 +30,9 @@ fn tier_plan_creates_root_span_with_expected_fields() {
 
 #[test]
 #[ignore = "requires otlp feature and tracing subscriber setup"]
-fn restripe_creates_root_span_with_expected_fields() {
-    // `restripe/mod.rs::restripe_span` creates a root span with
-    // fields: command="restripe", profile, dry_run.
+fn optimize_xorbs_creates_root_span_with_expected_fields() {
+    // `optimize/xorbs/mod.rs::optimize_xorbs_span` creates a root span with
+    // fields: command="optimize xorbs", profile, dry_run.
 }
 
 #[test]
