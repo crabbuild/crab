@@ -30,7 +30,6 @@ jobs:
       AWS_ENDPOINT_URL: http://127.0.0.1:9000
       AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
       CRAB_GC_QUALIFICATION_BUCKET: crab
-      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-gc-qualification-target
 
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +43,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ". -> ${{ env.CARGO_TARGET_DIR }}"
+          workspaces: ". -> ${{ runner.temp }}/crab-gc-qualification-target"
 
       - name: Build crash-qualified Crab
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-gc-qualification-target
         run: cargo build -p crab --features crash-injection --release --locked
 
       - name: Start isolated RustFS
@@ -70,7 +71,8 @@ jobs:
 
       - name: Run GC qualification
         env:
-          CRAB_GC_QUALIFICATION_CRAB_BIN: ${{ env.CARGO_TARGET_DIR }}/release/crab
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-gc-qualification-target
+          CRAB_GC_QUALIFICATION_CRAB_BIN: ${{ runner.temp }}/crab-gc-qualification-target/release/crab
         run: |
           python3 crab/scripts/e2e/gc_qualification.py \
             --provider rustfs \

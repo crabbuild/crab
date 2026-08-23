@@ -15,7 +15,7 @@ from typing import Any
 DEFAULT_PSK_BLAKE3 = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
 DEFAULT_FORBIDDEN_SECRETS = ("cache-smoke-psk", DEFAULT_PSK_BLAKE3)
 EVIDENCE_MANIFEST_SCHEMA = "crab-cache-service.evidence-manifest.v1"
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v2"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
@@ -42,7 +42,7 @@ EXPECTED_MUTABLE_ROUTE_PATTERNS = [
     "{repo}/manifests/*",
     "{repo}/pack-list",
     "{repo}/shard-list",
-    ".crab/ref-registry",
+    ".crab/ref-registry/*",
     "{repo}/file_index_db/manifest/current",
     ".crab/chunk_index_db/manifest/current",
 ]
@@ -54,7 +54,7 @@ MUTABLE_ROUTE_PATTERN_IDS = {
     "{repo}/manifests/*": "repo-manifests",
     "{repo}/pack-list": "repo-pack-list",
     "{repo}/shard-list": "repo-shard-list",
-    ".crab/ref-registry": "global-ref-registry",
+    ".crab/ref-registry/*": "global-ref-registry",
     "{repo}/file_index_db/manifest/current": "repo-file-index-current",
     ".crab/chunk_index_db/manifest/current": "global-chunk-index-current",
 }

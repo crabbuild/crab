@@ -220,6 +220,7 @@ COORDINATION_OBJECT_STORE_LOCK_PACKAGES = {
     "bytes",
     "futures-util",
     "object_store",
+    "tokio-util",
     "tracing",
     "uuid",
 }
@@ -1569,6 +1570,7 @@ DELETED_METADATA_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
 WORKFLOW_MODULE_ALLOWED_NORMAL_PACKAGES = {
     "blake3",
     "bytes",
+    "crab-coordination",
     "crab-storage",
     "crab-types",
     "futures-util",
@@ -1627,7 +1629,6 @@ WORKFLOW_MODULE_FORBIDDEN_PATTERNS = {
     "crab-cache",
     "crab-cache-server",
     "crab-cache-store",
-    "crab-coordination",
     "crab-diff",
     "crab-git",
     "crab-lfs",
@@ -1638,7 +1639,6 @@ WORKFLOW_MODULE_FORBIDDEN_PATTERNS = {
     "crab_auth",
     "crab_auth_server",
     "crab_auth_store",
-    "crab_coordination",
     "crab_diff",
     "crab_git",
     "crab_lfs",
@@ -1840,7 +1840,9 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-xet",
         },
     },
-    "crab-workflow": {"normal": {"crab-storage", "crab-types"}},
+    "crab-workflow": {
+        "normal": {"crab-coordination", "crab-storage", "crab-types"}
+    },
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
@@ -2701,8 +2703,10 @@ def check_coordination_feature_budget(root: Path, cargo: str, metadata: dict) ->
                 "dep:bytes",
                 "dep:futures-util",
                 "dep:object_store",
+                "dep:tokio-util",
                 "dep:tracing",
                 "dep:uuid",
+                "tokio/macros",
                 "tokio/rt",
                 "tokio/time",
             ],
