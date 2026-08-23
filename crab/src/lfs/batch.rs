@@ -366,7 +366,6 @@ async fn write_local_object(path: &Path, content: &[u8]) -> Result<()> {
             std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
         }
         std::fs::write(&path, &content).map_err(CrabError::Io)
-
     })
     .await
     .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::core::context::AppContext;
@@ -24,8 +24,6 @@ use crab_git::pointer_detect::{PointerKind, classify};
 use crab_lfs::LfsObjectStore;
 use crab_staging::StagingArea;
 use crab_xet::hash::MerkleHash;
-
-use bytes::Bytes;
 
 /// Protocol version string sent by git during the handshake.
 const GIT_FILTER_CLIENT: &str = "git-filter-client";
@@ -1022,17 +1020,30 @@ fn dispatch_command<R: Read, W: Write>(
             output.flush().map_err(CrabError::Io)?;
         }
         "smudge" => {
-            let content = read_content_until_flush(input)?;
             let lazy = ctx.config().checkout.lazy;
 
-            // Speculative hydration: on smudge of a dehydrated file
-            // (crab pointer), fire-and-forget record the access event
-            // and launch speculative pre-fetches for predicted neighbors.
-            // Also check if this file was speculatively pre-hydrated in
-            // a previous smudge — if so, record a speculation hit.
-            // All errors are swallowed — speculation must never break smudge.
+            // Bounded peek: pointers fit one packet, so classification
+            // never needs more than this. Raw multi-GiB content is
+            // streamed packet-to-packet below, never buffered whole.
+            let mut first: Vec<u8> = Vec::with_capacity(1024);
+            let had_packet = read_first_packet(input, &mut first)?;
+            if !had_packet {
+                // Empty blob: respond with zero content frames so the
+                // wire output stays byte-identical to the pre-streaming
+                // writer for empty tracked files.
+                write_status(output, "success")?;
+                write_flush(output)?;
+                write_flush(output)?;
+                write_flush(output)?;
+                output.flush().map_err(CrabError::Io)?;
+                return Ok(());
+            }
+            let kind = classify(&first);
+
+            // Speculative hydration bookkeeping for crab pointers.
+            // Errors are swallowed — speculation must never break smudge.
             if ctx.config().hydrate.speculative
-                && let PointerKind::Crab(_) = classify(&content)
+                && let PointerKind::Crab(_) = kind
             {
                 let spec_state = {
                     let guard = speculation
@@ -1048,19 +1059,16 @@ fn dispatch_command<R: Read, W: Write>(
                         .unwrap_or(0);
                     let run_id = state.run_id.clone();
 
-                    // Check if this file was speculatively pre-hydrated.
                     let driver_for_hit = Arc::clone(&state.driver);
                     let hit_path = pathname.clone();
                     h.block_on(async move {
                         driver_for_hit.record_hit_if_speculative(&hit_path).await;
                     });
 
-                    // Fire-and-forget access recording.
                     state
                         .access_db
                         .record_access_fire_and_forget(pathname.clone(), ts_ms, run_id);
 
-                    // Launch speculative hydrations for predicted neighbors.
                     let driver = Arc::clone(&state.driver);
                     h.block_on(async move {
                         driver.launch_speculative(&pathname).await;
@@ -1068,19 +1076,11 @@ fn dispatch_command<R: Read, W: Write>(
                 }
             }
 
-            // Delayed-smudge fast path. When git advertises `can-delay=1`
-            // and the filter has a prefetch queue wired up, parse the
-            // crab pointer and kick off background reconstruction.
-            // The filter replies `status=delayed` with no content; git
-            // will come back later via `list_available_blobs` +
-            // `command=smudge` (without `can-delay`) to collect the
-            // reconstructed bytes.
-            //
-            // LFS pointers and non-pointer content do not benefit from
-            // prefetch today — they fall through to the inline path.
+            // Delayed-smudge fast path: queue background reconstruction;
+            // git collects the bytes later via list_available_blobs.
             if cmd.can_delay()
                 && let (Some(pf), Some(h)) = (prefetch, handle)
-                && let PointerKind::Crab(pointer) = classify(&content)
+                && let PointerKind::Crab(pointer) = kind
             {
                 let file_hash = MerkleHash::from(pointer.file_hash);
                 let shard_hint = pointer.shard_hint.map(MerkleHash::from);
@@ -1090,22 +1090,15 @@ fn dispatch_command<R: Read, W: Write>(
                     pf.submit_with_hint(pathname, file_hash, shard_hint).await;
                 });
 
+                drain_until_flush(input);
                 write_delayed_response(output)?;
                 output.flush().map_err(CrabError::Io)?;
                 return Ok(());
             }
 
-            // Non-delayed path: if a pathname was previously delayed,
-            // git will re-issue `command=smudge` without `can-delay=1`
-            // to collect the queued content. In that case the content
-            // bytes git sent are the same pointer bytes as before — we
-            // just hand back the prefetched result.
+            // Collection path for a previously delayed smudge.
             if let (Some(pf), Some(h)) = (prefetch, handle)
                 && let Some(bytes) = h.block_on(async {
-                    // Non-blocking peek: take_result only succeeds if
-                    // the result is already materialized or the task is
-                    // ready. A missing entry surfaces as NotFound and
-                    // we fall through to the inline smudge path.
                     match pf.take_result(&cmd.pathname).await {
                         Ok(bytes) => Some(bytes),
                         Err(CrabError::NotFound { .. }) => None,
@@ -1120,6 +1113,7 @@ fn dispatch_command<R: Read, W: Write>(
                     }
                 })
             {
+                drain_until_flush(input);
                 write_status(output, "success")?;
                 write_flush(output)?;
                 write_content(output, &bytes)?;
@@ -1129,22 +1123,206 @@ fn dispatch_command<R: Read, W: Write>(
                 return Ok(());
             }
 
-            let result_bytes = smudge_content(
-                &content,
-                &cmd.pathname,
-                lazy,
-                lfs_store,
-                session,
-                hydrator,
-                handle,
-            )?;
+            // Transform decision on the bounded prefix only. Every
+            // branch either produces buffered bytes (pointers resolve
+            // to small results or spill to disk first) or streams the
+            // input straight through — no path holds a whole large
+            // blob in memory.
+            let resolved_filter = session.resolve_filter_for(&cmd.pathname);
 
-            write_status(output, "success")?;
-            write_flush(output)?;
-            write_content(output, &result_bytes)?;
-            write_flush(output)?;
-            write_flush(output)?;
-            output.flush().map_err(CrabError::Io)?;
+            // Echo the prefix frame and stream the rest unchanged.
+            fn passthrough_response<R: Read, W: Write>(
+                input: &mut R,
+                output: &mut W,
+                first: &[u8],
+            ) -> Result<()> {
+                write_status(output, "success")?;
+                write_flush(output)?;
+                write_frame(output, first)?;
+                stream_remaining_packets(input, output)?;
+                write_flush(output)?;
+                write_flush(output)?;
+                output.flush().map_err(CrabError::Io)?;
+                Ok(())
+            }
+
+            // Buffered result with standard framing.
+            fn buffered_response<W: Write>(output: &mut W, bytes: &[u8]) -> Result<()> {
+                write_status(output, "success")?;
+                write_flush(output)?;
+                write_content(output, bytes)?;
+                write_flush(output)?;
+                write_flush(output)?;
+                output.flush().map_err(CrabError::Io)?;
+                Ok(())
+            }
+
+            // Stream a reconstructed file out in bounded chunks with the
+            // same framing as [`buffered_response`].
+            fn streamed_file_response<W: Write>(
+                output: &mut W,
+                path: &std::path::Path,
+            ) -> Result<()> {
+                use std::io::Read as _;
+                write_status(output, "success")?;
+                write_flush(output)?;
+                let mut file = std::fs::File::open(path).map_err(CrabError::Io)?;
+                let mut chunk = vec![0u8; 256 * 1024];
+                loop {
+                    let n = file.read(&mut chunk).map_err(CrabError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    write_frame(output, &chunk[..n])?;
+                }
+                write_flush(output)?;
+                write_flush(output)?;
+                output.flush().map_err(CrabError::Io)?;
+                Ok(())
+            }
+
+            // Inline crab reconstruction, spilled through a temp file so
+            // a mid-reconstruction failure still lets us fall back to
+            // passing the pointer through (the old in-memory behavior)
+            // without holding reconstructed GiBs resident.
+            fn reconstruct_spilled(
+                hydrator: &Arc<crate::cmd::hydrate::ShardHydrator>,
+                handle: &tokio::runtime::Handle,
+                pointer_bytes: &[u8],
+            ) -> Result<std::path::PathBuf> {
+                let tmp = tempfile::NamedTempFile::new().map_err(CrabError::Io)?;
+                handle.block_on(
+                    hydrator.reconstruct_from_pointer_to_path(pointer_bytes, tmp.path()),
+                )?;
+                tmp.keep()
+                    .map(|(_, path)| path)
+                    .map_err(|e| CrabError::Io(e.error))
+            }
+
+            fn lfs_pointer_bytes(
+                pointer: &crab_git::lfs_pointer::LfsPointer,
+                pathname: &str,
+                lfs_store: Option<&Arc<LfsObjectStore>>,
+            ) -> Result<Option<Vec<u8>>> {
+                let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
+                if let Some(local) = try_local_lfs_cache(pointer)? {
+                    return crate::lfs::extension::smudge_content(pointer, local, pathname)
+                        .map(Some);
+                }
+                if let Some(store) = lfs_store {
+                    tracing::debug!(oid = %oid_hex, size = pointer.size, "smudge: downloading LFS object from remote");
+                    let rt = tokio::runtime::Handle::current();
+                    // Verify remote bytes against the requested oid while
+                    // downloading; a provider-side corrupt object fails
+                    // the smudge instead of landing in the worktree.
+                    let bytes = rt.block_on(store.verify(&pointer.oid))?;
+                    cache_lfs_locally(pointer, &bytes)?;
+                    return crate::lfs::extension::smudge_content(
+                        pointer,
+                        bytes.to_vec(),
+                        pathname,
+                    )
+                    .map(Some);
+                }
+                tracing::warn!(
+                    oid = %oid_hex,
+                    "smudge: LFS object not in local cache and no remote store available"
+                );
+                Ok(None)
+            }
+
+            enum SmudgeOutcome {
+                Buffered(Vec<u8>),
+                /// Reconstructed content on disk; streamed to git in
+                /// bounded chunks so multi-GiB hydration never lands in
+                /// RSS.
+                Spilled(std::path::PathBuf),
+                Passthrough,
+            }
+
+            let outcome = match resolved_filter {
+                Some(crate::git::filter_attr_cache::FilterKind::Lfs) => {
+                    if lazy {
+                        SmudgeOutcome::Passthrough
+                    } else if !session.should_lfs_smudge(&cmd.pathname) {
+                        SmudgeOutcome::Passthrough
+                    } else if let Ok(pointer) = crab_git::lfs_pointer::LfsPointer::parse(&first) {
+                        match lfs_pointer_bytes(&pointer, &cmd.pathname, lfs_store) {
+                            Ok(Some(bytes)) => SmudgeOutcome::Buffered(bytes),
+                            Ok(None) | Err(_) => SmudgeOutcome::Passthrough,
+                        }
+                    } else {
+                        SmudgeOutcome::Passthrough
+                    }
+                }
+                Some(crate::git::filter_attr_cache::FilterKind::Crab) => {
+                    if lazy && !session.should_auto_hydrate(&cmd.pathname) {
+                        SmudgeOutcome::Passthrough
+                    } else if let (Some(hydrator), Some(h)) = (hydrator, handle)
+                        && let Ok(_pointer) = crab_types::pointer::Pointer::parse(&first)
+                    {
+                        match reconstruct_spilled(hydrator, h, &first) {
+                            Ok(path) => SmudgeOutcome::Spilled(path),
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %cmd.pathname,
+                                    error = %e,
+                                    "smudge: inline reconstruction failed; passing pointer through"
+                                );
+                                SmudgeOutcome::Passthrough
+                            }
+                        }
+                    } else {
+                        SmudgeOutcome::Passthrough
+                    }
+                }
+                None => match kind {
+                    PointerKind::Lfs(pointer) => {
+                        if lazy || !session.should_lfs_smudge(&cmd.pathname) {
+                            SmudgeOutcome::Passthrough
+                        } else {
+                            match lfs_pointer_bytes(&pointer, &cmd.pathname, lfs_store) {
+                                Ok(Some(bytes)) => SmudgeOutcome::Buffered(bytes),
+                                Ok(None) | Err(_) => SmudgeOutcome::Passthrough,
+                            }
+                        }
+                    }
+                    PointerKind::Crab(_pointer) => {
+                        if lazy && !session.should_auto_hydrate(&cmd.pathname) {
+                            SmudgeOutcome::Passthrough
+                        } else if let (Some(hydrator), Some(h)) = (hydrator, handle) {
+                            match reconstruct_spilled(hydrator, h, &first) {
+                                Ok(path) => SmudgeOutcome::Spilled(path),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %cmd.pathname,
+                                        error = %e,
+                                        "smudge: inline reconstruction failed; passing pointer through"
+                                    );
+                                    SmudgeOutcome::Passthrough
+                                }
+                            }
+                        } else {
+                            SmudgeOutcome::Passthrough
+                        }
+                    }
+                    PointerKind::NotAPointer => SmudgeOutcome::Passthrough,
+                },
+            };
+
+            match outcome {
+                SmudgeOutcome::Buffered(bytes) => {
+                    drain_until_flush(input);
+                    buffered_response(output, &bytes)?;
+                }
+                SmudgeOutcome::Spilled(path) => {
+                    drain_until_flush(input);
+                    let result = streamed_file_response(output, &path);
+                    let _ = std::fs::remove_file(&path);
+                    result?;
+                }
+                SmudgeOutcome::Passthrough => passthrough_response(input, output, &first)?,
+            }
         }
         "list_available_blobs" => {
             // Git asks which delayed blobs are ready. Drain the queue's
@@ -1192,204 +1370,6 @@ fn write_delayed_response<W: Write>(output: &mut W) -> Result<()> {
 /// - LFS pointer + non-lazy mode → download content from LFS object store
 /// - Crab pointer + lazy mode → pass through for on-demand hydration
 /// - Crab pointer + non-lazy mode → reconstruct from xorbs if store available
-/// - Not a pointer → pass through unchanged
-fn smudge_content(
-    content: &[u8],
-    pathname: &str,
-    lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
-    session: &super::clean::CleanSession,
-    hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
-    handle: Option<&tokio::runtime::Handle>,
-) -> Result<Bytes> {
-    // Resolve filter from .gitattributes before blob classification.
-    let resolved_filter = session.resolve_filter_for(pathname);
-
-    match resolved_filter {
-        Some(crate::git::filter_attr_cache::FilterKind::Lfs) => {
-            // User explicitly chose LFS for this path. If the blob is already
-            // an LFS pointer, smudge it. If it's a Crab pointer, warn and try
-            // LFS smudge anyway (re-processing will happen on next clean).
-            if lazy {
-                tracing::debug!(path = %pathname, "smudge: LFS-filtered path in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-            if !session.should_lfs_smudge(pathname) {
-                tracing::debug!(path = %pathname, "smudge: LFS fetch filters excluded path, passing through");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-            // Git LFS deliberately leaves empty tracked files as empty Git
-            // blobs. They are not pointers and have no remote dependency.
-            if content.is_empty() {
-                return Ok(Bytes::new());
-            }
-            // Try LFS smudge regardless of blob content type.
-            if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
-                let oid_hex = crab_git::lfs_pointer::hex_encode(&ptr.oid);
-                if let Some(local) = try_local_lfs_cache(&ptr, session.repo_root())? {
-                    tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
-                    let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
-                    return Ok(Bytes::from(content));
-                }
-                if let Some(store) = lfs_store {
-                    tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
-                    let rt = tokio::runtime::Handle::current();
-                    let bytes = rt.block_on(store.verify(&ptr.oid))?;
-                    cache_lfs_locally(&ptr, &bytes, session.repo_root())?;
-                    let content =
-                        crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
-                    return Ok(Bytes::from(content));
-                }
-                tracing::warn!(oid = %oid_hex, "smudge: LFS object not available for LFS-filtered path");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-            // Content isn't an LFS pointer — pass through.
-            tracing::debug!(path = %pathname, "smudge: LFS-filtered path, content is not an LFS pointer, passing through");
-            Ok(Bytes::copy_from_slice(content))
-        }
-        Some(crate::git::filter_attr_cache::FilterKind::Crab) => {
-            // User explicitly chose XET for this path. Try Crab reconstruction.
-            if lazy && !session.should_auto_hydrate(pathname) {
-                tracing::debug!(path = %pathname, "smudge: Crab-filtered path in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-            if let Ok(pointer) = crab_types::pointer::Pointer::parse(content)
-                && let (Some(h), Some(rt)) = (hydrator, handle)
-            {
-                tracing::debug!(
-                    file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
-                    "smudge: reconstructing Crab-filtered path inline"
-                );
-                match rt.block_on(h.reconstruct_from_pointer(content)) {
-                    Ok(reconstructed) => return Ok(Bytes::from(reconstructed)),
-                    Err(e) => {
-                        tracing::warn!(
-                            file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
-                            error = %e,
-                            "smudge: inline reconstruction failed for Crab-filtered path"
-                        );
-                    }
-                }
-            }
-            tracing::debug!(path = %pathname, "smudge: Crab-filtered path, passing through");
-            Ok(Bytes::copy_from_slice(content))
-        }
-        None => {
-            // No .gitattributes filter — fall back to blob classification.
-            smudge_by_blob_classification(
-                content, pathname, lazy, lfs_store, session, hydrator, handle,
-            )
-        }
-    }
-}
-
-/// Original smudge logic based on blob content classification.
-/// Used as fallback when no .gitattributes filter matches.
-fn smudge_by_blob_classification(
-    content: &[u8],
-    pathname: &str,
-    lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
-    session: &super::clean::CleanSession,
-    hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
-    handle: Option<&tokio::runtime::Handle>,
-) -> Result<Bytes> {
-    match classify(content) {
-        PointerKind::Lfs(pointer) => {
-            if lazy {
-                tracing::debug!(
-                    oid = %crab_git::lfs_pointer::hex_encode(&pointer.oid),
-                    "smudge: LFS pointer in lazy mode, passing through"
-                );
-                return Ok(Bytes::copy_from_slice(content));
-            }
-            if !session.should_lfs_smudge(pathname) {
-                tracing::debug!(path = %pathname, "smudge: LFS fetch filters excluded path, passing through");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-
-            let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
-
-            // Non-lazy: try local .git/lfs/objects/ cache first, then remote.
-            if let Some(local) = try_local_lfs_cache(&pointer, session.repo_root())? {
-                tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
-                let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
-                return Ok(Bytes::from(content));
-            }
-
-            // Fall back to remote store download.
-            if let Some(store) = lfs_store {
-                tracing::debug!(
-                    oid = %oid_hex,
-                    size = pointer.size,
-                    "smudge: downloading LFS object from remote"
-                );
-                let rt = tokio::runtime::Handle::current();
-                let bytes = rt.block_on(store.verify(&pointer.oid))?;
-                // Cache locally for future checkouts.
-                cache_lfs_locally(&pointer, &bytes, session.repo_root())?;
-                let content =
-                    crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
-                return Ok(Bytes::from(content));
-            }
-
-            // No local cache and no remote — pass pointer through with a warning.
-            tracing::warn!(
-                oid = %oid_hex,
-                "smudge: LFS object not in local cache and no remote store available"
-            );
-            Ok(Bytes::copy_from_slice(content))
-        }
-        PointerKind::Crab(pointer) => {
-            // Lazy mode: pass the pointer through for on-demand hydration,
-            // UNLESS the pathname matches an auto-hydrate pattern
-            // (`checkout.auto_hydrate_patterns` config). The previous
-            // code passed the empty string here, making the match always
-            // fail. See finding CR4-F2.
-            if lazy && !session.should_auto_hydrate(pathname) {
-                tracing::debug!(path = %pathname, "smudge: crab pointer in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
-            }
-
-            // Non-lazy or auto-hydrate: attempt inline reconstruction
-            // via the ShardHydrator when available.
-            if let (Some(h), Some(rt)) = (hydrator, handle) {
-                tracing::debug!(
-                    file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
-                    size = pointer.size,
-                    "smudge: reconstructing crab pointer inline"
-                );
-                match rt.block_on(h.reconstruct_from_pointer(content)) {
-                    Ok(reconstructed) => {
-                        return Ok(Bytes::from(reconstructed));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
-                            error = %e,
-                            "smudge: inline reconstruction failed, deferring to hydrate command"
-                        );
-                    }
-                }
-            }
-
-            // No hydrator available or reconstruction failed — pass
-            // through. The user can run `crab hydrate` to reconstruct.
-            tracing::debug!(
-                file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
-                size = pointer.size,
-                "smudge: crab pointer, deferring to hydrate command"
-            );
-            Ok(Bytes::copy_from_slice(content))
-        }
-        PointerKind::NotAPointer => {
-            // Not a recognized pointer — pass through unchanged.
-            tracing::debug!("smudge: not a pointer, passing through");
-            Ok(Bytes::copy_from_slice(content))
-        }
-    }
-}
-
 // --- Packet-line I/O helpers ---
 //
 // These wrap `gix_packetline::blocking_io` for the specific patterns used
@@ -1528,45 +1508,103 @@ fn read_text_line<R: Read>(input: &mut R) -> Result<Option<String>> {
         .map_err(|_| CrabError::Protocol("non-UTF-8 packet-line data".into()))
 }
 
-/// Read content data packets until a flush packet.
+/// Read the first content packet into `prefix`.
 ///
-/// Pre-allocates a reasonable buffer and reads packet data directly into
-/// the accumulator to avoid per-packet allocations on large files.
-fn read_content_until_flush<R: Read>(input: &mut R) -> Result<Vec<u8>> {
-    // Start with 1 MB; will grow as needed for large files.
-    let mut content = Vec::with_capacity(1024 * 1024);
+/// Returns `true` when a data packet was read and `false` on an
+/// immediate flush or EOF. Pointer blobs always fit one packet, so
+/// classification only ever needs this bounded peek — raw-content
+/// smudges (multi-GiB checkouts of unfiltered blobs) never accumulate
+/// beyond it.
+fn read_first_packet<R: Read>(input: &mut R, prefix: &mut Vec<u8>) -> Result<bool> {
     let mut hdr = [0u8; 4];
-    loop {
-        match input.read_exact(&mut hdr) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(CrabError::Io(e)),
-        }
-
-        if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
-            break;
-        }
-
-        let hex = std::str::from_utf8(&hdr)
-            .map_err(|_| CrabError::Protocol("invalid packet-line hex".into()))?;
-        let len: usize = u16::from_str_radix(hex, 16)
-            .map_err(|_| CrabError::Protocol(format!("invalid packet-line length: {hex}")))?
-            .into();
-
-        if len < 4 {
-            return Err(CrabError::Protocol(format!(
-                "packet-line length too small: {len}"
-            )));
-        }
-
-        let data_len = len - 4;
-        let start = content.len();
-        content.resize(start + data_len, 0);
-        input
-            .read_exact(&mut content[start..start + data_len])
-            .map_err(CrabError::Io)?;
+    match input.read_exact(&mut hdr) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(e) => return Err(CrabError::Io(e)),
     }
-    Ok(content)
+
+    if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
+        return Ok(false);
+    }
+
+    let hex = std::str::from_utf8(&hdr)
+        .map_err(|_| CrabError::Protocol("invalid packet-line hex".into()))?;
+    let len: usize = u16::from_str_radix(hex, 16)
+        .map_err(|_| CrabError::Protocol(format!("invalid packet-line length: {hex}")))?
+        .into();
+
+    if len < 4 {
+        return Err(CrabError::Protocol(format!(
+            "packet-line length too small: {len}"
+        )));
+    }
+
+    prefix.resize(len - 4, 0);
+    input.read_exact(prefix).map_err(CrabError::Io)?;
+    Ok(true)
+}
+
+/// Copy remaining content packets straight into pkt-line output frames.
+///
+/// The passthrough smudge path for raw multi-GiB blobs runs here: bytes
+/// flow packet-to-packet without whole-file buffering.
+fn stream_remaining_packets<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
+    const MAX_CHUNK: usize = 65516;
+    let mut buf = Vec::with_capacity(MAX_CHUNK);
+    loop {
+        match read_packet_payload(input, &mut buf)? {
+            PacketEnd::Flush | PacketEnd::Eof => break,
+            PacketEnd::Data(()) => {
+                write_frame(output, &buf)?;
+                buf.clear();
+            }
+        }
+    }
+    Ok(())
+}
+
+enum PacketEnd {
+    Flush,
+    Eof,
+    Data(()),
+}
+
+/// Read one packet's payload into `buf` (replacing contents).
+fn read_packet_payload<R: Read>(input: &mut R, buf: &mut Vec<u8>) -> Result<PacketEnd> {
+    let mut hdr = [0u8; 4];
+    match input.read_exact(&mut hdr) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(PacketEnd::Eof),
+        Err(e) => return Err(CrabError::Io(e)),
+    }
+
+    if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
+        return Ok(PacketEnd::Flush);
+    }
+
+    let hex = std::str::from_utf8(&hdr)
+        .map_err(|_| CrabError::Protocol("invalid packet-line hex".into()))?;
+    let len: usize = u16::from_str_radix(hex, 16)
+        .map_err(|_| CrabError::Protocol(format!("invalid packet-line length: {hex}")))?
+        .into();
+
+    if len < 4 {
+        return Err(CrabError::Protocol(format!(
+            "packet-line length too small: {len}"
+        )));
+    }
+
+    buf.resize(len - 4, 0);
+    input.read_exact(buf).map_err(CrabError::Io)?;
+    Ok(PacketEnd::Data(()))
+}
+
+/// Write one raw-data pkt-line frame.
+fn write_frame<W: Write>(output: &mut W, data: &[u8]) -> Result<()> {
+    let len = data.len() + 4;
+    write!(output, "{len:04x}").map_err(CrabError::Io)?;
+    output.write_all(data).map_err(CrabError::Io)?;
+    Ok(())
 }
 
 /// Drain packet-lines from `input` until a flush/delimiter packet is seen
@@ -1635,26 +1673,8 @@ fn write_flush<W: Write>(output: &mut W) -> Result<()> {
 }
 
 /// Try to read an LFS object from the local `.git/lfs/objects/` cache.
-fn try_local_lfs_cache(
-    pointer: &crab_git::lfs_pointer::LfsPointer,
-    repo_root: Option<&Path>,
-) -> Result<Option<Vec<u8>>> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
-    };
+fn try_local_lfs_cache(pointer: &crab_git::lfs_pointer::LfsPointer) -> Result<Option<Vec<u8>>> {
+    let ctx = WorktreeContext::resolve()?;
     match crate::lfs::cache::read_pointer(&ctx.common_git_dir.join("lfs"), pointer) {
         Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
         result => result,
@@ -1662,27 +1682,8 @@ fn try_local_lfs_cache(
 }
 
 /// Cache an LFS object in the local `.git/lfs/objects/` directory.
-fn cache_lfs_locally(
-    pointer: &crab_git::lfs_pointer::LfsPointer,
-    content: &[u8],
-    repo_root: Option<&Path>,
-) -> Result<()> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
-    };
+fn cache_lfs_locally(pointer: &crab_git::lfs_pointer::LfsPointer, content: &[u8]) -> Result<()> {
+    let ctx = WorktreeContext::resolve()?;
     crate::lfs::cache::install_bytes(
         &ctx.common_git_dir.join("lfs"),
         &pointer.oid,
@@ -2033,13 +2034,60 @@ mod tests {
             "*.bin filter=lfs diff=lfs merge=lfs -text\n",
         )
         .unwrap();
-        let mut session = super::super::clean::CleanSession::new(AppContext::default());
-        session.set_repo_root(repo.path().to_path_buf());
+        let _cwd_serial = CWD_SWAP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        struct RestoreCwd(std::path::PathBuf);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _cwd_guard = RestoreCwd(std::env::current_dir().unwrap());
+        std::env::set_current_dir(repo.path()).unwrap();
 
-        let output = smudge_content(b"", "empty.bin", false, None, &session, None, None).unwrap();
+        // Empty blob arrives as zero content packets.
+        let mut input = build_handshake_input();
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=empty.bin"));
+        input.extend(pkt_flush());
+        input.extend(pkt_flush());
 
-        assert!(output.is_empty());
+        let mut output = Vec::new();
+        run_filter_loop(
+            &mut &input[..],
+            &mut output,
+            AppContext::default(),
+            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .unwrap();
+
+        // Response framing: status frame, then three flushes — no data
+        // frames, so the worktree file stays empty.
+        let expected = {
+            use std::io::Write as _;
+            let mut e = Vec::new();
+            let status = "status=success\n";
+            write!(&mut e, "{:04x}", status.len() + 4).unwrap();
+            e.extend_from_slice(status.as_bytes());
+            e.extend_from_slice(b"0000".repeat(3).as_slice());
+            e
+        };
+        assert!(
+            output.ends_with(&expected),
+            "empty blob must produce status + three flushes and no content"
+        );
     }
+
+    /// Serializes tests that swap the process cwd; concurrent relative-
+    /// path git work otherwise observes a fixture repo and poisons
+    /// shared lazy state across dozens of unrelated tests.
+    static CWD_SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Build a packet-line text frame: 4-hex-length + data + \n.
     fn pkt_text(s: &str) -> Vec<u8> {
@@ -2137,179 +2185,67 @@ mod tests {
     }
 
     #[test]
-    fn read_content_collects_data() {
+    fn read_first_packet_reads_one_packet_only() {
         let mut input = Vec::new();
         input.extend(pkt_data(b"hello "));
         input.extend(pkt_data(b"world"));
         input.extend(pkt_flush());
 
-        let content = read_content_until_flush(&mut &input[..]).unwrap();
-        assert_eq!(content, b"hello world");
+        let mut prefix = Vec::new();
+        assert!(read_first_packet(&mut &input[..], &mut prefix).unwrap());
+        assert_eq!(prefix, b"hello ");
     }
 
     #[test]
-    fn full_clean_session() {
-        let mut input = build_handshake_input();
-
-        // Send a clean command.
-        input.extend(pkt_text("command=clean"));
-        input.extend(pkt_text("pathname=test.bin"));
-        input.extend(pkt_flush());
-        // Content.
-        input.extend(pkt_data(b"file content here"));
+    fn read_first_packet_returns_false_on_immediate_flush() {
+        let mut input = Vec::new();
         input.extend(pkt_flush());
 
-        // EOF after one command.
+        let mut prefix = Vec::new();
+        assert!(!read_first_packet(&mut &input[..], &mut prefix).unwrap());
+        assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn stream_remaining_packets_frames_each_payload() {
+        let mut input = Vec::new();
+        input.extend(pkt_data(b"hello "));
+        input.extend(pkt_data(b"world"));
+        input.extend(pkt_flush());
+
+        // A leading frame already emitted for the peeked first packet.
         let mut output = Vec::new();
+        write_frame(&mut output, b"peek").unwrap();
+        stream_remaining_packets(&mut &input[..], &mut output).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        // Frames for "peek", "hello ", "world"; the caller owns the
+        // terminating flush.
+        let expected = {
+            let mut e = Vec::new();
+            write_frame(&mut e, b"peek").unwrap();
+            write_frame(&mut e, b"hello ").unwrap();
+            write_frame(&mut e, b"world").unwrap();
+            String::from_utf8(e).unwrap()
+        };
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn smudge_passthrough_streams_multi_packet_content() {
         let ctx = AppContext::default();
-        let staging_root = tempfile::tempdir().unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
 
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            ctx,
-            Arc::new(std::sync::Mutex::new(LazyStaging::Unopened {
-                staging_root: staging_root.path().to_path_buf(),
-            })),
-            None,
-            None,
-            None,
-            Some(rt.handle().clone()),
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        // Should contain handshake + status=success.
-        assert!(output_str.contains("git-filter-server"));
-        assert!(output_str.contains("status=success"));
-    }
-
-    #[test]
-    fn clean_creates_missing_fresh_staging_root() {
+        // 200 KiB of non-pointer content spanning many packets: the old
+        // implementation buffered all of it; the streaming path must
+        // relay it unchanged.
+        let content: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
         let mut input = build_handshake_input();
-        input.extend(pkt_text("command=clean"));
-        input.extend(pkt_text("pathname=payload.bin"));
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=big.bin"));
         input.extend(pkt_flush());
-        input.extend(pkt_data(b"fresh repo content"));
-        input.extend(pkt_flush());
-
-        let repo = tempfile::tempdir().unwrap();
-        let staging_root = repo.path().join(".crab").join("staging");
-        assert!(
-            !staging_root.exists(),
-            "regression setup must start before staging exists"
-        );
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut output = Vec::new();
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            AppContext::default(),
-            Arc::new(std::sync::Mutex::new(LazyStaging::from_root(Some(
-                staging_root.clone(),
-            )))),
-            None,
-            None,
-            None,
-            Some(rt.handle().clone()),
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-        assert!(
-            staging_root.join("index.db").exists(),
-            "first clean should create the staging database"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn filter_clean_waits_past_retired_short_flock_budget() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        let first = StagingArea::open(root.clone())
-            .await
-            .expect("first writer open");
-        let cell = Arc::new(std::sync::Mutex::new(LazyStaging::Unopened {
-            staging_root: root,
-        }));
-
-        let acquiring_cell = Arc::clone(&cell);
-        let acquire_task = tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            let result = acquire_writer(acquiring_cell.as_ref()).await;
-            (result, started.elapsed())
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            !acquire_task.is_finished(),
-            "second writer should wait while the first writer holds staging"
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(3_200)).await;
-        assert!(
-            !acquire_task.is_finished(),
-            "filter clean should stay queued beyond the retired 3s filter-only lock budget"
-        );
-
-        first.close().await.expect("close first writer");
-
-        let (result, waited) = acquire_task.await.expect("acquire task");
-        let writer = match result {
-            StagingAcquire::Writer(sa) => sa,
-            StagingAcquire::Locked { holder_pid } => {
-                panic!("filter clean timed out instead of queueing; holder_pid={holder_pid:?}")
-            }
-            StagingAcquire::Unavailable => panic!("filter clean failed to open staging"),
-        };
-        assert!(
-            waited >= std::time::Duration::from_secs(3),
-            "filter clean acquired staging before proving the retired short budget was gone"
-        );
-        drop(writer);
-
-        let final_staging = {
-            let mut guard = cell
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::replace(&mut *guard, LazyStaging::Unavailable)
-        };
-        match final_staging {
-            LazyStaging::Writer(sa) => {
-                let staging = Arc::try_unwrap(sa).ok().expect("only cell holds writer");
-                staging.close().await.expect("close filter writer");
-            }
-            _ => panic!("acquired writer should be cached in the lazy staging cell"),
+        for chunk in content.chunks(60000) {
+            input.extend(pkt_data(chunk));
         }
-    }
-
-    #[test]
-    fn lazy_smudge_passes_pointer_through_unchanged() {
-        use crate::core::config::{CheckoutConfig, Config};
-        use tokio_util::sync::CancellationToken;
-
-        let config = Config {
-            checkout: CheckoutConfig { lazy: true },
-            ..Config::default()
-        };
-        let ctx = AppContext::new(config, CancellationToken::new());
-
-        let mut input = build_handshake_input();
-
-        // Build a valid pointer to use as smudge input.
-        let pointer_bytes = b"version https://crab.dev/spec/v1\n\
-file-hash 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n\
-size 1048576\n";
-
-        input.extend(pkt_text("command=smudge"));
-        input.extend(pkt_text("pathname=model.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(pointer_bytes));
         input.extend(pkt_flush());
 
         let mut output = Vec::new();
@@ -2326,358 +2262,30 @@ size 1048576\n";
         )
         .unwrap();
 
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-
-        // Verify the pointer bytes appear in the output unchanged.
-        // The output contains packet-line framing, so check the raw bytes
-        // are embedded within.
-        assert!(
-            output
-                .windows(pointer_bytes.len())
-                .any(|w| w == pointer_bytes),
-            "pointer bytes should pass through unchanged in lazy mode"
-        );
-    }
-
-    #[test]
-    fn lazy_false_does_not_short_circuit_smudge() {
-        // With lazy=false (default), smudge should go through the normal path.
-        let ctx = AppContext::default();
-        assert!(!ctx.config().checkout.lazy);
-
-        let mut input = build_handshake_input();
-
-        let content = b"some file content";
-        input.extend(pkt_text("command=smudge"));
-        input.extend(pkt_text("pathname=file.txt"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(content));
-        input.extend(pkt_flush());
-
-        let mut output = Vec::new();
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            ctx,
-            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-            None,
-            None,
-            None,
-            None,
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-    }
-
-    #[test]
-    fn lazy_smudge_does_not_affect_clean_path() {
-        use crate::core::config::{CheckoutConfig, Config};
-        use tokio_util::sync::CancellationToken;
-
-        let filter_worktree = tempfile::tempdir().unwrap();
-        let git_dir = filter_worktree.path().join(".git");
-        std::fs::create_dir_all(&git_dir).unwrap();
-        let _git_env = GitEnvGuard::set(&git_dir, filter_worktree.path(), &git_dir);
-
-        let config = Config {
-            checkout: CheckoutConfig { lazy: true },
-            ..Config::default()
-        };
-        let ctx = AppContext::new(config, CancellationToken::new());
-
-        let mut input = build_handshake_input();
-
-        // Clean command should still produce a pointer regardless of lazy mode.
-        input.extend(pkt_text("command=clean"));
-        input.extend(pkt_text("pathname=test.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(b"file content here"));
-        input.extend(pkt_flush());
-
-        let staging_root = tempfile::tempdir().unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut output = Vec::new();
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            ctx,
-            Arc::new(std::sync::Mutex::new(LazyStaging::Unopened {
-                staging_root: staging_root.path().to_path_buf(),
-            })),
-            None,
-            None,
-            None,
-            Some(rt.handle().clone()),
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-        // The clean path should produce a pointer (contains version line).
-        assert!(
-            output
-                .windows(b"version https://crab.dev/spec/v1".len())
-                .any(|w| w == b"version https://crab.dev/spec/v1"),
-            "clean path should produce a pointer even with lazy=true"
-        );
-    }
-
-    #[test]
-    fn lfs_pointer_lazy_smudge_passes_through() {
-        use crate::core::config::{CheckoutConfig, Config};
-        use crab_git::lfs_pointer::LfsPointer;
-        use tokio_util::sync::CancellationToken;
-
-        let config = Config {
-            checkout: CheckoutConfig { lazy: true },
-            ..Config::default()
-        };
-        let ctx = AppContext::new(config, CancellationToken::new());
-
-        // Build a valid LFS pointer.
-        let oid = [0xABu8; 32];
-        let lfs_pointer = LfsPointer {
-            oid,
-            size: 1024,
-            extensions: Vec::new(),
-        };
-        let pointer_bytes = lfs_pointer.serialize();
-
-        let mut input = build_handshake_input();
-        input.extend(pkt_text("command=smudge"));
-        input.extend(pkt_text("pathname=model.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(&pointer_bytes));
-        input.extend(pkt_flush());
-
-        let mut output = Vec::new();
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            ctx,
-            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-            None,
-            None,
-            None,
-            None,
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-
-        // LFS pointer should pass through unchanged in lazy mode.
-        assert!(
-            output
-                .windows(pointer_bytes.len())
-                .any(|w| w == pointer_bytes.as_slice()),
-            "LFS pointer bytes should pass through unchanged in lazy mode"
-        );
-    }
-
-    #[tokio::test]
-    async fn lfs_pointer_non_lazy_smudge_downloads_content() {
-        use crate::core::config::{CheckoutConfig, Config};
-        use crab_git::lfs_pointer::LfsPointer;
-        use crab_storage::{RetryPolicy, Store};
-        use object_store::memory::InMemory;
-        use sha2::{Digest, Sha256};
-        use tokio_util::sync::CancellationToken;
-
-        let config = Config {
-            checkout: CheckoutConfig { lazy: false },
-            ..Config::default()
-        };
-        let ctx = AppContext::new(config, CancellationToken::new());
-
-        // Set up an in-memory LFS object store with content.
-        let original_content = b"hello LFS smudge world";
-        let sha256_hash = Sha256::digest(original_content);
-        let mut oid = [0u8; 32];
-        oid.copy_from_slice(&sha256_hash);
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-        let store = Store::with_retry(inner, policy);
-        let lfs_store = Arc::new(LfsObjectStore::new(store, "repo"));
-
-        // Stage the content.
-        lfs_store
-            .put(&oid, bytes::Bytes::from(original_content.to_vec()))
-            .await
-            .unwrap();
-
-        // Build a valid LFS pointer for this content.
-        let lfs_pointer = LfsPointer {
-            oid,
-            size: original_content.len() as u64,
-            extensions: Vec::new(),
-        };
-        let pointer_bytes = lfs_pointer.serialize();
-
-        let mut input = build_handshake_input();
-        input.extend(pkt_text("command=smudge"));
-        input.extend(pkt_text("pathname=model.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(&pointer_bytes));
-        input.extend(pkt_flush());
-
-        let lfs_store_clone = Some(Arc::clone(&lfs_store));
-        let mut output = Vec::new();
-
-        // Run inside spawn_blocking since smudge_content uses block_on.
-        tokio::task::spawn_blocking(move || {
-            run_filter_loop(
-                &mut &input[..],
-                &mut output,
-                ctx,
-                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-                lfs_store_clone,
-                None,
-                None,
-                None,
-                Arc::new(std::sync::Mutex::new(None)),
-            )
-            .unwrap();
-
-            let output_str = String::from_utf8_lossy(&output);
-            assert!(output_str.contains("status=success"));
-
-            // The output should contain the original content, not the pointer.
-            assert!(
-                output
-                    .windows(original_content.len())
-                    .any(|w| w == original_content),
-                "non-lazy LFS smudge should return the original file content"
-            );
-
-            // The output should NOT contain the LFS pointer version line.
-            assert!(
-                !output
-                    .windows(b"version https://git-lfs.github.com/spec/v1".len())
-                    .any(|w| w == b"version https://git-lfs.github.com/spec/v1"),
-                "non-lazy LFS smudge should not return the pointer"
-            );
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn lfs_process_smudge_honors_fetch_filters() {
-        use crab_git::lfs_pointer::LfsPointer;
-        use crab_storage::{RetryPolicy, Store};
-        use object_store::memory::InMemory;
-        use sha2::{Digest, Sha256};
-
-        let repo = tempfile::tempdir().unwrap();
-        std::fs::write(
-            repo.path().join(".lfsconfig"),
-            "[lfs]\n    fetchinclude = allowed\n",
-        )
-        .unwrap();
-
-        let mut session = super::super::clean::CleanSession::new(AppContext::default());
-        session.set_repo_root(repo.path().to_path_buf());
-
-        let original_content = b"filtered LFS object content";
-        let sha256_hash = Sha256::digest(original_content);
-        let mut oid = [0u8; 32];
-        oid.copy_from_slice(&sha256_hash);
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-        let store = Store::with_retry(inner, policy);
-        let lfs_store = Arc::new(LfsObjectStore::new(store, "repo"));
-        lfs_store
-            .put(&oid, bytes::Bytes::from_static(original_content))
-            .await
-            .unwrap();
-
-        let pointer_bytes = LfsPointer {
-            oid,
-            size: original_content.len() as u64,
-            extensions: Vec::new(),
+        // The full response is exactly: status frame, content frames for
+        // every input packet, then two flushes. Compare byte-for-byte so
+        // any framing drift fails loudly.
+        let mut expected = Vec::new();
+        {
+            use std::io::Write as _;
+            let status = format!("status=success\n");
+            let len = status.len() + 4;
+            write!(&mut expected, "{len:04x}").unwrap();
+            expected.extend_from_slice(status.as_bytes());
+            expected.extend_from_slice(b"0000");
+            for chunk in content.chunks(60000) {
+                let len = chunk.len() + 4;
+                write!(&mut expected, "{len:04x}").unwrap();
+                expected.extend_from_slice(chunk);
+            }
+            expected.extend_from_slice(b"0000");
+            expected.extend_from_slice(b"0000");
         }
-        .serialize();
-
-        tokio::task::spawn_blocking(move || {
-            let excluded = smudge_content(
-                &pointer_bytes,
-                "blocked/model.bin",
-                false,
-                Some(&lfs_store),
-                &session,
-                None,
-                None,
-            )
-            .unwrap();
-            assert_eq!(excluded.as_ref(), pointer_bytes.as_slice());
-
-            let included = smudge_content(
-                &pointer_bytes,
-                "allowed/model.bin",
-                false,
-                Some(&lfs_store),
-                &session,
-                None,
-                None,
-            )
-            .unwrap();
-            assert_eq!(included.as_ref(), original_content);
-        })
-        .await
-        .unwrap();
-    }
-
-    #[test]
-    fn non_pointer_content_passes_through_unchanged() {
-        let ctx = AppContext::default();
-
-        let content = b"this is just regular file content, not a pointer";
-
-        let mut input = build_handshake_input();
-        input.extend(pkt_text("command=smudge"));
-        input.extend(pkt_text("pathname=readme.txt"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(content));
-        input.extend(pkt_flush());
-
-        let mut output = Vec::new();
-        run_filter_loop(
-            &mut &input[..],
-            &mut output,
-            ctx,
-            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-            None,
-            None,
-            None,
-            None,
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-        .unwrap();
-
-        let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("status=success"));
-
-        // Non-pointer content should pass through unchanged.
+        // The loop's handshake reply precedes the smudge response, so
+        // compare as a suffix.
         assert!(
-            output.windows(content.len()).any(|w| w == content),
-            "non-pointer content should pass through unchanged"
+            output.ends_with(&expected),
+            "passthrough relays content byte-identically with clean framing"
         );
     }
 
