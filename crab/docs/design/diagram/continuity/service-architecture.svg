@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">Crab Continuity service architecture</title>
+  <desc id="desc">Clients enter through an edge load balancer and authorization boundary. Disposable Continuity nodes serve Git from NVMe warm caches and commit through one object-store head. Discovery, hints, cache, and observability are non-authoritative; offline garbage collection enters a sequenced head fence before deletion.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#22d3ee"/></marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#a78bfa"/></marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#fb923c"/></marker>
+  </defs>
+  <style>
+      text{font-family:monospace}.title{font-size:22px;font-weight:700;fill:#f8fafc}.subtitle{font-size:10px;fill:#94a3b8}.region{fill:none;stroke-width:1;stroke-dasharray:8 4}.region-label{font-size:10px;font-weight:600}.name{font-size:12px;font-weight:600;fill:#f8fafc;text-anchor:middle}.copy{font-size:9px;fill:#94a3b8;text-anchor:middle}.tiny{font-size:8px;fill:#94a3b8}.arrow-label{font-size:8px;fill:#cbd5e1;text-anchor:middle}.box{stroke-width:1.5}.legend{font-size:8px;fill:#cbd5e1}
+  </style>
+  <rect width="1600" height="1040" fill="#0f172a"/><rect width="1600" height="1040" fill="url(#grid)"/>
+  <text id="diagram-title" x="40" y="46" class="title">Crab Continuity · service architecture</text>
+  <text x="40" y="68" class="subtitle">One repository authority in object storage; every service-side disk is a disposable cache.</text>
+
+  <rect x="35" y="105" width="220" height="700" rx="12" class="region" stroke="#22d3ee"/>
+  <text x="50" y="128" class="region-label" fill="#22d3ee">Clients and product surfaces</text>
+  <rect x="285" y="105" width="255" height="700" rx="12" class="region" stroke="#fbbf24"/>
+  <text x="300" y="128" class="region-label" fill="#fbbf24">Ingress</text>
+  <rect x="575" y="105" width="570" height="700" rx="12" class="region" stroke="#34d399"/>
+  <text x="590" y="128" class="region-label" fill="#34d399">Continuity node fleet · new service</text>
+  <rect x="1180" y="105" width="385" height="700" rx="12" class="region" stroke="#a78bfa"/>
+  <text x="1195" y="128" class="region-label" fill="#a78bfa">Durability and optional accelerators</text>
+  <rect x="575" y="840" width="990" height="150" rx="12" class="region" stroke="#fb923c"/>
+  <text x="590" y="863" class="region-label" fill="#fb923c">Operations plane · separate identities · no client serving</text>
+
+  <!-- Connections first -->
+  <path d="M215 230H300M215 360H300M215 490H300M300 230V490" fill="none" stroke="#22d3ee" stroke-width="1.6"/>
+  <path d="M300 245H350" fill="none" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-cyan)"/>
+  <path d="M430 280V350" fill="none" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M510 385H600V335H635" fill="none" stroke="#34d399" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <path d="M785 315H825" fill="none" stroke="#64748b" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <path d="M975 315H1015" fill="none" stroke="#64748b" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <path d="M710 425V565" fill="none" stroke="#fb923c" stroke-width="1.3" marker-end="url(#arrow-orange)"/>
+  <path d="M900 425V565" fill="none" stroke="#fb923c" stroke-width="1.3" marker-end="url(#arrow-orange)"/>
+  <path d="M1065 425V565" fill="none" stroke="#fb923c" stroke-width="1.3" marker-end="url(#arrow-orange)"/>
+  <path d="M785 600H825M975 600H1015" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#arrow-orange)"/>
+  <path d="M710 245V170H1160V270H1240" fill="none" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+  <path d="M950 425V500H1170V320H1240" fill="none" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+  <path d="M1115 370H1240" fill="none" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+  <path d="M1115 400H1155V620H1240" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <path d="M1360 880V675" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
+  <path d="M1065 635V800H1035V880" fill="none" stroke="#64748b" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <path d="M745 880V825H1170V515H1380V490" fill="none" stroke="#fb923c" stroke-width="1.4" marker-end="url(#arrow-orange)"/>
+  <text x="970" y="812" class="arrow-label" fill="#fb923c">head fence → retained-root proof → scoped delete</text>
+
+  <!-- Clients -->
+  <g><rect x="70" y="195" width="145" height="70" rx="7" fill="#0f172a"/><rect x="70" y="195" width="145" height="70" rx="7" class="box" fill="rgba(8,51,68,.4)" stroke="#22d3ee"/><text x="142.5" y="225" class="name">Git clients</text><text x="142.5" y="244" class="copy">clone · fetch · push</text></g>
+  <g><rect x="70" y="325" width="145" height="70" rx="7" fill="#0f172a"/><rect x="70" y="325" width="145" height="70" rx="7" class="box" fill="rgba(8,51,68,.4)" stroke="#22d3ee"/><text x="142.5" y="355" class="name">Agents / CI</text><text x="142.5" y="374" class="copy">high read fan-out</text></g>
+  <g><rect x="70" y="455" width="145" height="70" rx="7" fill="#0f172a"/><rect x="70" y="455" width="145" height="70" rx="7" class="box" fill="rgba(8,51,68,.4)" stroke="#22d3ee"/><text x="142.5" y="485" class="name">Web / RPC</text><text x="142.5" y="504" class="copy">repository operations</text></g>
+
+  <!-- Ingress -->
+  <g><rect x="350" y="210" width="160" height="70" rx="7" fill="#0f172a"/><rect x="350" y="210" width="160" height="70" rx="7" class="box" fill="rgba(120,53,15,.3)" stroke="#fbbf24"/><text x="430" y="240" class="name">L7 load balancer</text><text x="430" y="259" class="copy">TLS · limits · hash route</text></g>
+  <g><rect x="350" y="350" width="160" height="70" rx="7" fill="#0f172a"/><rect x="350" y="350" width="160" height="70" rx="7" class="box" fill="rgba(136,19,55,.4)" stroke="#fb7185"/><text x="430" y="380" class="name">Auth boundary</text><text x="430" y="399" class="copy">tenant + repo scope</text></g>
+  <text x="412" y="470" class="tiny" text-anchor="middle">No repo placement table</text>
+  <text x="412" y="486" class="tiny" text-anchor="middle">No Git data at ingress</text>
+
+  <!-- Fleet -->
+  <g><rect x="635" y="245" width="150" height="180" rx="8" fill="#0f172a"/><rect x="635" y="245" width="150" height="180" rx="8" class="box" fill="rgba(6,78,59,.4)" stroke="#34d399"/><text x="710" y="275" class="name">Node A</text><text x="710" y="299" class="copy">smart HTTP</text><text x="710" y="318" class="copy">freshen / commit</text><rect x="655" y="345" width="110" height="52" rx="5" fill="rgba(76,29,149,.28)" stroke="#a78bfa"/><text x="710" y="368" class="copy" fill="#ddd6fe">NVMe bare Git</text><text x="710" y="384" class="tiny" text-anchor="middle">warm cache</text></g>
+  <g><rect x="825" y="245" width="150" height="180" rx="8" fill="#0f172a"/><rect x="825" y="245" width="150" height="180" rx="8" class="box" fill="rgba(6,78,59,.4)" stroke="#34d399"/><text x="900" y="275" class="name">Node B</text><text x="900" y="299" class="copy">smart HTTP</text><text x="900" y="318" class="copy">catch-up / serve</text><rect x="845" y="345" width="110" height="52" rx="5" fill="rgba(76,29,149,.28)" stroke="#a78bfa"/><text x="900" y="368" class="copy">NVMe bare Git</text><text x="900" y="384" class="tiny" text-anchor="middle">warm cache</text></g>
+  <g><rect x="1015" y="245" width="100" height="180" rx="8" fill="#0f172a"/><rect x="1015" y="245" width="100" height="180" rx="8" class="box" fill="rgba(6,78,59,.4)" stroke="#34d399"/><text x="1065" y="275" class="name">Node N</text><text x="1065" y="304" class="copy">same</text><text x="1065" y="322" class="copy">binary</text><rect x="1030" y="345" width="70" height="52" rx="5" fill="rgba(76,29,149,.28)" stroke="#a78bfa"/><text x="1065" y="376" class="tiny" text-anchor="middle">NVMe</text></g>
+  <g><rect x="635" y="565" width="150" height="70" rx="7" fill="#0f172a"/><rect x="635" y="565" width="150" height="70" rx="7" class="box" fill="rgba(120,53,15,.3)" stroke="#fbbf24"/><text x="710" y="595" class="name">Discovery adapter</text><text x="710" y="614" class="copy">authenticated healthy set</text></g>
+  <g><rect x="825" y="565" width="150" height="70" rx="7" fill="#0f172a"/><rect x="825" y="565" width="150" height="70" rx="7" class="box" fill="rgba(251,146,60,.18)" stroke="#fb923c"/><text x="900" y="595" class="name">Lossy hint mesh</text><text x="900" y="614" class="copy">warm-up only</text></g>
+  <g><rect x="1015" y="565" width="100" height="70" rx="7" fill="#0f172a"/><rect x="1015" y="565" width="100" height="70" rx="7" class="box" fill="rgba(30,41,59,.5)" stroke="#94a3b8"/><text x="1065" y="595" class="name">Route</text><text x="1065" y="614" class="copy">rendezvous</text></g>
+
+  <!-- Origin -->
+  <g><rect x="1240" y="190" width="280" height="300" rx="10" fill="#0f172a"/><rect x="1240" y="190" width="280" height="300" rx="10" class="box" fill="rgba(76,29,149,.4)" stroke="#a78bfa"/><text x="1380" y="225" class="name">Object store · authority</text><text x="1380" y="249" class="copy">authority-mode.json · immutable</text><text x="1380" y="272" class="copy">continuity/v1/head.json · CAS + GC fence</text><text x="1380" y="298" class="copy">immutable commit batches + entries</text><text x="1380" y="320" class="copy">history segments + snapshots</text><text x="1380" y="342" class="copy">content-addressed Git packs</text><line x1="1270" y1="357" x2="1490" y2="357" stroke="#6d5aa7"/><text x="1380" y="385" class="copy">bucket versioning / PITR required</text><text x="1380" y="409" class="copy">provider capability preflight</text><text x="1380" y="447" class="copy" fill="#ddd6fe">one repo · one mutable authority</text></g>
+  <g><rect x="1240" y="565" width="280" height="110" rx="8" fill="#0f172a"/><rect x="1240" y="565" width="280" height="110" rx="8" class="box" fill="rgba(30,41,59,.5)" stroke="#94a3b8"/><text x="1380" y="595" class="name">Optional crab-cache-server</text><text x="1380" y="620" class="copy">xorb / shard cache + dedup</text><text x="1380" y="643" class="copy">never Git ref authority</text></g>
+
+  <!-- Ops -->
+  <g><rect x="620" y="880" width="250" height="70" rx="7" fill="#0f172a"/><rect x="620" y="880" width="250" height="70" rx="7" class="box" fill="rgba(251,146,60,.18)" stroke="#fb923c"/><text x="745" y="910" class="name">Orphan / retention worker</text><text x="745" y="929" class="copy">head fence + scoped DELETE identity</text></g>
+  <g><rect x="910" y="880" width="250" height="70" rx="7" fill="#0f172a"/><rect x="910" y="880" width="250" height="70" rx="7" class="box" fill="rgba(30,41,59,.5)" stroke="#94a3b8"/><text x="1035" y="910" class="name">Metrics · logs · traces</text><text x="1035" y="929" class="copy">evidence, alerts, capacity</text></g>
+  <g><rect x="1200" y="880" width="320" height="70" rx="7" fill="#0f172a"/><rect x="1200" y="880" width="320" height="70" rx="7" class="box" fill="rgba(136,19,55,.25)" stroke="#fb7185"/><text x="1360" y="910" class="name">Operator admin + restore</text><text x="1360" y="929" class="copy">mTLS · audited head-version selection</text></g>
+
+  <text x="50" y="1015" class="legend">cyan: client traffic</text><text x="235" y="1015" class="legend">emerald: Continuity service</text><text x="480" y="1015" class="legend">violet: durable authority</text><text x="690" y="1015" class="legend">orange: optimization / operations</text><text x="980" y="1015" class="legend">dashed arrows: non-authoritative hints or telemetry</text>
+</svg>
