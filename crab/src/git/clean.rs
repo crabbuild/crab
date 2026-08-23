@@ -33,9 +33,6 @@ use gix_object::Find;
 /// Default capacity for the in-memory chunk-buffer ring (32 MiB).
 pub const DEFAULT_CHUNK_BUFFER_CAP: usize = 32 * 1024 * 1024;
 
-/// Default minimum file size for the fast path (64 MiB).
-pub const DEFAULT_FASTPATH_MIN_SIZE: u64 = 64 * 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // Session-scoped bloom filter
 // ---------------------------------------------------------------------------

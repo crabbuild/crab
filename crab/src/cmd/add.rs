@@ -115,6 +115,29 @@ struct StagedEntry {
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
 }
 
+/// Fields [`write_pointers_and_tracking_to_git_index`] reads from a
+/// staged entry. A owned snapshot lets the git-index writer run inside
+/// `spawn_blocking` without cloning non-`Clone` prepared-xorb handles.
+#[derive(Clone)]
+struct GitIndexEntrySnapshot {
+    file_hash: [u8; 32],
+    size: u64,
+    abs_path: PathBuf,
+    index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
+}
+
+fn snapshot_entries(entries: &[StagedEntry]) -> Vec<GitIndexEntrySnapshot> {
+    entries
+        .iter()
+        .map(|entry| GitIndexEntrySnapshot {
+            file_hash: entry.file_hash,
+            size: entry.size,
+            abs_path: entry.abs_path.clone(),
+            index_stat: entry.index_stat,
+        })
+        .collect()
+}
+
 struct AddExecutionPlans {
     duplicate_plan: DuplicateReusePlan,
     stream_xorb_plan: Option<StreamPreparedXorbPlan>,
@@ -1341,17 +1364,51 @@ async fn execute_add(
             crate::cache::ShardHintCache::new()
         });
 
+        // gix ODB writes plus the index flock/commit are synchronous and
+        // can take seconds on large batches — keep them off the async
+        // worker threads.
+        let snapshots = snapshot_entries(&staged_entries);
+        let repo_root_for_task = repo_root.clone();
+        let shard_hints_for_task = std::sync::Arc::new(shard_hints);
+        let tracking_patterns_for_task = generated_tracking_patterns.clone();
         let progress_cb = Arc::clone(&progress);
-        if let Err(e) = write_pointers_and_tracking_to_git_index(
-            &staged_entries,
-            &repo_root,
-            &shard_hints,
-            &generated_tracking_patterns,
-            || {
-                progress_cb.files_done.fetch_add(1, Relaxed);
-            },
-        ) {
-            let error = handle_git_index_write_error(&staging_root, &staged_entries, e).await;
+        enum IndexWriteFailure {
+            Join(CrabError),
+            Write(GitIndexWriteError),
+        }
+        let write_result = tokio::task::spawn_blocking(move || {
+            write_pointers_and_tracking_to_git_index(
+                &snapshots,
+                &repo_root_for_task,
+                &shard_hints_for_task,
+                &tracking_patterns_for_task,
+                move || {
+                    progress_cb.files_done.fetch_add(1, Relaxed);
+                },
+            )
+        })
+        .await
+        .map_err(|e| {
+            IndexWriteFailure::Join(CrabError::Internal(format!("git index writer join: {e}")))
+        })
+        .and_then(|written| written.map_err(IndexWriteFailure::Write));
+        if let Err(e) = write_result {
+            let error = match e {
+                // A panicked writer leaves index state unknown — treat
+                // like an uncertain mutation so staged rows survive as
+                // the retry source.
+                IndexWriteFailure::Join(err) => {
+                    handle_git_index_write_error(
+                        &staging_root,
+                        &staged_entries,
+                        GitIndexWriteError::IndexMutationUncertain(err),
+                    )
+                    .await
+                }
+                IndexWriteFailure::Write(err) => {
+                    handle_git_index_write_error(&staging_root, &staged_entries, err).await
+                }
+            };
             stop_progress_ticker(ticker.take(), &ticker_cancel).await;
             return Err(error);
         }
@@ -3016,7 +3073,7 @@ fn write_pointers_to_git_index(
     mut on_file_done: impl FnMut(),
 ) -> std::result::Result<(), GitIndexWriteError> {
     write_pointers_and_tracking_to_git_index(
-        entries,
+        &snapshot_entries(entries),
         repo_root,
         shard_hints,
         &[],
@@ -3025,7 +3082,7 @@ fn write_pointers_to_git_index(
 }
 
 fn write_pointers_and_tracking_to_git_index(
-    entries: &[StagedEntry],
+    entries: &[GitIndexEntrySnapshot],
     repo_root: &Path,
     shard_hints: &crate::cache::ShardHintCache,
     tracking_patterns: &[String],
@@ -4284,12 +4341,13 @@ mod tests {
         let path = dir.path().join("model.bin");
         let payload = b"model payload";
         std::fs::write(&path, payload).unwrap();
+        let staged = vec![staged_entry(
+            path,
+            *blake3::hash(payload).as_bytes(),
+            payload.len() as u64,
+        )];
         write_pointers_and_tracking_to_git_index(
-            &[staged_entry(
-                path,
-                *blake3::hash(payload).as_bytes(),
-                payload.len() as u64,
-            )],
+            &snapshot_entries(&staged),
             dir.path(),
             &crate::cache::ShardHintCache::new(),
             &["*.bin".to_owned()],

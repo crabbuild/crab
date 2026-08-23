@@ -104,7 +104,6 @@ crab/src/
 │   ├── retry.rs         Retry policy with exponential backoff
 │   ├── error_map.rs     Map object_store errors to CrabError
 │   ├── head_batch.rs    Batched HEAD requests for existence checks
-│   ├── multipart_resume.rs  Resumable multipart upload registry
 │   └── xorb/            CrabError/metrics adapters for xorb builder/parser
 │
 ├── metadata/            Chunk, file, and ref stores

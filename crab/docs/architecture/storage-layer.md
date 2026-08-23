@@ -144,11 +144,16 @@ Source: `crab/src/storage/retry.rs`
 Objects larger than 8 MiB use S3 multipart upload:
 - Part size: 8 MiB
 - Concurrent part uploads via `put_multipart` from `object_store`
-- Partial state persisted in `MultipartRegistry` (SQLite) for resume across
-  process restarts
-- Abandoned multipart uploads detected by `crab fsck` and aborted
+- Partial state persisted in `MultipartRegistry` (SQLite, under
+  `.crab/staging/multipart.db`) for resume across process restarts —
+  a cancelled or killed push uploads only its missing parts next run
+- Multipart-completed xorbs are read back and blake3-verified before
+  the push publishes pointers over them
+- Abandoned multipart uploads detected by `crab fsck` and dropped from
+  the registry on repair (backend parts follow provider lifecycle rules)
 
-Source: `crab/src/storage/multipart_resume.rs`
+Source: `crates/crab-storage/src/store.rs` (`put_multipart_file_resumable_retry`),
+journal at `crates/crab-staging/src/multipart_resume.rs`
 
 ## Batched HEAD Requests
 
