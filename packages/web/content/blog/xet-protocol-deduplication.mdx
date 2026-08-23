@@ -19,7 +19,7 @@ meta:
   audience: "Developers evaluating Crab's storage and transfer behavior."
 ---
 
-Crab deduplicates below the file level. It divides a tracked file into content-defined chunks, identifies each chunk with BLAKE3, and packs only new chunks into immutable objects called xorbs.
+Crab deduplicates below the file level. It divides a tracked file into content-defined chunks, identifies each chunk with the cryptographic BLAKE3 hash, and packs only new chunks into immutable objects called xorbs.
 
 <DedupPipelineDiagram />
 

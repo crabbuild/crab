@@ -130,7 +130,7 @@ function FlowDiagram({
               <line
                 x1={x + boxWidth}
                 y1="72"
-                x2={x + boxWidth + gap - 10}
+                x2={x + boxWidth + gap}
                 y2="72"
                 stroke="#64748b"
                 strokeWidth="1.5"
@@ -265,9 +265,9 @@ function CompareDiagram({
               {leftItems[index] ?? ""}
             </text>
             <line
-              x1="320"
+              x1="316"
               y1={y + 16}
-              x2="422"
+              x2="428"
               y2={y + 16}
               stroke="#0284c7"
               markerEnd={`url(#${id}-arrow)`}
@@ -355,7 +355,7 @@ function LayerDiagram({
                 x1="310"
                 y1={y + 54}
                 x2="310"
-                y2={y + 72}
+                y2={y + 78}
                 stroke="#64748b"
                 markerEnd={`url(#${id}-arrow)`}
               />
@@ -449,7 +449,7 @@ export function FirstRepositoryDiagram() {
   const items = [
     { label: "Configure", detail: "connect bucket", tone: "control" },
     { label: "Track", detail: "select paths", tone: "git" },
-    { label: "Ship", detail: "stage + commit", tone: "data" },
+    { label: "Ship", detail: "add + commit + push", tone: "data" },
     { label: "Clone", detail: "fetch history", tone: "store" },
     { label: "Hydrate", detail: "verify bytes", tone: "safe" },
   ] as const
@@ -508,7 +508,7 @@ export function FirstPushStateDiagram() {
 export function DedupPipelineDiagram() {
   const items = [
     { label: "File bytes", detail: "bounded stream", tone: "muted" },
-    { label: "CDC", detail: "stable regions", tone: "data" },
+    { label: "Chunking", detail: "content-defined", tone: "data" },
     { label: "BLAKE3", detail: "chunk identity", tone: "control" },
     { label: "Dedup index", detail: "known or new", tone: "store" },
     { label: "Xorb", detail: "new chunks only", tone: "safe" },
@@ -530,14 +530,14 @@ export function DedupPipelineDiagram() {
 export function CacheHierarchyDiagram() {
   const layers = [
     {
-      label: "Requested xorb range",
-      detail: "hash + byte range",
+      label: "Pointer and file recipe",
+      detail: "identify ordered chunks",
       tone: "control",
     },
     {
-      label: "Local verified cache",
-      detail: "reuse immutable bytes",
-      tone: "safe",
+      label: "Metadata indexes",
+      detail: "locate chunk byte ranges",
+      tone: "git",
     },
     {
       label: "Local staging",
@@ -545,9 +545,14 @@ export function CacheHierarchyDiagram() {
       tone: "data",
     },
     {
-      label: "Metadata indexes",
-      detail: "resolve chunk placement",
-      tone: "git",
+      label: "Local verified cache",
+      detail: "reuse immutable bytes",
+      tone: "safe",
+    },
+    {
+      label: "Optional shared cache",
+      detail: "team-level immutable reuse",
+      tone: "control",
     },
     {
       label: "Object-store origin",
@@ -558,7 +563,7 @@ export function CacheHierarchyDiagram() {
   return (
     <DiagramFrame
       title="Resolve locally before reading the origin"
-      caption="Every cache hit is verified against content identity. A miss falls through to canonical object storage and can warm the cache."
+      caption="Metadata first resolves each chunk to a byte range. Crab then checks local and optional shared sources before a miss falls through to canonical object storage."
     >
       <LayerDiagram
         id="cache-hierarchy"

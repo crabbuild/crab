@@ -92,7 +92,7 @@ Crab clients authenticate to object storage through the provider's credential fl
 
 Direct access also increases the importance of policy design. Clients should receive the operations required for their repository prefix, not broad bucket administration. Continuous integration should use short-lived workload credentials. Lifecycle and deletion permissions should remain separate from ordinary read and push roles when the provider supports that split.
 
-Compare revocation and incident response as well as initial login. Ask how quickly access can be removed, which audit record identifies an object read, and who owns credential delivery on developer machines and runners.
+Compare revocation and incident response as well as initial login. Ask how long access revocation takes, which audit record identifies an object read, and who owns credential delivery on developer machines and runners.
 
 ## Compare control and recovery boundaries
 
