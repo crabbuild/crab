@@ -5557,6 +5557,7 @@ async fn run_repack_command(
         lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
         dry_run,
         download_concurrency: config.download_concurrency,
+        max_cas_retries: config.push_max_cas_retries,
     };
 
     let outcome = crab::cmd::repack::run_repack(&store, &prefix, &repack_config, cancel).await?;
@@ -5571,14 +5572,23 @@ async fn run_repack_command(
             stream.emit_result(&summary);
         }
         OutputMode::Text => {
-            eprintln!(
-                "repack complete: {} → {} packs, {} → {} bytes, {:.1}s",
-                outcome.packs_before,
-                outcome.packs_after,
-                outcome.bytes_before,
-                outcome.bytes_after,
-                outcome.elapsed.as_secs_f64(),
-            );
+            if dry_run {
+                eprintln!(
+                    "repack dry run: {} packs, {} bytes, {:.1}s",
+                    outcome.packs_before,
+                    outcome.bytes_before,
+                    outcome.elapsed.as_secs_f64(),
+                );
+            } else {
+                eprintln!(
+                    "repack complete: {} → {} packs, {} → {} bytes, {:.1}s",
+                    outcome.packs_before,
+                    outcome.packs_after,
+                    outcome.bytes_before,
+                    outcome.bytes_after,
+                    outcome.elapsed.as_secs_f64(),
+                );
+            }
         }
     }
 

@@ -7,20 +7,24 @@ description: "How to optimize remote storage layout by consolidating many small 
 
 Every push creates a new pack file in the remote store. Over time, dozens or hundreds of small packs accumulate. This increases S3 listing latency, adds per-object overhead costs, and slows down clone and fetch operations.
 
-Repacking merges these small packs into fewer, larger ones — reducing object count while preserving all data.
+Repacking uses Git's geometric policy to roll up smaller packs into fewer,
+progressively larger ones. Large stable packs stay in place, so maintenance
+does not repeatedly rewrite the full history.
 
 ```mermaid
 flowchart LR
-    Before["15 small packs<br/>(2.4 GB total)"] -->|crab repack| After["1 merged pack<br/>(2.3 GB total)"]
+    Before["15 small packs<br/>(2.4 GB total)"] -->|crab repack| After["6 balanced packs<br/>(2.3 GB total)"]
 ```
 
 ## How Repacking Works
 
 1. Reads the pack list manifest from the remote store.
 2. Downloads all existing pack files.
-3. Merges contents into a single new pack with a fresh index.
-4. Validates the replacement pack against every manifest ref.
-5. Uploads the merged pack, index, and reverse index to the remote.
+3. Runs `git repack --geometric=2 -d` to roll up only the packs needed to
+   restore a geometric progression.
+4. Validates every resulting pack together against the manifest refs.
+5. Uploads only newly generated pack, index, and reverse-index objects, and
+   repairs missing metadata sidecars.
 6. Atomically updates the manifest using compare-and-swap (CAS).
 7. Rebinds the existing Git visibility proof to the replacement pack inventory.
 
@@ -47,12 +51,7 @@ missing proof; `crab fsck` reports that pre-existing condition.
 crab repack --dry-run
 ```
 
-```
-repack (dry run):
-  Current packs: 15
-  Total size: 2.4 GB
-  Estimated merged size: 2.3 GB
-```
+`repack dry run: 15 packs, 2400000000 bytes, 0.1s`
 
 ### Run the repack
 
@@ -61,7 +60,7 @@ crab repack
 ```
 
 ```
-repack complete: 15 → 1 packs, 2400000000 → 2300000000 bytes, 4.2s
+repack complete: 15 → 6 packs, 2400000000 → 2300000000 bytes, 4.2s
 ```
 
 ## When to Repack
@@ -73,7 +72,9 @@ repack complete: 15 → 1 packs, 2400000000 → 2300000000 bytes, 4.2s
 | Clone/fetch feels slow | Fewer packs = fewer round-trips |
 | Periodic maintenance | Run weekly in CI for active repos |
 
-The `repack_auto_threshold` config option can trigger automatic repacking when the pack count exceeds a threshold:
+The `repack_auto_threshold` config option emits an advisory warning after a
+fetch when the pack count exceeds a threshold. It does not run consolidation
+on the developer's push/fetch path:
 
 ```toml
 # .crab/config.toml

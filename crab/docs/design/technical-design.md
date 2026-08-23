@@ -1516,9 +1516,14 @@ Rationale:
 
 - Pack rewriting requires reading and re-packing the entire pack. On GB-sized packs this is expensive.
 - Most unreachable content in AI repos is in xet xorbs (large files), not Git pack objects (small). The meaningful GC happens there.
-- Pack consolidation (periodic repack to merge many small packs into one big one) is a separate operation, run less frequently.
+- Pack consolidation is a separate maintenance operation. Geometric repack rolls
+  up small packs while leaving large stable packs intact, avoiding repeated
+  whole-history rewrites as the repository grows.
 
-`crab repack` is a distinct command that reads all reachable packs, produces a single consolidated pack, and removes the old ones. This is analogous to Git’s `git gc --aggressive`.
+`crab repack` is a distinct command that reads the committed pack inventory,
+uses `git repack --geometric=2 -d` to produce a bounded pack progression, and
+atomically publishes the replacement inventory. Superseded immutable packs are
+retained until the normal recovery and GC policy removes them.
 
 ### 13.5 Running GC
 

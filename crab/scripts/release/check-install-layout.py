@@ -16,7 +16,8 @@ from pathlib import Path
 CRAB_CLI_FEATURES_NO_FUSE = (
     "simd-accel,tier,replication-s3-control-plane,"
     "replication-gcs-control-plane,replication-azure-control-plane,"
-    "coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"
+    "coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,"
+    "gix-pathmatch"
 )
 CRAB_CLI_FEATURES_WITH_FUSE = f"{CRAB_CLI_FEATURES_NO_FUSE},fuse"
 

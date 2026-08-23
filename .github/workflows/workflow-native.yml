@@ -56,7 +56,7 @@ jobs:
 
       - name: Build release CLI on Windows feature contract
         if: runner.os == 'Windows'
-        run: cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs
+        run: cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch
 
       - name: Build release CLI on Unix
         if: runner.os != 'Windows'

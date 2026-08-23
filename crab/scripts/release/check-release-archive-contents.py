@@ -167,7 +167,7 @@ def check_release_script(root: Path) -> list[str]:
         'cp "$binary_dir/crab" /dist/crab',
         'ln -sf crab "$DIST_DIR/crab-nfs-mount"',
         "-p crab --bin crab-nfs-mount",
-        "--no-default-features --features simd-accel,tier,watch,nfs",
+        "--no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch",
     ):
         if needle not in text:
             errors.append(f"release.sh: expected {needle!r}")
@@ -213,8 +213,8 @@ def check_release_workflow(root: Path) -> list[str]:
         errors.append(f"release.yml: {error}")
     else:
         for needle in (
-            'no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"',
-            "--no-default-features --features simd-accel,tier,watch,nfs",
+            'no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"',
+            "--no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch",
             '--no-default-features --features "$no_fuse_features"',
             "-p crab --bin crab-nfs-mount",
             "ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount",

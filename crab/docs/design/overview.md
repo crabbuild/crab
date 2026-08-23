@@ -1055,7 +1055,7 @@ Normal users rarely need them.
 | `crab dehydrate <glob>`| Replace materialized files with pointers       | Proposed (§5.6) |
 | `crab gc`            | Garbage collect unreachable objects from S3      | Planned         |
 | `crab fsck`          | Check repository integrity                       | Planned         |
-| `crab repack`        | Consolidate remote Git pack files                | Stub            |
+| `crab repack`        | Geometrically consolidate remote Git pack files  | Implemented     |
 | `crab mount`         | FUSE mount for on-demand file access             | Proposed (§5.6) |
 | `crab cache stats`   | Print local cache statistics                     | Planned         |
 | `crab cache clean`   | Clear local cache                                | Planned         |
