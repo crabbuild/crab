@@ -50,7 +50,7 @@ Separate hot, warm, and archival xorbs instead of averaging the complete reposit
 | Required latency | Interactive | Batch-compatible | Restore-compatible |
 | Minimum retention | Provider class rule | Provider class rule | Provider class rule |
 
-Multiply each set by its current regional prices, then add request and transfer terms. This model makes a cold-tail policy visible instead of hiding it inside one storage total.
+Multiply each set by its current regional prices, then add request and transfer terms. Separate rows expose a cold-tail policy that one storage total would hide.
 
 Run a sensitivity check as well. Double the archive read frequency, increase the hot set by one release cycle, and model an early-delete event. The policy should remain acceptable under plausible workload changes.
 
@@ -70,6 +70,21 @@ Populate the table from logs and Crab counters rather than estimates where possi
 
 Keep cache-served and origin-served bytes separate. Provider billing sees the origin path, while application latency sees both. A shared cache may trade object-store transfer for cache-service compute and network cost.
 
+## Work one tiering decision with concrete numbers
+
+Use a small calculation to test whether a lower storage rate pays for retrieval and transition work. The rates below illustrate the method; replace them with the current rates and minimum-retention rules for your provider.
+
+Assume access logs identify 6,000 GB of reachable xorbs that workflows read once per quarter. The proposed class lowers storage by `$0.014` per GB-month, charges `$0.02` per retrieved GB, and requires `$18` of one-time transition requests.
+
+| Term | Calculation | Effect |
+| --- | ---: | ---: |
+| Monthly storage reduction | `6,000 GB × $0.014` | `$84` saved |
+| Expected monthly retrieval | `200 GB × $0.02` | `$4` added |
+| Steady monthly savings | `$84 - $4` | `$80` saved |
+| Transition payback | `$18 ÷ $80` | `0.225 months` |
+
+The arithmetic supports the transition, but it does not prove the policy is safe. Confirm that quarterly restores meet the recovery-time objective and that early-deletion charges cannot erase the `$80` estimate.
+
 ## Measure local and remote bytes
 
 Use Crab's inventory before changing policy:
@@ -88,7 +103,7 @@ Keep the observation window long enough to include releases, training cycles, an
 
 Measure growth by cause. New unique chunks, retained historical roots, abandoned uploads inside the grace period, repacking overlap, and delayed provider deletion all add remote bytes for different reasons.
 
-One inventory total cannot identify the right control. Deduplication affects new unique data. Retention policy and GC affect unreachable data.
+One inventory total cannot identify the failing cost term. Deduplication affects new unique data. Retention policy and GC affect unreachable data.
 
 Repacking affects object layout. Provider lifecycle affects the rate charged for reachable xorb bytes.
 

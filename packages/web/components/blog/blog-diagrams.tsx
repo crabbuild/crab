@@ -34,7 +34,7 @@ type FlowItem = {
   tone: Tone
 }
 
-function DiagramFrame({
+export function DiagramFrame({
   title,
   caption,
   children,

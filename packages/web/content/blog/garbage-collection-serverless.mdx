@@ -47,6 +47,8 @@ The walk follows both data lanes. Git roots reach commits, trees, packs, and poi
 
 Shared chunks complicate intuition but not the rule. An xorb remains live when any retained recipe needs one of its chunks. The branch or file that first uploaded it does not own the complete object.
 
+<GarbageCollectionReachabilityDiagram />
+
 ## Retained roots express recovery policy
 
 Current branches and tags describe active Git history. The ref journal records committed transitions. Recovery history preserves earlier states that operators may restore after an accidental ref change.

@@ -58,7 +58,7 @@ With hosted Git LFS, the forge usually supplies the endpoint, authorization flow
 
 Crab removes the endpoint from the data path. Clients need direct access to the repository prefix, and operators use object-store inventory, lifecycle, access logs, and retention policy. Crab also adds native operations for hydration, dehydration, mounts, integrity checking, optimization, and garbage collection.
 
-The right comparison includes the people who will operate the repository. A workflow that saves transfer but has no sustainable credential path is not a successful migration.
+Include repository operators in the comparison. A workflow that saves transfer but has no sustainable credential path is not a successful migration.
 
 ## Changed-file behavior can dominate the comparison
 
@@ -104,7 +104,7 @@ The recovery question differs between the systems. Ask where large bytes live, w
 
 ## Compare cost with version churn included
 
-A useful cost model includes stored bytes, requests, network transfer, retrieval, service charges, and operator time. Whole-file storage grows with each distinct file object. Native Crab storage grows with chunks that lack durable proof, plus recipe and shard metadata.
+Model stored bytes, requests, network transfer, retrieval, service charges, and operator time. Whole-file storage grows with each distinct file object. Native Crab storage grows with chunks that lack durable proof, plus recipe and shard metadata.
 
 The difference is workload-dependent. Two compressed or encrypted versions may share little physical content, so chunking cannot create savings from semantic similarity. Two checkpoints with stable byte regions may reuse most chunks even though the full-file hashes differ.
 
@@ -120,7 +120,7 @@ A full native conversion is a different operation. `crab lfs migrate export --to
 
 ## Run a two-version pilot
 
-A useful comparison needs more than one initial upload. Choose a repository slice with ordinary source, one frequently changed binary, and one stable large asset.
+Test more than one initial upload. Choose a repository slice with ordinary source, one frequently changed binary, and one stable large asset.
 
 Evaluate both systems with the same sequence:
 
