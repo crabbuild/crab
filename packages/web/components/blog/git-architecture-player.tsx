@@ -83,22 +83,22 @@ const stories: Record<StoryName, Story> = {
     caption:
       "Git owns names and history. Crab chooses each file's representation, then joins both lanes at one publication boundary.",
     nodes: [
-      { id: "worktree", x: 30, y: 174, width: 132, height: 78, title: "Worktree", detail: "real file bytes", kind: "file", firstStep: 0 },
-      { id: "rules", x: 200, y: 174, width: 142, height: 78, title: ".gitattributes", detail: "select per path", kind: "control", firstStep: 0 },
-      { id: "git", x: 402, y: 64, width: 156, height: 82, title: "Git object graph", detail: "blob · tree · commit", kind: "git", firstStep: 1 },
-      { id: "stage", x: 402, y: 286, width: 156, height: 82, title: "Crab staging", detail: "chunks · recipes", kind: "xet", firstStep: 2 },
-      { id: "pack", x: 628, y: 64, width: 146, height: 82, title: "Git pack", detail: "ordinary + pointer", kind: "git", firstStep: 3 },
-      { id: "xet", x: 628, y: 286, width: 146, height: 82, title: "Xet objects", detail: "xorbs + shards", kind: "xet", firstStep: 3 },
-      { id: "ref", x: 816, y: 174, width: 116, height: 78, title: "Ref journal", detail: "visible state", kind: "store", firstStep: 4 },
+      { id: "worktree", x: 24, y: 174, width: 132, height: 78, title: "Worktree", detail: "real file bytes", kind: "file", firstStep: 0 },
+      { id: "rules", x: 212, y: 174, width: 142, height: 78, title: ".gitattributes", detail: "select per path", kind: "control", firstStep: 0 },
+      { id: "git", x: 418, y: 64, width: 156, height: 82, title: "Git object graph", detail: "blob · tree · commit", kind: "git", firstStep: 1 },
+      { id: "stage", x: 418, y: 286, width: 156, height: 82, title: "Crab staging", detail: "chunks · recipes", kind: "xet", firstStep: 2 },
+      { id: "pack", x: 646, y: 64, width: 146, height: 82, title: "Git pack", detail: "ordinary + pointer", kind: "git", firstStep: 3 },
+      { id: "xet", x: 646, y: 286, width: 146, height: 82, title: "Xet objects", detail: "xorbs + shards", kind: "xet", firstStep: 3 },
+      { id: "ref", x: 872, y: 174, width: 132, height: 78, title: "Ref journal", detail: "visible state", kind: "store", firstStep: 4 },
     ],
     edges: [
-      { id: "inspect", path: "M162 213 H200", step: 0, label: "inspect", labelX: 181, labelY: 202 },
-      { id: "ordinary", path: "M342 198 C370 198 372 105 402 105", step: 1, label: "ordinary", labelX: 374, labelY: 154 },
-      { id: "tracked", path: "M342 228 C370 228 372 327 402 327", step: 2, label: "filter=crab", labelX: 374, labelY: 278 },
-      { id: "pack", path: "M558 105 H628", step: 3 },
-      { id: "xet", path: "M558 327 H628", step: 3 },
-      { id: "publish-git", path: "M774 105 C804 105 796 196 816 202", step: 4 },
-      { id: "publish-xet", path: "M774 327 C804 327 796 230 816 224", step: 4 },
+      { id: "inspect", path: "M156 213 H204", step: 0, label: "inspect", labelX: 180, labelY: 202 },
+      { id: "ordinary", path: "M354 198 C386 198 382 105 410 105", step: 1, label: "ordinary", labelX: 384, labelY: 154 },
+      { id: "tracked", path: "M354 228 C386 228 382 327 410 327", step: 2, label: "filter=crab", labelX: 384, labelY: 278 },
+      { id: "pack", path: "M574 105 H638", step: 3 },
+      { id: "xet", path: "M574 327 H638", step: 3 },
+      { id: "publish-git", path: "M792 105 C832 105 824 184 864 195", step: 4 },
+      { id: "publish-xet", path: "M792 327 C832 327 824 242 864 231", step: 4 },
     ],
     steps: [
       { label: "SELECT", title: "Classify the path", description: "Crab reads Git's own attributes to decide whether a file stays ordinary or uses the large-file representation.", invariant: "Selection is per path, not per repository.", activeNodes: ["worktree", "rules"] },
@@ -114,22 +114,22 @@ const stories: Record<StoryName, Story> = {
     caption:
       "The large-file lane streams and flushes its bytes before Git's index receives the pointer. The ordinary lane remains native Git.",
     nodes: [
-      { id: "files", x: 26, y: 174, width: 134, height: 78, title: "Input paths", detail: "source + model", kind: "file", firstStep: 0 },
-      { id: "match", x: 196, y: 174, width: 142, height: 78, title: "Attribute match", detail: "filter=crab?", kind: "control", firstStep: 0 },
-      { id: "blob", x: 394, y: 58, width: 148, height: 82, title: "Git blob", detail: "exact source bytes", kind: "git", firstStep: 1 },
-      { id: "stream", x: 378, y: 270, width: 178, height: 98, title: "BLAKE3 + CDC", detail: "bounded stream", kind: "xet", firstStep: 2 },
-      { id: "stage", x: 610, y: 270, width: 144, height: 98, title: "Local staging", detail: "ordered chunks", kind: "xet", firstStep: 2 },
-      { id: "pointer", x: 610, y: 58, width: 144, height: 82, title: "Pointer blob", detail: "hash · size · hint", kind: "git", firstStep: 3 },
-      { id: "index", x: 808, y: 174, width: 126, height: 78, title: "Git index", detail: "ready to commit", kind: "git", firstStep: 4 },
+      { id: "files", x: 24, y: 174, width: 134, height: 78, title: "Input paths", detail: "source + model", kind: "file", firstStep: 0 },
+      { id: "match", x: 212, y: 174, width: 142, height: 78, title: "Attribute match", detail: "filter=crab?", kind: "control", firstStep: 0 },
+      { id: "blob", x: 420, y: 58, width: 148, height: 82, title: "Git blob", detail: "exact source bytes", kind: "git", firstStep: 1 },
+      { id: "stream", x: 400, y: 270, width: 178, height: 98, title: "BLAKE3 + CDC", detail: "bounded stream", kind: "xet", firstStep: 2 },
+      { id: "stage", x: 648, y: 270, width: 144, height: 98, title: "Local staging", detail: "ordered chunks", kind: "xet", firstStep: 2 },
+      { id: "pointer", x: 648, y: 58, width: 144, height: 82, title: "Pointer blob", detail: "hash · size · hint", kind: "git", firstStep: 3 },
+      { id: "index", x: 882, y: 174, width: 126, height: 78, title: "Git index", detail: "ready to commit", kind: "git", firstStep: 4 },
     ],
     edges: [
-      { id: "match", path: "M160 213 H196", step: 0 },
-      { id: "normal", path: "M338 196 C366 196 366 99 394 99", step: 1, label: "ordinary", labelX: 367, labelY: 149 },
-      { id: "stream", path: "M338 230 C360 230 354 319 378 319", step: 2, label: "tracked", labelX: 359, labelY: 278 },
-      { id: "chunks", path: "M556 319 H610", step: 2, label: "chunks", labelX: 583, labelY: 307 },
-      { id: "flush", path: "M682 270 V140", step: 3, label: "flush", labelX: 702, labelY: 208 },
-      { id: "blob-index", path: "M542 99 C740 99 760 195 808 202", step: 4 },
-      { id: "pointer-index", path: "M754 99 C790 99 782 190 808 202", step: 4 },
+      { id: "match", path: "M158 213 H204", step: 0 },
+      { id: "normal", path: "M354 196 C386 196 382 99 412 99", step: 1, label: "ordinary", labelX: 384, labelY: 149 },
+      { id: "stream", path: "M354 230 C382 230 372 319 392 319", step: 2, label: "tracked", labelX: 378, labelY: 278 },
+      { id: "chunks", path: "M578 319 H640", step: 2, label: "chunks", labelX: 609, labelY: 307 },
+      { id: "flush", path: "M720 270 V148", step: 3, label: "flush", labelX: 740, labelY: 208 },
+      { id: "blob-index", path: "M494 58 V46 H820 C852 46 848 182 874 194", step: 4 },
+      { id: "pointer-index", path: "M792 99 C838 99 830 220 874 232", step: 4 },
     ],
     steps: [
       { label: "MATCH", title: "Resolve Git attributes", description: "Each path is classified with the same .gitattributes rules that Git uses for its filter process.", invariant: "A tracked pattern does not change unrelated paths.", activeNodes: ["files", "match"] },
@@ -145,26 +145,26 @@ const stories: Record<StoryName, Story> = {
     caption:
       "Git and Xet uploads overlap behind a per-ref lock. Verification gates the only operation that changes repository visibility.",
     nodes: [
-      { id: "helper", x: 20, y: 174, width: 126, height: 78, title: "Remote helper", detail: "push batch", kind: "control", firstStep: 0 },
-      { id: "discover", x: 178, y: 174, width: 132, height: 78, title: "Discovery", detail: "objects + pointers", kind: "control", firstStep: 0 },
-      { id: "lock", x: 178, y: 54, width: 132, height: 70, title: "Ref lock", detail: "serialize writers", kind: "control", firstStep: 1 },
-      { id: "gitpack", x: 362, y: 66, width: 138, height: 80, title: "Git pack", detail: "reachable objects", kind: "git", firstStep: 2 },
-      { id: "xorbs", x: 362, y: 278, width: 138, height: 94, title: "Xorbs + shards", detail: "new chunks + map", kind: "xet", firstStep: 2 },
-      { id: "origin", x: 552, y: 154, width: 144, height: 118, title: "Object store", detail: "immutable origin", kind: "store", firstStep: 3 },
-      { id: "verify", x: 744, y: 174, width: 122, height: 78, title: "Closure proof", detail: "all dependencies", kind: "control", firstStep: 4 },
-      { id: "ref", x: 744, y: 326, width: 122, height: 70, title: "Ref journal", detail: "expected-old", kind: "store", firstStep: 5 },
-      { id: "manifest", x: 552, y: 326, width: 144, height: 70, title: "Manifest", detail: "derived snapshot", kind: "store", firstStep: 6 },
+      { id: "helper", x: 24, y: 174, width: 126, height: 78, title: "Remote helper", detail: "push batch", kind: "control", firstStep: 0 },
+      { id: "discover", x: 198, y: 174, width: 132, height: 78, title: "Discovery", detail: "objects + pointers", kind: "control", firstStep: 0 },
+      { id: "lock", x: 198, y: 54, width: 132, height: 70, title: "Ref lock", detail: "serialize writers", kind: "control", firstStep: 1 },
+      { id: "gitpack", x: 396, y: 66, width: 138, height: 80, title: "Git pack", detail: "reachable objects", kind: "git", firstStep: 2 },
+      { id: "xorbs", x: 396, y: 278, width: 138, height: 94, title: "Xorbs + shards", detail: "new chunks + map", kind: "xet", firstStep: 2 },
+      { id: "origin", x: 602, y: 154, width: 144, height: 118, title: "Object store", detail: "immutable origin", kind: "store", firstStep: 3 },
+      { id: "verify", x: 814, y: 174, width: 122, height: 78, title: "Closure proof", detail: "all dependencies", kind: "control", firstStep: 4 },
+      { id: "ref", x: 814, y: 326, width: 122, height: 70, title: "Ref journal", detail: "expected-old", kind: "store", firstStep: 5 },
+      { id: "manifest", x: 602, y: 326, width: 144, height: 70, title: "Manifest", detail: "derived snapshot", kind: "store", firstStep: 6 },
     ],
     edges: [
-      { id: "discover", path: "M146 213 H178", step: 0 },
-      { id: "lock", path: "M244 174 V124", step: 1 },
-      { id: "gitpack", path: "M310 195 C334 195 334 106 362 106", step: 2 },
-      { id: "xorbs", path: "M310 231 C334 231 334 325 362 325", step: 2 },
-      { id: "upload-git", path: "M500 106 C530 106 526 183 552 190", step: 3 },
-      { id: "upload-xet", path: "M500 325 C530 325 526 243 552 236", step: 3 },
-      { id: "verify", path: "M696 213 H744", step: 4 },
-      { id: "commit", path: "M805 252 V326", step: 5, label: "commit", labelX: 826, labelY: 292 },
-      { id: "compact", path: "M744 361 H696", step: 6, label: "fold", labelX: 720, labelY: 350 },
+      { id: "discover", path: "M150 213 H190", step: 0 },
+      { id: "lock", path: "M264 174 V132", step: 1 },
+      { id: "gitpack", path: "M330 195 C364 195 360 106 388 106", step: 2 },
+      { id: "xorbs", path: "M330 231 C364 231 360 325 388 325", step: 2 },
+      { id: "upload-git", path: "M534 106 C568 106 562 182 594 190", step: 3 },
+      { id: "upload-xet", path: "M534 325 C568 325 562 244 594 236", step: 3 },
+      { id: "verify", path: "M746 213 H806", step: 4 },
+      { id: "commit", path: "M875 252 V318", step: 5, label: "commit", labelX: 896, labelY: 289 },
+      { id: "compact", path: "M814 361 H754", step: 6, label: "fold", labelX: 784, labelY: 350 },
     ],
     steps: [
       { label: "DISCOVER", title: "Discover the complete push closure", description: "The helper walks reachable Git objects and parses Crab pointers before opening any large-file metadata path.", invariant: "No pointers means a pure-Git fast path.", activeNodes: ["helper", "discover"] },
@@ -183,20 +183,20 @@ const stories: Record<StoryName, Story> = {
       "Step through the failure boundaries. Before the ref transaction, readers keep seeing the old tip; after it, repair never rolls visibility back.",
     nodes: [
       { id: "old", x: 32, y: 170, width: 132, height: 82, title: "Old ref", detail: "still reachable", kind: "git", firstStep: 0 },
-      { id: "objects", x: 218, y: 70, width: 148, height: 86, title: "Immutable data", detail: "pack · xorbs · shards", kind: "store", firstStep: 0 },
-      { id: "verify", x: 218, y: 274, width: 148, height: 86, title: "Closure check", detail: "reject if incomplete", kind: "control", firstStep: 2 },
-      { id: "expected", x: 430, y: 170, width: 148, height: 82, title: "Expected-old", detail: "compare current tip", kind: "control", firstStep: 3 },
-      { id: "journal", x: 642, y: 170, width: 136, height: 82, title: "Ref journal", detail: "commit or reject", kind: "store", firstStep: 3 },
-      { id: "new", x: 830, y: 70, width: 106, height: 82, title: "New ref", detail: "visible", kind: "git", firstStep: 4 },
-      { id: "repair", x: 830, y: 274, width: 106, height: 86, title: "Repair", detail: "rebuild indexes", kind: "xet", firstStep: 4 },
+      { id: "objects", x: 226, y: 70, width: 148, height: 86, title: "Immutable data", detail: "pack · xorbs · shards", kind: "store", firstStep: 0 },
+      { id: "verify", x: 226, y: 274, width: 148, height: 86, title: "Closure check", detail: "reject if incomplete", kind: "control", firstStep: 2 },
+      { id: "expected", x: 446, y: 170, width: 148, height: 82, title: "Expected-old", detail: "compare current tip", kind: "control", firstStep: 3 },
+      { id: "journal", x: 666, y: 170, width: 136, height: 82, title: "Ref journal", detail: "commit or reject", kind: "store", firstStep: 3 },
+      { id: "new", x: 870, y: 70, width: 106, height: 82, title: "New ref", detail: "visible", kind: "git", firstStep: 4 },
+      { id: "repair", x: 870, y: 274, width: 106, height: 86, title: "Repair", detail: "rebuild indexes", kind: "xet", firstStep: 4 },
     ],
     edges: [
-      { id: "upload", path: "M164 193 C188 193 190 113 218 113", step: 0 },
-      { id: "orphan", path: "M292 156 V274", step: 1, label: "safe orphan", labelX: 318, labelY: 220 },
-      { id: "reject", path: "M366 317 C404 317 398 232 430 220", step: 2 },
-      { id: "compare", path: "M578 211 H642", step: 3 },
-      { id: "publish", path: "M778 194 C810 194 804 111 830 111", step: 4 },
-      { id: "repair", path: "M710 252 C742 300 792 317 830 317", step: 4 },
+      { id: "upload", path: "M164 193 C194 193 190 113 218 113", step: 0 },
+      { id: "orphan", path: "M300 156 V266", step: 1, label: "safe orphan", labelX: 328, labelY: 220 },
+      { id: "reject", path: "M374 317 C416 317 410 232 438 220", step: 2 },
+      { id: "compare", path: "M594 211 H658", step: 3 },
+      { id: "publish", path: "M802 194 C836 194 830 111 862 111", step: 4 },
+      { id: "repair", path: "M734 252 C770 300 824 317 862 317", step: 4 },
     ],
     steps: [
       { label: "PREPARE", title: "Uploads are not publication", description: "Crab may write any number of immutable objects while the old branch tip remains the only reachable state.", invariant: "VISIBLE: old ref", activeNodes: ["old", "objects"] },
@@ -213,22 +213,22 @@ const stories: Record<StoryName, Story> = {
       "Crab follows metadata to the minimum object-store ranges, reconstructs the ordered chunks, and verifies the full-file identity before materializing it.",
     nodes: [
       { id: "checkout", x: 24, y: 174, width: 126, height: 78, title: "Git checkout", detail: "pointer blob", kind: "git", firstStep: 0 },
-      { id: "pointer", x: 184, y: 174, width: 130, height: 78, title: "Pointer", detail: "hash · size · hint", kind: "git", firstStep: 0 },
-      { id: "shard", x: 354, y: 64, width: 138, height: 82, title: "Shard lookup", detail: "ordered terms", kind: "xet", firstStep: 1 },
-      { id: "ranges", x: 354, y: 284, width: 138, height: 82, title: "Range plan", detail: "coalesce reads", kind: "control", firstStep: 2 },
-      { id: "origin", x: 546, y: 174, width: 138, height: 78, title: "Object store", detail: "xorb byte ranges", kind: "store", firstStep: 3 },
-      { id: "rebuild", x: 728, y: 64, width: 140, height: 82, title: "Reconstruct", detail: "ordered chunks", kind: "xet", firstStep: 4 },
-      { id: "verify", x: 728, y: 284, width: 140, height: 82, title: "BLAKE3 verify", detail: "full-file identity", kind: "control", firstStep: 4 },
-      { id: "worktree", x: 892, y: 174, width: 58, height: 78, title: "File", detail: "bytes", kind: "file", firstStep: 5 },
+      { id: "pointer", x: 202, y: 174, width: 132, height: 78, title: "Pointer", detail: "hash · size · hint", kind: "git", firstStep: 0 },
+      { id: "shard", x: 392, y: 64, width: 140, height: 82, title: "Shard lookup", detail: "ordered terms", kind: "xet", firstStep: 1 },
+      { id: "ranges", x: 392, y: 284, width: 140, height: 82, title: "Range plan", detail: "coalesce reads", kind: "control", firstStep: 2 },
+      { id: "origin", x: 590, y: 174, width: 140, height: 78, title: "Object store", detail: "xorb byte ranges", kind: "store", firstStep: 3 },
+      { id: "rebuild", x: 786, y: 64, width: 142, height: 82, title: "Reconstruct", detail: "ordered chunks", kind: "xet", firstStep: 4 },
+      { id: "verify", x: 786, y: 284, width: 142, height: 82, title: "BLAKE3 verify", detail: "full-file identity", kind: "control", firstStep: 4 },
+      { id: "worktree", x: 982, y: 174, width: 70, height: 78, title: "File", detail: "bytes", kind: "file", firstStep: 5 },
     ],
     edges: [
-      { id: "pointer", path: "M150 213 H184", step: 0 },
-      { id: "lookup", path: "M314 196 C334 196 332 105 354 105", step: 1 },
-      { id: "plan", path: "M423 146 V284", step: 2 },
-      { id: "get", path: "M492 325 C522 325 518 230 546 220", step: 3, label: "range GET", labelX: 519, labelY: 279 },
-      { id: "rebuild", path: "M684 196 C708 196 704 105 728 105", step: 4 },
-      { id: "verify", path: "M798 146 V284", step: 4 },
-      { id: "hydrate", path: "M868 325 C886 325 878 233 892 222", step: 5 },
+      { id: "pointer", path: "M150 213 H194", step: 0 },
+      { id: "lookup", path: "M334 196 C362 196 356 105 384 105", step: 1 },
+      { id: "plan", path: "M462 146 V276", step: 2 },
+      { id: "get", path: "M532 325 C564 325 554 230 582 220", step: 3, label: "range GET", labelX: 558, labelY: 279 },
+      { id: "rebuild", path: "M730 196 C758 196 750 105 778 105", step: 4 },
+      { id: "verify", path: "M857 146 V276", step: 4 },
+      { id: "hydrate", path: "M928 325 C958 325 946 233 974 222", step: 5 },
     ],
     steps: [
       { label: "CHECKOUT", title: "Git supplies the pointer", description: "The Git graph stays compact and reveals the content identity without embedding the large file in the pack.", invariant: "Git can inspect history without fetching large bytes.", activeNodes: ["checkout", "pointer"] },
@@ -434,8 +434,8 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
 
       <div className="overflow-x-auto" aria-hidden="true">
         <svg
-          className="block w-full min-w-[700px]"
-          viewBox="0 0 960 430"
+          className="block w-full min-w-[780px]"
+          viewBox="0 0 1080 450"
           focusable="false"
         >
           <defs>
@@ -447,27 +447,27 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
               <marker
                 key={marker.id}
                 id={`arrow-${storyName}-${marker.id}`}
-                viewBox="0 0 9 9"
-                refX="9"
-                refY="4.5"
-                markerWidth="9"
-                markerHeight="9"
+                viewBox="0 0 12 12"
+                refX="10.5"
+                refY="6"
+                markerWidth="10"
+                markerHeight="10"
                 markerUnits="userSpaceOnUse"
                 orient="auto"
               >
-                <path d="M0 0 9 4.5 0 9Z" fill={marker.color} fillOpacity={marker.opacity} />
+                <path d="M1 1.5 10.5 6 1 10.5 3.5 6Z" fill={marker.color} fillOpacity={marker.opacity} />
               </marker>
             ))}
           </defs>
-          <rect width="960" height="430" fill="#070b12" />
+          <rect width="1080" height="450" fill="#070b12" />
           <text x="28" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="11.5" letterSpacing="1.4">
             IMMUTABLE DATA
           </text>
-          <line x1="132" y1="28" x2="410" y2="28" stroke="#1e293b" />
-          <text x="756" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="11.5" letterSpacing="1.4">
+          <line x1="132" y1="28" x2="520" y2="28" stroke="#1e293b" />
+          <text x="890" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="11.5" letterSpacing="1.4">
             VISIBLE STATE
           </text>
-          <line x1="850" y1="28" x2="932" y2="28" stroke="#1e293b" />
+          <line x1="984" y1="28" x2="1052" y2="28" stroke="#1e293b" />
 
           {story.edges.map((edge) => {
             const active = edge.step === activeIndex
