@@ -1,6 +1,10 @@
 ---
 title: "crab hydrate"
 description: "Materialize pointer files into full content by downloading and reconstructing from the remote store."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab hydrate."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab hydrate
@@ -9,7 +13,7 @@ Materialize pointer files into full content.
 
 ## Synopsis
 
-```
+```bash
 crab hydrate [OPTIONS] [GLOBS]...
 ```
 
@@ -98,7 +102,7 @@ crab hydrate --manifest-ref HEAD:.crab/manifests/ci.txt
 
 ## Output
 
-```
+```text
 Hydrating 5 files...
   models/weights.bin       1.2 GB  ✓
   models/embeddings.bin    800 MB  ✓
@@ -126,7 +130,7 @@ Patterns are resolved in this order of precedence:
 A manifest is a newline-delimited text file listing paths and globs relative
 to the repo root. Blank lines and lines starting with `#` are ignored:
 
-```
+```text
 # CI manifest
 src/main.rs
 src/**/*.rs

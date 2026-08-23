@@ -1,6 +1,10 @@
 ---
 title: "Integrity Check"
 description: "How to verify repository integrity by checking for dangling refs, missing blobs, expired locks, and other inconsistencies."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Integrity Check problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Verifying Repository Integrity
@@ -19,7 +23,7 @@ Think of it as `git fsck` extended to cover Crab's object store layer.
 crab fsck
 ```
 
-```
+```text
   ✓ Git objects          all refs resolve
   ✓ Data chain           all file indices and xorbs present
   ✓ Pack list            consistent
@@ -64,6 +68,21 @@ Repair is limited to issues explicitly marked repairable. Missing content
 requires history, replica, cache, or backup recovery. Provider-side incomplete
 multipart uploads require a provider lifecycle rule because the generic
 object-store API cannot enumerate them.
+
+## Verify after repair
+
+Run the read-only check again and test reconstruction from an isolated cache:
+
+```bash
+crab fsck --json > fsck-after.json
+crab hydrate path/to/representative-file.bin
+```
+
+The second `fsck` result must no longer contain the repairable issue. Hydration
+adds a byte-level reconstruction check for one important path; it does not turn
+`fsck` into a complete hydration of the repository. For a release gate, select
+representative files across the storage classes and data paths used by that
+release.
 
 ## When to Run
 

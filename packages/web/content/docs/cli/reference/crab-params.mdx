@@ -1,11 +1,20 @@
 ---
 title: "crab params"
 description: "Read and diff parameter files across Git revisions."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab params."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab params
 
 Read or compare flattened parameter maps across Git refs.
+
+Use `show` to inspect the resolved parameter values for one revision. Use
+`diff` to find values that were added, removed, or changed between two
+revisions. Crab flattens nested parameter documents into stable key paths, so
+the output is useful for both terminal review and experiment automation.
 
 ## Synopsis
 
@@ -22,3 +31,26 @@ crab params <COMMAND>
 crab params show --help
 crab params diff --help
 ```
+
+## Choose a subcommand
+
+Start with the subcommand help because selectors and output options belong to
+`show` and `diff`, not to the parent command:
+
+```bash
+crab params show --help
+crab params diff --help
+```
+
+A common review compares the current branch with its parent revision:
+
+```bash
+crab params show
+crab params diff HEAD~1 HEAD
+```
+
+The command reads parameter files through Git revisions; it does not execute
+workflow stages or modify the workspace. Pair the result with
+[`crab metrics diff`](/docs/cli/reference/crab-metrics) to connect an input
+change with a measured outcome. If a value is absent, confirm that its file is
+declared as a workflow parameter source and exists at the selected ref.

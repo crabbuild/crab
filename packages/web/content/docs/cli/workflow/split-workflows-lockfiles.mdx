@@ -1,6 +1,10 @@
 ---
 title: "Split Workflows and Lockfiles"
 description: "Use recursive workflow discovery and split lockfiles for monorepos and multi-team pipelines."
+meta:
+  contentType: How-to
+  goal: "Use Split Workflows and Lockfiles in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Split Workflows and Lockfiles
@@ -78,6 +82,13 @@ stages:
 
 Crab infers producer-to-consumer edges from output paths across the merged DAG.
 
+| Surface | Recommended owner | Review evidence |
+| --- | --- | --- |
+| Root `crab.yaml` | Platform or repository maintainers | Shared defaults and cross-team orchestration |
+| Named `*.workflow.yaml` | Team that owns its stages | Stage commands, dependencies, and outputs |
+| Matching split lockfile | Same team as the workflow file | Successful state for that declared surface |
+| Merged recursive DAG | Repository-wide CI | No duplicate outputs, cycles, or missing producers |
+
 ## Lockfile Modes
 
 Single lockfile:
@@ -117,7 +128,7 @@ config change together.
 When git merge leaves conflict markers in a workflow lockfile:
 
 ```bash
-crab workflow lockfile resolve crab.lock
+crab workflow lockfile resolve --path crab.lock
 ```
 
 The resolver keeps identical resolved stages and drops divergent stale entries
@@ -138,3 +149,7 @@ Stay with one `crab.yaml` and one `crab.lock` if the workflow is under a few
 hundred lines, one team owns most stages, or merge conflicts are rare. Split
 workflows add naming and ownership rules; use them when that structure pays for
 it.
+
+After a split or conflict resolution, run validation and a recursive dry run.
+Commit workflow files, their matching lockfiles, and the discovery configuration
+together so another clone resolves the same stage names and producer edges.

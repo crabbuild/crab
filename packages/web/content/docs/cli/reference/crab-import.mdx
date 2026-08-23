@@ -1,6 +1,10 @@
 ---
 title: "crab import"
 description: "Import existing cloud buckets as a Crab repository."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab import."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab import
@@ -70,7 +74,7 @@ crab import \
   --to crab://crab-repos/models
 ```
 
-### Quick import with target derivation
+### Derive the target URL
 
 ```bash
 crab import s3://my-data-bucket/models/ \

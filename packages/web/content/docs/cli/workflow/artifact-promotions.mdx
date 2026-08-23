@@ -1,19 +1,91 @@
 ---
 title: Artifact promotions
 description: Compare-and-swap promotion labels for immutable workflow versions.
+meta:
+  contentType: How-to
+  goal: "Use Artifact promotions in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
-Promote an existing immutable version with crab artifacts promote NAME VERSION
-STAGE. Stage names are normalized and validated; a stage is a mutable label,
-never part of the immutable manifest identity.
+# Promote an immutable artifact version
 
-Automation should pass --expected CURRENT_VERSION. A concurrent change then
+Promotion moves a stage label such as `staging` or `production` to an existing
+immutable artifact version. It copies no payload bytes and does not change the
+version manifest.
+
+<DocsPathDiagram
+  id="artifact-promotion-path"
+  title="Artifact promotion path"
+  caption="Inspect the current label, compare its version, move it with compare-and-swap, then verify the canonical registry from another client."
+  steps={[
+    { label: "Inspect", detail: "current label", tone: "control" },
+    { label: "Select", detail: "immutable version", tone: "data" },
+    { label: "Promote", detail: "CAS label write", tone: "store" },
+    { label: "Verify", detail: "show + history", tone: "safe" },
+  ]}
+/>
+
+## Inspect versions and labels
+
+```bash
+crab artifacts show fraud-model --json
+crab artifacts history fraud-model --json
+```
+
+Record the current version assigned to the target stage. A version is a
+content-addressed identity; the stage is a mutable human-facing label.
+
+## Promote with compare-and-swap
+
+```bash
+crab artifacts promote \
+  fraud-model \
+  <new-version> \
+  production \
+  --expected <current-version> \
+  --json
+```
+
+Automation should pass `--expected <CURRENT_VERSION>`. A concurrent change then
 fails instead of silently overwriting the label. Promotion records the prior
 value and timestamp in the remote (or local, when no remote is configured)
 audit history and copies no artifact bytes.
 
-Use crab artifacts show NAME to inspect versions and labels without hydrating
-payloads. With a configured Crab remote, the stage label uses a remote CAS
+## Verify canonical state
+
+Use `crab artifacts show <NAME>` to inspect versions and labels without
+hydrating payloads. With a configured Crab remote, the stage label uses a remote CAS
 write and another clean clone observes the same canonical state. Artifact GC
 retention remains conservative: old immutable versions are not removed
 automatically.
+
+```bash
+crab artifacts show fraud-model
+crab artifacts history fraud-model
+```
+
+The new stage mapping and a promotion event with the prior value are the
+completion evidence. If compare-and-swap fails, reread the label and decide
+whether the concurrent promotion should remain; do not retry with a guessed
+expected version.
+
+## Use labels for environments, not identity
+
+Consumers that require an immutable result should store the version ID they
+resolved, even when discovery began from a stage label. A later promotion can
+move `production` without changing either version's manifest. This separation
+lets operators roll a label forward or back while audit records retain the
+exact sequence of prior values.
+
+Before promotion, retrieve the candidate by version in a validation environment
+and run application-level checks. Registry hash verification proves payload
+identity, but it does not prove model quality, schema compatibility, or rollout
+safety. Promotion should follow those domain checks rather than replace them.
+
+## Choose promotion instead of creation
+
+| Intent | Command | Payload bytes copied |
+| --- | --- | --- |
+| Capture new output bytes | `crab artifacts version create <NAME>` | New content-addressed payload may upload |
+| Move a stage label | `crab artifacts promote <NAME> <VERSION> <STAGE>` | None |
+| Retrieve selected bytes | `crab artifacts get <NAME> --stage <STAGE>` | One verified payload downloads |

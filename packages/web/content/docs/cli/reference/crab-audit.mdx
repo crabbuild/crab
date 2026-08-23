@@ -1,6 +1,10 @@
 ---
 title: "crab audit"
 description: "Inspect, verify, and export Crab audit events."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab audit."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab audit
@@ -38,3 +42,11 @@ crab audit log --operation release.publish --json
 crab audit verify --path .crab/audit/events.jsonl
 crab audit export --output audit.json
 ```
+
+Run `verify` before exporting evidence or using it in an incident review. It
+checks both the event schema and the digest chain, so a syntactically readable
+JSONL file can still fail verification if records were removed or changed.
+`export` creates a portable bundle; it does not repair the source log. Preserve
+the original JSONL file when verification fails, then collect
+[`crab logs`](/docs/cli/reference/crab-logs) and the installed version before
+investigating further.

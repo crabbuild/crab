@@ -1,6 +1,10 @@
 ---
 title: "Migrating from Git LFS"
 description: "Rewrite history to move files into or out of crab tracking, migrating from Git LFS."
+meta:
+  contentType: Tutorial
+  goal: "Complete Migrating from Git LFS and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # crab migrate
@@ -9,7 +13,7 @@ Rewrite history to move files into or out of crab tracking.
 
 ## Synopsis
 
-```
+```bash
 crab migrate info [OPTIONS]
 crab migrate import [OPTIONS]
 crab migrate export [OPTIONS]
@@ -47,7 +51,7 @@ Convert large files in history to crab pointers.
 | `--exclude` | | Glob patterns to exclude from migration |
 | `--above` | `1048576` (1 MB) | Only migrate files above this size |
 | `--dry-run` | `false` | Report what would be migrated without rewriting |
-| `--everything` | `false` | Rewrite all branches, not just the current one |
+| `--everything` | `false` | Rewrite all branches instead of only the current one |
 
 ### crab migrate export
 
@@ -66,7 +70,7 @@ Convert crab pointers back to full files in history.
 crab migrate info
 ```
 
-```
+```text
 Extension         Total Size    Count
 -------------------------------------
 *.bin              12.4 GB        42
@@ -90,7 +94,7 @@ Only shows files above 10 MB, top 5 extensions.
 crab migrate import --include '*.bin' --dry-run
 ```
 
-```
+```text
 migrate import (dry run):
   include: ["*.bin"]
   exclude: []

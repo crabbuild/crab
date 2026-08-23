@@ -1,6 +1,10 @@
 ---
 title: "CI/CD Integration"
 description: "Set up Crab in continuous integration pipelines to clone, hydrate, and push large-file repositories automatically."
+meta:
+  contentType: Tutorial
+  goal: "Complete CI/CD Integration and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # CI/CD Integration
@@ -9,6 +13,19 @@ This guide walks through configuring Crab in CI/CD pipelines so your
 automation can clone repositories with large files, hydrate them for
 builds or training, and push results back to object storage — all without
 manual intervention.
+
+<DocsPathDiagram
+  id="ci-publication-path"
+  title="CI data publication path"
+  caption="A clean runner proves identity and input hydration before execution. Publication completes only after outputs, pointers, and the Git ref are durable."
+  steps={[
+    { label: "Authenticate", detail: "OIDC identity", tone: "control" },
+    { label: "Clone", detail: "Git + pointers", tone: "git" },
+    { label: "Hydrate", detail: "declared inputs", tone: "data" },
+    { label: "Run", detail: "stage outputs", tone: "warning" },
+    { label: "Publish", detail: "objects + ref", tone: "safe" },
+  ]}
+/>
 
 ## Overview
 
@@ -85,7 +102,7 @@ A typical CI job clones the repository and hydrates the files needed for
 the build:
 
 ```bash
-# Clone the repository (pointer files only — fast)
+# Clone Git metadata and pointer files
 git clone crab://my-bucket/my-repo .
 
 # Hydrate only the files this job needs
@@ -249,8 +266,10 @@ transient failures:
 git push  # Crab handles ref CAS retries automatically
 ```
 
-**Dehydrate before pushing.** If your job hydrated files that it did not
-modify, dehydrate them before committing to keep the git index clean:
+**Review generated outputs before pushing.** A correctly configured clean
+filter maps unchanged hydrated files back to their pointers. Dehydrate
+unchanged inputs when you want to reduce local I/O, then add only the outputs
+the job intends to publish:
 
 ```bash
 crab dehydrate --all

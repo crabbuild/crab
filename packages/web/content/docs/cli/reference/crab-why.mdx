@@ -1,6 +1,10 @@
 ---
 title: "crab why"
 description: "Explain why a file is tracked and its current hydration state."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab why."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab why
@@ -21,3 +25,26 @@ crab why --json models/checkpoint.safetensors
 
 The JSON form is useful for tooling that needs the resolved tracking pattern,
 pointer state, or hydration details without parsing human output.
+
+## Interpret the explanation
+
+Run `crab why` when a file behaves differently from neighboring files or when
+you need to know which tracking rule selected it. The command reports the
+resolved file state; it does not hydrate, dehydrate, stage, or rewrite the
+file. This makes it suitable as the first diagnostic step before changing
+tracking configuration.
+
+For example, compare two paths that you expected to follow the same rule:
+
+```bash
+crab why models/checkpoint.safetensors
+crab why data/labels.csv
+crab ls-files --json
+```
+
+Look for the matching pattern and whether each working-tree path is a pointer
+or materialized content. If the pattern is wrong, update tracking with
+[`crab track`](/docs/cli/reference/crab-track). If the pattern is correct but
+the representation is not, use [`crab hydrate`](/docs/cli/reference/crab-hydrate)
+or [`crab dehydrate`](/docs/cli/reference/crab-dehydrate). Keep the JSON form
+for scripts that need stable fields and exit-status handling.

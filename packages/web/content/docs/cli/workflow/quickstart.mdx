@@ -1,12 +1,29 @@
 ---
 title: "Workflow Quickstart"
 description: "Define a small Crab Workflow pipeline, run it, and share the stage cache."
+meta:
+  contentType: Tutorial
+  goal: "Complete Workflow Quickstart and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # Workflow Quickstart
 
 This quickstart creates a two-stage pipeline, runs it, records metrics, and
 pushes the stage cache so another clone or CI job can reuse the result.
+
+<DocsPathDiagram
+  id="workflow-quickstart-path"
+  title="Two-stage workflow path"
+  caption="Validation proves the declaration, execution records outputs and a lockfile, then a clean clone verifies the remote cache without rerunning commands."
+  steps={[
+    { label: "Define", detail: "prepare + train", tone: "git" },
+    { label: "Validate", detail: "schema + DAG", tone: "control" },
+    { label: "Run", detail: "outputs + lock", tone: "data" },
+    { label: "Publish", detail: "Git + cache", tone: "store" },
+    { label: "Replay", detail: "clean clone", tone: "safe" },
+  ]}
+/>
 
 ## Prerequisites
 
@@ -164,6 +181,19 @@ crab run --cache-only
 
 `--cache-only` exits with code 3 on a cache miss. That is useful in CI when a
 job should prove the committed lockfile and remote cache are complete.
+
+## Verify the cache boundary
+
+The clean-clone command is the decisive check because the original workspace
+still has local outputs and stage-cache entries. In the clone, remove any
+generated outputs before `--cache-only` if they were committed for review, then
+confirm the command restores the declared outputs without executing the Python
+scripts. Inspect `crab workflow status` and `crab metrics show` after replay.
+
+If the clone exits with code 3, rerun the producer with `--cache-push` or push
+the existing entries with `crab workflow push-cache --all`. Do not replace the
+cache-only check with a normal run when CI is intended to prove publication;
+normal execution can hide a missing remote cache entry by recomputing it.
 
 ## Next Steps
 

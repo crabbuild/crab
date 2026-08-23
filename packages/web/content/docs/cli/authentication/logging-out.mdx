@@ -1,6 +1,10 @@
 ---
 title: "Logging Out"
 description: "Revoke when possible and remove managed-service or direct-provider tokens without deleting unrelated profiles."
+meta:
+  contentType: How-to
+  goal: "Use Logging Out in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Logging Out
@@ -60,6 +64,34 @@ Logout does not delete:
 - managed repositories or memberships;
 - object-store data;
 - unrelated provider tokens unless `--all` is used.
+
+## Verify local removal
+
+Inspect authentication state after logging out:
+
+```bash
+crab logout crab.build
+crab auth status --json
+```
+
+The status output should no longer report a usable cached token for the
+selected identity. A non-secret service profile can still remain installed,
+and repository remotes can still point at that authority. The next operation
+that needs authentication should therefore return a login-required error
+rather than silently using a different credential.
+
+For machine decommissioning, run `crab logout --all`, verify local token state,
+and follow the identity provider's administrative revocation procedure if the
+device may have been compromised. Best-effort CLI revocation cannot replace an
+administrator disabling a stolen account or workload credential.
+
+## Choose the logout scope
+
+| Intent | Command | Preserved state |
+| --- | --- | --- |
+| Remove the active managed login | `crab logout` | Other authorities and direct providers |
+| Remove one installed authority | `crab logout <SERVICE>` | Every unrelated token entry |
+| Decommission the machine | `crab logout --all` | Non-secret profiles and repository remotes |
 
 ## Related
 

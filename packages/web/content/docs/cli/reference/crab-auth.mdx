@@ -1,6 +1,10 @@
 ---
 title: "crab auth"
 description: "Inspect and refresh Crab authentication state."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab auth."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab auth
@@ -26,3 +30,26 @@ crab auth refresh
 Use [`crab login`](/docs/cli/reference/crab-login) and
 [`crab logout`](/docs/cli/reference/crab-logout) to establish or clear the
 cached login session.
+
+## Inspect before refreshing
+
+`crab auth status` reads the locally configured authentication state and shows
+whether Crab has a usable cached session. It is the appropriate first command
+when a managed or authenticated storage operation fails. Status inspection does
+not establish a new login.
+
+Use refresh when a cached refresh credential exists but the current access
+token needs replacement:
+
+```bash
+crab auth status
+crab auth refresh
+crab auth status
+```
+
+The final status check verifies the new local state. Refresh can still fail if
+the identity-provider session was revoked, the configured service is
+unreachable, or the refresh credential expired. In those cases, use
+`crab login` to create a new session. Use `crab logout` when you intend to
+remove cached credentials rather than repair them. For scripts, inspect the
+subcommand help for structured-output support instead of parsing terminal text.

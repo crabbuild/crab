@@ -1,6 +1,10 @@
 ---
 title: "Tracking Files"
 description: "Configure which files Crab manages — how tracking patterns work and how they integrate with git's filter system."
+meta:
+  contentType: How-to
+  goal: "Use Tracking Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Tracking Files
@@ -57,7 +61,7 @@ crab track
 
 Output:
 
-```
+```text
 *.safetensors (filter=crab diff=crab merge=crab -text)
 *.bin (filter=crab diff=crab merge=crab -text)
 data/models/** (filter=crab diff=crab merge=crab -text)

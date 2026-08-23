@@ -1,6 +1,10 @@
 ---
 title: "crab stage"
 description: "Create and inspect workflow stages in crab.yaml."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab stage."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab stage
@@ -24,3 +28,26 @@ crab stage add --help
 ```
 
 Run [`crab run`](/docs/cli/reference/crab-run) after changing a stage.
+
+## Author and verify a stage
+
+`crab stage add` updates the workflow declaration; it does not execute the
+command. Use its subcommand help to select command, dependency, output,
+parameter, metric, and plot fields supported by the installed binary. Review
+the resulting YAML before running it.
+
+```bash
+crab stage add --help
+crab stage list
+git diff -- crab.yaml
+crab run <stage-name>
+```
+
+`crab stage list` is read-only and includes stages discovered from workflow
+files. The Git diff is the boundary check: it shows the command and tracked
+inputs that will contribute to future runs. After `crab run`, inspect the
+workflow lockfile and declared outputs before committing them.
+
+For complex definitions, editing `crab.yaml` directly may be clearer than a
+long command line. The stage helper and handwritten YAML share the same parser,
+so keep one canonical declaration and validate it with `crab stage list`.

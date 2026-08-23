@@ -1,6 +1,10 @@
 ---
 title: "Fetching Updates"
 description: "How Crab downloads remote objects and pre-warms the local cache for faster hydration."
+meta:
+  contentType: How-to
+  goal: "Use Fetching Updates in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Fetching Updates
@@ -40,7 +44,7 @@ crab fetch --include '*.safetensors'
 # Fetch everything except training data
 crab fetch --exclude 'data/train/*'
 
-# Fetch objects for all branches (not just HEAD)
+# Fetch objects for all branches, not only HEAD
 crab fetch --all
 ```
 
@@ -52,7 +56,7 @@ The most common pattern is fetching before hydrating:
 # Download objects while on fast network
 crab fetch --include 'models/**'
 
-# Later, hydrate is instant (reads from cache)
+# Later hydration can reuse the local cache
 crab hydrate 'models/**'
 ```
 
@@ -88,8 +92,12 @@ When the cache exceeds this limit, least-recently-used objects are evicted.
 
 `crab fetch` is not the same as `git pull`:
 
-- `git pull` (or `git fetch`) downloads git objects (commits, trees, pointer blobs) and updates refs.
-- `crab fetch` downloads chunk data (xorbs) into the local cache for faster hydration.
+| Operation | Moves | Changes working files |
+| --- | --- | --- |
+| `git fetch` | Git commits, trees, and pointer blobs | No |
+| `git pull` | Git objects and the selected branch integration | It can update pointers through checkout or merge |
+| `crab fetch` | Crab shards and xorbs into local cache | No |
+| `crab hydrate` | Reconstructed file bytes into the working tree | Yes |
 
 You typically need both: `git pull` to get the latest pointers, then `crab fetch` + `crab hydrate` to get the actual file content.
 

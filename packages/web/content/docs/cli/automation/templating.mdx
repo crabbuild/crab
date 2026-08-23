@@ -1,4 +1,13 @@
-# Templating Reference
+---
+title: "Reuse workflow values with templating"
+description: "Reference parameters, variables, and environment values in workflow stage definitions."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for Reuse workflow values with templating."
+  audience: "Crab users who need exact command or configuration behavior."
+---
+
+# Reuse workflow values with templating
 
 Crab supports `${expr}` variable substitution in `crab.yaml`. This
 lets you reference parameters, variables, and environment values directly
@@ -246,7 +255,7 @@ stages:
 
 ### Undefined reference
 
-```
+```text
 Error: WorkflowTemplateUndefined
   key: "model.learning_rate"
   field: "cmd"
@@ -263,7 +272,7 @@ stage. When possible, it suggests similar keys that do exist.
 
 ### Undefined environment variable
 
-```
+```text
 Error: WorkflowTemplateUndefined
   key: "env.DEPLOY_TARGET"
   field: "cmd"
@@ -277,7 +286,7 @@ Error: WorkflowTemplateUndefined
 
 ### Index out of bounds
 
-```
+```text
 Error: WorkflowTemplateUndefined
   key: "data.files[5]"
   field: "deps"

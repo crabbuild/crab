@@ -1,6 +1,10 @@
 ---
 title: "Experiments"
 description: "Run reproducible experiments with parameter overrides, compare results, and manage experiment history."
+meta:
+  contentType: How-to
+  goal: "Use Experiments in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab exp
@@ -10,7 +14,7 @@ overrides, then inspect, compare, and manage experiment history.
 
 ## Synopsis
 
-```
+```bash
 crab exp run [OPTIONS]
 crab exp show <ID> [--json]
 crab exp diff <ID_A> <ID_B> [--json]
@@ -45,7 +49,7 @@ Six subcommands are available:
   (newest first).
 
 - **`promote`** — create a git branch pointing at an experiment's base commit,
-  making it easy to share or build upon a successful experiment.
+  so a successful experiment can be shared or extended.
 
 - **`gc`** — prune old experiment metadata beyond a configurable retention
   count. Orphan temporary directories are swept as well.
@@ -158,7 +162,7 @@ crab exp promote 019077a2-... --branch feature/best-model
 ```
 
 Creates a git branch `feature/best-model` pointing at the experiment's base
-commit, making it easy to share or continue work from that point.
+commit, allowing the team to share or continue work from that point.
 
 ### Clean up old experiments
 

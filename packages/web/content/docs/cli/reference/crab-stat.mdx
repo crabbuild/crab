@@ -1,6 +1,10 @@
 ---
 title: "crab stat"
 description: "Show staging, push-plan, performance, and storage-class statistics."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab stat."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab stat
@@ -46,8 +50,14 @@ crab stat
 crab stat push-plan --verify --json
 ```
 
-## Related Commands
+Choose the view that matches the question: the default for staged inventory,
+`perf` for counters, `push-plan` for add-time transfer planning, and `classes`
+for storage-class totals. `push-plan --verify` reads planned payloads and checks
+their inventory before a push; it does not publish them. JSON output is useful
+for comparing the same view across runs without parsing the human table.
 
-- [`crab ls-files`](/docs/cli/reference/crab-ls-files) — list all tracked files.
-- [`crab du`](/docs/cli/reference/crab-du) — disk usage overview.
-- [`crab status`](/docs/cli/reference/crab-status) — hydration state.
+## Related commands
+
+- [`crab ls-files`](/docs/cli/reference/crab-ls-files): list tracked files.
+- [`crab du`](/docs/cli/reference/crab-du): inspect disk usage.
+- [`crab status`](/docs/cli/reference/crab-status): inspect hydration state.

@@ -1,6 +1,10 @@
 ---
 title: "Dehydrating Files"
 description: "How Crab replaces hydrated files with pointer blobs to free disk space while keeping content safely stored in the cloud."
+meta:
+  contentType: How-to
+  goal: "Use Dehydrating Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Dehydrating Files
@@ -14,7 +18,7 @@ Large files consume disk space even when you're not actively using them. A machi
 - **Reclaim disk space** — A 10 GB model file becomes a 128-byte pointer.
 - **Keep your working tree focused** — Only the files you're actively working on are materialized.
 - **Prepare for pulls** — Dehydrating before `git pull` keeps git status clean and avoids merge conflicts with pointer blobs.
-- **Speed up branch switching** — Switching branches with dehydrated files is instant since git only swaps tiny pointers.
+- **Reduce branch-switch work**: Git can replace small pointers instead of materialized large files.
 
 ## How It Works
 
@@ -64,7 +68,10 @@ git pull origin main
 crab hydrate --all
 ```
 
-This avoids the "hydrated files show as modified" issue, since git status compares working tree content against the index. When files are dehydrated (pointer in working tree, pointer in index), status is clean.
+This reduces the amount of full file content Git must carry through a branch
+change. A correctly configured Crab clean filter can keep unchanged hydrated
+files clean in Git status, but pointer-only working trees also reduce the local
+I/O required during checkout and merge.
 
 ### Dehydrate a directory
 
@@ -98,7 +105,7 @@ If you see "skipped (modified)" in the output, commit or stash your changes firs
 
 Dehydration and hydration form a cycle:
 
-```
+```text
 Full content ──dehydrate──▶ Pointer blob
 Pointer blob ──hydrate────▶ Full content
 ```

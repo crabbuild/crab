@@ -1,6 +1,10 @@
 ---
 title: "External providers"
 description: "Capability-accurate external dependency support in Crab workflows."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for External providers."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # External providers
@@ -24,6 +28,30 @@ Unsupported providers fail before a stage is spawned. Crab does not silently
 fall back to a different protocol or claim that an S3-compatible endpoint is
 equivalent to every provider. Large bodies are hashed incrementally; an ETag
 is treated as a provider validator and never as a Crab content hash.
+
+## Validate one dependency before a full run
+
+Declare a small external input, then inspect the workflow plan without spawning
+the stage command:
+
+```yaml title="crab.yaml"
+stages:
+  summarize:
+    cmd: python scripts/summarize.py
+    deps:
+      - https://data.example.com/releases/input.json
+    outs:
+      - reports/summary.json
+```
+
+```bash
+crab run summarize --dry-run --explain-miss
+```
+
+A supported provider should resolve and stream the dependency during the
+required inspection path. An unsupported scheme must fail before the stage is
+spawned. Keep the URL immutable or versioned when reproducibility depends on
+the remote body; an advisory HTTP validator is not a Crab content identity.
 
 The SSH/SFTP, WebDAV, HDFS/WebHDFS, Google Drive, and Aliyun OSS rows become
 supported only after dependency review, authentication tests, and retained

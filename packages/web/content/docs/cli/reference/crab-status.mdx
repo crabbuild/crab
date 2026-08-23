@@ -1,6 +1,10 @@
 ---
 title: "crab status"
 description: "Report hydration state of tracked files — which are hydrated, dehydrated, or modified."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab status."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab status
@@ -71,7 +75,7 @@ crab status --workflow --why train
 
 ## Output
 
-```
+```text
 Tracked files (5 total):
   H  models/weights.bin       1.2 GB  (hydrated)
   H  models/embeddings.bin    800 MB  (hydrated)

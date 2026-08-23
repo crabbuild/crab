@@ -1,6 +1,10 @@
 ---
 title: "crab staging"
 description: "Inspect and manage the local staging area where chunks are stored between add and push."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab staging."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab staging
@@ -11,6 +15,7 @@ Manage the staging area.
 
 ```bash
 crab staging stats
+crab staging verify
 crab staging clean [OPTIONS]
 ```
 
@@ -32,6 +37,18 @@ Print staging area statistics (read-only, never blocks writers).
 crab staging stats
 ```
 
+### verify
+
+Verify staged file metadata and chunk payloads before a push or after an
+interrupted add:
+
+```bash
+crab staging verify
+```
+
+Verification is read-only. A failure means the local staged closure should not
+be published until the affected paths are reset and added again.
+
 ### clean
 
 Purge stale staging data.
@@ -50,8 +67,8 @@ crab staging clean --force   # break stale locks from dead processes
 
 `crab staging stats` also accepts `--json`; `crab staging clean` does not.
 
-## Related Commands
+## Related commands
 
-- [`crab add`](/docs/cli/reference/crab-add) — writes to the staging area.
-- [`crab reset`](/docs/cli/reference/crab-reset) — unstage files.
-- [`crab du`](/docs/cli/reference/crab-du) — disk usage including staging.
+- [`crab add`](/docs/cli/reference/crab-add): write to the staging area.
+- [`crab reset`](/docs/cli/reference/crab-reset): unstage files.
+- [`crab du`](/docs/cli/reference/crab-du): inspect disk usage including staging.

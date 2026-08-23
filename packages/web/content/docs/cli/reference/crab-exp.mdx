@@ -1,6 +1,10 @@
 ---
 title: "crab exp"
 description: "Run and manage experiments with parameter, metric, cache, and queue state."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab exp."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab exp
@@ -42,7 +46,14 @@ crab exp ls
 crab exp diff <experiment-a> <experiment-b>
 ```
 
-## Related Commands
+Run `crab exp show <id>` or `crab exp diff` before applying or promoting an
+experiment. Experiment metadata is local until a push operation shares it with
+the configured remote. Applying a completed snapshot changes the current
+workspace, while promoting creates a branch at the experiment's base commit;
+inspect each subcommand help before choosing that boundary. Temporary worktrees
+keep normal runs isolated from uncommitted workspace edits.
 
-- [`crab run`](/docs/cli/reference/crab-run) — cached command execution.
-- [`crab workflow`](/docs/cli/reference/crab-workflow) — multi-step pipelines.
+## Related commands
+
+- [`crab run`](/docs/cli/reference/crab-run): execute cached commands.
+- [`crab workflow`](/docs/cli/reference/crab-workflow): manage multi-stage pipelines.

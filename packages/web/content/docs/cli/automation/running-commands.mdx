@@ -1,6 +1,10 @@
 ---
 title: "Running Commands"
 description: "Execute stages with content-addressed caching, DAG scheduling, and structured output."
+meta:
+  contentType: How-to
+  goal: "Use Running Commands in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab run
@@ -10,7 +14,7 @@ execution, named stages from `crab.yaml`, and full DAG scheduling.
 
 ## Synopsis
 
-```
+```bash
 crab run [OPTIONS] [--name <NAME> --deps <PATH>... --outs <PATH>... -- <CMD>...]
 crab run [OPTIONS] [<STAGE>]
 crab run [OPTIONS]
@@ -199,7 +203,7 @@ Supports `--json` and `--jsonl` (mutually exclusive).
 
 Each line is a complete JSON object:
 
-```
+```json
 {"schema":"workflow.stage.started","version":"1.0","timestamp":"2026-06-01T10:15:30.000Z","data":{"stage":"train","stage_hash":"a7f3b2..."}}
 {"schema":"workflow.stage.cache_checked","version":"1.0","timestamp":"2026-06-01T10:15:30.100Z","data":{"stage":"train","cache_hit":false,"hit_source":"none"}}
 {"schema":"workflow.stage.produced","version":"1.0","timestamp":"2026-06-01T10:15:42.000Z","data":{"stage":"train","stage_hash":"a7f3b2..."}}

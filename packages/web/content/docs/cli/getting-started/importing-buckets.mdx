@@ -1,6 +1,10 @@
 ---
 title: "Importing Existing Buckets"
 description: "Turn an existing cloud storage bucket full of files into a Crab-managed git repository — with history from versioned buckets."
+meta:
+  contentType: How-to
+  goal: "Use Importing Existing Buckets in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Importing Existing Buckets
@@ -27,7 +31,7 @@ crab import \
 
 When source and target are in the same bucket, Crab avoids re-uploading bytes — it creates the metadata layout alongside your existing objects.
 
-For quick imports, you can let Crab build the target `crab://` URL from a bucket and repo name:
+For direct imports, Crab can build the target `crab://` URL from a bucket and repository name:
 
 ```bash
 crab import s3://my-bucket/datasets/v2/ \

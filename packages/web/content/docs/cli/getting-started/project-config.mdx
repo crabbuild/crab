@@ -1,6 +1,10 @@
 ---
 title: "Project Configuration"
 description: "Reference for .crab.toml — the project-level config file that travels with your repository and auto-configures collaborators."
+meta:
+  contentType: Conceptual
+  goal: "Understand Project Configuration and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 # Project Configuration (`.crab.toml`)
@@ -138,7 +142,7 @@ default = "lazy"
 auto_patterns = ["*.py", "*.yaml", "requirements.txt", "README*"]
 ```
 
-Collaborators clone instantly (pointers only), then hydrate the specific model checkpoint they need.
+Collaborators clone Git metadata and pointers, then hydrate the specific model checkpoint they need.
 
 ### Monorepo with Large Assets
 

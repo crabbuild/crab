@@ -1,6 +1,10 @@
 ---
 title: "Managed Service Quickstart"
 description: "Sign in to Crab's hosted service, create a repository, push data, clone it, and fetch updates without provisioning cloud infrastructure."
+meta:
+  contentType: Tutorial
+  goal: "Preview the complete managed-service repository workflow."
+  audience: "Teams evaluating Crab's planned hosted control plane."
 ---
 
 # Managed Service Quickstart
@@ -23,18 +27,17 @@ organization and repository. `crab://crab.build//acme/models` is invalid.
 Bucket, region, physical prefix, and short-lived transfer credentials are
 runtime routing details and are never written into the repository remote.
 
-```mermaid
-sequenceDiagram
-    participant CLI as Crab CLI
-    participant Service as crab.build
-    participant Origin as Managed object storage
-    CLI->>Service: Login and create acme/models
-    CLI->>Service: Request repository access
-    Service-->>CLI: Short-lived scoped grant
-    CLI->>Origin: Transfer immutable repository objects
-    CLI->>Service: Finalize protected push
-    Service->>Origin: Publish canonical refs and manifest
-```
+<DocsPathDiagram
+  id="managed-repository-path"
+  title="Managed repository path"
+  caption="The service owns repository identity and canonical publication. The CLI transfers immutable objects with short-lived, scoped access."
+  steps={[
+    { label: "Sign in", detail: "OIDC session", tone: "control" },
+    { label: "Provision", detail: "acme/models", tone: "store" },
+    { label: "Transfer", detail: "immutable data", tone: "data" },
+    { label: "Publish", detail: "canonical refs", tone: "safe" },
+  ]}
+/>
 
 ## 1. Sign in
 

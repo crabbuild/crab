@@ -1,11 +1,15 @@
 ---
 title: "Virtual Filesystem Mount"
-description: "Mount a Crab repository as a virtual filesystem — access any file instantly without explicit hydration."
+description: "Mount a Crab repository as a virtual filesystem and read file content on demand without explicit hydration."
+meta:
+  contentType: How-to
+  goal: "Use Virtual Filesystem Mount in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Virtual Filesystem Mount
 
-The virtual filesystem mount gives you instant access to every file in a Crab repository without downloading anything upfront. Files appear at their full size in directory listings, but content is fetched from cloud storage only when you actually read them. It's like having the entire repository on disk, but only paying for what you touch.
+The virtual filesystem mount exposes every path in a Crab repository without downloading all file content upfront. Files appear at their full size in directory listings, but content is fetched from cloud storage when a reader opens the relevant ranges. Startup and read latency still depend on repository metadata, the selected backend, network conditions, and cache state.
 
 Crab uses NFS by default when available. The NFS backend starts a local loopback NFSv3 server and mounts it through your operating system's NFS client. FUSE is still available with `--backend=fuse` when you want tighter kernel integration and have fuse3 or macFUSE installed.
 
@@ -26,12 +30,12 @@ The mount handles all of these by presenting files on-demand.
 
 When you mount a repository:
 
-1. **Directory structure is instant** — Crab builds a snapshot from git's tree objects (lightweight metadata). `ls` and `find` work immediately.
+1. **Directory structure comes from metadata**: Crab builds a snapshot from Git tree objects. `ls` and `find` do not require full file hydration.
 2. **File reads are on-demand** — The first read of a file triggers chunk downloads. Subsequent reads are served from cache.
 3. **Writes go to an overlay** — Modified files are stored locally in an overlay layer until you explicitly commit or discard them.
 4. **Backend selection is explicit when needed** — `crab mount` defaults to `--backend=auto`, which prefers NFS. Use `--backend=fuse` for FUSE.
 
-## Quick Start
+## Mount a repository
 
 ### Mount a remote repository
 
@@ -156,7 +160,7 @@ crab mount --repo crab://bucket/repo --mountpoint /mnt/view --read-only
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|
-| `ls` / directory listing | Instant | Served from in-memory snapshot |
+| `ls` / directory listing | Metadata-only | Served from the in-memory snapshot |
 | First read of a file | Network-dependent | Downloads chunks from cloud |
 | Subsequent reads | Local disk speed | Served from chunk cache |
 | Small files (< 1 MB) | ~50-200ms first read | Single chunk fetch |
@@ -230,7 +234,7 @@ ls /dev/fuse
 | Use Case | Recommendation |
 |----------|---------------|
 | Working on specific files (editing, training) | Hydrate — full local copy, no latency |
-| Browsing / exploring a large repo | Mount — instant access, no upfront download |
+| Browsing or exploring a large repository | Mount for on-demand reads without an upfront full download |
 | CI pipeline with known file list | Hydrate with manifest — predictable, cacheable |
 | Viewing another branch | Mount — no working tree changes |
 | IDE / editor access | Mount for browsing, hydrate for editing |

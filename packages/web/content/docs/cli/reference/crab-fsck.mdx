@@ -1,6 +1,10 @@
 ---
 title: "crab fsck"
 description: "Verify repository integrity by checking all references and stored objects."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab fsck."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab fsck
@@ -9,7 +13,7 @@ Verify repository integrity.
 
 ## Synopsis
 
-```
+```bash
 crab fsck [OPTIONS]
 ```
 
@@ -43,7 +47,13 @@ crab fsck
 crab fsck --repair
 ```
 
-## Related Commands
+Run the read-only check first and preserve its output. `--repair` attempts only
+the repairs implemented as safe by the installed release; it is not a request
+to discard corrupt or missing referenced data. After any repair, run `crab
+fsck` again without the flag and confirm a clean terminal result. Use JSONL for
+long-running checks that need progress events and JSON for one final envelope.
 
-- [`crab doctor`](/docs/cli/reference/crab-doctor) — quick health checks.
-- [`crab gc`](/docs/cli/reference/crab-gc) — garbage collection.
+## Related commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor): run broad health checks.
+- [`crab gc`](/docs/cli/reference/crab-gc): garbage-collect unreachable objects.

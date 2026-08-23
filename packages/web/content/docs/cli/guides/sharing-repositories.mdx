@@ -1,6 +1,10 @@
 ---
 title: "Sharing Repositories"
 description: "Clone and work with a shared Crab repository as a collaborator, including hydrating files, making changes, and pushing back."
+meta:
+  contentType: Tutorial
+  goal: "Complete Sharing Repositories and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # Sharing Repositories
@@ -10,16 +14,30 @@ repository, hydrating the files you need, making changes, and pushing them
 back. If you are setting up a repository for the first time, see
 [Creating a Repository](/docs/cli/getting-started/first-repository) instead.
 
+<DocsPathDiagram
+  id="collaborator-path"
+  title="Collaborator publication path"
+  caption="A collaborator reads pointer state, materializes only the required files, stages new bytes, and publishes data before the branch ref advances."
+  steps={[
+    { label: "Clone", detail: "Git + pointers", tone: "git" },
+    { label: "Hydrate", detail: "selected files", tone: "data" },
+    { label: "Edit/add", detail: "stage outputs", tone: "control" },
+    { label: "Push", detail: "data + ref", tone: "store" },
+    { label: "Verify", detail: "fresh client", tone: "safe" },
+  ]}
+/>
+
 ## Overview
 
 Crab repositories use lazy checkout by default. When you clone, the working
-tree contains lightweight pointer stubs instead of full file content. This
-means cloning a 50 GB repository takes seconds, not hours. You then
+tree contains lightweight pointer stubs instead of full file content. Clone
+time depends on Git history and metadata rather than the total managed-file
+bytes. You then
 selectively hydrate only the files you need to work with.
 
 The typical collaborator workflow looks like this:
 
-1. Clone the repository (instant, lazy)
+1. Clone the Git metadata and Crab pointers
 2. Hydrate the files you need
 3. Make changes and stage them
 4. Dehydrate before pulling (if others have pushed)
@@ -43,7 +61,7 @@ cd ml-project
 ```
 
 This creates a local clone with pointer stubs for all tracked files. The
-clone is nearly instant regardless of how much data the repository holds.
+clone time depends on Git metadata rather than the total bytes in Crab-managed files.
 
 To clone a specific branch:
 
@@ -148,10 +166,10 @@ git pull
 crab hydrate '*.safetensors'
 ```
 
-The dehydrate-before-pull pattern is important: hydrated files show as
-modified in git's view (full content vs. pointer in the index). Dehydrating
-first ensures `git pull` merges cleanly on the pointer blobs, then you
-re-hydrate to get the updated content.
+Dehydrating before a pull reduces local file I/O and makes the pointer
+transition explicit. A correctly configured clean filter can keep unchanged
+hydrated files clean in Git status, so do not dehydrate a path that contains an
+uncommitted edit. Review `git status` and `crab status` first.
 
 See [`crab dehydrate`](/docs/cli/daily-workflow/dehydrating-files) for
 selective dehydration options.
@@ -192,8 +210,8 @@ crab workflow lockfile resolve
 - **Use shallow clones in CI.** Combine `--depth 1` with manifest hydration
   for the fastest possible pipeline setup.
 
-- **Dehydrate before switching branches.** This avoids large diffs caused by
-  hydrated content appearing as modifications on the new branch.
+- **Review before switching branches.** Commit or stash edits, then dehydrate
+  unchanged large files to reduce checkout I/O.
 
 - **Pre-warm the cache.** Run `crab fetch` after cloning to download chunk
   metadata into the local cache, making subsequent hydrations faster.

@@ -1,6 +1,10 @@
 ---
 title: "Experiment Queue"
 description: "Queue, execute, monitor, and stop batches of experiments with parameter sweeps and parallel workers."
+meta:
+  contentType: How-to
+  goal: "Use Experiment Queue in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab exp queue
@@ -10,7 +14,7 @@ processes, monitor queue status, and gracefully stop running workers.
 
 ## Synopsis
 
-```
+```bash
 crab exp queue --set-param <KEY=VALUE>... [--json]
 crab exp start [--jobs <N>] [--json]
 crab exp status [--json]
@@ -134,7 +138,7 @@ crab exp status
 ```
 
 Output:
-```
+```text
 Experiment queue (12 total):
   Pending:  5
   Running:  4

@@ -1,6 +1,10 @@
 ---
 title: "File Locking"
 description: "How Crab provides distributed advisory file locking to prevent concurrent edits on binary files."
+meta:
+  contentType: How-to
+  goal: "Use File Locking in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # File Locking
@@ -58,7 +62,7 @@ crab locks
 
 Output shows who holds each lock:
 
-```
+```text
 O models/character.fbx    alice@example.com    ID:abc123
   data/train.bin          bob@example.com      ID:def456
 ```
@@ -79,7 +83,7 @@ crab locks --path models/character.fbx
 
 If you try to lock a file that someone else has locked:
 
-```
+```text
 error: models/character.fbx is locked by bob@example.com
 ```
 

@@ -1,6 +1,10 @@
 ---
 title: "crab dehydrate"
 description: "Replace hydrated files with pointer blobs to free disk space while keeping content in the remote store."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab dehydrate."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab dehydrate
@@ -9,7 +13,7 @@ Replace hydrated files with pointer blobs, freeing disk space.
 
 ## Synopsis
 
-```
+```bash
 crab dehydrate [OPTIONS] [GLOBS]...
 ```
 
@@ -62,7 +66,7 @@ crab dehydrate 'models/*'
 
 ## Output
 
-```
+```text
 Dehydrating 5 files...
   models/weights.bin       1.2 GB → 128 B  ✓
   models/embeddings.bin    800 MB → 128 B  ✓
@@ -98,7 +102,7 @@ Supports `--json` and `--jsonl`.
 
 ### crab dehydrate --all --jsonl
 
-```
+```json
 {"schema":"dehydrate.event","version":"1.0","timestamp":"2026-04-24T18:32:17.500Z","type":"file_done","data":{"path":"models/weights.bin","bytes":1288490188,"duration_ms":120,"status":"ok"}}
 {"schema":"dehydrate.event","version":"1.0","timestamp":"2026-04-24T18:32:17.700Z","type":"file_done","data":{"path":"data/dirty.bin","bytes":0,"duration_ms":0,"status":"skipped"}}
 {"schema":"dehydrate.event","version":"1.0","timestamp":"2026-04-24T18:32:17.900Z","type":"result","data":{"files_dehydrated":3,"bytes_freed":2336462028,"files_skipped":1,"duration_ms":400}}

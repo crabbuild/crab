@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
+    "audit:docs-content": "node scripts/audit-docs-content.mjs",
     "check:links": "node scripts/check-links.mjs",
     "start": "next start",
     "lint": "eslint",

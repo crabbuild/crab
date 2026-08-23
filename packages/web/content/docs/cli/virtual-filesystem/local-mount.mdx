@@ -1,6 +1,10 @@
 ---
 title: "Local Mount"
-description: "Mount a local repository at a different path or branch without checking out — instant, no network required."
+description: "Mount a local repository at another path or branch without creating a separate checkout or requiring remote reads."
+meta:
+  contentType: How-to
+  goal: "Use Local Mount in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Local Mount
@@ -23,7 +27,7 @@ Common scenarios:
 - **Build artifacts** — mount a release tag to inspect its state
 - **Avoid stashing** — view another branch without disrupting uncommitted changes
 
-## Quick Start
+## Mount local content
 
 ```bash
 # View main while working on a feature branch
@@ -43,14 +47,14 @@ crab unmount --mountpoint /tmp/main-view
 |---|---|---|
 | **Source** | Local filesystem path | `crab://`, `s3://`, `gs://`, `az://` URL |
 | **Clone step** | None — uses `.git` directly | Blobless clone (cached) |
-| **Startup time** | Instant | First mount downloads tree objects |
+| **Startup work** | Build a local snapshot | First mount downloads tree objects |
 | **Network** | Not needed for git-native files | Required for initial clone and hydration |
 | **Pointer files** | Hydrated from object storage (needs network) | Hydrated from object storage |
 | **Cache directory** | `~/.crab/mounts/repos/<hash>/` (hash of absolute path) | `~/.crab/mounts/repos/<hash>/` (hash of URL) |
 
 The key difference: local mounts read tree and blob objects from the local
 `.git/objects` directory. For regular git files, this means zero network
-access and instant reads. The mount is ready as fast as the snapshot can be
+access and local reads. The mount is ready after the snapshot can be
 built from the local ODB.
 
 ## Pointer File Hydration
@@ -106,7 +110,7 @@ crab unmount --all
 ### Mount a bare repository
 
 ```bash
-# Bare repos work too — just point at the .git directory
+# Bare repositories work too; point at the .git directory
 crab mount --repo /srv/git/project.git --mountpoint /tmp/browse --ref=main
 ```
 

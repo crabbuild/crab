@@ -1,13 +1,25 @@
 ---
 title: "Troubleshooting"
 description: "Symptom-first diagnostics for the cache service."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Troubleshooting problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 # Troubleshooting
 
 Start with health, auth, and client configuration. Most cache-service incidents are one of those three.
 
-## Quick Checks
+| Symptom | Boundary to test first | Evidence |
+| --- | --- | --- |
+| No client traffic | Resolved client URL and health probe | Support bundle plus liveness response |
+| `401` or `403` | Authentication or policy | Authenticated admin request and `/v1/authz/check` |
+| `503` or `504` | Origin reachability | Readiness response and origin logs |
+| Repeated misses | Routing, capacity, or warming | Hit, miss, eviction, and origin-fetch counters |
+| Data mismatch | Immutable-object integrity | Object path, hashes, server version, and logs |
+
+## Run the first checks
 
 From a configured Crab repo, collect a redacted support bundle first:
 

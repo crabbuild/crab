@@ -1,6 +1,10 @@
 ---
 title: "Local Cache"
 description: "How Crab's local chunk cache works — speeding up hydration by keeping previously downloaded data on disk."
+meta:
+  contentType: How-to
+  goal: "Use Local Cache in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Local Cache
@@ -80,7 +84,7 @@ If you know you'll need certain files later (going offline, preparing for a demo
 crab fetch --include '*.safetensors'
 ```
 
-This downloads chunks without hydrating files — the data sits in cache ready for instant hydration later.
+This downloads chunks without hydrating files. Later hydration can reuse the cached data instead of fetching those chunks from the remote again.
 
 ## When to Clean vs. Prune
 

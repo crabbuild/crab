@@ -1,12 +1,23 @@
 ---
 title: "Params, Metrics, and Plots"
 description: "Track workflow inputs and results with params files, metric files, plot definitions, and diffs."
+meta:
+  contentType: How-to
+  goal: "Use Params, Metrics, and Plots in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Params, Metrics, and Plots
 
 Params explain why a run changed. Metrics and plots explain what changed.
 Together they make workflow commits and experiments reviewable.
+
+| Evidence | Answers | Commit when |
+| --- | --- | --- |
+| Params | Which declared input setting changed? | The value is part of reproducible stage identity |
+| Metrics | What scalar result changed? | Reviewers need the small result with the commit |
+| Plot source | How did a curve or distribution change? | The source is bounded and useful for later comparison |
+| Rendered plot | What should a reviewer see now? | Usually store as a CI artifact unless it is a product output |
 
 ## Params
 
@@ -133,6 +144,11 @@ crab plots diff origin/main HEAD --format html --output plot-diff.html
 
 Attach the JSON summaries and HTML plot output to CI artifacts. Reviewers can
 see both the setting change and the result change.
+
+Treat the three artifacts as one review chain. A metric improvement without the
+parameter diff can hide the input that produced it, while a parameter change
+without metrics provides no recorded outcome. Preserve units and comparison
+direction so a numeric delta has the same meaning across branches.
 
 ## Experiments Pattern
 

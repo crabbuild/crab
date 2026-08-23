@@ -1,6 +1,10 @@
 ---
 title: "Pushing Changes"
 description: "Upload staged Crab chunks and Git refs to a Crab remote."
+meta:
+  contentType: How-to
+  goal: "Use Pushing Changes in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Pushing Changes
@@ -18,6 +22,10 @@ For `crab://` remotes, `git push` can also invoke Crab's remote helper. Prefer
 `crab push` when you want Crab-specific progress, structured output, or native
 concurrent upload behavior.
 
+Use JSONL when a CI interface needs progress events and JSON when it needs one
+terminal envelope. In both modes, a nonzero exit status remains the publication
+failure signal.
+
 ## Common Commands
 
 | Goal | Command |
@@ -33,6 +41,26 @@ concurrent upload behavior.
 2. It checks which chunks already exist remotely.
 3. Missing chunks are packed into xorbs and uploaded.
 4. The remote ref is updated only after required data is available.
+
+## Verify publication
+
+Check the ref and repository closure after a successful push:
+
+```bash
+git ls-remote origin refs/heads/main
+crab fsck --json
+git status --short
+```
+
+The remote-ref hash should match the commit you intended to publish. The
+integrity check verifies referenced Crab objects rather than relying on the ref
+update alone, and the final Git status exposes local edits that were never part
+of the push.
+
+These are separate boundaries: a ref can identify the expected commit while a
+referenced object is missing, and a complete remote push can coexist with new
+uncommitted local work. Record structured push and integrity output in CI when
+another job will hydrate the result.
 
 ## Failure Recovery
 

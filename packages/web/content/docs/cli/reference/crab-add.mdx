@@ -1,6 +1,10 @@
 ---
 title: "crab add"
 description: "Stage files for crab using parallel chunking, bypassing git's serial filter protocol."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab add."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab add
@@ -9,7 +13,7 @@ Stage files for crab, bypassing git's serial filter protocol.
 
 ## Synopsis
 
-```
+```bash
 crab add [OPTIONS] <PATTERNS>...
 ```
 
@@ -78,7 +82,7 @@ git add models/weights.bin  # manually add later
 
 ## Output
 
-```
+```text
 Added 5 files (2.3 GB total, 847 chunks)
   models/weights.bin       1.2 GB  423 chunks
   models/embeddings.bin    800 MB  312 chunks

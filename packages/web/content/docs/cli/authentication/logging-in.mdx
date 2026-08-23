@@ -1,6 +1,10 @@
 ---
 title: "Logging In"
 description: "Authenticate to Crab's hosted or self-hosted managed service, with explicit compatibility for direct cloud-provider login."
+meta:
+  contentType: How-to
+  goal: "Use Logging In in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Logging In
@@ -84,6 +88,25 @@ to either location.
 Tokens refresh automatically when possible. If refresh is rejected, the
 operation returns `login_required`; sign in again rather than retrying the same
 token.
+
+## Verify the selected profile
+
+After login, verify both local state and one read-only managed-service request:
+
+```bash
+crab auth status --json
+crab organization list --service crab.build --limit 1 --json
+```
+
+The first command describes cached authentication state. The second crosses
+service discovery, token refresh, API compatibility, and authorization. For a
+self-hosted service, replace `crab.build` with its installed authority. Keep the
+authority explicit during diagnosis so an active profile change cannot make the
+probe address a different service.
+
+Login does not create repository membership or object-store permissions. If
+authentication succeeds but the read-only request is forbidden, inspect the
+principal's organization role instead of repeating browser login.
 
 ## Next steps
 

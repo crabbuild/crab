@@ -1,6 +1,10 @@
 ---
 title: "Mount Modes"
 description: "Choose between coordinator-style mounts and DaemonService mode for Crab virtual filesystem workflows."
+meta:
+  contentType: Conceptual
+  goal: "Understand Mount Modes and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 # Mount Modes
@@ -18,7 +22,7 @@ use a local copy-on-write overlay for writes. The difference is ownership:
 coordinator-style mounts are mountpoint-oriented and ephemeral; DaemonService is
 repo-name-oriented and persistent.
 
-## Quick Recommendation
+## Choose a mount mode
 
 | Need | Use |
 | --- | --- |
@@ -121,7 +125,7 @@ with other coordinator mounts.
 
 - No registration step.
 - Best default path for one-off and interactive use.
-- Easy to switch a mount between branches.
+- Supports switching a mount between branches.
 - Multiple active mounts share one coordinator, cache, and hydration pool.
 - One active mount is allowed per repo cache, so each cached checkout and
   snapshot database has a single owner.
@@ -231,7 +235,7 @@ agent runtime.
 
 - Requires repo registration before use.
 - More persistent state to manage.
-- Less convenient for quick branch views or one-off browsing.
+- Less convenient for temporary branch views or one-off browsing.
 - Overlay inspection is currently less rich than coordinator-style mounts:
   status reports dirty counts, and commit/remount workflows are repo-name
   based.
@@ -322,7 +326,7 @@ Use this when users or tools expect the same mount paths to exist every day.
 
 Use DaemonService when a higher-level app needs stable repo names, status
 polling, and service lifecycle control. Use coordinator-style mounts when the
-app is simply invoking `crab mount` for a user-selected path.
+app invokes `crab mount` for a user-selected path.
 
 ## Troubleshooting by Mode
 

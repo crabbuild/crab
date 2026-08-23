@@ -1,6 +1,10 @@
 ---
 title: "Store Verification"
 description: "How Crab verifies remote object store consistency by cross-referencing manifests against actual stored objects."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Store Verification problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Verifying Remote Store Consistency
@@ -51,7 +55,7 @@ crab fsck
 
 When healthy:
 
-```
+```bash
 crab fsck: repository is clean
 ```
 
@@ -61,7 +65,7 @@ crab fsck: repository is clean
 crab fsck --repair
 ```
 
-```
+```bash
 crab fsck: 2 error(s), 0 info, 2 repaired, 0 repair failure(s)
 ```
 

@@ -1,6 +1,10 @@
 ---
 title: "crab lock"
 description: "Lock files to prevent concurrent edits on binary files that cannot be merged."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab lock."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab lock
@@ -64,7 +68,13 @@ crab locks
 crab unlock --force models/character.fbx
 ```
 
-## Related Commands
+Verify ownership with `crab locks --path <PATH>` before using `--force`.
+Advisory locks coordinate Crab clients but do not stop edits made outside that
+workflow. Acquire the lock before editing, publish or abandon the change, then
+release it. A failed lock acquisition should be treated as a writer conflict,
+not bypassed without contacting the recorded owner.
 
-- [`crab push`](/docs/cli/reference/crab-push) — push respects locks.
-- [`crab status`](/docs/cli/reference/crab-status) — shows locked files.
+## Related commands
+
+- [`crab push`](/docs/cli/reference/crab-push): publish changes while respecting locks.
+- [`crab status`](/docs/cli/reference/crab-status): inspect file state.

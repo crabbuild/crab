@@ -1,9 +1,13 @@
 ---
-title: "Cache Service"
-description: "Enterprise guide to deploying and operating the Crab cache service."
+title: "Deploy a shared cache service"
+description: "Decide when to deploy Crab's shared cache, then plan one verified rollout without changing origin authority."
+meta:
+  contentType: "Landing"
+  goal: "Choose, deploy, and verify a cache-service rollout."
+  audience: "Platform engineers operating repeated Crab reads across developer and CI fleets."
 ---
 
-# Cache Service
+# Deploy a shared cache service
 
 The Crab cache service is a self-hosted acceleration layer for teams that work with large repositories, repeated hydrations, CI fleets, and shared binary data.
 
@@ -15,7 +19,19 @@ It helps reduce:
 
 The origin object store remains authoritative. If the cache service is unavailable, Crab falls back to normal origin reads and uploads.
 
-## When To Use It
+<DocsPathDiagram
+  id="cache-service-path"
+  title="Every cache read retains an origin proof path"
+  caption="A cache hit must verify against the requested immutable identity. A miss or unavailable service falls back to the authoritative origin."
+  steps={[
+    { label: "Client read", detail: "object identity", tone: "git" },
+    { label: "Cache lookup", detail: "local then shared", tone: "control" },
+    { label: "Origin fallback", detail: "authoritative bytes", tone: "store" },
+    { label: "Verify + store", detail: "hash-checked result", tone: "safe" },
+  ]}
+/>
+
+## Decide whether to deploy it
 
 Deploy the cache service when:
 
@@ -27,7 +43,7 @@ Deploy the cache service when:
 
 You usually do not need it for single-user workflows or small repositories.
 
-## What Users Get
+## Understand the operating outcome
 
 | Capability | Outcome |
 |------------|---------|
@@ -36,7 +52,7 @@ You usually do not need it for single-user workflows or small repositories.
 | Shared dedup knowledge | Pushes can skip chunks the cache service already knows about. |
 | Central metrics | Operators can track cache hit rate, bytes served, and origin miss behavior. |
 
-## Recommended Rollout
+## Roll out one repository first
 
 1. Copy `crab/deploy/cache-service/enterprise-onboarding/` and edit origin,
    policy, cache sizing, and secrets.
@@ -48,15 +64,15 @@ You usually do not need it for single-user workflows or small repositories.
 7. Roll the config out to CI and developer machines.
 8. Use separate cache instances for environments or tenants that must not share dedup visibility.
 
-## Documentation Map
+## Continue with the deployment path
 
-- [Deployment](/docs/cli/cache-service/deployment): Docker, Kubernetes, and systemd deployment.
-- [Quickstart](/docs/cli/cache-service/quickstart): start one service and connect one client.
-- [How It Works](/docs/cli/cache-service/architecture): request flow, data safety, and isolation model.
-- [Server Configuration](/docs/cli/cache-service/server-configuration): TOML reference.
-- [Client Configuration](/docs/cli/cache-service/client-configuration): Crab and CI configuration.
-- [Authentication](/docs/cli/cache-service/authentication): PSK, bearer, and proxy-terminated mTLS.
-- [Monitoring](/docs/cli/cache-service/monitoring): health checks, metrics, dashboards, and alerts.
-- [Runbooks](/docs/cli/cache-service/runbooks): alert response procedures.
-- [Operations](/docs/cli/cache-service/operations): sizing, scaling, upgrades, and recovery.
-- [Troubleshooting](/docs/cli/cache-service/troubleshooting): symptom-first diagnostics.
+- [Deploy the service](/docs/cli/cache-service/deployment): Docker, Kubernetes, and systemd deployment
+- [Complete the quickstart](/docs/cli/cache-service/quickstart): start one service and connect one client
+- [Understand the architecture](/docs/cli/cache-service/architecture): request flow, data safety, and isolation model
+- [Configure the server](/docs/cli/cache-service/server-configuration): TOML reference
+- [Configure clients](/docs/cli/cache-service/client-configuration): Crab and CI configuration
+- [Choose authentication](/docs/cli/cache-service/authentication): pre-shared key, bearer, and proxy-terminated mutual TLS
+- [Monitor the service](/docs/cli/cache-service/monitoring): health checks, metrics, dashboards, and alerts
+- [Use the runbooks](/docs/cli/cache-service/runbooks): alert response procedures
+- [Operate capacity](/docs/cli/cache-service/operations): sizing, scaling, upgrades, and recovery
+- [Troubleshoot symptoms](/docs/cli/cache-service/troubleshooting): symptom-first diagnostics

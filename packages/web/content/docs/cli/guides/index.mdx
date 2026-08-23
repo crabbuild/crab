@@ -1,28 +1,56 @@
 ---
-title: "Tutorials & Guides"
-description: "Step-by-step paths for learning Crab, onboarding a team, migrating repositories, and running Crab in CI."
+title: "Choose a guided workflow"
+description: "Follow an end-to-end path for daily work, collaboration, migration, or continuous integration."
+meta:
+  contentType: "Landing"
+  goal: "Select the tutorial that matches the repository outcome you need."
+  audience: "Developers and platform teams completing a multi-command Crab task."
 ---
 
-# Tutorials & Guides
+# Choose a guided workflow
 
-Use these guides when you want a complete workflow, not a command reference.
-Each guide starts with a goal, walks through the commands, and ends with checks
-you can run to confirm everything is working.
+Use these guides when the outcome spans several commands or systems. Each path begins with prerequisites, changes one boundary at a time, and ends with verification from another client or automation environment.
 
-## Learn Crab
+<DocsPathDiagram
+  id="guides-path"
+  title="A complete guide ends with independent proof"
+  caption="Local success is not the final state. Another client or CI runner must resolve the published Git ref and reconstruct the required file bytes."
+  steps={[
+    { label: "Prepare", detail: "prerequisites", tone: "control" },
+    { label: "Change", detail: "bounded workflow", tone: "data" },
+    { label: "Publish", detail: "remote closure", tone: "store" },
+    { label: "Verify", detail: "independent client", tone: "safe" },
+  ]}
+/>
 
-- [Working with Files](/docs/cli/daily-workflow) — Add, commit, push, fetch, and hydrate in the order most teams use every day.
-- [Sharing Repositories](/docs/cli/guides/sharing-repositories) — Set up a shared bucket and onboard collaborators.
+## Choose by desired outcome
 
-## Migrate Existing Work
+| You need to | Start with | Completion evidence |
+| --- | --- | --- |
+| Learn the daily file cycle | [Work with managed files](/docs/cli/daily-workflow) | A second checkout hydrates the committed file |
+| Onboard collaborators | [Share a repository](/docs/cli/guides/sharing-repositories) | Each collaborator resolves credentials and reads the same ref |
+| Move from Git Large File Storage (LFS) | [Migrate from Git LFS](/docs/cli/guides/migrating-from-lfs) | Pointer history and required large objects survive the cutover |
+| Move a Data Version Control (DVC) pipeline | [Migrate from DVC](/docs/cli/guides/migrating-from-dvc) | The generated workflow reproduces required outputs |
+| Run Crab in automation | [Integrate CI/CD](/docs/cli/guides/ci-cd-integration) | A clean runner fetches and hydrates only its declared working set |
 
-- [Migrating from Git LFS](/docs/cli/guides/migrating-from-lfs) — Move large-file history and team workflows from LFS to Crab.
-- [Migrating from DVC](/docs/cli/guides/migrating-from-dvc) — Transition data pipelines to Crab-backed storage.
+## Keep command reference separate
 
-## Operate Crab
+Tutorials explain ordering, safety boundaries, and verification. Reference pages list accepted syntax, flags, defaults, and output contracts.
 
-- [CI/CD Integration](/docs/cli/guides/ci-cd-integration) — Use Crab in automated build, training, and deployment pipelines.
-- [Enterprise Authentication](/docs/cli/authentication/enterprise-auth) — Choose an auth model for a team or company.
-- [Cache Service](/docs/cli/cache-service) — Deploy a shared cache for repeated clone, hydrate, and CI workloads.
+If you already know the operation, use the [CLI command index](/docs/cli/reference). If you need to understand why an operation exists, start with the relevant conceptual or workflow page before copying commands.
 
-For individual commands, use the [CLI reference](/docs/cli/reference).
+## Include failure proof in rehearsals
+
+Run migration and automation guides against a disposable repository before changing production state. Capture both the successful path and one expected failure, such as missing credentials, unavailable remote data, or a non-fast-forward ref.
+
+The failure should stop before publication and retain an actionable error. This proves that the workflow does not report success while leaving its data closure incomplete.
+
+Keep the rehearsal commands, expected exit status, and verification artifact in
+the repository or CI configuration so the same safety boundary can be tested
+after a Crab upgrade.
+
+## Continue with operational topics
+
+- [Choose enterprise authentication](/docs/cli/authentication/enterprise-auth)
+- [Deploy a shared cache](/docs/cli/cache-service)
+- [Diagnose repository failures](/docs/cli/diagnostics)

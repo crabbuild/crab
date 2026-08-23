@@ -1,6 +1,10 @@
 ---
 title: "crab plots"
 description: "Render workflow plots, comparisons, and plot templates."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab plots."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab plots
@@ -20,3 +24,26 @@ crab plots <COMMAND>
 | `templates` | List or print built-in and local plot templates |
 
 Use `crab plots <command> --help` for renderer, target, and output options.
+
+## Select the plot operation
+
+`show` renders the current plot declarations or explicitly selected target
+files. `diff` overlays data from two Git revisions, which helps connect a code
+or parameter change with a metric curve. `templates` exposes the Vega-Lite
+templates available to the renderer; it can list template names or print one
+template as JSON.
+
+Inspect each subcommand before choosing output paths:
+
+```bash
+crab plots show --help
+crab plots diff --help
+crab plots templates --help
+```
+
+Plot commands read workflow configuration and data. They do not run a stage to
+produce missing metrics. If a plot is empty, first confirm that the declared
+metric or plot file exists at the selected revision, then inspect
+[`crab metrics`](/docs/cli/reference/crab-metrics). Commit plot declarations
+with the workflow so collaborators and CI render the same view from the same
+inputs.

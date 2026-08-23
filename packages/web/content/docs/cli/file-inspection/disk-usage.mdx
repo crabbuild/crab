@@ -1,6 +1,10 @@
 ---
 title: "Disk Usage"
 description: "Understand where storage is consumed — working tree, staging area, cache, and remote."
+meta:
+  contentType: How-to
+  goal: "Use Disk Usage in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Disk Usage
@@ -17,7 +21,7 @@ Crab stores data in several places: hydrated files in your working tree, chunks 
 crab du
 ```
 
-```
+```text
 Working tree:
   Tracked files:     42
   Hydrated:          12 files (3.2 GB)
@@ -38,7 +42,7 @@ crab du --remote
 
 Adds the cloud storage size (requires network access):
 
-```
+```text
 Remote:              8.4 GB (crab://my-bucket/my-repo)
 ```
 
@@ -54,7 +58,7 @@ Remote:              8.4 GB (crab://my-bucket/my-repo)
 
 ## Reclaiming Space
 
-### Quick wins
+### Reduce local usage
 
 ```bash
 # Free the most space: dehydrate files you're not using
@@ -76,6 +80,29 @@ crab du
 # See what GC would reclaim remotely
 crab gc --dry-run
 ```
+
+## Verify the intended storage boundary
+
+Run `crab du` again after local cleanup and compare the same scope. A normal
+report can change because of working-tree, staging, or cache cleanup; remote
+usage changes only after a remote maintenance operation. `crab dehydrate` and
+`crab prune` are recoverable through later hydration or fetch, while `crab gc`
+can delete unreachable remote objects after its safety rules are satisfied.
+
+Do not compare a local-only report with a later `--remote` report as if the
+difference were newly allocated data. Save JSON output and whether network
+scope was enabled when tracking usage over time. Before clearing all staging
+data, confirm the related pointer commits were pushed or reset.
+
+## Choose the least destructive action
+
+Start with working-tree dehydration when full local files are no longer needed.
+Next, prune cache to its configured budget; those objects remain recoverable
+from the authoritative remote. Clean staging only after verifying that pending
+work was pushed or intentionally reset. Treat remote garbage collection as a
+separate maintenance workflow with a dry run, grace period, and integrity
+check. This order preserves the widest recovery path while addressing local
+disk pressure first.
 
 ## CLI Reference
 

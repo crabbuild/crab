@@ -1,6 +1,10 @@
 ---
 title: "Authoring Stages"
 description: "Write production Crab workflow stages with DVC-style helpers, YAML, templating, foreach, matrix, and external resources."
+meta:
+  contentType: How-to
+  goal: "Use Authoring Stages in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Authoring Stages
@@ -8,6 +12,19 @@ description: "Write production Crab workflow stages with DVC-style helpers, YAML
 You can author stages with `crab stage add` or by editing `crab.yaml` directly.
 Use the helper when you want DVC-style command ergonomics. Edit YAML directly
 when the stage uses advanced fields, shared defaults, `foreach`, or `matrix`.
+
+<DocsPathDiagram
+  id="stage-authoring-path"
+  title="Stage authoring path"
+  caption="Declare one logical result, validate its graph and fields, inspect the execution plan, then run and review the lockfile."
+  steps={[
+    { label: "Declare", detail: "cmd + inputs", tone: "git" },
+    { label: "Validate", detail: "schema + DAG", tone: "control" },
+    { label: "Plan", detail: "dry run", tone: "warning" },
+    { label: "Execute", detail: "outs + lock", tone: "data" },
+    { label: "Review", detail: "Git diff", tone: "safe" },
+  ]}
+/>
 
 ## Use `crab stage add`
 

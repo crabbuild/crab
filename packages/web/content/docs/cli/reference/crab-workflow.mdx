@@ -1,6 +1,10 @@
 ---
 title: "crab workflow"
 description: "Inspect and manage Crab workflow lockfiles, DAGs, journals, and stage caches."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab workflow."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab workflow
@@ -41,11 +45,22 @@ crab workflow dag --format mermaid
 ### Inspect journals and publish cache entries
 
 ```bash
-crab workflow journal
+crab workflow journal ls
 crab workflow push-cache --all
 ```
 
-## Related Commands
+The administrative commands do not all share the same mutation boundary.
+`status` and `dag` inspect declared state. `journal ls` and `journal show` read
+run evidence, while `journal gc` removes older terminal journals. `push-cache`
+uploads local stage-cache entries to the configured remote and therefore
+requires network access and write authorization.
 
-- [`crab run`](/docs/cli/reference/crab-run) — execute workflow stages with caching.
-- [`crab exp`](/docs/cli/reference/crab-exp) — manage experiment runs.
+Start diagnosis with `status`, render `dag` when dependencies are unclear, and
+inspect the relevant journal before pruning anything. Run each nested
+`--help` because target selectors, formats, and retention controls belong to the
+subcommand.
+
+## Related commands
+
+- [`crab run`](/docs/cli/reference/crab-run): execute workflow stages with caching.
+- [`crab exp`](/docs/cli/reference/crab-exp): manage experiment runs.

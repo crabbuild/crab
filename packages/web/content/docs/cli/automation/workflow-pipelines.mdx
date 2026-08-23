@@ -1,6 +1,10 @@
 ---
 title: "Workflow Pipelines"
 description: "Manage workflow pipeline cache by pushing local stage cache entries to the remote store."
+meta:
+  contentType: How-to
+  goal: "Use Workflow Pipelines in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab workflow
@@ -64,7 +68,7 @@ crab workflow push-cache --all
 Scans `.crab/cache/stages/`, identifies entries without a remote counterpart,
 and uploads them. Output:
 
-```
+```text
 Pushed 12 entries, skipped 3 (already remote), 0 errors
 ```
 

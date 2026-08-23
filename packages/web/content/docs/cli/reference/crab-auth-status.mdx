@@ -1,6 +1,10 @@
 ---
 title: "crab auth status"
 description: "Display authentication state for the configured direct cloud provider."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab auth status."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab auth status
@@ -9,14 +13,14 @@ Display current authentication state.
 
 ## Synopsis
 
-```
+```bash
 crab auth status [OPTIONS]
 ```
 
 ## Description
 
 `crab auth status` shows token state and non-secret settings for the direct
-cloud provider selected by `[auth].provider` — whether its token is present,
+cloud provider selected by `[auth].provider`: whether its token is present,
 expired, and refreshable.
 
 For a live managed-service profile check, use an authenticated control-plane
@@ -41,10 +45,17 @@ For conceptual background, see [Authentication Status](/docs/cli/authentication/
 
 ```bash
 crab auth status
+crab auth status --json
 ```
 
-## Related Commands
+The command reads local authentication state and does not prove that the remote
+provider will accept the next request. Use the managed-service probe above or a
+read-only provider operation when the incident requires an end-to-end access
+check. JSON output is appropriate for diagnostics that need stable token-state
+fields without exposing the credential itself.
 
-- [`crab login`](/docs/cli/reference/crab-login) — authenticate.
-- [`crab logout`](/docs/cli/reference/crab-logout) — remove credentials.
-- [`crab env`](/docs/cli/reference/crab-env) — full environment info.
+## Related commands
+
+- [`crab login`](/docs/cli/reference/crab-login): authenticate.
+- [`crab logout`](/docs/cli/reference/crab-logout): remove credentials.
+- [`crab env`](/docs/cli/reference/crab-env): inspect environment information.

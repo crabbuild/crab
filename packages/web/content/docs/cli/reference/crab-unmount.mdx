@@ -1,6 +1,10 @@
 ---
 title: "crab unmount"
 description: "Unmount one or all active Crab virtual filesystem mounts."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab unmount."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab unmount
@@ -28,3 +32,27 @@ crab unmount --all
 
 Use [`crab mount`](/docs/cli/reference/crab-mount) to inspect and manage a
 mount before unmounting it.
+
+## Verify mount shutdown
+
+Prefer an explicit mountpoint when a machine has more than one active mount.
+`--all` is intended for maintenance or shutdown flows where every Crab mount
+on the machine should stop. It is broader than unmounting the repository in
+the current directory.
+
+Inspect state before and after the operation:
+
+```bash
+crab mount status
+crab unmount --mountpoint /mnt/models
+crab mount status
+```
+
+The final status must no longer report the selected active mount. If a process
+still has files open, the operating system or mount backend can delay or reject
+shutdown; close readers and retry the same explicit path. Use `--all` only
+after reviewing the mount list, because it can interrupt unrelated repository
+views owned by the same Crab installation.
+
+Unmounting removes the filesystem view. It does not delete repository objects,
+working-tree files outside the mount, or cached data.

@@ -1,6 +1,10 @@
 ---
 title: "crab logs"
 description: "View and manage diagnostic logs for troubleshooting."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab logs."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab logs
@@ -50,7 +54,13 @@ crab logs show <NAME>
 crab logs clear
 ```
 
-## Related Commands
+List files before selecting `show`, because a displayed label and a filesystem
+name may differ across releases. Capture `last` or the relevant named log before
+running `clear`; clearing is destructive and removes every diagnostic log file
+managed by this command. Logs can contain repository paths and provider
+details, so review them before sharing outside the incident team.
 
-- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.
-- [`crab errors`](/docs/cli/reference/crab-errors) — error code lookup.
+## Related commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor): run health checks.
+- [`crab errors`](/docs/cli/reference/crab-errors): look up error codes.

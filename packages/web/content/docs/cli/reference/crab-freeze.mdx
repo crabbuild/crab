@@ -1,12 +1,22 @@
 ---
 title: "crab freeze"
 description: "Freeze or unfreeze workflow stages for cached execution."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab freeze."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab freeze and unfreeze
 
 Freeze workflow stages so `crab run` skips them until they are explicitly
 unfrozen.
+
+Freezing changes the selected stage declaration in its workflow YAML. It does
+not delete cached results or edit the stage command. Use it when an output is
+accepted for now and downstream work should continue without executing that
+stage again. Unfreeze the stage when its command or inputs should participate
+in normal invalidation and execution.
 
 ## Synopsis
 
@@ -22,3 +32,22 @@ crab freeze prepare-data train
 crab unfreeze train
 crab freeze --json prepare-data
 ```
+
+## Behavior and verification
+
+Each target must resolve to a declared workflow stage. Crab discovers workflow
+files recursively, updates the file that owns the stage, and reports whether
+the declaration changed. Repeating `crab freeze` on an already frozen stage is
+therefore safe: its structured result reports `changed: false`.
+
+Review the YAML change before committing it:
+
+```bash
+git diff -- crab.yaml '*.workflow.yaml'
+crab run prepare-data train
+```
+
+The diff should show `frozen: true` for frozen stages or remove the frozen state
+after `crab unfreeze`. A subsequent run skips a frozen target but can continue
+through the rest of the selected graph. Commit the workflow-file change when
+the frozen state should be shared with collaborators and CI.

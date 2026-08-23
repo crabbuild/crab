@@ -1,13 +1,17 @@
 ---
 title: "Creating a Repository"
 description: "Set up a new Crab repository connected to your cloud storage bucket."
+meta:
+  contentType: Tutorial
+  goal: "Complete Creating a Repository and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # Creating a Repository
 
 A Crab repository is a standard git repository with a cloud storage backend for large files. Crab handles the wiring between git and your bucket in a short setup flow.
 
-## Quick Start
+## Create the repository
 
 ```bash
 mkdir my-project && cd my-project
@@ -55,7 +59,7 @@ the two phases separately.
 
 ### Example output
 
-```
+```text
 Initialized git repository in /home/user/my-project
 Filter driver installed
 Auto-tracked 3 extension(s) in .gitattributes
@@ -95,7 +99,7 @@ crab setup --no-auto-track
 
 Crab URLs follow the pattern `crab://<bucket>/<repo-path>`:
 
-```
+```bash
 crab://my-bucket/my-project
 crab://company-data/team-ml/experiment-42
 crab://us-west-2-storage/repos/frontend-assets

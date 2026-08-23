@@ -1,6 +1,10 @@
 ---
 title: "Workflow Journal"
 description: "Inspect, list, and garbage-collect workflow run journals stored in .crab/workflow/runs/."
+meta:
+  contentType: How-to
+  goal: "Use Workflow Journal in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab workflow journal
@@ -10,7 +14,7 @@ workflow execution.
 
 ## Synopsis
 
-```
+```bash
 crab workflow journal show <RUN_ID> [--json]
 crab workflow journal ls [--json]
 crab workflow journal gc [--keep <N>] [--dry-run] [--json]
@@ -84,7 +88,7 @@ crab workflow journal ls
 
 Output:
 
-```
+```text
 RUN_ID                                OUTCOME       STARTED_AT
 a1b2c3d4-e5f6-7890-abcd-ef1234567890  success       1715356923
 f0e1d2c3-b4a5-6789-0abc-def123456789  in_flight     1715356800
@@ -99,7 +103,7 @@ crab workflow journal show a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 Output:
 
-```
+```text
 run_id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
 outcome: success
 started_at: 1715356923

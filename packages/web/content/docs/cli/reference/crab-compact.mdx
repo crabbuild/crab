@@ -1,6 +1,10 @@
 ---
 title: "crab compact"
 description: "Compact metadata and storage layers for improved performance."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab compact."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab compact
@@ -37,7 +41,14 @@ crab compact --repo org/models --bucket my-bucket --dry-run
 crab compact --repo org/models --bucket my-bucket
 ```
 
-## Related Commands
+Start with `--dry-run` and record the proposed shard count and size. Apply the
+same repository prefix, bucket, and maximum shard size only after the plan
+matches the intended remote. Compaction changes shard layout while preserving
+the referenced file content; clients should still reconstruct the same bytes.
+Run the repository integrity checks after a maintenance window if compaction is
+part of a larger storage operation.
 
-- [`crab repack`](/docs/cli/reference/crab-repack) — consolidate remote Git pack files.
-- [`crab gc`](/docs/cli/reference/crab-gc) — garbage collection.
+## Related commands
+
+- [`crab repack`](/docs/cli/reference/crab-repack): consolidate remote Git pack files.
+- [`crab gc`](/docs/cli/reference/crab-gc): garbage collection.

@@ -1,11 +1,28 @@
 ---
 title: "Quickstart"
 description: "Start a cache service, connect one Crab client, and verify cache traffic."
+meta:
+  contentType: Tutorial
+  goal: "Complete Quickstart and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # Quickstart
 
 This guide starts one cache service and connects one Crab repository to it.
+
+<DocsPathDiagram
+  id="cache-service-quickstart-path"
+  title="Cache-service validation path"
+  caption="Prove origin access first, then server readiness, client authentication, cache warming, and a repeated read served from shared cache."
+  steps={[
+    { label: "Preflight", detail: "origin + config", tone: "warning" },
+    { label: "Start", detail: "live + ready", tone: "control" },
+    { label: "Connect", detail: "client auth", tone: "git" },
+    { label: "Warm", detail: "immutable data", tone: "data" },
+    { label: "Verify", detail: "hit counters", tone: "safe" },
+  ]}
+/>
 
 ## Prerequisites
 
@@ -124,3 +141,10 @@ curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
 ```
 
 Then clear only the local client cache and run a hydrate or fetch. The cache-server logs should show object reads through the service.
+
+Capture the stats response before and after the repeated read. A valid result
+shows cache hits increasing while origin fetches remain unchanged for objects
+that were already warmed. If origin fetches also increase, keep the service in
+the path but continue with [Troubleshooting](/docs/cli/cache-service/troubleshooting);
+the fallback preserves correctness while you inspect routing, eviction, and
+object classification.

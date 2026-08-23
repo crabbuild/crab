@@ -1,6 +1,10 @@
 ---
 title: "crab du"
 description: "Report disk usage for tracked files, staging area, and cache."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab du."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab du
@@ -39,8 +43,14 @@ crab du
 crab du --remote
 ```
 
-## Related Commands
+The default report reads local state. `--remote` adds a network-dependent size
+query and can take longer or fail independently of the local calculation. Use
+the JSON form when comparing usage over time, and record whether remote data
+was requested so two reports describe the same scope. This command reports
+usage; it does not evict cached objects or delete remote data.
 
-- [`crab status`](/docs/cli/reference/crab-status) — file state overview.
-- [`crab staging`](/docs/cli/reference/crab-staging) — staging area details.
-- [`crab cache`](/docs/cli/reference/crab-cache) — cache management.
+## Related commands
+
+- [`crab status`](/docs/cli/reference/crab-status): inspect file state.
+- [`crab staging`](/docs/cli/reference/crab-staging): inspect staging details.
+- [`crab cache`](/docs/cli/reference/crab-cache): manage the cache.

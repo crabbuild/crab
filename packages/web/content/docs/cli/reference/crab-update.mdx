@@ -1,6 +1,10 @@
 ---
 title: "crab update"
 description: "Check for and install the latest Crab GitHub release."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab update."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab update
@@ -27,3 +31,26 @@ crab update --yes
 
 Use the package manager or release installer that owns a managed installation
 when your environment does not permit self-updates.
+
+## Check before installing
+
+`--check` performs the release comparison without replacing the current binary.
+Use it in scheduled checks and report the JSON result to the operator that owns
+the installation. A normal update asks for confirmation; `--yes` is intended
+for an already approved non-interactive update. `--force` reinstalls the latest
+release even when its version matches the current one.
+
+Record the current and resulting versions around an update:
+
+```bash
+crab version
+crab update --check
+crab update --yes
+crab version
+```
+
+The final version check verifies which binary is now on the command path. If
+Crab was installed through Homebrew, a system package, or an image build, use
+that owner to update it so package metadata and rollback procedures remain
+consistent. Do not combine `--force` with unattended automation unless the
+installation owner explicitly requires a reinstall.

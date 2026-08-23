@@ -1,6 +1,10 @@
 ---
 title: "crab prune"
 description: "Evict local cache objects to free disk space."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab prune."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab prune
@@ -9,7 +13,7 @@ Evict local cache objects.
 
 ## Synopsis
 
-```
+```bash
 crab prune [OPTIONS]
 ```
 
@@ -37,7 +41,13 @@ crab prune --dry-run
 crab prune
 ```
 
-## Related Commands
+Always inspect `--dry-run` before eviction when cache warmth matters. The real
+operation removes local cache objects until configured budgets are satisfied;
+referenced remote data remains intact and can be fetched again. A later read may
+therefore incur network transfer and reconstruction time. Use JSONL to record
+individual progress events or JSON when automation needs one terminal result.
 
-- [`crab gc`](/docs/cli/reference/crab-gc) — remove unreachable remote objects.
-- [`crab cache`](/docs/cli/reference/crab-cache) — manage the chunk cache.
+## Related commands
+
+- [`crab gc`](/docs/cli/reference/crab-gc): remove unreachable remote objects.
+- [`crab cache`](/docs/cli/reference/crab-cache): manage the chunk cache.

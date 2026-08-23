@@ -1,6 +1,10 @@
 ---
 title: "Version Info"
 description: "How to check your installed Crab version, build details, and supported schema versions for compatibility and bug reports."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Version Info problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Checking Version Information
@@ -13,7 +17,7 @@ Knowing which version of Crab you're running matters for compatibility checks, b
 crab version
 ```
 
-```
+```bash
 crab 1.0.15 (<build commit>)
 built at <UTC timestamp>
 ```
@@ -36,6 +40,18 @@ crab version
 crab env
 crab doctor
 ```
+
+Also confirm which executable the shell resolves when multiple installations
+may exist:
+
+```bash
+command -v crab
+crab version --json
+```
+
+The semantic version identifies the release. The Git SHA and build timestamp
+distinguish an official release binary from a locally rebuilt binary with the
+same package version. Keep all three fields in incident evidence.
 
 ## Schema Registry
 
@@ -62,6 +78,27 @@ crab version --json
   }
 }
 ```
+
+## Check compatibility without guessing
+
+Repository and service compatibility errors should name the required version.
+Do not infer compatibility from release dates alone. Compare the installed
+version with the explicit minimum, then use `crab update --check` or the package
+manager that owns the installation.
+
+After upgrading, open a new shell if command hashing or environment activation
+can retain an older path. Run `command -v crab` and `crab version` again before
+rerunning the failed operation. In CI, print version JSON near the start of the
+job so later structured output can be interpreted against the schema registry
+from the same binary.
+
+## Use the schema registry in automation
+
+The registry reports the output schemas supported by this installed release.
+An integration can check for the required schema name and version before
+running a command, then reject an incompatible runner with a clear message.
+This is safer than parsing human help text or assuming every machine was
+updated at the same time.
 
 ## CLI Reference
 

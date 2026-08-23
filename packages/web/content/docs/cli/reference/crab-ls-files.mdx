@@ -1,6 +1,10 @@
 ---
 title: "crab ls-files"
 description: "List files tracked by Crab with their sizes and chunk information."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab ls-files."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab ls-files
@@ -49,8 +53,14 @@ crab ls-files --long --size
 crab ls-files --name-only
 ```
 
-## Related Commands
+Use `--name-only` as input to path-oriented shell tools, and use `--json` when
+another program needs hashes, sizes, or hydration state. `--debug` exposes all
+available fields and is intended for diagnosis rather than a stable display
+contract. The command is read-only: it reports the repository-wide tracked set
+without hydrating files or changing tracking patterns.
 
-- [`crab status`](/docs/cli/reference/crab-status) — hydration state of files.
-- [`crab track`](/docs/cli/reference/crab-track) — manage tracking patterns.
-- [`crab du`](/docs/cli/reference/crab-du) — report storage usage by object class and tier.
+## Related commands
+
+- [`crab status`](/docs/cli/reference/crab-status): inspect hydration state.
+- [`crab track`](/docs/cli/reference/crab-track): manage tracking patterns.
+- [`crab du`](/docs/cli/reference/crab-du): report storage usage.

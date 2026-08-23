@@ -1,6 +1,10 @@
 ---
 title: "crab unadopt"
 description: "Restore staged Crab-adopted pointers to their original full files."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab unadopt."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab unadopt
@@ -24,3 +28,27 @@ crab unadopt [OPTIONS]
 crab unadopt --pattern '*.bin'
 crab unadopt --json
 ```
+
+## Confirm the pre-commit boundary
+
+`crab unadopt` is a pre-commit reversal. It depends on the staged chunks created
+by the earlier adopt operation and restores the working-tree bytes from that
+local state. It is not a history-rewrite command and does not recover content
+after the required staging data has been removed.
+
+Inspect the path before and after restoration:
+
+```bash
+git diff --cached --name-only
+crab unadopt --pattern 'models/*.bin'
+git status --short
+```
+
+The selected paths should return to full files and leave the Git index. Review
+the remaining staged set before committing. A pattern restricts which detected
+pointers are restored; quote shell globs so Crab, rather than the shell,
+matches them.
+
+Use [`crab undo`](/docs/cli/reference/crab-undo) when you want Crab to detect
+reversible staged pointer changes automatically. Use a Git history operation
+for a change that is already committed.
