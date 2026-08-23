@@ -389,7 +389,8 @@ impl DurableMarkReader {
                 let value = partition
                     .as_ref()
                     .strip_prefix(prefix.as_ref())
-                    .and_then(|suffix| suffix.strip_suffix('/'))
+                    .map(|suffix| suffix.strip_prefix('/').unwrap_or(suffix))
+                    .map(|suffix| suffix.strip_suffix('/').unwrap_or(suffix))
                     .unwrap_or_default();
                 if value.len() != 4
                     || !value
@@ -502,6 +503,19 @@ mod tests {
         let mut reader =
             DurableMarkReader::new(store, ".crab/gc/runs/run/marks".to_owned(), "shards");
         assert!(reader.contains("not-a-hash").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn key_partitions_accept_object_store_common_prefixes() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let prefix = ".crab/gc/runs/run/marks".to_owned();
+        let mut writer = DurableMarkWriter::new_keys(store.clone(), prefix.clone(), "roots");
+        writer.add("repo/manifest").await.unwrap();
+        writer.finish().await.unwrap();
+
+        let reader = DurableMarkReader::new_keys(store, prefix, "roots");
+        let expected = blake3::hash("repo/manifest".as_bytes()).to_hex()[..4].to_owned();
+        assert_eq!(reader.key_partitions().await.unwrap(), vec![expected]);
     }
 
     #[tokio::test]
