@@ -374,7 +374,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   return (
     <figure
       ref={figureRef}
-      className="relative left-1/2 my-10 w-[min(48.75rem,calc(100vw-2rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] lg:w-[min(48.75rem,calc(100vw-24.5rem))]"
+      className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(55.5rem,calc(100vw-2rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] lg:w-[min(55.5rem,calc(100vw-24.5rem))]"
     >
       <div className="border-b border-slate-800/90 bg-[#0b111a] px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
