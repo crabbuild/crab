@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" role="img" aria-labelledby="title desc">
+  <title id="title">Push uploads immutable dependencies before committing refs</title>
+  <desc id="desc">A sequence from Git through the Crab remote helper to Git packs and Xet objects in cloud storage. The ref journal transaction becomes visible only after both active data paths are durable and verified.</desc>
+  <defs>
+    <linearGradient id="bg-push" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="1" stop-color="#101d31"/></linearGradient>
+    <linearGradient id="commit-grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#075985"/><stop offset="1" stop-color="#0e7490"/></linearGradient>
+    <marker id="push-arrow-slate" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#64748b"/></marker>
+    <marker id="push-arrow-sky" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#38bdf8"/></marker>
+    <filter id="push-glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <path id="pack-upload-route" d="M300 352H560H845"/>
+    <path id="xorb-upload-route" d="M300 472H560H845"/>
+    <path id="commit-route" d="M300 592H560H845"/>
+    <style>
+      text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}.strong{fill:#f8fafc}.label{fill:#cbd5e1}.muted{fill:#94a3b8}.animated{display:block}
+      .commit-switch{animation:commit-switch 6.4s ease-in-out infinite}.commit-ring{animation:commit-ring 6.4s ease-out infinite;transform-box:fill-box;transform-origin:center}.derived{animation:derived 6.4s ease-in-out infinite}
+      @keyframes commit-switch{0%,70%{fill:#17263a;stroke:#475569}77%,92%{fill:#075985;stroke:#7dd3fc}100%{fill:#17263a;stroke:#475569}}
+      @keyframes commit-ring{0%,72%{opacity:0;transform:scale(.75)}78%{opacity:.9}94%,100%{opacity:0;transform:scale(1.45)}}
+      @keyframes derived{0%,83%{opacity:.28}91%,100%{opacity:1}}
+      @media (prefers-reduced-motion:reduce){.animated{display:none}.commit-switch,.commit-ring,.derived{animation:none}}
+    </style>
+  </defs>
+
+  <g id="background">
+    <rect width="1200" height="780" rx="28" fill="url(#bg-push)"/>
+    <path d="M0 116H1200M0 710H1200" stroke="#1e293b"/>
+  </g>
+
+  <g id="containers">
+    <rect x="40" y="150" width="216" height="520" rx="18" fill="#0b1728" stroke="#29384d"/>
+    <rect x="282" y="150" width="244" height="520" rx="18" fill="#101d30" stroke="#334155"/>
+    <rect x="552" y="150" width="256" height="520" rx="18" fill="#0b2132" stroke="#155e75"/>
+    <rect x="834" y="150" width="326" height="520" rx="18" fill="#0b1728" stroke="#29384d"/>
+  </g>
+
+  <g id="connections" fill="none">
+    <path d="M256 214H282" stroke="#64748b" stroke-width="2" marker-end="url(#push-arrow-slate)"/>
+    <path d="M526 214H552" stroke="#64748b" stroke-width="2" marker-end="url(#push-arrow-slate)"/>
+    <path d="M526 352H552" stroke="#64748b" stroke-width="2" marker-end="url(#push-arrow-slate)"/>
+    <path d="M808 352H834" stroke="#64748b" stroke-width="2" marker-end="url(#push-arrow-slate)"/>
+    <path d="M526 472H552" stroke="#38bdf8" stroke-width="2" marker-end="url(#push-arrow-sky)"/>
+    <path d="M808 472H834" stroke="#38bdf8" stroke-width="2" marker-end="url(#push-arrow-sky)"/>
+    <path d="M526 592H552" stroke="#38bdf8" stroke-width="2" marker-end="url(#push-arrow-sky)"/>
+    <path d="M808 592H834" stroke="#38bdf8" stroke-width="2" marker-end="url(#push-arrow-sky)"/>
+    <path d="M996 523V548" stroke="#475569" stroke-width="1.5" marker-end="url(#push-arrow-slate)"/>
+    <path d="M996 630V650" stroke="#475569" stroke-width="1.5" marker-end="url(#push-arrow-slate)"/>
+  </g>
+
+  <g id="nodes">
+    <rect x="70" y="187" width="156" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="70" y="273" width="156" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="70" y="445" width="156" height="54" rx="11" fill="#0c2537" stroke="#0e7490"/>
+
+    <rect x="312" y="187" width="184" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="312" y="273" width="184" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="312" y="325" width="184" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="312" y="445" width="184" height="54" rx="11" fill="#0c2537" stroke="#0e7490"/>
+    <rect x="312" y="565" width="184" height="54" rx="11" fill="#082f49" stroke="#38bdf8"/>
+
+    <rect x="582" y="187" width="196" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="582" y="325" width="196" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="582" y="445" width="196" height="54" rx="11" fill="#0c2537" stroke="#0e7490"/>
+    <rect x="582" y="565" width="196" height="54" rx="11" fill="#082f49" stroke="#38bdf8"/>
+
+    <rect x="864" y="187" width="266" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="864" y="325" width="266" height="54" rx="11" fill="#111f33" stroke="#475569"/>
+    <rect x="864" y="429" width="266" height="94" rx="11" fill="#0c2537" stroke="#0e7490"/>
+    <rect class="commit-switch" x="864" y="548" width="266" height="82" rx="11" fill="#17263a" stroke="#475569" stroke-width="1.5"/>
+    <rect class="derived" x="920" y="650" width="154" height="34" rx="9" fill="#111f33" stroke="#334155" opacity=".28"/>
+    <circle class="commit-ring animated" cx="997" cy="589" r="48" fill="none" stroke="#38bdf8" stroke-width="2"/>
+  </g>
+
+  <g id="labels">
+    <text x="40" y="52" fill="#f8fafc" font-size="27" font-weight="750">Push makes data durable, then moves the ref</text>
+    <text x="40" y="83" fill="#94a3b8" font-size="15">The normal Git lane is always present. The Xet lane activates only when reachable pointer blobs require it.</text>
+
+    <text x="148" y="172" fill="#64748b" font-size="10" font-weight="750" letter-spacing="1.2" text-anchor="middle">GIT</text>
+    <text x="404" y="172" fill="#64748b" font-size="10" font-weight="750" letter-spacing="1.2" text-anchor="middle">REMOTE HELPER</text>
+    <text x="680" y="172" fill="#38bdf8" font-size="10" font-weight="750" letter-spacing="1.2" text-anchor="middle">VERIFY + PREPARE</text>
+    <text x="997" y="172" fill="#64748b" font-size="10" font-weight="750" letter-spacing="1.2" text-anchor="middle">OBJECT STORAGE</text>
+
+    <text x="148" y="209" fill="#f8fafc" class="mono" font-size="12" text-anchor="middle">git push</text>
+    <text x="148" y="226" fill="#94a3b8" font-size="10" text-anchor="middle">refspec batch</text>
+    <text x="148" y="295" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Reachable graph</text>
+    <text x="148" y="313" fill="#94a3b8" font-size="10" text-anchor="middle">commits · trees · blobs</text>
+    <text x="148" y="467" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Pointer recipes</text>
+    <text x="148" y="485" fill="#7dd3fc" font-size="10" text-anchor="middle">only when present</text>
+
+    <text x="404" y="209" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Read base state</text>
+    <text x="404" y="226" fill="#94a3b8" font-size="10" text-anchor="middle">expected-old refs</text>
+    <text x="404" y="295" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Acquire ref lock</text>
+    <text x="404" y="313" fill="#94a3b8" font-size="10" text-anchor="middle">same-ref serialization</text>
+    <text x="404" y="347" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Prepare Git pack</text>
+    <text x="404" y="365" fill="#94a3b8" font-size="10" text-anchor="middle">pure Git fast path</text>
+    <text x="404" y="467" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Classify chunks</text>
+    <text x="404" y="485" fill="#7dd3fc" font-size="10" text-anchor="middle">reuse or upload</text>
+    <text x="404" y="587" fill="#f8fafc" font-size="12" font-weight="750" text-anchor="middle">Build ref transaction</text>
+    <text x="404" y="605" fill="#7dd3fc" font-size="10" text-anchor="middle">bound to old state</text>
+
+    <text x="680" y="209" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Evaluate edits</text>
+    <text x="680" y="226" fill="#94a3b8" font-size="10" text-anchor="middle">NFF · delete · atomic</text>
+    <text x="680" y="347" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Strict pack proof</text>
+    <text x="680" y="365" fill="#94a3b8" font-size="10" text-anchor="middle">connectivity before refs</text>
+    <text x="680" y="467" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Pack xorbs + shards</text>
+    <text x="680" y="485" fill="#7dd3fc" font-size="10" text-anchor="middle">bounded + backpressured</text>
+    <text x="680" y="587" fill="#f8fafc" font-size="12" font-weight="750" text-anchor="middle">Validate closure</text>
+    <text x="680" y="605" fill="#7dd3fc" font-size="10" text-anchor="middle">all dependencies durable</text>
+
+    <text x="997" y="209" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Current refs + manifest</text>
+    <text x="997" y="226" fill="#94a3b8" font-size="10" text-anchor="middle">coherent base snapshot</text>
+    <text x="997" y="347" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Immutable Git pack</text>
+    <text x="997" y="365" fill="#94a3b8" font-size="10" text-anchor="middle">always for new Git objects</text>
+    <text x="997" y="455" fill="#f8fafc" font-size="12" font-weight="700" text-anchor="middle">Immutable Xet objects</text>
+    <text x="997" y="477" fill="#7dd3fc" font-size="10" text-anchor="middle">xorbs · shards · segmented indexes</text>
+    <text x="997" y="499" fill="#94a3b8" font-size="10" text-anchor="middle">skipped for pointer-free pushes</text>
+    <text x="997" y="578" fill="#f8fafc" font-size="13" font-weight="800" text-anchor="middle">COMMIT REF JOURNAL</text>
+    <text x="997" y="600" fill="#bae6fd" font-size="10" font-weight="650" text-anchor="middle">new commit becomes visible</text>
+    <text x="997" y="618" fill="#94a3b8" font-size="10" text-anchor="middle">locks can now release</text>
+    <text x="997" y="672" fill="#94a3b8" font-size="10" text-anchor="middle">compact manifest</text>
+
+    <text x="40" y="742" fill="#64748b" font-size="11">PUSH ORDERING · IMMUTABLE BEFORE VISIBLE · DERIVED INDEXES ARE REPAIRABLE</text>
+  </g>
+
+  <g id="animation" class="animated">
+    <circle r="5" fill="#cbd5e1" filter="url(#push-glow)"><animateMotion dur="6.4s" repeatCount="indefinite" keyTimes="0;0.26;0.64;1" keyPoints="0;0;.55;1" calcMode="linear"><mpath href="#pack-upload-route"/></animateMotion></circle>
+    <circle r="5" fill="#22d3ee" filter="url(#push-glow)"><animateMotion dur="6.4s" begin=".35s" repeatCount="indefinite" keyTimes="0;0.3;0.68;1" keyPoints="0;0;.55;1" calcMode="linear"><mpath href="#xorb-upload-route"/></animateMotion></circle>
+    <circle r="5" fill="#38bdf8" filter="url(#push-glow)"><animateMotion dur="6.4s" begin=".65s" repeatCount="indefinite" keyTimes="0;0.58;1" keyPoints="0;0;1" calcMode="linear"><mpath href="#commit-route"/></animateMotion></circle>
+  </g>
+</svg>
