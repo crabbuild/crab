@@ -1649,6 +1649,29 @@ impl From<crab_git::pack::PackError> for CrabError {
     }
 }
 
+impl From<crab_git::repack::RepackError> for CrabError {
+    fn from(error: crab_git::repack::RepackError) -> Self {
+        match error {
+            crab_git::repack::RepackError::Io { source, .. } => Self::Io(source),
+            crab_git::repack::RepackError::Pack { source } => source.into(),
+            crab_git::repack::RepackError::SourceIntegrity { pack_id, reason } => {
+                Self::CorruptObject {
+                    path: pack_id,
+                    reason,
+                }
+            }
+            crab_git::repack::RepackError::EmptyRefs => {
+                Self::Internal("cannot repack a repository without refs".to_owned())
+            }
+            crab_git::repack::RepackError::Locator { source } => Self::Internal(source.to_string()),
+            crab_git::repack::RepackError::Git { operation, status } => {
+                Self::Internal(format!("{operation} failed with {status}"))
+            }
+            _ => Self::Internal(error.to_string()),
+        }
+    }
+}
+
 impl From<crab_git::ref_resolve::RefResolveError> for CrabError {
     fn from(error: crab_git::ref_resolve::RefResolveError) -> Self {
         match error {

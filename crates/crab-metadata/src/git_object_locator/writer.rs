@@ -954,6 +954,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sweep_preserves_locator_coverage_for_retained_pack() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let retained = writer.bind_packs(&[pack(1)]).await.expect("bind retained")[0];
+        writer
+            .write_locations(retained, &[entry(1)])
+            .await
+            .expect("write retained location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("cover retained pack");
+
+        let interrupted = writer
+            .bind_packs(&[pack(2)])
+            .await
+            .expect("bind interrupted")[0];
+        writer
+            .write_locations(interrupted, &[entry(2)])
+            .await
+            .expect("write interrupted location");
+        let sweep = writer
+            .sweep_unreferenced(&HashSet::from([retained.pack_slot]))
+            .await
+            .expect("sweep interrupted pack");
+
+        assert_eq!(sweep.pack_rows_deleted, 1);
+        assert!(writer.binding_has_covered_objects(retained));
+        assert!(!writer.binding_has_covered_objects(interrupted));
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
     async fn checkpoints_publish_multiple_generations_without_closing_writer() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")

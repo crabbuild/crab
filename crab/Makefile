@@ -260,7 +260,7 @@ RELEASE_DIST_ARTIFACTS := \
 # Release build flags
 RELEASE_FLAGS := --release
 UNAME_S := $(shell uname -s)
-CRAB_CLI_FEATURES_NO_FUSE := simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs
+CRAB_CLI_FEATURES_NO_FUSE := simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch
 CRAB_CLI_FEATURES_WITH_FUSE := $(CRAB_CLI_FEATURES_NO_FUSE),fuse
 
 # Cargo workspace puts artifacts in the workspace root target dir,

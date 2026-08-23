@@ -103,7 +103,7 @@ fn bulk_data_bytes(bulk: &BulkData) -> u64 {
     shard_segment_bytes + pack_segment_bytes + shard_index_bytes + pack_index_bytes
 }
 
-async fn upsert_pack_metadata(
+pub(crate) async fn upsert_pack_metadata(
     store: &Store,
     path: &ObjectPath,
     pack_id: &str,
@@ -5732,7 +5732,11 @@ async fn publish_pack_locator_inventory(
         .map(|binding| binding.pack_slot)
         .collect::<HashSet<_>>();
     let sweep = writer.sweep_unreferenced(&retained_slots).await?;
-    let rebuild_all = sweep.pack_rows_deleted != 0;
+    debug!(
+        object_rows_deleted = sweep.object_rows_deleted,
+        pack_rows_deleted = sweep.pack_rows_deleted,
+        "swept stale Git locator rows"
+    );
     let mut evidence = Vec::new();
     for pack in current_packs {
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
@@ -5740,7 +5744,10 @@ async fn publish_pack_locator_inventory(
                 "committed pack id is invalid for locator publication: {error}"
             ))
         })?;
-        if !rebuild_all && covered.contains(&pack_id) {
+        // Pack bytes are immutable. Sweeping an obsolete slot removes only
+        // rows owned by that slot; covered retained packs remain valid and do
+        // not need another full index scan.
+        if covered.contains(&pack_id) {
             continue;
         }
         let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {

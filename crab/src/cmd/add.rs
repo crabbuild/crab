@@ -3529,6 +3529,21 @@ mod tests {
 
     #[test]
     #[cfg(feature = "gix-pathmatch")]
+    fn classifier_matches_root_pathspec_for_nested_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "qualification/*.bin filter=crab\n",
+        )
+        .unwrap();
+        let cls = TrackedClassifier::open(dir.path()).unwrap();
+
+        assert!(cls.is_tracked(Path::new("qualification/model.bin")));
+        assert!(!cls.is_tracked(Path::new("other/model.bin")));
+    }
+
+    #[test]
+    #[cfg(feature = "gix-pathmatch")]
     fn classifier_is_empty_without_crab_filter_patterns() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".gitattributes"), "*.txt text\n").unwrap();

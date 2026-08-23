@@ -652,7 +652,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs
+          cargo build -p crab --release --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch
           .\target\release\crab.exe --version
 
       - name: Build and execute the Unix release candidate
@@ -799,11 +799,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"
+          no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"
           with_fuse_features="${no_fuse_features},fuse"
           if [ "${{ matrix.windows }}" = "true" ]; then
             cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab \
-              --no-default-features --features simd-accel,tier,watch,nfs
+              --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch
             cargo build --release --locked --target ${{ matrix.target }} -p crab --bin crab-nfs-mount \
               --no-default-features
           else

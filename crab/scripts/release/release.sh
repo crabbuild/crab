@@ -36,7 +36,7 @@ CARGO="${CARGO:-cargo}"
 REPLICA_RELEASE_EVIDENCE_DIR="${REPLICA_RELEASE_EVIDENCE_DIR:-}"
 REPLICA_RELEASE_EVIDENCE_OUTPUT="${REPLICA_RELEASE_EVIDENCE_OUTPUT:-replica-release-evidence-verify.json}"
 REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID="${REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID:-}"
-CRAB_CLI_FEATURES_NO_FUSE="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs"
+CRAB_CLI_FEATURES_NO_FUSE="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"
 CRAB_CLI_FEATURES_WITH_FUSE="${CRAB_CLI_FEATURES_NO_FUSE},fuse"
 
 DRY_RUN=false
@@ -519,7 +519,7 @@ build_windows() {
     PATH="$xwin_env_path" "$CARGO" xwin build --release --locked --target "$triple" \
         --manifest-path "$CRAB_DIR/Cargo.toml" \
         -p crab --bin crab \
-        --no-default-features --features simd-accel,tier,watch,nfs
+        --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch
 
     PATH="$xwin_env_path" "$CARGO" xwin build --release --locked --target "$triple" \
         --manifest-path "$CRAB_DIR/Cargo.toml" \

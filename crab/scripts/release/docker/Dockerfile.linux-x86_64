@@ -6,7 +6,7 @@ ARG CRAB_BUILD_VERSION
 ARG GIT_SHA
 ENV CRAB_BUILD_VERSION=${CRAB_BUILD_VERSION}
 ENV GIT_SHA=${GIT_SHA}
-ENV CRAB_CLI_FEATURES_NO_FUSE=simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs
+ENV CRAB_CLI_FEATURES_NO_FUSE=simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch
 ENV CRAB_CLI_FEATURES_WITH_FUSE=${CRAB_CLI_FEATURES_NO_FUSE},fuse
 
 RUN apt-get update && apt-get install -y \

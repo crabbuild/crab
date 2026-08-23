@@ -1,9 +1,8 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,7 +29,6 @@ use crab_storage::{repo_pack_index_path, repo_pack_path, repo_pack_reverse_index
 use crab_xet::hash::MerkleHash;
 
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
-
 /// Configuration for the repack operation.
 #[derive(Debug, Clone)]
 pub struct RepackConfig {
@@ -40,6 +38,8 @@ pub struct RepackConfig {
     pub dry_run: bool,
     /// Maximum number of concurrent pack/index downloads.
     pub download_concurrency: usize,
+    /// Maximum CAS retries while repairing pack metadata sidecars.
+    pub max_cas_retries: u32,
 }
 
 impl Default for RepackConfig {
@@ -48,6 +48,7 @@ impl Default for RepackConfig {
             lock_ttl: Duration::from_mins(5),
             dry_run: false,
             download_concurrency: 8,
+            max_cas_retries: 64,
         }
     }
 }
@@ -95,19 +96,9 @@ pub struct RepackSummary {
     pub elapsed_ms: u64,
 }
 
-struct GeneratedPack {
-    pack_path: PathBuf,
-    index_path: PathBuf,
-    reverse_index_path: PathBuf,
-    pack_id: String,
-    pack_hash: [u8; 32],
-    pack_size: u64,
-    index_hash: [u8; 32],
-    index_size: u64,
-    reverse_index_hash: [u8; 32],
-    reverse_index_size: u64,
-    object_count: u64,
-    git_sha1: String,
+struct RepackedPack<'a> {
+    generated: &'a crab_git::repack::GeometricRepackedPack,
+    entry: PackManifestEntry,
 }
 
 /// Consolidate all packs selected by one pinned manifest generation.
@@ -192,18 +183,24 @@ async fn run_repack_locked(
         ));
     }
     if config.dry_run {
-        return Ok(outcome(packs_before, 1, bytes_before, bytes_before, start));
+        return Ok(outcome(
+            packs_before,
+            packs_before,
+            bytes_before,
+            bytes_before,
+            start,
+        ));
     }
     let visibility = read_current_visibility(store, router, &manifest).await?;
 
     let temp = tempfile::tempdir()?;
-    let git_dir = temp.path().join("source.git");
-    initialize_bare_repository(&git_dir)?;
+    let download_dir = temp.path().join("downloads");
+    std::fs::create_dir_all(&download_dir)?;
     download_source_packs(
         store,
         router,
         &packs,
-        &git_dir.join("objects/pack"),
+        &download_dir,
         config.download_concurrency,
         cancel,
     )
@@ -211,31 +208,80 @@ async fn run_repack_locked(
     check_cancelled(cancel)?;
 
     let refs = manifest.refs.values().cloned().collect::<BTreeSet<_>>();
-    let output_dir = temp.path().join("output");
-    std::fs::create_dir_all(&output_dir)?;
-    let git_dir_for_pack = git_dir.clone();
     let refs_for_pack = refs.clone();
-    let output_for_pack = output_dir.clone();
-    let generated = tokio::task::spawn_blocking(move || {
-        build_and_validate_pack(&git_dir_for_pack, &output_for_pack, &refs_for_pack)
+    let download_dir_for_pack = download_dir.clone();
+    let source_packs = packs.clone();
+    let repacked_repository = tokio::task::spawn_blocking(move || {
+        let sources = source_packs
+            .iter()
+            .map(|pack| crab_git::repack::RepackSource {
+                canonical_id: pack.pack_id.clone(),
+                path: download_dir_for_pack.join(format!("pack-{}.pack", pack.pack_id)),
+                size: pack.size,
+                object_count: pack.object_count,
+            })
+            .collect::<Vec<_>>();
+        crab_git::repack::repack_repository_geometric(&sources, &refs_for_pack)
+            .map_err(CrabError::from)
     })
     .await
     .map_err(|error| CrabError::Internal(format!("repack worker join failed: {error}")))??;
     check_cancelled(cancel)?;
 
-    upload_generated_pack(store, router, &generated, cancel).await?;
+    let source_by_id = packs
+        .iter()
+        .cloned()
+        .map(|pack| (pack.pack_id.clone(), pack))
+        .collect::<HashMap<_, _>>();
+    let repacked = repacked_repository
+        .packs()
+        .iter()
+        .map(|generated| {
+            let entry = source_by_id
+                .get(&generated.pack_id)
+                .cloned()
+                .unwrap_or_else(|| PackManifestEntry {
+                    pack_id: generated.pack_id.clone(),
+                    size: generated.pack_size,
+                    content_hash: generated.pack_id.clone(),
+                    ref_tips: refs.iter().cloned().collect(),
+                    object_count: generated.object_count,
+                });
+            RepackedPack { generated, entry }
+        })
+        .collect::<Vec<_>>();
+    for pack in repacked.iter().filter(|pack| pack.generated.is_new) {
+        upload_generated_pack(store, router, pack.generated, cancel).await?;
+        crab_metadata::pack_origin::record_verified_pack_origin(
+            store.as_storage(),
+            router.repo_prefix(),
+            &pack.entry,
+        )
+        .await?;
+    }
+    for pack in &repacked {
+        if !pack.generated.is_new {
+            ensure_remote_reverse_index(store, router, pack.generated, cancel).await?;
+        }
+        crate::git::push::upsert_pack_metadata(
+            store,
+            &router.pack_metadata_path(&pack.entry.pack_id),
+            &pack.entry.pack_id,
+            pack.entry.object_count,
+            pack.entry.ref_tips.clone(),
+            config.max_cas_retries,
+        )
+        .await?;
+    }
+    let replacement_entries = repacked
+        .iter()
+        .map(|pack| pack.entry.clone())
+        .collect::<Vec<_>>();
     let new_generation = manifest.generation.checked_add(1).ok_or_else(|| {
         CrabError::Internal("manifest generation overflow during repack".to_owned())
     })?;
-    let replacement = PackManifestEntry {
-        pack_id: generated.pack_id.clone(),
-        size: generated.pack_size,
-        content_hash: generated.pack_id.clone(),
-        ref_tips: refs.into_iter().collect(),
-        object_count: generated.object_count,
-    };
     let (pack_index_hash, _index, pack_write) =
-        compact_pack_index(new_generation, std::slice::from_ref(&replacement))?;
+        compact_pack_index(new_generation, &replacement_entries)?;
     upload_segmented_bulk(
         store,
         router,
@@ -279,17 +325,21 @@ async fn run_repack_locked(
         shard_index_hash: manifest_hash_or_default(&committed.shard_index_hash)?,
         pack_index_hash: manifest_hash_or_default(&committed.pack_index_hash)?,
     };
+    let committed_packs = repacked
+        .iter()
+        .map(|pack| CommittedPackIndex {
+            pack: &pack.entry,
+            idx_path: pack.generated.index_path(),
+            rev_path: pack.generated.reverse_index_path(),
+            git_sha1: &pack.generated.git_sha1,
+        })
+        .collect::<Vec<_>>();
     if let Err(error) = publish_committed_pack_locators(
         store,
         router,
-        &[CommittedPackIndex {
-            pack: &replacement,
-            idx_path: &generated.index_path,
-            rev_path: &generated.reverse_index_path,
-            git_sha1: &generated.git_sha1,
-        }],
+        &committed_packs,
         anchor,
-        Some(std::slice::from_ref(&replacement)),
+        Some(&replacement_entries),
         config.lock_ttl,
         cancel,
     )
@@ -300,15 +350,15 @@ async fn run_repack_locked(
 
     info!(
         generation = committed.generation,
-        pack_id = %replacement.pack_id,
+        packs_after = replacement_entries.len(),
         packs_before,
         "repack manifest committed"
     );
     Ok(outcome(
         packs_before,
-        1,
+        replacement_entries.len(),
         bytes_before,
-        generated.pack_size,
+        replacement_entries.iter().map(|pack| pack.size).sum(),
         start,
     ))
 }
@@ -335,8 +385,8 @@ fn repack_manifest(mut manifest: Manifest, generation: u64, pack_index_hash: Str
     manifest.pusher = None;
     manifest.session_id = format!("repack-{generation}");
     manifest.pack_index_hash = pack_index_hash;
-    // `run` validates the replacement pack against the complete temporary ODB
-    // before this helper commits its single-pack inventory.
+    // `run` validates every replacement pack against the complete temporary
+    // ODB before this helper commits its compacted inventory.
     manifest.seal_git_validation();
     manifest
 }
@@ -471,163 +521,6 @@ async fn download_source_packs(
     Ok(())
 }
 
-fn initialize_bare_repository(git_dir: &Path) -> Result<()> {
-    run_git(
-        Command::new("git")
-            .arg("init")
-            .arg("--bare")
-            .arg("--quiet")
-            .arg(git_dir),
-        "initialize temporary bare repository",
-    )
-}
-
-fn build_and_validate_pack(
-    source_git_dir: &Path,
-    output_dir: &Path,
-    refs: &BTreeSet<String>,
-) -> Result<GeneratedPack> {
-    if refs.is_empty() {
-        return Err(CrabError::Internal(
-            "cannot repack a manifest with no refs".to_owned(),
-        ));
-    }
-    let pack_path = output_dir.join("replacement.pack");
-    let index_path = output_dir.join("replacement.idx");
-    let reverse_index_path = output_dir.join("replacement.rev");
-    let stdout = File::create(&pack_path)?;
-    let mut child = Command::new("git")
-        .arg(format!("--git-dir={}", source_git_dir.display()))
-        .arg("pack-objects")
-        .arg("--stdout")
-        .arg("--revs")
-        .arg("--delta-base-offset")
-        .arg("--window-memory=256m")
-        .arg("--depth=64")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(stdout))
-        .spawn()?;
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            CrabError::Internal("git pack-objects did not expose stdin".to_owned())
-        })?;
-        for oid in refs {
-            writeln!(stdin, "{oid}")?;
-        }
-    }
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(CrabError::Internal(format!(
-            "git pack-objects failed with {status}"
-        )));
-    }
-    run_git(
-        Command::new("git")
-            .arg("index-pack")
-            .arg("-o")
-            .arg(&index_path)
-            .arg(&pack_path)
-            .stdout(Stdio::null()),
-        "index replacement pack",
-    )?;
-    write_pack_reverse_index(&index_path, &reverse_index_path)
-        .map_err(crab_git::pack::PackError::from)?;
-    if !reverse_index_path.is_file() {
-        return Err(CrabError::Internal(
-            "reverse-index generation did not create the canonical reverse index".to_owned(),
-        ));
-    }
-    let pack_size = std::fs::metadata(&pack_path)?.len();
-    let locations = PackLocationIter::open(&index_path, &reverse_index_path, pack_size)
-        .map_err(crab_git::pack::PackError::from)?;
-    let object_count = locations.object_count();
-    let git_sha1 = locations.pack_checksum().to_string();
-    run_git(
-        Command::new("git")
-            .arg("verify-pack")
-            .arg("-v")
-            .arg(&index_path)
-            .stdout(Stdio::null()),
-        "verify replacement pack",
-    )?;
-    validate_replacement_repository(
-        output_dir,
-        refs,
-        &pack_path,
-        &index_path,
-        &reverse_index_path,
-    )?;
-
-    let (pack_hash, hashed_pack_size) = hash_file(&pack_path)?;
-    if hashed_pack_size != pack_size {
-        return Err(CrabError::Internal(
-            "replacement pack changed during validation".to_owned(),
-        ));
-    }
-    let pack_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
-    let (index_hash, index_size) = hash_file(&index_path)?;
-    let (reverse_index_hash, reverse_index_size) = hash_file(&reverse_index_path)?;
-    Ok(GeneratedPack {
-        pack_path,
-        index_path,
-        reverse_index_path,
-        pack_id,
-        pack_hash,
-        pack_size,
-        index_hash,
-        index_size,
-        reverse_index_hash,
-        reverse_index_size,
-        object_count,
-        git_sha1,
-    })
-}
-
-fn validate_replacement_repository(
-    output_dir: &Path,
-    refs: &BTreeSet<String>,
-    pack_path: &Path,
-    index_path: &Path,
-    reverse_index_path: &Path,
-) -> Result<()> {
-    let validation = output_dir.join("validation.git");
-    initialize_bare_repository(&validation)?;
-    let pack_dir = validation.join("objects/pack");
-    std::fs::copy(pack_path, pack_dir.join("pack-replacement.pack"))?;
-    std::fs::copy(index_path, pack_dir.join("pack-replacement.idx"))?;
-    std::fs::copy(reverse_index_path, pack_dir.join("pack-replacement.rev"))?;
-    for (index, oid) in refs.iter().enumerate() {
-        let validation_ref = format!("refs/heads/crab-repack-{index}");
-        run_git(
-            Command::new("git")
-                .arg(format!("--git-dir={}", validation.display()))
-                .arg("update-ref")
-                .arg(&validation_ref)
-                .arg(oid),
-            "pin replacement validation ref",
-        )?;
-        if index == 0 {
-            run_git(
-                Command::new("git")
-                    .arg(format!("--git-dir={}", validation.display()))
-                    .arg("symbolic-ref")
-                    .arg("HEAD")
-                    .arg(&validation_ref),
-                "pin replacement validation HEAD",
-            )?;
-        }
-    }
-    run_git(
-        Command::new("git")
-            .arg(format!("--git-dir={}", validation.display()))
-            .arg("fsck")
-            .arg("--strict")
-            .arg("--full")
-            .arg("--no-reflogs"),
-        "validate replacement repository",
-    )
-}
-
 fn run_git(command: &mut Command, operation: &str) -> Result<()> {
     debug!(operation, command = ?command, "running git repack subprocess");
     let status = command.status()?;
@@ -650,13 +543,13 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
 async fn upload_generated_pack(
     store: &Store,
     router: &StoreLayout,
-    generated: &GeneratedPack,
+    generated: &crab_git::repack::GeometricRepackedPack,
     cancel: &CancellationToken,
 ) -> Result<()> {
     store
         .put_multipart_file_retry(
             &repo_pack_path(router.repo_prefix(), &generated.pack_id),
-            &generated.pack_path,
+            generated.pack_path(),
             generated.pack_size,
             generated.pack_hash,
             MULTIPART_PART_SIZE,
@@ -667,7 +560,7 @@ async fn upload_generated_pack(
     store
         .put_multipart_file_retry(
             &repo_pack_index_path(router.repo_prefix(), &generated.pack_id),
-            &generated.index_path,
+            generated.index_path(),
             generated.index_size,
             generated.index_hash,
             MULTIPART_PART_SIZE,
@@ -678,7 +571,7 @@ async fn upload_generated_pack(
     store
         .put_multipart_file_retry(
             &repo_pack_reverse_index_path(router.repo_prefix(), &generated.pack_id),
-            &generated.reverse_index_path,
+            generated.reverse_index_path(),
             generated.reverse_index_size,
             generated.reverse_index_hash,
             MULTIPART_PART_SIZE,
@@ -686,6 +579,32 @@ async fn upload_generated_pack(
             None,
         )
         .await
+}
+
+async fn ensure_remote_reverse_index(
+    store: &Store,
+    router: &StoreLayout,
+    generated: &crab_git::repack::GeometricRepackedPack,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let path = repo_pack_reverse_index_path(router.repo_prefix(), &generated.pack_id);
+    match store.head(&path).await {
+        Ok(_) => Ok(()),
+        Err(CrabError::NotFound { .. }) => {
+            store
+                .put_multipart_file_retry(
+                    &path,
+                    generated.reverse_index_path(),
+                    generated.reverse_index_size,
+                    generated.reverse_index_hash,
+                    MULTIPART_PART_SIZE,
+                    cancel,
+                    None,
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn now_iso8601() -> String {
@@ -723,6 +642,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -798,7 +718,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repack_commits_one_verified_pack_and_locator_generation() -> Result<()> {
+    async fn repack_commits_verified_pack_set_and_locator_generation() -> Result<()> {
         let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(Arc::clone(&backend));
         let prefix = "org/repack-test";
@@ -864,27 +784,29 @@ mod tests {
                 lock_ttl: Duration::from_secs(60),
                 dry_run: false,
                 download_concurrency: 2,
+                max_cas_retries: 4,
             },
             &CancellationToken::new(),
         )
         .await?;
 
         assert_eq!(outcome.packs_before, 2);
-        assert_eq!(outcome.packs_after, 1);
+        assert!((1..=outcome.packs_before).contains(&outcome.packs_after));
         let (committed, _) = read_manifest(&store, &router).await?;
         assert_eq!(committed.generation, 2);
         assert_eq!(committed.refs.get("refs/heads/main"), Some(&tip));
         let replacement = read_bulk_pack_list(&store, &router, &committed.pack_index_hash).await?;
-        assert_eq!(replacement.len(), 1);
-        store
-            .head(&router.pack_path(&replacement[0].pack_id))
-            .await?;
-        store
-            .head(&router.pack_index_path(&replacement[0].pack_id))
-            .await?;
-        store
-            .head(&router.pack_reverse_index_path(&replacement[0].pack_id))
-            .await?;
+        assert_eq!(replacement.len(), outcome.packs_after);
+        for pack in &replacement {
+            store.head(&router.pack_path(&pack.pack_id)).await?;
+            store.head(&router.pack_index_path(&pack.pack_id)).await?;
+            store
+                .head(&router.pack_reverse_index_path(&pack.pack_id))
+                .await?;
+            store
+                .head(&router.pack_metadata_path(&pack.pack_id))
+                .await?;
+        }
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
             prefix,

@@ -154,7 +154,7 @@ settings the whole team must share, such as `auth.storage_provider`.
 | `download_concurrency` | int | | Number of concurrent downloads |
 | `max_retries` | int | | Maximum retry attempts for transient errors |
 | `operation_timeout` | string | | Timeout for remote operations |
-| `repack_auto_threshold` | int | | Pack count threshold for auto-repack |
+| `repack_auto_threshold` | int | | Pack count threshold for an advisory repack warning |
 
 ## Related Commands
 
