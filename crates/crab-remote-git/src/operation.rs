@@ -153,6 +153,7 @@ pub struct OperationContext {
     budget: OperationBudget,
     session: Option<TrackedLocatorSession>,
     started: Instant,
+    kind: OperationKind,
     finished: bool,
     correlation_id: u64,
     span: tracing::Span,
@@ -248,6 +249,7 @@ impl OperationContext {
             deadline_stop,
             session,
             started,
+            kind,
             finished: false,
             correlation_id,
             span,
@@ -294,6 +296,7 @@ impl OperationContext {
             Err(Error::Cancelled) => MetricOutcome::Cancelled,
             Err(_) => MetricOutcome::Error,
         };
+        let usage = self.budget.usage().await;
         self.state.runtime.metrics().record(MetricObservation {
             kind: MetricKind::Operation,
             value: 1,
@@ -306,6 +309,21 @@ impl OperationContext {
             self.correlation_id,
             outcome,
             result.as_ref().err(),
+        );
+        tracing::info!(
+            target: "crab_remote_git::telemetry",
+            parent: &self.span,
+            telemetry_event = "operation_summary",
+            correlation_id = self.correlation_id,
+            operation = self.kind.as_str(),
+            outcome = ?outcome,
+            duration_ms = self.started.elapsed().as_millis() as u64,
+            logical_objects = usage.amount(BudgetDimension::LogicalObjects),
+            storage_requests = usage.amount(BudgetDimension::StorageRequests),
+            fetched_bytes = usage.amount(BudgetDimension::FetchedBytes),
+            inflated_bytes = usage.amount(BudgetDimension::InflatedBytes),
+            response_bytes = usage.amount(BudgetDimension::ResponseBytes),
+            "remote Git operation summary"
         );
         self.finished = true;
         result

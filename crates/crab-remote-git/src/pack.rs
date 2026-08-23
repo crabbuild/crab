@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::time::Instant;
 
 use flate2::{Compression, write::ZlibEncoder};
 use gix_hash::ObjectId;
@@ -180,6 +181,7 @@ async fn generate_pack_with_operation(
     object_ids: &[ObjectId],
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
+    let started = Instant::now();
     let object_count = u32::try_from(object_ids.len()).map_err(|_| Error::LimitExceeded {
         limit: "pack object count",
         actual: object_ids.len() as u64,
@@ -209,6 +211,14 @@ async fn generate_pack_with_operation(
     operation
         .charge(BudgetDimension::ResponseBytes, size)
         .await?;
+    tracing::info!(
+        target: "crab_remote_git::telemetry",
+        telemetry_event = "pack_generation",
+        object_count,
+        response_bytes = size,
+        pack_generation_ms = started.elapsed().as_millis() as u64,
+        "remote Git response pack generated"
+    );
     Ok(pack)
 }
 

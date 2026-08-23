@@ -139,3 +139,13 @@ gated on Plan 004.
   its permissive skip/zero semantics are appropriate for estimates, not deletes.
 - Importing PB layout/recipe/partition assumptions: they are not current GC
   roots and would make this delivery untestable against the current store.
+
+## Large-repository scale track
+
+`006-large-repository-scale-roadmap.md` is a separate P1, high-risk delivery
+track for Kubernetes-scale Git history and team fanout. It covers bitmap
+reachability, delta-preserving response packs, a generation-bound object
+catalog, split commit graphs, bounded geometric maintenance, stale-pack
+retention, and concurrency qualification. Its implementation is in progress;
+the roadmap records completed code separately from pending Kubernetes/RustFS,
+fault, provider, and canary acceptance evidence.

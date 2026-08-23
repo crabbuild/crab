@@ -126,7 +126,7 @@ impl BudgetUsage {
         Self { used }
     }
 
-    const fn amount(self, dimension: BudgetDimension) -> u64 {
+    pub(crate) const fn amount(self, dimension: BudgetDimension) -> u64 {
         self.used[dimension as usize]
     }
 }

@@ -1,6 +1,7 @@
 //! Protocol-neutral upload-pack admission and object selection.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use bstr::ByteSlice;
 use crab_metadata::git_visibility::GitVisibilityIndex;
@@ -403,6 +404,7 @@ async fn plan_with_operation(
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<PackPlan> {
+    let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
     if let Some(plan) = plan_from_visibility(
         &repository.refs().entries,
@@ -414,6 +416,13 @@ async fn plan_with_operation(
         tracing::debug!(
             planned_objects = plan.object_ids.len(),
             "planned full ref closure from visibility proof"
+        );
+        tracing::info!(
+            telemetry_event = "visibility_plan",
+            strategy = "full_closure",
+            planned_objects = plan.object_ids.len(),
+            visibility_plan_ms = started.elapsed().as_millis() as u64,
+            "upload-pack object plan completed"
         );
         return Ok(plan);
     }
@@ -604,7 +613,7 @@ async fn plan_with_operation(
     shallow.sort_unstable_by_key(|oid| oid.to_hex().to_string());
     let mut unshallow = unshallow.into_iter().collect::<Vec<_>>();
     unshallow.sort_unstable_by_key(|oid| oid.to_hex().to_string());
-    Ok(PackPlan {
+    let plan = PackPlan {
         wants: request.wants.clone(),
         common_haves: {
             let mut haves = common_haves.iter().copied().collect::<Vec<_>>();
@@ -617,7 +626,15 @@ async fn plan_with_operation(
         required_bases: Vec::new(),
         shallow,
         unshallow,
-    })
+    };
+    tracing::info!(
+        telemetry_event = "visibility_plan",
+        strategy = "traversal",
+        planned_objects = plan.object_ids.len(),
+        visibility_plan_ms = started.elapsed().as_millis() as u64,
+        "upload-pack object plan completed"
+    );
+    Ok(plan)
 }
 
 fn plan_from_visibility(
