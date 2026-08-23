@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bytes::Bytes;
 #[cfg(not(feature = "gix-pathmatch"))]
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use sha2::Digest;
@@ -169,11 +168,11 @@ impl BatchResolver {
                     return Ok(());
                 }
 
-                read_local_object(&local_path, &oid, size).await?;
-                store
-                    .put_stream(&oid, &local_path)
-                    .await
-                    .map_err(CrabError::from)
+                // Stream from disk with inline SHA-256 verification;
+                // put_stream surfaces a corrupt local cache as an oid-
+                // identified ObjectCorrupt before anything is stored.
+                store.put_stream(&oid, &local_path).await?;
+                Ok(())
             });
 
             handles.push((pointer.oid, handle));
@@ -358,34 +357,16 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(&hex)
 }
 
-/// Read an LFS object from local storage and verify its SHA-256 hash
-/// matches the expected OID. A local cache corruption (bit rot, disk
-/// failure, concurrent write) would surface here with a clear error
-/// message identifying the local file, rather than only at the remote
-/// PUT's idempotency check where the error says "remote hash mismatch"
-/// and the source of corruption is ambiguous. See finding CR9-F9.
-async fn read_local_object(path: &Path, oid: &[u8; 32], size: u64) -> Result<Bytes> {
+/// Write an LFS object to local storage, creating parent directories.
+async fn write_local_object(path: &Path, content: &[u8]) -> Result<()> {
     let path = path.to_owned();
-    let oid = *oid;
+    let content = content.to_vec();
     tokio::task::spawn_blocking(move || {
-        let content = std::fs::read(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => CrabError::LfsObjectMissing {
-                oid: hex_encode(&oid),
-            },
-            _ => CrabError::Io(e),
-        })?;
-        let computed = sha2::Sha256::digest(&content);
-        if computed.as_slice() != oid || (size > 0 && content.len() as u64 != size) {
-            return Err(CrabError::CorruptObject {
-                path: path.display().to_string(),
-                reason: format!(
-                    "local LFS object hash does not match expected {}; \
-                     cache may be corrupt",
-                    hex_encode(&oid),
-                ),
-            });
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
         }
-        Ok(Bytes::from(content))
+        std::fs::write(&path, &content).map_err(CrabError::Io)
+
     })
     .await
     .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
