@@ -20,7 +20,7 @@ pub enum ReadError {
     #[error("metadata error")]
     Metadata(#[from] crab_metadata::error::MetadataError),
 
-    #[error("remote Git error")]
+    #[error("remote Git error: {0}")]
     RemoteGit(#[from] crab_remote_git::Error),
 
     #[error("xet data-plane error")]
@@ -62,5 +62,24 @@ pub enum ReadError {
 impl ReadError {
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_git_error_retains_its_safe_diagnostic() {
+        let error = ReadError::from(crab_remote_git::Error::LimitExceeded {
+            limit: "decoded object bytes",
+            actual: 65,
+            maximum: 64,
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "remote Git error: remote Git read exceeded decoded object bytes: requested 65, maximum 64"
+        );
     }
 }

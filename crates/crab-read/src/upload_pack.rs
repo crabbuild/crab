@@ -486,6 +486,14 @@ async fn plan_with_operation(
             if common_haves.contains(&item.oid) && request.deepen.is_none() {
                 continue;
             }
+            // Tree entries prove that blobs are leaves. Rejecting a known omitted blob here
+            // avoids fetching content that cannot affect traversal or enter the response.
+            if item.known_kind == Some(gix_object::Kind::Blob)
+                && !roots.contains(&item.oid)
+                && filter_rejects_known_blob_without_size(&request.filter, &item, &sparse_matchers)
+            {
+                continue;
+            }
             batch.push(item);
         }
         if batch.is_empty() {
@@ -834,6 +842,23 @@ fn filter_requires_blob_size(filter: &UploadPackFilter) -> bool {
         UploadPackFilter::BlobLimit(_) => true,
         UploadPackFilter::Combine(filters) => filters.iter().any(filter_requires_blob_size),
         _ => false,
+    }
+}
+
+fn filter_rejects_known_blob_without_size(
+    filter: &UploadPackFilter,
+    item: &QueueItem,
+    sparse_matchers: &SparseMatchers,
+) -> bool {
+    match filter {
+        UploadPackFilter::None | UploadPackFilter::BlobLimit(_) => false,
+        UploadPackFilter::BlobNone => true,
+        UploadPackFilter::ObjectType(expected) => !expected.matches(gix_object::Kind::Blob),
+        UploadPackFilter::TreeDepth(depth) => item.tree_depth >= *depth,
+        UploadPackFilter::Sparse { oid } => !sparse_path_matches(sparse_matchers, oid, &item.path),
+        UploadPackFilter::Combine(filters) => filters
+            .iter()
+            .any(|filter| filter_rejects_known_blob_without_size(filter, item, sparse_matchers)),
     }
 }
 
@@ -1540,6 +1565,50 @@ mod tests {
             &UploadPackFilter::BlobLimit(4),
             gix_object::Kind::Blob,
             4,
+            &item,
+            &sparse_matchers,
+        ));
+    }
+
+    #[test]
+    fn known_filtered_blob_is_rejected_without_reading_its_size() {
+        let item = QueueItem {
+            oid: oid('1'),
+            depth: TraversalDepth::Absolute(0),
+            tree_depth: 2,
+            path: b"vendor/archive.bin".to_vec(),
+            follow_children: false,
+            known_kind: Some(gix_object::Kind::Blob),
+        };
+        let sparse_matchers = SparseMatchers {
+            patterns: HashMap::new(),
+        };
+
+        assert!(filter_rejects_known_blob_without_size(
+            &UploadPackFilter::BlobNone,
+            &item,
+            &sparse_matchers,
+        ));
+        assert!(filter_rejects_known_blob_without_size(
+            &UploadPackFilter::ObjectType(UploadPackObjectType::Commit),
+            &item,
+            &sparse_matchers,
+        ));
+        assert!(filter_rejects_known_blob_without_size(
+            &UploadPackFilter::Combine(vec![
+                UploadPackFilter::BlobLimit(1),
+                UploadPackFilter::BlobNone,
+            ]),
+            &item,
+            &sparse_matchers,
+        ));
+        assert!(!filter_rejects_known_blob_without_size(
+            &UploadPackFilter::BlobLimit(1),
+            &item,
+            &sparse_matchers,
+        ));
+        assert!(!filter_rejects_known_blob_without_size(
+            &UploadPackFilter::ObjectType(UploadPackObjectType::Blob),
             &item,
             &sparse_matchers,
         ));

@@ -15,8 +15,8 @@ use crab_read::{
     parse_upload_pack_filter, plan_upload_pack,
 };
 use crab_remote_git::{
-    Error as RemoteGitError, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
-    RepositoryOptions,
+    Error as RemoteGitError, ObjectLimits, OperationLimits, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity, RepositoryOptions,
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
@@ -34,6 +34,8 @@ const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
 const LOCATOR_READ_RETRY_LIMIT: usize = 5;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
 const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Packet {
@@ -402,10 +404,31 @@ async fn open_repository_snapshot(
         layout,
         identity,
         runtime,
-        RepositoryOptions::default(),
+        upload_pack_repository_options()?,
         cancellation,
     )
     .await
+}
+
+fn upload_pack_repository_options() -> crab_remote_git::Result<RepositoryOptions> {
+    let object = ObjectLimits {
+        max_packed_entry_bytes: 128 * MIB,
+        max_inflated_entry_bytes: 128 * MIB,
+        max_object_bytes: 128 * MIB,
+        ..ObjectLimits::default()
+    };
+    let operation = OperationLimits {
+        // Upload-pack is an explicit repository transfer. Its bounded profile must cover the
+        // largest supported visibility generation without weakening interactive read defaults.
+        max_duration: Duration::from_secs(2 * 60 * 60),
+        max_logical_objects: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_storage_requests: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_fetched_bytes: 64 * GIB,
+        max_inflated_bytes: 128 * GIB,
+        max_response_bytes: 16 * GIB,
+        ..OperationLimits::default()
+    };
+    RepositoryOptions::new(object, operation)
 }
 
 fn locator_read_retry_delay(attempt: usize) -> Duration {
@@ -1142,6 +1165,21 @@ mod tests {
         assert!(parse_oid(&"a".repeat(40)).is_ok());
         assert!(parse_oid(&"a".repeat(39)).is_err());
         assert!(parse_oid(&format!("{}z", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn upload_pack_profile_covers_the_supported_visibility_generation() {
+        let options = upload_pack_repository_options().expect("valid upload-pack limits");
+
+        assert_eq!(options.object_limits().max_object_bytes, 128 * MIB);
+        assert_eq!(
+            options.operation_limits().max_logical_objects,
+            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
+        );
+        assert!(
+            options.operation_limits().max_response_bytes
+                < options.operation_limits().max_inflated_bytes
+        );
     }
 
     #[test]
