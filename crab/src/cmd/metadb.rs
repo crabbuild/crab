@@ -43,7 +43,7 @@ use tracing::{info, warn};
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result};
-use crate::core::output::{OutputMode, emit_json};
+use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::git::url::CrabUrl;
 use crate::metadata::{MetaDb, MetaDbGuard, XorbRef};
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
@@ -697,12 +697,8 @@ async fn generation_owner_sample(
 
 fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -> Result<()> {
     if jsonl {
-        println!(
-            "{}",
-            serde_json::to_string(sample).map_err(|error| CrabError::Internal(format!(
-                "Git generation owner sample serialize: {error}"
-            )))?
-        );
+        let mut stream = JsonlStream::new("metadb.owner", "1.0", std::io::stdout());
+        stream.emit_snapshot(sample);
     } else {
         info!(
             generation = sample.generation,
