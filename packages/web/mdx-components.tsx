@@ -14,6 +14,7 @@ import {
   SystemNote,
   TakeawayBox,
 } from '@/components/blog/blog-mdx-helpers';
+import { GitArchitecturePlayer } from '@/components/blog/git-architecture-player';
 import type { MDXComponents } from 'mdx/types';
 import {
   Children,
@@ -95,6 +96,7 @@ export function getMDXComponents(components?: MDXComponents) {
     FlowSteps,
     SystemNote,
     TakeawayBox,
+    GitArchitecturePlayer,
     ...components,
   } satisfies MDXComponents;
 }

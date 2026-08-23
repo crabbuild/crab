@@ -219,9 +219,9 @@ export default async function BlogPostPage({
           </div>
         </section>
 
-        <section className="mx-auto grid max-w-6xl gap-10 px-4 pb-16 sm:px-6 lg:grid-cols-[minmax(0,44rem)_18rem] lg:px-8">
+        <section className="mx-auto grid max-w-6xl gap-10 px-4 pb-16 has-[.wide-article-visual]:max-w-7xl sm:px-6 lg:grid-cols-[minmax(0,44rem)_18rem] lg:px-8 lg:has-[.wide-article-visual]:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="min-w-0">
-            <div className="prose-neutral dark:prose-invert prose max-w-none prose-headings:scroll-mt-24 prose-img:rounded-lg">
+            <div className="prose-neutral dark:prose-invert prose mx-auto max-w-[44rem] prose-headings:scroll-mt-24 prose-img:rounded-lg">
               <MDX components={getMDXComponents({})} />
             </div>
           </div>
