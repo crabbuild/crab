@@ -952,6 +952,34 @@ async fn public_api_opens_resolves_snapshots_lists_and_reads_without_a_filesyste
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn visibility_rebuild_batches_remote_object_reads() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_storage_requests: 30,
+            ..OperationLimits::default()
+        },
+    )
+    .expect("repository options");
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    fixture.backend.reset_pack_gets();
+
+    let index = fixture
+        .repository
+        .rebuild_visibility_index(&CancellationToken::new())
+        .await
+        .expect("rebuild visibility");
+
+    assert_eq!(index.refs.len(), fixture.repository.refs().entries.len());
+    let pack_gets = fixture.backend.pack_gets();
+    assert!(
+        pack_gets <= 14,
+        "visibility reconstruction performed {pack_gets} pack reads"
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repository_handle_revalidation_detects_manifest_replacement() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();

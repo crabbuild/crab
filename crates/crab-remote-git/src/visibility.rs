@@ -10,6 +10,10 @@ use crate::{
     RemoteGitRepository, Result, RevisionError,
 };
 
+// A whole traversal frontier gives the reader enough locator entries to
+// coalesce nearby pack ranges without making visibility memory unbounded.
+const OBJECT_BATCH_SIZE: usize = 10_000;
+
 #[derive(Clone, Copy)]
 struct PendingObject {
     oid: ObjectId,
@@ -66,38 +70,57 @@ async fn rebuild_with_operation(
             tag_depth: 0,
         }];
 
-        while let Some(next) = pending.pop() {
-            operation.ensure_active()?;
-            if !objects.insert(next.oid) {
-                if next.expected == Some(Kind::Tag) {
-                    return Err(Error::Revision {
-                        reason: RevisionError::TagCycle,
+        while !pending.is_empty() {
+            let mut reads = Vec::with_capacity(OBJECT_BATCH_SIZE.min(pending.len()));
+            while reads.len() < OBJECT_BATCH_SIZE {
+                let Some(next) = pending.pop() else {
+                    break;
+                };
+                operation.ensure_active()?;
+                if !objects.insert(next.oid) {
+                    if next.expected == Some(Kind::Tag) {
+                        return Err(Error::Revision {
+                            reason: RevisionError::TagCycle,
+                        });
+                    }
+                    continue;
+                }
+                total = total.saturating_add(1);
+                if total > maximum {
+                    return Err(Error::LimitExceeded {
+                        limit: "visibility proof objects",
+                        actual: total,
+                        maximum,
                     });
                 }
+
+                if let Some(cached) = cache.get(&next.oid) {
+                    ensure_kind(cached.kind, next)?;
+                    insert_terminals(&mut objects, &cached.terminals, &mut total, maximum)?;
+                    pending.extend(cached.children.iter().copied());
+                    continue;
+                }
+
+                reads.push(next);
+            }
+
+            if reads.is_empty() {
                 continue;
             }
-            total = total.saturating_add(1);
-            if total > maximum {
-                return Err(Error::LimitExceeded {
-                    limit: "visibility proof objects",
-                    actual: total,
-                    maximum,
+            let oids = reads.iter().map(|next| next.oid).collect::<Vec<_>>();
+            let objects_read = operation.read_objects(&oids).await?;
+            if objects_read.len() != reads.len() {
+                return Err(Error::InternalInvariant {
+                    invariant: "batched visibility read changed cardinality",
                 });
             }
-
-            if let Some(cached) = cache.get(&next.oid) {
-                ensure_kind(cached.kind, next)?;
-                insert_terminals(&mut objects, &cached.terminals, &mut total, maximum)?;
-                pending.extend(cached.children.iter().copied());
-                continue;
+            for (next, object) in reads.into_iter().zip(objects_read) {
+                ensure_kind(object.kind, next)?;
+                let links = object_links(&object, next.tag_depth, operation)?;
+                insert_terminals(&mut objects, &links.terminals, &mut total, maximum)?;
+                pending.extend(links.children.iter().copied());
+                cache.insert(next.oid, links);
             }
-
-            let object = operation.read_object(next.oid).await?;
-            ensure_kind(object.kind, next)?;
-            let links = object_links(&object, next.tag_depth, operation)?;
-            insert_terminals(&mut objects, &links.terminals, &mut total, maximum)?;
-            pending.extend(links.children.iter().copied());
-            cache.insert(next.oid, links);
         }
 
         if reference
