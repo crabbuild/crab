@@ -1,5 +1,4 @@
 import { Fragment } from "react"
-import type { Metadata } from "next"
 import { Download, Check, Minus, ArrowRight, MailIcon } from "lucide-react"
 
 import { MarketingLayout } from "@/components/marketing-layout"
@@ -19,17 +18,14 @@ import {
   TableCell,
 } from "@/components/ui/table"
 import { pricingData } from "@/lib/pricing-data"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
-  title: "Pricing — Crab",
+export const metadata = createPageMetadata({
+  title: "Pricing",
   description:
     "Crab is free for developers. Enterprise teams get SSO, managed caching, audit logs, and priority support starting at $39/seat/month.",
-  openGraph: {
-    title: "Pricing — Crab",
-    description:
-      "Crab is free for developers. Enterprise teams get SSO, managed caching, audit logs, and priority support starting at $39/seat/month.",
-  },
-}
+  path: "/pricing",
+})
 
 /* ─── Tier card data ─── */
 

@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   ShieldCheck,
   KeyRound,
@@ -30,17 +29,14 @@ import { TypingCode } from "@/components/marketing/typing-code"
 import { Badge } from "@/components/ui/badge"
 import { AuthFlowSvg } from "@/app/diagrams/auth-flow-svg"
 import { AuthInternalsSvg } from "@/app/diagrams/auth-internals-svg"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Crab Auth — Enterprise Identity & Credential Vending",
   description:
     "Identity-based access control for Crab repositories. SSO via OIDC, RBAC policies, and short-lived scoped credentials for AWS, GCP, and Azure — no shared keys, no manual rotation.",
-  openGraph: {
-    title: "Crab Auth — Enterprise Identity & Credential Vending",
-    description:
-      "Identity-based access control for Crab repositories. SSO via OIDC, RBAC policies, and short-lived scoped credentials for AWS, GCP, and Azure — no shared keys, no manual rotation.",
-  },
-}
+  path: "/auth",
+})
 
 /* ─── Client-side auth methods ─── */
 

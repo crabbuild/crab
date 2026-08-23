@@ -1,21 +1,16 @@
-import type { Metadata } from "next"
-
 import { MarketingLayout } from "@/components/marketing-layout"
 import { HeroSection } from "@/components/marketing/hero-section"
 import { Reveal } from "@/components/marketing/reveal"
 import { ChangelogEntry } from "@/components/changelog/changelog-entry"
 import { sortChangelog, changelogData } from "@/lib/changelog"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
-  title: "Changelog — Crab",
+export const metadata = createPageMetadata({
+  title: "Changelog",
   description:
     "Track verified product updates, fixes, and release artifacts across Crab releases.",
-  openGraph: {
-    title: "Changelog — Crab",
-    description:
-      "Track verified product updates, fixes, and release artifacts across Crab releases.",
-  },
-}
+  path: "/changelog",
+})
 
 const ENTRIES_PER_PAGE = 10
 

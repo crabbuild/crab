@@ -1,20 +1,16 @@
-import type { Metadata } from "next"
 import Link from "next/link"
 import { ArrowRight, Cloud, GitBranch, ShieldCheck } from "lucide-react"
 
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
 import { Button } from "@/components/ui/button"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "About Us",
   description:
     "Learn about Beyondnote Technology Inc, the team building Crab: a serverless Git remote helper for large repositories in cloud object storage.",
-  openGraph: {
-    title: "About Us - Crab",
-    description:
-      "Crab is built for teams that need Git workflows for large files without a hosted LFS control plane.",
-  },
-}
+  path: "/about-us",
+})
 
 const sectionLinks = [
   { id: "who-we-are", label: "Who we are" },
