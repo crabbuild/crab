@@ -145,25 +145,25 @@ const stories: Record<StoryName, Story> = {
     caption:
       "Git and Xet uploads overlap behind a per-ref lock. Verification gates the only operation that changes repository visibility.",
     nodes: [
-      { id: "helper", x: 24, y: 174, width: 126, height: 78, title: "Remote helper", detail: "push batch", kind: "control", firstStep: 0 },
-      { id: "discover", x: 198, y: 174, width: 132, height: 78, title: "Discovery", detail: "objects + pointers", kind: "control", firstStep: 0 },
-      { id: "lock", x: 198, y: 54, width: 132, height: 70, title: "Ref lock", detail: "serialize writers", kind: "control", firstStep: 1 },
+      { id: "helper", x: 24, y: 174, width: 134, height: 78, title: "Remote helper", detail: "push batch", kind: "control", firstStep: 0 },
+      { id: "discover", x: 198, y: 174, width: 144, height: 78, title: "Discovery", detail: "objects + pointers", kind: "control", firstStep: 0 },
+      { id: "lock", x: 198, y: 54, width: 144, height: 70, title: "Ref lock", detail: "serialize writers", kind: "control", firstStep: 1 },
       { id: "gitpack", x: 396, y: 66, width: 138, height: 80, title: "Git pack", detail: "reachable objects", kind: "git", firstStep: 2 },
       { id: "xorbs", x: 396, y: 278, width: 138, height: 94, title: "Xorbs + shards", detail: "new chunks + map", kind: "xet", firstStep: 2 },
       { id: "origin", x: 602, y: 154, width: 144, height: 118, title: "Object store", detail: "immutable origin", kind: "store", firstStep: 3 },
-      { id: "verify", x: 814, y: 174, width: 122, height: 78, title: "Closure proof", detail: "all dependencies", kind: "control", firstStep: 4 },
+      { id: "verify", x: 814, y: 174, width: 134, height: 78, title: "Closure proof", detail: "all dependencies", kind: "control", firstStep: 4 },
       { id: "ref", x: 814, y: 326, width: 122, height: 70, title: "Ref journal", detail: "expected-old", kind: "store", firstStep: 5 },
       { id: "manifest", x: 602, y: 326, width: 144, height: 70, title: "Manifest", detail: "derived snapshot", kind: "store", firstStep: 6 },
     ],
     edges: [
-      { id: "discover", path: "M150 213 H190", step: 0 },
-      { id: "lock", path: "M264 174 V132", step: 1 },
-      { id: "gitpack", path: "M330 195 C364 195 360 106 388 106", step: 2 },
-      { id: "xorbs", path: "M330 231 C364 231 360 325 388 325", step: 2 },
+      { id: "discover", path: "M158 213 H190", step: 0 },
+      { id: "lock", path: "M270 174 V132", step: 1 },
+      { id: "gitpack", path: "M342 195 C364 195 360 106 388 106", step: 2 },
+      { id: "xorbs", path: "M342 231 C364 231 360 325 388 325", step: 2 },
       { id: "upload-git", path: "M534 106 C568 106 562 182 594 190", step: 3 },
       { id: "upload-xet", path: "M534 325 C568 325 562 244 594 236", step: 3 },
       { id: "verify", path: "M746 213 H806", step: 4 },
-      { id: "commit", path: "M875 252 V318", step: 5, label: "commit", labelX: 896, labelY: 289 },
+      { id: "commit", path: "M881 252 V318", step: 5, label: "commit", labelX: 902, labelY: 289 },
       { id: "compact", path: "M814 361 H754", step: 6, label: "fold", labelX: 784, labelY: 350 },
     ],
     steps: [
@@ -183,18 +183,18 @@ const stories: Record<StoryName, Story> = {
       "Step through the failure boundaries. Before the ref transaction, readers keep seeing the old tip; after it, repair never rolls visibility back.",
     nodes: [
       { id: "old", x: 32, y: 170, width: 132, height: 82, title: "Old ref", detail: "still reachable", kind: "git", firstStep: 0 },
-      { id: "objects", x: 226, y: 70, width: 148, height: 86, title: "Immutable data", detail: "pack · xorbs · shards", kind: "store", firstStep: 0 },
-      { id: "verify", x: 226, y: 274, width: 148, height: 86, title: "Closure check", detail: "reject if incomplete", kind: "control", firstStep: 2 },
-      { id: "expected", x: 446, y: 170, width: 148, height: 82, title: "Expected-old", detail: "compare current tip", kind: "control", firstStep: 3 },
+      { id: "objects", x: 226, y: 70, width: 162, height: 86, title: "Immutable data", detail: "pack · xorbs · shards", kind: "store", firstStep: 0 },
+      { id: "verify", x: 226, y: 274, width: 162, height: 86, title: "Closure check", detail: "reject if incomplete", kind: "control", firstStep: 2 },
+      { id: "expected", x: 446, y: 170, width: 156, height: 82, title: "Expected-old", detail: "compare current tip", kind: "control", firstStep: 3 },
       { id: "journal", x: 666, y: 170, width: 136, height: 82, title: "Ref journal", detail: "commit or reject", kind: "store", firstStep: 3 },
       { id: "new", x: 870, y: 70, width: 106, height: 82, title: "New ref", detail: "visible", kind: "git", firstStep: 4 },
-      { id: "repair", x: 870, y: 274, width: 106, height: 86, title: "Repair", detail: "rebuild indexes", kind: "xet", firstStep: 4 },
+      { id: "repair", x: 870, y: 274, width: 126, height: 86, title: "Repair", detail: "rebuild indexes", kind: "xet", firstStep: 4 },
     ],
     edges: [
       { id: "upload", path: "M164 193 C194 193 190 113 218 113", step: 0 },
-      { id: "orphan", path: "M300 156 V266", step: 1, label: "safe orphan", labelX: 328, labelY: 220 },
-      { id: "reject", path: "M374 317 C416 317 410 232 438 220", step: 2 },
-      { id: "compare", path: "M594 211 H658", step: 3 },
+      { id: "orphan", path: "M307 156 V266", step: 1, label: "safe orphan", labelX: 335, labelY: 220 },
+      { id: "reject", path: "M388 317 C416 317 410 232 438 220", step: 2 },
+      { id: "compare", path: "M602 211 H658", step: 3 },
       { id: "publish", path: "M802 194 C836 194 830 111 862 111", step: 4 },
       { id: "repair", path: "M734 252 C770 300 824 317 862 317", step: 4 },
     ],
@@ -213,22 +213,22 @@ const stories: Record<StoryName, Story> = {
       "Crab follows metadata to the minimum object-store ranges, reconstructs the ordered chunks, and verifies the full-file identity before materializing it.",
     nodes: [
       { id: "checkout", x: 24, y: 174, width: 126, height: 78, title: "Git checkout", detail: "pointer blob", kind: "git", firstStep: 0 },
-      { id: "pointer", x: 202, y: 174, width: 132, height: 78, title: "Pointer", detail: "hash · size · hint", kind: "git", firstStep: 0 },
+      { id: "pointer", x: 202, y: 174, width: 144, height: 78, title: "Pointer", detail: "hash · size · hint", kind: "git", firstStep: 0 },
       { id: "shard", x: 392, y: 64, width: 140, height: 82, title: "Shard lookup", detail: "ordered terms", kind: "xet", firstStep: 1 },
       { id: "ranges", x: 392, y: 284, width: 140, height: 82, title: "Range plan", detail: "coalesce reads", kind: "control", firstStep: 2 },
       { id: "origin", x: 590, y: 174, width: 140, height: 78, title: "Object store", detail: "xorb byte ranges", kind: "store", firstStep: 3 },
-      { id: "rebuild", x: 786, y: 64, width: 142, height: 82, title: "Reconstruct", detail: "ordered chunks", kind: "xet", firstStep: 4 },
-      { id: "verify", x: 786, y: 284, width: 142, height: 82, title: "BLAKE3 verify", detail: "full-file identity", kind: "control", firstStep: 4 },
+      { id: "rebuild", x: 786, y: 64, width: 148, height: 82, title: "Reconstruct", detail: "ordered chunks", kind: "xet", firstStep: 4 },
+      { id: "verify", x: 786, y: 284, width: 148, height: 82, title: "BLAKE3 verify", detail: "full-file identity", kind: "control", firstStep: 4 },
       { id: "worktree", x: 982, y: 174, width: 70, height: 78, title: "File", detail: "bytes", kind: "file", firstStep: 5 },
     ],
     edges: [
       { id: "pointer", path: "M150 213 H194", step: 0 },
-      { id: "lookup", path: "M334 196 C362 196 356 105 384 105", step: 1 },
+      { id: "lookup", path: "M346 196 C362 196 356 105 384 105", step: 1 },
       { id: "plan", path: "M462 146 V276", step: 2 },
       { id: "get", path: "M532 325 C564 325 554 230 582 220", step: 3, label: "range GET", labelX: 558, labelY: 279 },
       { id: "rebuild", path: "M730 196 C758 196 750 105 778 105", step: 4 },
-      { id: "verify", path: "M857 146 V276", step: 4 },
-      { id: "hydrate", path: "M928 325 C958 325 946 233 974 222", step: 5 },
+      { id: "verify", path: "M860 146 V276", step: 4 },
+      { id: "hydrate", path: "M934 325 C958 325 946 233 974 222", step: 5 },
     ],
     steps: [
       { label: "CHECKOUT", title: "Git supplies the pointer", description: "The Git graph stays compact and reveals the content identity without embedding the large file in the pack.", invariant: "Git can inspect history without fetching large bytes.", activeNodes: ["checkout", "pointer"] },
@@ -301,7 +301,7 @@ function NodeGlyph({ kind, color }: { kind: NodeKind; color: string }) {
 export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }) {
   const story = stories[storyName]
   const figureRef = useRef<HTMLElement>(null)
-  const stageScrollerRef = useRef<HTMLDivElement>(null)
+  const diagramScrollerRef = useRef<HTMLDivElement>(null)
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
   const [activeIndex, setActiveIndex] = useState(0)
   const [paused, setPaused] = useState(true)
@@ -343,20 +343,6 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
     [story.steps.length],
   )
 
-  useEffect(() => {
-    const scroller = stageScrollerRef.current
-    const tab = tabRefs.current[activeIndex]
-    if (!scroller || !tab) return
-
-    const tabStart = tab.offsetLeft
-    const tabEnd = tabStart + tab.offsetWidth
-    const visibleStart = scroller.scrollLeft
-    const visibleEnd = visibleStart + scroller.clientWidth
-
-    if (tabStart < visibleStart) scroller.scrollLeft = tabStart
-    if (tabEnd > visibleEnd) scroller.scrollLeft = tabEnd - scroller.clientWidth
-  }, [activeIndex])
-
   const moveTabFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     let nextIndex: number | undefined
     if (event.key === "ArrowRight") nextIndex = activeIndex + 1
@@ -371,25 +357,42 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
     tabRefs.current[normalizedIndex]?.focus()
   }
 
+  useEffect(() => {
+    const scroller = diagramScrollerRef.current
+    if (!scroller) return
+
+    const activeNodes = story.nodes.filter((node) => step.activeNodes.includes(node.id))
+    const firstNode = activeNodes[0]
+    if (!firstNode) return
+
+    const left = Math.min(...activeNodes.map((node) => node.x))
+    const right = Math.max(...activeNodes.map((node) => node.x + node.width))
+    const target = (left + right) / 2 - scroller.clientWidth / 2
+    scroller.scrollTo({
+      left: Math.max(0, target),
+      behavior: reducedMotion ? "auto" : "smooth",
+    })
+  }, [activeIndex, reducedMotion, step.activeNodes, story.nodes])
+
   return (
     <figure
       ref={figureRef}
-      className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(55.5rem,calc(100vw-2rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] lg:w-[min(55.5rem,calc(100vw-24.5rem))]"
+      className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(62rem,calc(100vw-1rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] sm:w-[min(62rem,calc(100vw-2rem))] lg:w-[min(62rem,calc(100vw-24.5rem))] min-[1400px]:-translate-x-[calc(50%+1.75rem)]"
     >
       <div className="border-b border-slate-800/90 bg-[#0b111a] px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
+          <div className="min-w-0 flex-1">
             <p className="m-0 font-mono text-[10px] font-semibold tracking-[0.22em] text-sky-400">{story.eyebrow}</p>
-            <h3 className="m-0 mt-1 text-base font-semibold tracking-tight text-slate-100 sm:text-lg">{story.title}</h3>
+            <h3 className="m-0 mt-1 break-words text-base font-semibold tracking-tight text-slate-100 sm:text-lg">{story.title}</h3>
           </div>
           <div className="font-mono text-[10px] tracking-[0.12em] text-slate-600" aria-hidden="true">
             INTERACTIVE TRACE
           </div>
         </div>
 
-        <div ref={stageScrollerRef} className="-mx-1 mt-4 overflow-x-auto px-1 pb-1">
+        <div className="-mx-1 mt-4 px-1 pb-1">
           <div
-            className="flex min-w-max items-center gap-1.5"
+            className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:flex xl:items-center xl:gap-1.5"
             role="tablist"
             aria-label={`${story.title} stages`}
             onKeyDown={moveTabFocus}
@@ -411,7 +414,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   tabIndex={isActive ? 0 : -1}
                   onClick={() => goTo(index)}
                   className={cn(
-                    "group flex min-h-11 items-center gap-2 rounded-md border px-3 font-mono text-xs font-semibold tracking-[0.08em] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none",
+                    "group flex min-h-11 min-w-0 items-center gap-2 rounded-md border px-2 font-mono text-[11px] font-semibold tracking-[0.06em] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none sm:px-3 sm:text-xs sm:tracking-[0.08em] xl:w-auto",
                     isActive
                       ? "border-sky-400/60 bg-sky-400/10 text-sky-300"
                       : isComplete
@@ -427,7 +430,9 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   >
                     {index + 1}
                   </span>
-                  {candidate.label}
+                  <span className="min-w-0 break-words text-left leading-4">
+                    {candidate.label}
+                  </span>
                 </button>
               )
             })}
@@ -435,11 +440,19 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
         </div>
       </div>
 
-      <div className="overflow-hidden" aria-hidden="true">
+      <div
+        ref={diagramScrollerRef}
+        role="region"
+        aria-label={`${story.title} diagram. Scroll horizontally to inspect the complete trace.`}
+        tabIndex={0}
+        className="touch-pan-x overflow-x-auto overscroll-x-contain border-y border-slate-800/90 bg-[#070b12] [scrollbar-color:#334155_#070b12] [scrollbar-gutter:stable] [scrollbar-width:thin] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400/70 focus-visible:outline-none"
+      >
         <svg
-          className="block w-full"
+          className="block h-[28.125rem] w-[67.5rem] max-w-none"
           viewBox="0 0 1080 450"
+          preserveAspectRatio="xMinYMin meet"
           focusable="false"
+          aria-hidden="true"
         >
           <defs>
             {[
@@ -530,13 +543,26 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   strokeWidth={active ? 1.75 : 1}
                   vectorEffect="non-scaling-stroke"
                 />
-                <g transform="translate(22 29)">
+                <g transform="translate(15 29)">
                   <NodeGlyph kind={node.kind} color={color} />
                 </g>
-                <text x="42" y="27" fill={active ? "#f8fafc" : "#cbd5e1"} fontFamily="Inter, ui-sans-serif, system-ui" fontSize="14" fontWeight="600">
+                <text
+                  x="31"
+                  y="27"
+                  fill={active ? "#f8fafc" : "#cbd5e1"}
+                  fontFamily="Inter, ui-sans-serif, system-ui"
+                  fontSize="14"
+                  fontWeight="600"
+                >
                   {node.title}
                 </text>
-                <text x="42" y="46" fill={active ? "#94a3b8" : "#64748b"} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="10">
+                <text
+                  x="31"
+                  y="46"
+                  fill={active ? "#94a3b8" : "#64748b"}
+                  fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                  fontSize="10"
+                >
                   {node.detail}
                 </text>
                 <circle cx={node.width - 14} cy="14" r="3" fill={color} opacity={active ? 1 : 0.55} />
