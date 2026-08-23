@@ -1,6 +1,10 @@
 ---
 title: "Automation Identities"
 description: "Create, rotate, and revoke workload and opaque-token service accounts without exposing permanent storage credentials."
+meta:
+  contentType: How-to
+  goal: "Use Automation Identities in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Automation Identities
@@ -9,6 +13,14 @@ Service accounts identify automation to the managed API. They are scoped to
 one organization and receive an explicit role. They never receive permanent
 bucket credentials or interactive owner privileges; repository transfers still
 use short-lived, operation-scoped grants.
+
+| Identity | Secret stored by the runner | Rotation boundary | Preferred use |
+| --- | --- | --- | --- |
+| OIDC workload | No long-lived Crab secret | Identity-provider trust policy | CI or clusters with stable issuer and subject claims |
+| Opaque token | One Crab token | Explicit rotate and revoke commands | Runners without workload identity support |
+
+Both identities receive a managed-service role. Neither exposes canonical
+object-store credentials to the runner.
 
 ## Prefer workload identity
 

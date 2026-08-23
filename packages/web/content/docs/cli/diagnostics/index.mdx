@@ -1,49 +1,81 @@
 ---
-title: "Diagnostics & Repair"
-description: "Overview of Crab's diagnostic tools for verifying repository health, understanding errors, and recovering from failures."
+title: "Diagnose and repair a repository"
+description: "Start with local health checks, verify remote integrity, and choose a bounded repair or recovery action."
+meta:
+  contentType: "Troubleshooting"
+  goal: "Identify the failing boundary and verify the repository after repair."
+  audience: "Developers and operators responding to Crab command or repository failures."
 ---
 
-## Keeping Your Repository Healthy
+# Diagnose and repair a repository
 
-Crab provides a suite of diagnostic tools that help you verify repository integrity, understand errors when they occur, and recover from interrupted operations. Whether you're troubleshooting a failed push or running periodic maintenance, these tools give you visibility into both local and remote state.
+Start with the narrowest command that identifies the failing boundary. Preserve logs and structured output before applying repair, recovery, or destructive maintenance.
 
-```mermaid
-flowchart TD
-    Problem[Something went wrong] --> Doctor[crab doctor]
-    Doctor -->|Config issue| Config[Fix configuration]
-    Doctor -->|Remote issue| Fsck[crab fsck]
-    Fsck -->|Repairable| Repair[crab fsck --repair]
-    Fsck -->|Data issue| Recovery[Recovery operations]
-    Problem --> Errors[crab errors CRAB-EXXXX]
-    Errors --> Fix[Follow remediation steps]
-```
+<DocsPathDiagram
+  id="diagnostics-path"
+  title="Move from symptom to verified recovery"
+  caption="Diagnosis reads state first. Repair changes only the identified boundary, then the same checks verify the result."
+  steps={[
+    { label: "Observe", detail: "error + logs", tone: "warning" },
+    { label: "Diagnose", detail: "doctor + status", tone: "control" },
+    { label: "Verify", detail: "fsck + store", tone: "data" },
+    { label: "Repair", detail: "bounded action", tone: "safe" },
+  ]}
+/>
 
-## Quick Diagnostics
+## Capture the first useful evidence
+
+Run health and integrity checks without changing repository state:
 
 ```bash
-# Run all health checks
 crab doctor
-
-# Verify remote store integrity
 crab fsck
-
-# Look up a specific error code
-crab errors CRAB-E0017
-
-# Check recent logs for details
 crab logs last
 ```
 
-## Tools at a Glance
+Keep the first error code and the command that produced it. Repeated retries can replace useful context with secondary failures.
 
-| Tool | Purpose | When to use |
-|------|---------|-------------|
-| [Health Check](/docs/cli/diagnostics/health-check) | Verify configuration and connectivity | First thing when something isn't working |
-| [Error Codes](/docs/cli/diagnostics/error-codes) | Look up error explanations and fixes | After encountering a `CRAB-EXXXX` error |
-| [Log Management](/docs/cli/diagnostics/log-management) | Inspect diagnostic logs | Debugging failures, filing bug reports |
-| [Integrity Check](/docs/cli/diagnostics/integrity-check) | Verify remote objects and references | Before GC, after crashes, periodic maintenance |
-| [Store Verification](/docs/cli/diagnostics/store-verification) | Validate remote store consistency | Deep investigation of remote state |
-| [Recovery Operations](/docs/cli/diagnostics/recovery-operations) | Recover from interrupted pushes | After crashes or network failures |
-| [Hydrate Restore](/docs/cli/diagnostics/hydrate-restore) | Handle archived storage classes | When hydrating files in cold storage |
-| [Metadata Database](/docs/cli/diagnostics/metadata-database) | Inspect and repair metadata DBs | When push/hydrate reports DB errors |
-| [Version Info](/docs/cli/diagnostics/version-info) | Check installed version | Bug reports, compatibility checks |
+Use JSON when automation or a support bundle needs stable fields:
+
+```bash
+crab doctor --json > doctor.json
+crab fsck --json > fsck.json
+```
+
+## Choose the tool from the failing boundary
+
+| Symptom | First command | Evidence to inspect | Next page |
+| --- | --- | --- | --- |
+| Credentials, filters, or remote configuration fail | `crab doctor` | Failed check, remediation, resolved provider | [Health checks](/docs/cli/diagnostics/health-check) |
+| A pointer cannot hydrate | `crab fsck` | Recipe, shard, xorb, and restore status | [Integrity checks](/docs/cli/diagnostics/integrity-check) |
+| A command returns `CRAB-E####` | `crab errors CRAB-E####` | Meaning, cause, and remediation | [Error codes](/docs/cli/diagnostics/error-codes) |
+| A ref changed unexpectedly | `crab recover history list` | Retained generations and exact historical roots | [Recovery operations](/docs/cli/diagnostics/recovery-operations) |
+| Metadata opens slowly or reports corruption | `crab metadb diagnose` | Database generation and validation result | [Metadata databases](/docs/cli/diagnostics/metadata-database) |
+| Archived data blocks hydration | `crab hydrate --restore` | Storage class and restore state | [Hydrate restore](/docs/cli/diagnostics/hydrate-restore) |
+
+## Repair only after classification
+
+`crab fsck --repair` is not a substitute for diagnosis. Review the dry result first, confirm that the command targets the intended repository, and retain its output.
+
+After any repair, rerun the original check and hydrate a representative file from an isolated client. A clean metadata report alone does not prove that remote bytes reconstruct correctly.
+
+Prefer a new clone or an empty cache for this final hydration so local cached
+chunks cannot hide a missing remote object.
+
+## Preserve an incident record
+
+Record these artifacts together:
+
+- The first failing command and exit code
+- Crab version and operating system from `crab version --json`
+- `crab doctor --json` output with secrets excluded
+- Integrity or recovery output used to approve the action
+- The repair command and its terminal result
+- The verification command and a representative hydration result
+
+## Continue with the identified boundary
+
+- [Inspect command logs](/docs/cli/diagnostics/log-management)
+- [Verify remote storage](/docs/cli/diagnostics/store-verification)
+- [Recover interrupted operations](/docs/cli/diagnostics/recovery-operations)
+- [Check installed version information](/docs/cli/diagnostics/version-info)

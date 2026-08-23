@@ -1,6 +1,10 @@
 ---
 title: "LFS Compatibility"
 description: "Use Crab with repositories and tooling that still expect Git LFS."
+meta:
+  contentType: Conceptual
+  goal: "Understand LFS Compatibility and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 # LFS Compatibility
@@ -44,6 +48,22 @@ crab lfs fsck
 
 History rewrites should happen on a branch with team coordination. After the
 rewrite, verify with `crab lfs fsck` and a fresh clone.
+
+## Verify the selected compatibility boundary
+
+Check which pointer format is committed after tracking or migration:
+
+```bash
+git show HEAD:assets/model.psd | sed -n '1,4p'
+crab lfs status
+crab lfs fsck
+```
+
+An LFS pointer starts with the Git LFS specification URL, while a Crab pointer
+uses the Crab pointer specification. Do not infer the format from a
+`.gitattributes` rule alone; history can contain both formats during a staged
+migration. A fresh clone verifies that filter installation, transfer-agent
+configuration, remote objects, and checkout behavior agree for another client.
 
 ## Pitfalls
 

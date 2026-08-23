@@ -1,6 +1,10 @@
 ---
 title: "crab version"
 description: "Display Crab version and build information."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab version."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab version
@@ -9,7 +13,7 @@ Display Crab version and build information.
 
 ## Synopsis
 
-```
+```bash
 crab version [OPTIONS]
 ```
 
@@ -35,12 +39,35 @@ crab version
 Output includes the installed version, the build commit, and the build
 timestamp. Build metadata varies by release.
 
-```
+```bash
 crab 1.0.15 (<build commit>)
 built at <UTC timestamp>
 ```
 
-## Related Commands
+Use the JSON form when a support bundle or compatibility check needs stable
+fields. The command is read-only and does not contact GitHub, inspect the
+repository, or check whether a newer release exists.
 
-- [`crab env`](/docs/cli/reference/crab-env) — full environment info.
-- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.
+## Record reproducible version evidence
+
+Capture `crab version` alongside a failing command and its environment report:
+
+```bash
+crab version --json
+crab env --json
+```
+
+The semantic version identifies the release contract. The build commit and
+timestamp distinguish official builds from locally rebuilt binaries that share
+the same package version. When comparing two machines, verify the command path
+as well as the printed version if different installations may be present.
+
+Use [`crab update --check`](/docs/cli/reference/crab-update) to contact the
+release source and compare versions. Keep `crab version` in incident evidence
+because a later update can change command syntax, output schemas, and supported
+storage behavior.
+
+## Related commands
+
+- [`crab env`](/docs/cli/reference/crab-env): inspect environment information.
+- [`crab doctor`](/docs/cli/reference/crab-doctor): run health checks.

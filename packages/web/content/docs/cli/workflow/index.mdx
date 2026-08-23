@@ -1,22 +1,37 @@
 ---
-title: "Workflow"
+title: "Build reproducible workflows"
 description: "Build reproducible, cached, DVC-style pipelines with Crab."
+meta:
+  contentType: Landing
+  goal: "Understand how Crab Workflow declares, runs, caches, and shares pipeline stages."
+  audience: "Data and ML teams that want reproducible pipelines in a Crab repository."
 ---
 
-# Crab Workflow
+# Build reproducible workflows
 
-Crab Workflow is the production pipeline layer for repositories that already
-use Crab for large files. It lets you define stages, track dependencies and
-outputs, cache stage results, compare metrics, and run experiments without
-adding a separate data server.
+Crab Workflow adds reproducible pipeline stages to repositories that already
+use Crab for large files. You declare a command, its inputs, and its outputs.
+Crab then records the successful state, reuses matching results, and helps
+teams compare metrics and experiments without adding a separate data server.
 
-![Crab workflow overview: git stores workflow files and lockfiles, the local stage cache replays outputs, and the remote object store shares data with collaborators and CI.](./workflow-overview.svg)
+<DocsPathDiagram
+  id="workflow-execution-path"
+  title="Workflow execution path"
+  caption="A stage definition becomes a content-addressed run. Matching inputs can replay cached outputs; new results can be shared through the configured Crab remote."
+  steps={[
+    { label: "Declare", detail: "crab.yaml", tone: "git" },
+    { label: "Hash inputs", detail: "deps + params", tone: "control" },
+    { label: "Run or replay", detail: "stage cache", tone: "data" },
+    { label: "Record", detail: "crab.lock", tone: "safe" },
+    { label: "Share", detail: "remote cache", tone: "store" },
+  ]}
+/>
 
 Use Workflow when a repository has commands that should be reproducible:
 data preparation, model training, evaluation, report generation, asset builds,
 or any expensive step where "same inputs, same outputs" should be reusable.
 
-## What Workflow Adds
+## What Workflow adds
 
 Crab's file layer handles large content in git by storing pointers in commits
 and bytes in object storage. Workflow sits above that layer:
@@ -30,7 +45,7 @@ and bytes in object storage. Workflow sits above that layer:
 The workflow layer is additive. A repo can use Crab for large files without
 Workflow, and a Workflow repo still uses normal git commits and branches.
 
-## Production Model
+## Separate committed state from local runtime state
 
 A workflow repo usually commits these files:
 
@@ -48,7 +63,7 @@ Local runtime state stays out of git:
 - `.crab/workflow/exp/` stores local experiment metadata.
 - Queued experiment logs and temporary worktrees are local until pushed.
 
-## DVC-Style, Crab-Native
+## Use DVC-style concepts with Crab storage
 
 Workflow is inspired by DVC's pipeline and experiment model, but it is designed
 to live inside Crab's serverless git remote:
@@ -63,15 +78,15 @@ to live inside Crab's serverless git remote:
 
 If you are moving from DVC, start with [Migrating from DVC](/docs/cli/workflow/migration-from-dvc).
 
-## Recommended Learning Path
+## Follow the learning path
 
-1. [Quickstart](/docs/cli/workflow/quickstart) - run a small pipeline with Workflow.
-2. [Concepts](/docs/cli/workflow/concepts) - understand stages, cache, lockfiles, journals, and experiments.
-3. [Authoring Stages](/docs/cli/workflow/authoring-stages) - write production `crab.yaml` files.
-4. [Running Pipelines](/docs/cli/workflow/running-pipelines) - use target modes, cache controls, and JSON output.
-5. [Experiments](/docs/cli/workflow/experiments) and [Hydra](/docs/cli/workflow/hydra) - compare parameterized runs.
-6. [Remote Cache and CI](/docs/cli/workflow/remote-cache-ci) - make cache reuse work for teams and automation.
-7. [Operations and Troubleshooting](/docs/cli/workflow/operations-troubleshooting) - recover from common failures.
+1. [Quickstart](/docs/cli/workflow/quickstart): run a small pipeline with Workflow.
+2. [Concepts](/docs/cli/workflow/concepts): understand stages, cache, lockfiles, journals, and experiments.
+3. [Authoring stages](/docs/cli/workflow/authoring-stages): write production `crab.yaml` files.
+4. [Running pipelines](/docs/cli/workflow/running-pipelines): use target modes, cache controls, and JSON output.
+5. [Experiments](/docs/cli/workflow/experiments) and [Hydra](/docs/cli/workflow/hydra): compare parameterized runs.
+6. [Remote cache and CI](/docs/cli/workflow/remote-cache-ci): share cache results with teams and automation.
+7. [Operations and troubleshooting](/docs/cli/workflow/operations-troubleshooting): recover from common failures.
 
 Command-level details remain in [Automation & Pipelines](/docs/cli/automation)
 and [CLI Reference](/docs/cli/reference).

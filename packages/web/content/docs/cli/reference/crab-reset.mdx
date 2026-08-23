@@ -1,6 +1,10 @@
 ---
 title: "crab reset"
 description: "Unstage files from the Crab staging area and optionally clean staging data."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab reset."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab reset
@@ -9,7 +13,7 @@ Unstage files from the Crab staging area.
 
 ## Synopsis
 
-```
+```bash
 crab reset [OPTIONS] [PATTERNS]...
 ```
 
@@ -53,8 +57,14 @@ Synchronize staging after a direct Git operation:
 crab reset --sync
 ```
 
-## Related Commands
+Start with `--dry-run` when a pattern could match multiple files. A normal reset
+updates both the Git index and Crab's local staging records for the matched
+paths. `--sync` is different: it reconciles staging after a direct `git reset`,
+`git rm`, or similar index change. Verify the result with `git status --short`
+and `crab staging stats` before deleting any remaining staging data.
 
-- [`crab add`](/docs/cli/reference/crab-add) — stage files.
-- [`crab staging`](/docs/cli/reference/crab-staging) — inspect staging area.
-- [`crab status`](/docs/cli/reference/crab-status) — check file state.
+## Related commands
+
+- [`crab add`](/docs/cli/reference/crab-add): stage files.
+- [`crab staging`](/docs/cli/reference/crab-staging): inspect the staging area.
+- [`crab status`](/docs/cli/reference/crab-status): check file state.

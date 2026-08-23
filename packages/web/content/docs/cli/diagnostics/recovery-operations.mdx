@@ -1,59 +1,105 @@
 ---
-title: "Recovery Operations"
-description: "How Crab automatically recovers from interrupted pushes and uploads by detecting and cleaning up incomplete operations."
+title: "Plan and verify repository recovery"
+description: "Build a recovery plan from durable evidence, materialize verified files, and repair remote state only after review."
+meta:
+  contentType: Troubleshooting
+  goal: "Recover manifest-selected content without trusting unverified candidate bytes."
+  audience: "Crab operators responding to missing or damaged repository content."
 ---
 
-## Recovering from Failures
+# Plan and verify repository recovery
 
-Pushes and uploads can be interrupted by crashes, network failures, or process kills. When this happens, Crab leaves markers in the remote store to track the incomplete operation. The recovery system detects these markers and either retries the operation or cleans up stale state.
+Use `crab recover` when a release manifest identifies expected content that is
+missing or damaged. Recovery is evidence-driven: plan from known inventories
+and candidate byte sources, inspect the saved plan, materialize verified files
+to an isolated directory, and change the remote only with explicit repair
+flags.
 
-![Recovery flow — interrupted push leaves markers, next push scans and cleans committed/stale markers or retries live uploads.](./recovery-flow.svg)
+<DocsPathDiagram
+  id="repository-recovery-path"
+  title="Repository recovery path"
+  caption="A release manifest defines expected content. Candidate sources remain untrusted until their bytes match the planned identities."
+  steps={[
+    { label: "Collect", detail: "manifest + evidence", tone: "warning" },
+    { label: "Plan", detail: "no remote writes", tone: "control" },
+    { label: "Inspect", detail: "saved JSON", tone: "git" },
+    { label: "Materialize", detail: "isolated output", tone: "data" },
+    { label: "Verify/repair", detail: "explicit action", tone: "safe" },
+  ]}
+/>
 
-## How Recovery Works
+## Create a plan without changing the remote
 
-The recovery module runs automatically — you don't invoke it directly. It activates:
-
-- **Before every push** — scans for inflight markers from previous interrupted operations
-- **During `crab fsck --repair`** — detects and cleans stale markers as part of integrity repair
-
-### The Recovery Process
-
-1. Lists all inflight markers in the remote store.
-2. For each marker, determines its state:
-   - **Committed** — the upload actually completed despite the marker (clean the marker)
-   - **Stale** — from a dead process that won't resume (clean the marker)
-   - **Live** — from a running process (retry the upload)
-3. After recovery, runs post-ref cleanup:
-   - Moves staging data to the cache
-   - Installs shard metadata
-   - Clears completed file-DB rows
-   - Removes the inflight marker
-
-## When You Might See Recovery
-
-Recovery is transparent in normal operation. You'll notice it in logs when:
-
-- A push was killed mid-flight (Ctrl+C, OOM, network drop)
-- A machine crashed during an upload
-- A CI job timed out during push
-
-The next operation on that repository will detect the incomplete state and handle it automatically.
-
-## Manual Intervention
-
-In rare cases where automatic recovery isn't sufficient:
+Start from a release manifest and add only sources available to the incident:
 
 ```bash
-# Detect stale markers and repair
-crab fsck --repair
-
-# Clean local staging state
-crab staging clean
-
-# Check logs for recovery details
-crab logs last
+crab fsck --jsonl > fsck.jsonl
+crab recover plan \
+  --manifest release.json \
+  --source /mnt/verified-backup \
+  --fsck-jsonl fsck.jsonl \
+  --output recovery-plan.json
 ```
 
-## CLI Reference
+Planning reads the supplied manifest, missing-object evidence, and candidate
+sources. It records expected identities and possible recovery actions. It does
+not trust a filename as proof of content and does not write recovered objects
+to the configured remote.
 
-For complete command syntax and all available flags, see the [crab fsck reference](/docs/cli/reference/crab-fsck).
+Other evidence sources include a workflow cache, replica export, import or
+workflow journal, pointer tree, and explicit shard, xorb, pack, or file-index
+inventories. Include only evidence whose origin and collection time can be
+explained in the incident record.
+
+## Inspect and apply the plan
+
+```bash
+crab recover show --plan recovery-plan.json
+crab recover apply \
+  --plan recovery-plan.json \
+  --restore-to ./recovered-files
+```
+
+The default apply path materializes verified recovered files under the selected
+directory. Remote actions require explicit flags such as `--restore-shards`,
+`--restore-xorbs`, `--restore-packs`, `--rebuild-file-index`, or
+`--repair-remote`. Review each action, destination, and refspec before granting
+write credentials.
+
+| Action | Mutation boundary | Required evidence |
+| --- | --- | --- |
+| Materialize files | New `--restore-to` directory | Bytes match planned file identities |
+| Restore shards or xorbs | Configured Crab remote | Object hash and plan mapping verify |
+| Rebuild file index | Remote metadata database | Durable shards cover planned files |
+| Repair remote | Objects and selected Git refs | Explicit remote and repair refspecs |
+
+## Inspect historical repository roots
+
+Historical recovery is a separate command group:
+
+```bash
+crab recover history list
+crab recover history verify --help
+crab recover history restore --help
+```
+
+List is read-only. Verify one immutable historical root and its complete
+dependency closure before previewing restoration. Retention and restoration
+commands expose their own preview or apply boundary; inspect subcommand help for
+the installed release.
+
+## Distinguish interrupted pushes
+
+Push and upload commands can also resume or clean operation-specific staging
+state. Diagnose those failures first with `crab logs last`, `crab staging
+verify`, and `crab fsck`. Do not create a repository recovery plan merely to
+clear local staging after a failed push.
+
+## Verify the recovered result
+
+Run `crab fsck` again, hydrate representative files from an empty client cache,
+and compare their application-level format or checksum with the release
+evidence. Keep the plan, apply output, and post-recovery checks together as the
+incident record.
+
+For exact plan and mutation flags, see the [crab recover reference](/docs/cli/reference/crab-recover).

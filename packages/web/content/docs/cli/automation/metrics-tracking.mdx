@@ -1,17 +1,21 @@
 ---
 title: "Metrics Tracking"
 description: "Display, compare, and plot numeric metrics across git refs with absolute and percent deltas."
+meta:
+  contentType: How-to
+  goal: "Use Metrics Tracking in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab metrics
 
 Read, diff, and plot numeric metrics files across git refs. Renders absolute
-and percent deltas for changed values, making it easy to track model accuracy,
+and percent deltas for changed values, helping you track model accuracy,
 loss, or any numeric KPI over time.
 
 ## Synopsis
 
-```
+```bash
 crab metrics show [OPTIONS]
 crab metrics diff <REF_A> <REF_B> [OPTIONS]
 crab metrics plot [OPTIONS]
@@ -37,7 +41,7 @@ crab metrics plot [OPTIONS]
 Metrics files are plain JSON objects with string keys and numeric (or string)
 values. The parser shares infrastructure with `crab params`, but the diff
 renderer operates in metrics mode — showing absolute + percent deltas instead
-of simple old/new values.
+of scalar old and new values.
 
 ## Options
 

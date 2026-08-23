@@ -1,6 +1,10 @@
 ---
 title: "crab init"
 description: "Initialize a Crab repository and connect it to a cloud storage backend."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab init."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab init
@@ -9,7 +13,7 @@ Initialize a new Crab repository.
 
 ## Synopsis
 
-```
+```bash
 crab init [OPTIONS] [URL]
 ```
 
@@ -119,7 +123,7 @@ When auto-tracking is enabled (the default), `crab setup` tracks extensions that
 
 Crab URLs follow the pattern `crab://<bucket>/<repo-path>`:
 
-```
+```bash
 crab://my-bucket/my-project
 crab://company-data/team-ml/experiment-42
 s3://us-west-2-storage/repos/frontend-assets

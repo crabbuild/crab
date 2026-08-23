@@ -1,6 +1,10 @@
 ---
 title: "crab completions"
 description: "Generate or install shell completion scripts for Crab."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab completions."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab completions
@@ -25,3 +29,25 @@ crab completions powershell --install
 `--install` writes to the shell-specific completion directory. Use
 `crab completions <shell> --help` if your shell setup needs a different load
 path.
+
+## Load the generated script
+
+Generating a script prints it to standard output unless `--install` is used.
+This lets you inspect or place the file according to your shell configuration.
+For zsh, make sure the destination directory is in `fpath` before shell
+completion initialization. For bash, source the generated file from the
+interactive shell startup configuration when your package manager does not
+load it automatically.
+
+Verify the generated content and start a new shell session:
+
+```bash
+crab completions zsh | head
+exec zsh
+```
+
+Then type `crab ` and request completion. The script describes the command
+surface of the installed Crab binary, so regenerate it after an upgrade that
+adds commands or options. `--install` chooses Crab's shell-specific default
+directory; explicit redirection remains the better choice when dotfiles or a
+system package owns completion loading.

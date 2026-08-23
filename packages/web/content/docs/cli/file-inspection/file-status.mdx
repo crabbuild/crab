@@ -1,6 +1,10 @@
 ---
 title: "File Status"
 description: "Understanding file states in a Crab repository — hydrated, dehydrated, and modified."
+meta:
+  contentType: How-to
+  goal: "Use File Status in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # File Status
@@ -23,7 +27,7 @@ Every Crab-tracked file in your working tree is in one of three states: **hydrat
 crab status
 ```
 
-```
+```text
 Tracked files (42 total):
   H  models/weights.bin       1.2 GB  (hydrated)
   H  models/embeddings.bin    800 MB  (hydrated)
@@ -32,23 +36,34 @@ Tracked files (42 total):
   M  config/vocab.bin         2.1 MB  (modified)
 ```
 
-## Why "Hydrated Files Show as Modified"
+## Separate Crab state from Git state
 
-This is the most common source of confusion for new Crab users. Here's what happens:
+Git stores a Crab pointer in the index and passes working-tree content through
+the Crab clean filter when it computes status. A correctly configured filter
+can map unchanged hydrated bytes back to their pointer, so hydration alone does
+not imply an uncommitted Git change.
 
-1. Git's index stores the **pointer blob** (what was committed)
-2. Your working tree has the **full content** (after hydration)
-3. `git status` compares them and sees a difference → "modified"
+`crab status` reports a different question: whether the path is a pointer, has
+full content with the committed size, or has full content with a different
+size. Its `M` state is a size-based signal. A same-size content edit can still
+require `git status`, `git diff`, or application-specific validation to detect.
 
-This is expected behavior, not a bug. The file content is correct — it's just different from the pointer in git's index.
+| Observation | Meaning | Next check |
+| --- | --- | --- |
+| Crab `P` | Working tree contains a valid pointer | Hydrate before reading file bytes |
+| Crab `H` | Full content has the committed size | Use Git or a checksum for change detection |
+| Crab `M` | Full content size differs from the committed pointer | Review the edit before add or reset |
+| Git reports modified after hydration | Clean-filter result differs or filter setup failed | Run `crab why <path>` and `crab doctor` |
 
-**To make git status clean:** dehydrate before committing or pulling:
+Dehydrating can reduce checkout work before a branch change, but it should not
+be used to hide a real edit:
 
 ```bash
 crab dehydrate --all
-git status              # clean
-git pull origin main    # fast, pointer-only diffs
-crab hydrate --all      # restore content
+git status
+crab dehydrate --all
+git pull origin main
+crab hydrate --all
 ```
 
 ## Filtering by Pattern
@@ -63,7 +78,7 @@ crab status --porcelain
 
 Porcelain output (one line per file):
 
-```
+```text
 p models/weights.bin
 h models/embeddings.bin
 m data/train.safetensors
@@ -88,6 +103,10 @@ crab status | grep "pointer"
 ```bash
 crab status | grep "modified"
 ```
+
+Use `git status --short` as the final Git answer. Crab's state output explains
+representation and expected size; it is not a byte-for-byte replacement for
+Git change detection.
 
 ## CLI Reference
 

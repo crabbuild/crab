@@ -1,6 +1,10 @@
 ---
 title: "crab locks"
 description: "List active advisory locks on Crab-managed files."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab locks."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab locks
@@ -25,3 +29,25 @@ crab locks
 crab locks --owner self --json
 crab locks --path models/
 ```
+
+## Narrow the lock set
+
+The lock list is the read-only starting point for resolving writer conflicts.
+Filter by path when you know the affected file, or use `--owner self` to review
+locks held by the current identity. `--limit` bounds terminal and JSON output
+when a repository contains many active locks.
+
+```bash
+crab locks --owner self --limit 50
+crab locks --path models/checkpoint.safetensors --json
+```
+
+An empty filtered result means no active advisory lock matched that query. It
+does not prove that no one is editing the file outside the locking workflow.
+Locks coordinate cooperating Crab clients and do not replace Git conflict
+handling.
+
+Use [`crab unlock`](/docs/cli/reference/crab-unlock) to release your own lock.
+Before force-breaking another owner's lock, capture the JSON record and confirm
+that the owner is no longer writing. This preserves enough evidence to explain
+why the coordination boundary was overridden.

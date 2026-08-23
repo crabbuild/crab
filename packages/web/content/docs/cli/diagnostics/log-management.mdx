@@ -1,6 +1,10 @@
 ---
 title: "Log Management"
 description: "How to configure, inspect, and manage Crab's diagnostic logs for debugging and troubleshooting."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Log Management problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Diagnostic Logging
@@ -31,7 +35,7 @@ This is the fastest way to check what happened during a failed operation.
 crab logs list
 ```
 
-```
+```text
 2024-01-14.log
 2024-01-15.log
 2024-01-16.log
@@ -104,6 +108,33 @@ crab env > env-info.txt
 ```bash
 CRAB_LOG=debug crab hydrate --all 2> hydrate-debug.log
 ```
+
+## Capture a bounded diagnostic window
+
+Increase verbosity for one reproducible command instead of leaving trace logs
+enabled across normal work:
+
+```bash
+CRAB_LOG='info,crab::storage=debug' crab hydrate models/v2.bin
+crab logs last > hydrate-operation.log
+crab version --json > crab-version.json
+```
+
+Record the start time, command, exit status, and installed version with the log.
+Module filters reduce unrelated events and make network retries, cache choices,
+or storage decisions easier to follow in chronological order. Return to the
+normal log level after collecting the evidence.
+
+## Review before sharing or clearing
+
+Logs avoid credential values by design, but they can contain local paths,
+repository identities, object keys, provider errors, and user-supplied command
+arguments. Redact that context according to the incident's sharing boundary.
+
+`crab logs clear` deletes all managed log files. Export the relevant file and
+confirm the copy is readable before clearing old logs. Clearing does not fix the
+underlying command failure; use it only for retention or after evidence has
+been preserved.
 
 ## CLI Reference
 

@@ -1,6 +1,10 @@
 ---
 title: "Enterprise Authentication"
 description: "Federated identity and multi-cloud credential management for crab"
+meta:
+  contentType: How-to
+  goal: "Use Enterprise Authentication in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Enterprise Authentication
@@ -29,7 +33,7 @@ see zero change unless they opt in to a federated provider.
 
 | Situation | Recommended Provider |
 |-----------|---------------------|
-| Small team, AWS-only, simple permissions | `aws-oidc` |
+| Small team, AWS-only, basic role mapping | `aws-oidc` |
 | Need per-repo access control (RBAC) | `crab-auth` with [self-hosted auth server](self-hosted-auth-server) |
 | Multi-cloud (AWS + GCP or Azure) | `crab-auth` with [self-hosted auth server](self-hosted-auth-server) |
 | GCP-only with Workload Identity | `gcp-workload-identity` |
@@ -40,7 +44,7 @@ see zero change unless they opt in to a federated provider.
 For most enterprise deployments with multiple teams and repos, we recommend
 the **self-hosted auth server** (`crab-auth` provider). It gives you:
 
-- Per-repo, per-operation access control via a simple YAML policy
+- Per-repository, per-operation access control through a declarative YAML policy
 - Scoped credentials that restrict each user to authorized repos and operations
 - A single auth layer that works across AWS, GCP, and Azure
 - Full audit logging of every credential issuance
@@ -68,7 +72,7 @@ Direct providers such as `aws-oidc`, `gcp-workload-identity`, and
 identity, group, repository glob, operation, and cloud provider before issuing
 short-lived credentials.
 
-## Quick Start
+## Configure the provider
 
 ### Check current auth status
 
@@ -162,7 +166,7 @@ policies without coupling your access rules to cloud IAM.
 Tokens are cached at `~/.config/crab/tokens/` (configurable via
 `auth.token_cache_path`). Each provider gets its own encrypted file:
 
-```
+```text
 ~/.config/crab/tokens/
 ├── aws-oidc.json.enc
 ├── gcp-workload-identity.json.enc
@@ -199,7 +203,7 @@ The `crab doctor` command includes an auth health check:
 crab doctor
 ```
 
-```
+```bash
 crab doctor
 
   ✓ git                      git version 2.47.1

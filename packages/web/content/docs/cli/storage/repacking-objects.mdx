@@ -1,6 +1,10 @@
 ---
 title: "Repacking Objects"
 description: "How to optimize remote storage layout by consolidating many small pack files into fewer, larger ones."
+meta:
+  contentType: How-to
+  goal: "Use Repacking Objects in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 ## Optimizing Remote Storage Layout
@@ -59,7 +63,7 @@ crab repack --dry-run
 crab repack
 ```
 
-```
+```text
 repack complete: 15 → 6 packs, 2400000000 → 2300000000 bytes, 4.2s
 ```
 

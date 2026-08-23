@@ -1,6 +1,10 @@
 ---
 title: "crab errors"
 description: "Look up error codes and their explanations."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab errors."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab errors
@@ -47,7 +51,14 @@ crab errors CRAB-E0017
 crab errors
 ```
 
-## Related Commands
+Copy the complete `CRAB-E####` value from the original failure. The lookup
+explains the stable error category and suggested response, while the original
+message and logs retain operation-specific details such as paths or provider
+responses. Looking up a code is read-only and does not retry or repair the
+failed operation. Use `--json` when an incident tool needs the explanation in a
+structured envelope.
 
-- [`crab doctor`](/docs/cli/reference/crab-doctor) — diagnose issues.
-- [`crab logs`](/docs/cli/reference/crab-logs) — view diagnostic logs.
+## Related commands
+
+- [`crab doctor`](/docs/cli/reference/crab-doctor): diagnose issues.
+- [`crab logs`](/docs/cli/reference/crab-logs): view diagnostic logs.

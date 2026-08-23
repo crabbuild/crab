@@ -1,6 +1,10 @@
 ---
 title: "crab queue"
 description: "Manage queued experiment tasks and their worker processes."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab queue."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab queue
@@ -24,3 +28,27 @@ crab queue <COMMAND>
 
 Use `crab queue <command> --help` for task identifiers, worker counts, and
 output options.
+
+## Operate the queue by state
+
+Queue commands separate task submission from worker control. `start` launches
+workers for queued experiments. `status` reports task and worker state. `logs`
+retrieves a task's console output, while `kill` interrupts running work,
+`remove` deletes queue entries, and `stop` asks workers to exit without taking
+new work.
+
+Inspect the relevant subcommand before changing queue state:
+
+```bash
+crab queue status
+crab queue logs --help
+crab queue stop --help
+```
+
+Use a task identifier from `status` rather than copying a display label into
+`logs`, `kill`, or `remove`. Prefer `stop` for planned worker shutdown and
+reserve `kill` for work that must be interrupted. After either action, run
+`crab queue status` again and inspect logs for tasks that did not complete.
+
+Queue state is local until the related experiment results are committed or
+pushed through the experiment workflow.

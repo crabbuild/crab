@@ -1,13 +1,17 @@
 ---
 title: "Crab CLI command index"
 description: "Current top-level Crab CLI commands, grouped by repository, file, storage, workflow, service, and operations use case."
+meta:
+  contentType: Reference
+  goal: "Find the command that matches a Crab task and open its detailed reference."
+  audience: "Crab users who know the task they need to perform."
 ---
 
 # Crab CLI command index
 
-This page reflects the current top-level command surface of the open-source Crab
-CLI. Reference pages cover the higher-use commands and workflows. For the full
-option set for any installed binary, run `crab <command> --help`.
+Use this index to move from a task to the relevant Crab command. Reference
+pages explain the higher-use commands and workflows. The installed binary
+remains authoritative for its exact option set: run `crab <command> --help`.
 
 Running `crab --help` shows these same top-level commands in task-oriented
 sections. The sections are visual navigation only; commands remain directly
@@ -16,6 +20,18 @@ available as `crab hydrate`, `crab exp`, `crab gc`, and so on.
 The CLI also exposes aliases such as `crab get` for `crab download` and
 `crab repro` for `crab run`. Internal Git filter and remote-helper entry points
 are intentionally omitted from this user-facing index.
+
+<DocsPathDiagram
+  id="command-discovery-path"
+  title="From task to verified command"
+  caption="Choose a command family here, inspect the installed help, run the command, then verify its output or repository state."
+  steps={[
+    { label: "Choose task", detail: "command family", tone: "control" },
+    { label: "Inspect help", detail: "--help", tone: "git" },
+    { label: "Run", detail: "crab <command>", tone: "data" },
+    { label: "Verify", detail: "state or output", tone: "safe" },
+  ]}
+/>
 
 ## Repository setup and transfer
 

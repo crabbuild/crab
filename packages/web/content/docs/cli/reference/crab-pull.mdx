@@ -1,6 +1,10 @@
 ---
 title: "crab pull"
 description: "Pull Git changes and hydrate newly fetched Crab pointer files."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab pull."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab pull
@@ -37,3 +41,13 @@ crab pull --no-hydrate --json
 
 Use [`crab hydrate`](/docs/cli/reference/crab-hydrate) afterward when you skip
 automatic hydration.
+
+The Git pull completes before Crab considers hydration. A merge or rebase
+failure therefore stops the workflow before new pointer materialization. After
+a successful pull, inspect `git status` and `crab status` to distinguish Git
+integration state from file hydration state. `--no-hydrate` keeps new files as
+pointers even if they match the configured hydration filter.
+
+Use JSONL when a caller needs progress from both phases and JSON when it needs
+one terminal result. The selected remote and branch are Git names, not Crab
+storage URLs.

@@ -1,11 +1,15 @@
 ---
 title: "Comparing Changes"
 description: "How Crab provides chunk-level diffs for large binary files using only metadata — no data transfer required."
+meta:
+  contentType: How-to
+  goal: "Use Comparing Changes in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Comparing Changes
 
-Traditional `git diff` needs the full file content to show differences. For a 10 GB model file, that means downloading and reconstructing both versions just to see what changed. Crab takes a different approach: it compares files at the chunk level using only metadata, showing you exactly which parts changed with zero data transfer.
+Traditional `git diff` needs full file content to show byte-level differences. For a 10 GB model file, that can require reconstructing both versions before comparison. Crab instead compares tracked files at the chunk level from metadata, so the file payloads do not need to be downloaded for the summary.
 
 ## Why Chunk-Level Diffs?
 
@@ -13,7 +17,7 @@ When Crab stores a file, it splits it into content-defined chunks. Each chunk ha
 
 This means you can:
 
-- **Diff multi-GB files instantly** — Compare two versions of a 50 GB dataset in milliseconds.
+- **Compare multi-gigabyte files from metadata**: Report changed chunks and byte ranges without reconstructing both payloads.
 - **See exactly what changed** — Know which byte ranges were modified, added, or removed.
 - **Work offline** — Diffs use cached metadata, not file content.
 - **Understand dedup efficiency** — See how many chunks are shared between versions.
@@ -55,13 +59,13 @@ crab diff v1.0 v2.0
 crab diff --stat HEAD~3
 ```
 
-```
+```text
  models/weights.bin    | 423 chunks changed (+312, -111), +1.2 GB
  data/train.bin        | 12 chunks changed (+12, -0), +45 MB
  2 files changed, 435 segments, +1.245 GB delta
 ```
 
-### Just file names
+### Show file names only
 
 ```bash
 crab diff --name-only v1.0 v2.0
@@ -83,6 +87,14 @@ The default output shows:
 
 With `--verbose`, you also see individual xorb hashes and chunk ranges. With `--byte-ranges`, you see the exact byte offsets within each file that changed.
 
+| View | Best for | Does not prove |
+| --- | --- | --- |
+| Default | Changed chunks and approximate byte impact | Semantic meaning of binary changes |
+| `--stat` | Review summaries and release sizing | Exact changed offsets |
+| `--name-only` | Selecting files for another command | Amount of data changed |
+| `--byte-ranges` | Locating changed regions | That either full file is locally hydrated |
+| `--verbose` | Storage and reconstruction diagnosis | Application-level correctness |
+
 ## Use Cases
 
 ### Code review for data changes
@@ -93,7 +105,7 @@ Before merging a PR that updates training data:
 crab diff main feature/updated-dataset --stat
 ```
 
-Instantly see how much data changed without downloading anything.
+Use the summary to estimate how much file data changed without downloading the payloads.
 
 ### Release notes
 

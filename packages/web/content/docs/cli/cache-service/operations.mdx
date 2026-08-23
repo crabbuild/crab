@@ -1,6 +1,10 @@
 ---
 title: "Operations"
 description: "Sizing, scaling, upgrades, and recovery for the cache service."
+meta:
+  contentType: How-to
+  goal: "Use Operations in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Operations
@@ -51,7 +55,7 @@ Use horizontal scaling when you have:
 
 - Multiple regions.
 - Separate business units or tenants.
-- Very large working sets that should not share one cache.
+- Independent large working sets that should not share one cache.
 
 Run separate cache instances for isolation. Do not share one cache volume between instances.
 

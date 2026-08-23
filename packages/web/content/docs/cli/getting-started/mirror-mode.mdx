@@ -1,6 +1,10 @@
 ---
 title: "Mirror Mode"
 description: "Use GitHub or GitLab for code review while Crab handles large-file storage transparently — no changes to your PR workflow."
+meta:
+  contentType: Conceptual
+  goal: "Understand Mirror Mode and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 # Mirror Mode (GitHub + Crab)
@@ -113,7 +117,7 @@ crab status
 
 With mirror mode active, you'll see:
 
-```
+```text
 Mirror: origin ↔ crab (crab://my-bucket/my-repo) | healthy
   Crab remote: reachable
   Pending push: 0 files

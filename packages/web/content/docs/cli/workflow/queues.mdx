@@ -1,6 +1,10 @@
 ---
 title: "Experiment Queues"
 description: "Queue and process batches of Crab experiments with parameter sweeps and worker logs."
+meta:
+  contentType: How-to
+  goal: "Use Experiment Queues in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Experiment Queues
@@ -67,6 +71,13 @@ crab queue logs <task-id>
 
 Use logs to debug failed tasks before removing queue entries.
 
+| Task state | Operator action | Verification |
+| --- | --- | --- |
+| Queued | Start workers or leave for a later window | `crab queue status` shows no worker assignment yet |
+| Running | Inspect logs; stop workers gracefully for planned shutdown | Status retains the active task until it exits |
+| Failed | Preserve logs and experiment metadata before removal | Failure reason is recorded with the task ID |
+| Successful | Inspect and push selected experiment results | `crab exp show <id>` exposes params and metrics |
+
 ## Stop, Kill, and Remove
 
 Request graceful shutdown:
@@ -110,6 +121,11 @@ crab exp push --all
 
 Start from a clean committed baseline when results need to be shared. Push the
 winning experiments after the queue completes.
+
+Record the JSON task IDs returned by queue creation. Human messages can repeat,
+while an ID or unambiguous prefix selects the intended task for logs, kill, and
+remove operations. After stopping or killing work, run status again before
+cleaning temporary worktrees.
 
 ## When Not to Use Queues
 

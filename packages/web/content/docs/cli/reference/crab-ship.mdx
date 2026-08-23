@@ -1,6 +1,10 @@
 ---
 title: "crab ship"
 description: "One-shot add + commit + push — stage, commit, and upload in a single command."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab ship."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab ship
@@ -45,7 +49,7 @@ behavior as `crab add`.
 | `-b, --branch` | current branch | Branch to push |
 | `--rebase-on-non-fast-forward` | `false` | Integrate the current branch and retry after a non-fast-forward or lock conflict |
 | `--rebase-retry-limit` | `256` | Maximum integration retries when rebasing is enabled |
-| `--no-push` | `false` | Skip the push step (just add + commit) |
+| `--no-push` | `false` | Run add and commit without pushing |
 | `--dry-run` | `false` | Show what would be shipped without making changes |
 | `--json` | `false` | Structured JSON output |
 
@@ -92,7 +96,7 @@ remote. If more than one remains, choose one explicitly with
 
 | Scenario | Recommended |
 |----------|-------------|
-| Quick upload of model/data files | `crab ship` |
+| Combined add, commit, and push | `crab ship` |
 | Selective staging across multiple commits | `crab add` + `git commit` |
 | Need to review changes before committing | `crab add` → `crab status` → `git commit` |
 | CI/CD pipelines with custom logic | Individual commands |

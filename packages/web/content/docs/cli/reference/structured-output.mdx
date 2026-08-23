@@ -1,6 +1,10 @@
 ---
 title: "Structured Output"
 description: "Machine-readable JSON and JSONL output modes for automation, scripting, and UI integration."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for Structured Output."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # Structured Output (`--json` / `--jsonl`)
@@ -168,7 +172,7 @@ The final event is always `type: "result"`. Its `data` field matches what
 
 ### Example: `crab add --jsonl`
 
-```
+```json
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.100Z","type":"progress","data":{"operation":"staging","current":3,"total":10,"bytes":15728640,"total_bytes":52428800,"rate_bytes_per_sec":45000000.0}}
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.450Z","type":"file_done","data":{"path":"data/train.parquet","bytes":52428800,"duration_ms":340,"status":"ok"}}
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.460Z","type":"file_done","data":{"path":"data/val.parquet","bytes":10485760,"duration_ms":120,"status":"ok"}}
@@ -329,7 +333,7 @@ crab version --json
 }
 ```
 
-## Quick Examples
+## Inspect example envelopes
 
 ### Parse a single result
 

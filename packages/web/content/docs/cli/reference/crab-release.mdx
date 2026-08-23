@@ -1,6 +1,10 @@
 ---
 title: "crab release"
 description: "Create, verify, list, and export dataset release manifests."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab release."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab release
@@ -49,3 +53,11 @@ crab release export --name model-v1 --output portable-release.json
 `release create` refuses a dirty worktree unless `--allow-dirty` is supplied.
 `release verify` supports detached Ed25519 signatures with `--signature` and
 `--public-key`.
+
+Treat creation and verification as separate evidence boundaries. Record the Git
+revision and output manifest, then verify that exact manifest before publishing
+or distributing it. `--allow-dirty` weakens the connection between a release
+and committed repository state, so use it only when the uncommitted state is an
+explicit part of the release record. Deep verification can require remote
+object reads and should run with the same repository identity used to create
+the manifest.

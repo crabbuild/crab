@@ -1,6 +1,10 @@
 ---
 title: "Storage Tiers"
 description: "How to use hot, warm, and cold storage tiers to reduce costs for infrequently accessed data in your Crab repositories."
+meta:
+  contentType: Conceptual
+  goal: "Understand Storage Tiers and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 ## Cost Optimization with Storage Tiers
@@ -27,7 +31,7 @@ flowchart LR
 | `<repo>/refs/` | ✗ | Mutable refs |
 | `<repo>/packs/` | ✗ | Git packs |
 
-## Quick Start
+## Plan lifecycle rules
 
 ### 1. Preview the lifecycle plan
 
@@ -131,7 +135,7 @@ Deleting an object before its minimum retention period incurs an early-deletion 
 
 Every `tier plan --apply` writes a backup before modifying the bucket:
 
-```
+```text
 .crab/tier/backups/<RFC3339-ts>-pre-apply.json
 ```
 

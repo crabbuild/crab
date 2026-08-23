@@ -1,22 +1,53 @@
 ---
-title: "Virtual Filesystem"
-description: "Mount Crab repositories so files are available on demand without hydrating the whole working tree."
+title: "Read repositories through a mount"
+description: "Mount a Crab repository, fetch file ranges on demand, and choose between interactive and persistent mount modes."
+meta:
+  contentType: "Landing"
+  goal: "Choose and verify the mount mode required by an application."
+  audience: "Developers and operators reading large repositories without full hydration."
 ---
 
-# Virtual Filesystem
+# Read repositories through a mount
 
 The Crab virtual filesystem lets you browse and read a repository without
 downloading every file first. Directory listings appear immediately, and file
 content is fetched from cloud storage when an application actually reads it.
 
-Use it when you want to:
+<DocsPathDiagram
+  id="virtual-filesystem-path"
+  title="A file read resolves only the required remote ranges"
+  caption="The mount presents ordinary paths. Metadata resolves the file recipe, and verified xorb ranges populate the local cache as the application reads."
+  steps={[
+    { label: "Mount", detail: "select ref + mode", tone: "control" },
+    { label: "Open path", detail: "resolve pointer", tone: "git" },
+    { label: "Read ranges", detail: "cache then origin", tone: "store" },
+    { label: "Return bytes", detail: "hash verified", tone: "safe" },
+  ]}
+/>
+
+## Decide whether a mount fits
+
+Use a mount when you need to:
 
 - Inspect a large repository before deciding what to hydrate.
 - Run tools that expect a normal filesystem path.
 - Open another branch or remote repository without changing your working tree.
 - Keep local disk usage low while still making files available on demand.
 
-## Start Here
+## Verify one local mount
+
+Mount the current repository, read one managed file, then inspect mount state:
+
+```bash
+crab mount ./mnt
+head -c 64 ./mnt/models/weights.safetensors >/dev/null
+crab mount status
+crab unmount ./mnt
+```
+
+The first read may fetch remote ranges. A repeated read can use verified cache entries when they remain available.
+
+## Choose the next mount topic
 
 - [FUSE Mount](/docs/cli/virtual-filesystem/fuse-mount) — mount a Crab repository on macOS or Linux.
 - [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) — choose between default coordinator-style mounts and DaemonService mode.
@@ -24,15 +55,14 @@ Use it when you want to:
 - [Mount Management](/docs/cli/virtual-filesystem/mount-management) — list, refresh, switch, and unmount active mounts.
 - [LFS Compatibility](/docs/cli/virtual-filesystem/lfs-compatibility) — work with repositories that still contain Git LFS pointers.
 
-## How To Think About It
+## Keep mount and hydration responsibilities separate
 
 The virtual filesystem is a view over a Crab repository. It does not replace
 normal clone, push, or hydrate workflows; it gives you another way to access
 large repositories when selective, on-demand reads are more convenient.
 
 For repeatable development workflows, keep using `crab clone`, `crab fetch`,
-and `crab hydrate`. For exploration, review, notebooks, model inspection, and
-large read-only datasets, a mount is often faster and cleaner.
+and `crab hydrate`. Use a mount for exploration, review, notebooks, model inspection, and large read-only datasets that do not require a fully materialized checkout.
 
 For most interactive use, start with `crab mount`. For persistent multi-repo
 service workflows, use `crab daemon`. The [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) guide

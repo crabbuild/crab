@@ -1,6 +1,10 @@
 ---
 title: "Pruning Objects"
 description: "How to reclaim local disk space by evicting local cache objects."
+meta:
+  contentType: How-to
+  goal: "Use Pruning Objects in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 ## Reclaiming Local Cache Space
@@ -17,14 +21,15 @@ flowchart TD
 
 ## How Pruning Works
 
-Prune is purely local and always safe:
+Prune is purely local and never mutates the configured remote:
 
 1. Walks the local cache directory (`~/.cache/crab/` or `$CRAB_CACHE_DIR`).
 2. Sorts chunk/xorb objects by least-recently-used order under the shared data-object budget.
 3. Sorts shard objects by least-recently-used order when a shard budget is configured.
 4. Removes the oldest objects needed to bring the cache back under budget.
 
-The remote store always retains the authoritative copy. Pruned objects can be re-fetched anytime with `crab hydrate`.
+The remote store is the authoritative copy. Pruned objects can be fetched again
+when the remote remains reachable and still contains the referenced data.
 
 ## Usage
 
@@ -34,7 +39,7 @@ The remote store always retains the authoritative copy. Pruned objects can be re
 crab prune --dry-run
 ```
 
-```
+```text
 prune (dry run): would remove 15 objects (234567890 bytes)
 ```
 
@@ -44,7 +49,7 @@ prune (dry run): would remove 15 objects (234567890 bytes)
 crab prune
 ```
 
-```
+```text
 prune complete: removed 15 objects (234567890 bytes freed)
 ```
 
@@ -69,7 +74,7 @@ These are different operations at different scopes:
 | | `crab prune` | `crab gc` |
 |---|---|---|
 | **Scope** | Local cache only | Remote store |
-| **Safety** | Always safe — remote is untouched | Requires careful reference checking |
+| **Safety** | Remote is untouched; later reads may need network access | Requires careful reference checking |
 | **Reversibility** | Objects re-fetched on next hydrate | Deleted objects are gone permanently |
 | **When to use** | Free local disk space | Remove unreachable remote objects |
 
@@ -80,6 +85,22 @@ The local cache defaults to `~/.cache/crab/`. Override with:
 ```bash
 export CRAB_CACHE_DIR=/path/to/cache
 ```
+
+## Verify reclaimed space
+
+Compare the dry-run plan with the terminal result and a new usage report:
+
+```bash
+crab prune --dry-run --json
+crab prune --json
+crab du
+```
+
+The removed-object count can differ if cache access or another Crab process
+changes recency between plan and apply. After pruning, hydrate one representative
+file to confirm the configured remote can refill missing cache objects. Use
+`crab cache clean` only when you intend to remove the full local cache rather
+than enforce its budgets.
 
 ## CLI Reference
 

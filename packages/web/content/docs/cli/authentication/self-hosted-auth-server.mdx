@@ -1,6 +1,10 @@
 ---
 title: "Self-Hosted Auth Server"
 description: "Deploy crab-auth for identity-based access control with your own IdP and RBAC policies."
+meta:
+  contentType: How-to
+  goal: "Use Self-Hosted Auth Server in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Self-Hosted Auth Server
@@ -20,7 +24,7 @@ changing production routing.
 
 | Benefit | Description |
 |---------|-------------|
-| **Your policies, your rules** | Define who can push/fetch which repos using a simple YAML policy |
+| **Your policies, your rules** | Define who can push or fetch each repository through a declarative YAML policy |
 | **Credentials never leave your network** | crab-auth runs in your VPC, calls your STS, returns creds to your developers |
 | **No vendor dependency** | If crab (the company) disappears, your auth still works |
 | **Multi-cloud** | Single auth layer across AWS, GCP, and Azure storage |
@@ -63,7 +67,7 @@ Path-scoped push rules require at least one advisory or verified changed path;
 use a non-path-scoped push rule for intentional ref-only or metadata-only
 updates.
 
-## Quick Start (5 minutes)
+## Start the authentication server
 
 Test the full flow locally with Docker:
 

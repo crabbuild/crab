@@ -1,6 +1,10 @@
 ---
 title: "Garbage Collection"
 description: "How Crab identifies and removes unreachable objects from cloud storage to reclaim space and reduce costs."
+meta:
+  contentType: How-to
+  goal: "Use Garbage Collection in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Garbage Collection
@@ -74,7 +78,7 @@ flowchart LR
 crab gc --dry-run
 ```
 
-```
+```text
 GC dry run:
   Unreachable xorbs:       42 (1.2 GB)
   Unreachable shards:      8 (45 MB)

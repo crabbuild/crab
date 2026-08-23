@@ -1,6 +1,10 @@
 ---
 title: "Listing Tracked Files"
 description: "See which files Crab is managing, their content hashes, and hydration state."
+meta:
+  contentType: How-to
+  goal: "Use Listing Tracked Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Listing Tracked Files
@@ -9,12 +13,12 @@ When you need to see exactly which files Crab is managing in your repository —
 
 ## What It Shows
 
-For each Crab-tracked file in your working tree, you can see:
+For each path matched by a `filter=crab` rule in `.gitattributes`, you can see:
 
 - **Content hash** — The blake3 hash identifying this file version (from the pointer blob)
-- **Hydration state** — Whether the file is a pointer (`p`) or hydrated (`*`)
+- **Display state**: whether Crab parsed a pointer or found full working-tree content
 - **File path** — Relative path in the repository
-- **Size** — Original file size (with `--size`)
+- **Size**: current working-tree file size (with `--size`)
 
 ## Basic Usage
 
@@ -22,13 +26,20 @@ For each Crab-tracked file in your working tree, you can see:
 crab ls-files
 ```
 
-```
-abc1234567 p models/weights.bin
-def8901234 p models/embeddings.bin
----------- * data/train.csv
+```text
+Hash        Status      File
+──────────  ──────────  ────────────────────
+abc1234567  pointer     models/weights.bin
+def8901234  pointer     models/embeddings.bin
+··········  unstaged    data/train.csv
 ```
 
-The `p` marker means the file is a pointer (dehydrated). The `*` marker means it's hydrated (full content on disk). The hash is `----------` for hydrated files because the pointer isn't readable when full content is present.
+`pointer` means the working-tree file itself contains a Crab pointer, so its
+content hash is available. The current human display labels matched full files
+as `unstaged` because no pointer can be parsed from their working-tree bytes.
+Use JSON when automation needs the explicit `hydrated` boolean. A full file can
+be a clean hydration or new content awaiting `crab add`; this listing alone does
+not distinguish those cases.
 
 ## With File Sizes
 
@@ -36,13 +47,16 @@ The `p` marker means the file is a pointer (dehydrated). The `*` marker means it
 crab ls-files --size
 ```
 
-```
-abc1234567 p models/weights.bin (1.2 GB)
-def8901234 p models/embeddings.bin (800 MB)
----------- * data/train.csv (45.2 MB)
+```text
+abc1234567  pointer       164 B  models/weights.bin
+def8901234  pointer       164 B  models/embeddings.bin
+··········  unstaged    45.2 MB  data/train.csv
 ```
 
-## Just File Names
+The size column reports bytes currently on disk. For a pointer, that is the
+pointer blob size rather than the original managed file size.
+
+## Show file names only
 
 For scripting or piping to other tools:
 
@@ -50,7 +64,7 @@ For scripting or piping to other tools:
 crab ls-files --name-only
 ```
 
-```
+```text
 models/weights.bin
 models/embeddings.bin
 data/train.csv
@@ -61,7 +75,7 @@ data/train.csv
 ### Find all pointer files (not yet hydrated)
 
 ```bash
-crab ls-files | grep ' p '
+crab ls-files | grep ' pointer '
 ```
 
 ### Count tracked files
@@ -84,10 +98,13 @@ crab ls-files --json | jq '.data.files[] | select(.hydrated == false) | .name'
 
 ## Difference from `crab status`
 
-- `crab status` gives a **summary** — counts of hydrated, pointer, and modified files.
-- `crab ls-files` gives a **listing** — every tracked file with its details.
+| Command | Primary question | Important limit |
+| --- | --- | --- |
+| `crab status` | Is each selected path a pointer, size-matching hydration, or size-different file? | Hydrated versus modified is size-based |
+| `crab ls-files` | Which working-tree paths match Crab tracking rules? | Full files do not expose their committed pointer hash |
+| `crab why <path>` | Which rule selected this path and what state was resolved? | Inspects one path at a time |
 
-Use `status` for a quick overview, `ls-files` when you need the full list.
+Use `status` for a repository summary and `ls-files` when you need the full list.
 
 ## CLI Reference
 

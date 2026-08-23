@@ -1,6 +1,10 @@
 ---
 title: "Workflow Status"
 description: "Report per-stage state of your declared workflow pipeline with crab workflow status"
+meta:
+  contentType: How-to
+  goal: "Use Workflow Status in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab workflow status
@@ -9,7 +13,7 @@ Report per-stage state of your declared workflow pipeline.
 
 ## Synopsis
 
-```
+```bash
 crab workflow status [OPTIONS] [TARGET]...
 ```
 
@@ -28,7 +32,7 @@ whether the stage is:
 | `frozen` | Stage is marked frozen and will be skipped |
 
 When a stage is stale, the command identifies the first differing input
-category so you can quickly understand why a re-run is needed.
+category so you can identify why a rerun is needed.
 
 Use `--why <stage>` to drill into a single stage and get a field-by-field
 input-hash breakdown — the same information `crab run --explain-miss`

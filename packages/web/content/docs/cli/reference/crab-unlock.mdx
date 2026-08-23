@@ -1,6 +1,10 @@
 ---
 title: "crab unlock"
 description: "Release advisory locks on Crab-managed files."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab unlock."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab unlock
@@ -24,3 +28,24 @@ crab unlock --force models/checkpoint.safetensors
 ```
 
 Use [`crab locks`](/docs/cli/reference/crab-locks) to inspect active locks.
+
+## Release the intended lock
+
+Advisory locks coordinate writers; they do not replace Git commits or object
+storage consistency. Release a lock after the protected edit has been pushed
+or abandoned. Multiple paths can be released in one invocation:
+
+```bash
+crab unlock data/train.parquet models/checkpoint.safetensors
+crab locks --owner self
+```
+
+The second command verifies that the current owner no longer holds the selected
+locks. A normal unlock refuses to break a lock owned by someone else. Use
+`--force` only after confirming that the recorded owner is no longer working on
+the file, because another writer may still rely on that lock.
+
+For automation, `--json` provides a machine-readable result while command
+failure still uses a nonzero exit status. Filter the lock list by exact path
+before a forced unlock so the operator can record which owner and path were
+overridden.

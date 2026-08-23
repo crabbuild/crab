@@ -1,7 +1,13 @@
 ---
 title: Workflow checkpoints
 description: Explicit experiment checkpoint semantics and the fail-closed execution boundary.
+meta:
+  contentType: How-to
+  goal: "Use Workflow checkpoints in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
+
+# Resume experiments from acknowledged checkpoints
 
 Crab checkpoints are immutable experiment lineage points. They are different
 from persistent outputs: persist keeps an output during cleanup, while a
@@ -10,6 +16,23 @@ identities, metrics, and resume state.
 
 Declare a checkpoint explicitly in crab.yaml. The minimal shape is a stage with
 an output mapping containing path, checkpoint: true, and cache: true.
+
+```yaml title="crab.yaml"
+stages:
+  train:
+    cmd: python train.py
+    outs:
+      - path: checkpoints/model.bin
+        checkpoint: true
+        cache: true
+```
+
+| Concept | Meaning | Mutation boundary |
+| --- | --- | --- |
+| Persistent output | Survives normal cleanup | Same run and output path |
+| Checkpoint record | Acknowledged immutable lineage point | Supervisor appends a parent-linked record |
+| Resume | Forks a new experiment from the latest resumable point | Source experiment stays unchanged |
+| Reset | Selects an earlier checkpoint or discards active lineage | Requires an experiment identifier |
 
 Checkpoint outputs must be cached local files or directories. The field is
 included in the stage hash. crab run and crab repro reject checkpoint stages
@@ -32,6 +55,22 @@ checkpoint remains the recovery point.
 latest resumable point after validating and copying the source lineage and
 immutable checkpoint objects. Subsequent acknowledgements append to that
 lineage; the source experiment remains unchanged.
+
+## Inspect before resuming or resetting
+
+```bash
+crab exp show <experiment-id> --json
+crab exp run --resume <experiment-id>
+crab exp reset <experiment-id> --checkpoint <checkpoint-id> --json
+```
+
+Use the canonical experiment and checkpoint identifiers from structured output.
+An ambiguous prefix fails instead of selecting one lineage arbitrarily. Resume
+creates a new experiment, while reset changes the active checkpoint lineage of
+the selected experiment. Preserve the source metadata before reset when the
+incident requires an audit trail.
+
+## Understand the release boundary
 
 The validated contract, local supervisor, lineage selectors, and local
 push/pull validation are implemented. Release qualification still requires a

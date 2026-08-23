@@ -1,6 +1,10 @@
 ---
 title: "How It Works"
 description: "A user-facing overview of cache-service request flow and data safety."
+meta:
+  contentType: Conceptual
+  goal: "Understand How It Works and the system boundaries it defines."
+  audience: "Crab users who want the system model behind this feature."
 ---
 
 # How It Works
@@ -56,6 +60,27 @@ Only versioned SlateDB metadata objects are cached. Discovery pointers such as `
 The same taxonomy is exposed from `/v1/capabilities.routes` so `crab doctor`
 and onboarding probes can verify that a client and cache server agree before
 traffic starts.
+
+## Trace one repeated read
+
+Clear only the local client cache, read the same managed file twice, then
+inspect shared-cache counters:
+
+```bash
+crab cache clean
+crab hydrate models/checkpoint.safetensors
+crab dehydrate models/checkpoint.safetensors
+crab cache clean
+crab hydrate models/checkpoint.safetensors
+curl -fsS -H "X-Cache-PSK: $CRAB_CACHE_PSK" \
+  https://crab-cache.example.com:8443/v1/admin/stats
+```
+
+The first hydration may fetch immutable objects from origin and store them in
+the shared cache. After local eviction or dehydration, a matching later read
+should increase shared cache hits without increasing origin fetches for those
+objects. The exact counters are stronger evidence than timing alone because
+local disk and network conditions can change between reads.
 
 ## Availability Model
 

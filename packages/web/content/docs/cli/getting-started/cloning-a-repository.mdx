@@ -1,11 +1,15 @@
 ---
 title: "Cloning a Repository"
-description: "Clone a Crab repository with instant lazy checkout — files appear immediately as pointers, hydrate on demand."
+description: "Clone a Crab repository with a lazy checkout, then hydrate selected file content on demand."
+meta:
+  contentType: Tutorial
+  goal: "Complete Cloning a Repository and verify each important state transition."
+  audience: "Crab users following this workflow for the first time."
 ---
 
 # Cloning a Repository
 
-Cloning a Crab repository is nearly instant regardless of how much data it contains. Unlike traditional git (or Git LFS) where cloning downloads all file content, Crab clones only download git metadata and lightweight pointer blobs. The actual file content stays in cloud storage until you explicitly hydrate it.
+Cloning a Crab repository downloads Git metadata and lightweight pointer blobs instead of hydrating every managed file. Clone time therefore depends on repository history and metadata rather than the total bytes stored in Crab-managed files. The file content remains in cloud storage until you explicitly hydrate it.
 
 ## How Lazy Cloning Works
 
@@ -29,7 +33,7 @@ crab status
 Then hydrate what you need:
 
 ```bash
-crab hydrate '*.safetensors'    # just model files
+crab hydrate '*.safetensors'    # hydrate model files only
 crab hydrate --all              # everything
 ```
 

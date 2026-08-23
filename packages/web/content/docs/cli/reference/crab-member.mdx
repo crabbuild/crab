@@ -1,6 +1,10 @@
 ---
 title: "crab member"
 description: "List, add, update, and remove managed organization memberships."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab member."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab member
@@ -75,6 +79,13 @@ crab member remove acme 018f3f80-7b2d-7c3a-8b1f-a0b1c2d3e4f5 --revision 3
 Only owners can change owner memberships. The service rejects removal or
 downgrade of the last active owner. Membership update and removal require the
 revision shown by `crab member list --json`.
+
+List membership again after every mutation and retain the returned revision for
+the next guarded update. A stale revision fails instead of silently replacing a
+concurrent administrator's change. Service targeting uses an installed
+authority such as `crab.build`, not a repository URL. Token and workload
+identities belong under `crab service-account`; member commands operate on
+human or workload principals already known to the service.
 
 ## Related
 

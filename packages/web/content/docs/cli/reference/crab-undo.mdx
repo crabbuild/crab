@@ -1,6 +1,10 @@
 ---
 title: "crab undo"
 description: "Undo the last reversible Crab adopt or add operation."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab undo."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab undo
@@ -8,6 +12,12 @@ description: "Undo the last reversible Crab adopt or add operation."
 Inspect staged changes and reverse the last detected reversible `crab adopt` or
 `crab add` operation. If no reversible staged operation is found, the command
 returns an error.
+
+Use this command before committing when an add or adopt operation selected the
+wrong files. Crab inspects the staged paths, keeps only working-tree files that
+currently contain Crab pointers, and restores those files through the same
+staging data used by `crab unadopt`. It does not rewind arbitrary Git commits or
+choose an older repository snapshot.
 
 ## Synopsis
 
@@ -19,3 +29,21 @@ crab undo [OPTIONS]
 crab undo
 crab undo --json
 ```
+
+## Verify the reversal
+
+Inspect both the working tree and the index after the command:
+
+```bash
+git status --short
+git diff --cached --name-only
+```
+
+The restored files should contain their full bytes and should no longer appear
+as staged pointer changes. If Crab reports that there is nothing to undo,
+inspect `git diff --cached --name-only`; the staged set either contains no Crab
+pointers or the reversible change has already been removed. Use `git revert`
+or another Git history operation for a change that was already committed.
+
+`--json` uses the `undo` structured-output schema, which is suitable for tools
+that need to distinguish a successful reversal from a command failure.

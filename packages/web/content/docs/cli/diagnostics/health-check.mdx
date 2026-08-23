@@ -1,6 +1,10 @@
 ---
 title: "Health Check"
 description: "How to run a comprehensive health check on your Crab installation to verify configuration, connectivity, and repository state."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Health Check problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Running Health Checks
@@ -31,7 +35,7 @@ Each check produces one of three statuses:
 crab doctor
 ```
 
-```
+```text
   ✓ Git version          git 2.43.0
   ✓ Crab binary          /usr/local/bin/crab
   ✓ Git repository       /home/user/my-repo
@@ -77,6 +81,19 @@ crab doctor --json > doctor-output.json
 crab env > env-info.txt
 # Attach both to your issue
 ```
+
+## Keep diagnosis and repair separate
+
+`crab doctor` can probe configuration, credentials, remotes, cache service, and
+repository posture, but a passing check does not reconstruct every referenced
+file. Use the failed check's remediation for the identified boundary, then run
+the same doctor check again. Continue with `crab fsck` when the symptom involves
+missing or corrupt repository objects.
+
+Support bundles and environment output can contain repository URLs, local
+paths, and provider names even when secrets are redacted. Review the artifacts
+before sharing them publicly. Keep the Crab version with the output because
+the set of checks and their remediation can change between releases.
 
 ## CLI Reference
 

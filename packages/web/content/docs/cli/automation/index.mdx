@@ -1,27 +1,84 @@
 ---
-title: "Automation & Pipelines"
-description: "Run reproducible workflows with content-addressed caching, experiment tracking, and pipeline orchestration."
+title: "Automate reproducible workflows"
+description: "Define cached stages, run dependency graphs, compare experiments, and inspect the state that produced each result."
+meta:
+  contentType: "Landing"
+  goal: "Choose the automation command or concept required for a reproducible workflow."
+  audience: "Developers building data, model, and artifact pipelines with Crab."
 ---
 
-# Automation & Pipelines
+# Automate reproducible workflows
 
-Crab includes a workflow engine for running reproducible commands with content-addressed caching. Define multi-step pipelines, track experiments, and let Crab skip steps whose inputs haven't changed.
+Crab executes declared stages from repository files and caches outputs by input identity. Use this section for command-focused explanations of stages, dependency graphs, parameters, metrics, experiments, and queues.
 
-## Key Concepts
+<DocsPathDiagram
+  id="automation-path"
+  title="A stage becomes reusable evidence"
+  caption="A cache hit is valid only when the command, dependencies, parameters, and declared outputs match the recorded stage identity."
+  steps={[
+    { label: "Declare", detail: "cmd + deps + outs", tone: "git" },
+    { label: "Hash", detail: "stage identity", tone: "control" },
+    { label: "Run or replay", detail: "verified outputs", tone: "data" },
+    { label: "Record", detail: "lock + journal", tone: "safe" },
+  ]}
+/>
 
-- **Content-addressed caching** — Commands are cached by the hash of their inputs. If nothing changed, the step is skipped.
-- **Pipeline DAGs** — Define dependencies between steps. Crab runs them in topological order.
-- **Experiment tracking** — Log parameters, metrics, and outputs for each run.
+## Start with one cached command
 
-## Topics in This Section
+Create a stage in `crab.yaml`, then run its output target:
 
-- [External Data Sources](/docs/cli/automation/data-commands) — Import, inspect, and refresh versioned inputs with `crab data`
-- [Running Commands](/docs/cli/automation/running-commands) — Execute cached commands with `crab run`
-- [Workflow Pipelines](/docs/cli/automation/workflow-pipelines) — Define multi-step pipelines
-- [Workflow Journal](/docs/cli/automation/workflow-journal) — Inspect pipeline execution history
-- [Workflow Lockfile](/docs/cli/automation/workflow-lockfile) — Pin pipeline state for reproducibility
-- [Experiments](/docs/cli/automation/experiments) — Track experiment runs and parameters
-- [Experiment Queue](/docs/cli/automation/experiment-queue) — Queue and schedule experiment runs
-- [Parameters](/docs/cli/automation/parameters) — Define and sweep hyperparameters
-- [Metrics Tracking](/docs/cli/automation/metrics-tracking) — Log and compare metrics across runs
-- [DAG Visualization](/docs/cli/automation/dag-visualization) — Visualize pipeline dependency graphs
+```yaml title="crab.yaml"
+stages:
+  train:
+    cmd: python scripts/train.py
+    deps:
+      - scripts/train.py
+      - data/training.parquet
+    outs:
+      - models/model.safetensors
+```
+
+```bash
+crab run models/model.safetensors
+crab run models/model.safetensors
+```
+
+The first run executes the command and records the successful output state. The second run can replay a matching cache entry when every declared input still identifies the same content.
+
+Change one declared dependency and use a dry run to inspect why the stage no
+longer matches its previous result:
+
+```bash
+touch data/training.parquet
+crab run train --dry-run --explain-miss
+```
+
+The plan should identify the changed dependency. This is the central workflow
+debugging rule: inspect the computed identity before forcing execution or
+deleting cache data.
+
+## Separate declarations from runtime state
+
+Commit workflow declarations, parameter files, and lockfiles to Git. Keep run journals, temporary worktrees, and local cache entries under `.crab/`.
+
+| State | Purpose | Normal owner |
+| --- | --- | --- |
+| `crab.yaml` | Declares commands, dependencies, and outputs | Git |
+| `crab.lock` | Records the successful stage state | Git |
+| Stage cache | Stores reusable output snapshots | Local or Crab remote |
+| Run journal | Records execution and recovery progress | Local client |
+| Experiment ref | Identifies a retained experiment result | Git and Crab remote |
+
+## Choose the next topic
+
+- [Run commands](/docs/cli/automation/running-commands) and understand cache decisions
+- [Define workflow pipelines](/docs/cli/automation/workflow-pipelines) with ordered dependencies
+- [Inspect the workflow journal](/docs/cli/automation/workflow-journal) after interruption or retry
+- [Understand the workflow lockfile](/docs/cli/automation/workflow-lockfile) that records successful state
+- [Track experiments](/docs/cli/automation/experiments) and compare parameter changes
+- [Queue experiments](/docs/cli/automation/experiment-queue) for batch execution
+- [Define parameters](/docs/cli/automation/parameters) and matrix overrides
+- [Track metrics](/docs/cli/automation/metrics-tracking) for comparisons
+- [Visualize the dependency graph](/docs/cli/automation/dag-visualization) before execution
+
+For an end-to-end learning path, start with the [Workflow quickstart](/docs/cli/workflow/quickstart). Use the [CLI reference](/docs/cli/reference) when you already know the command and need its flags.

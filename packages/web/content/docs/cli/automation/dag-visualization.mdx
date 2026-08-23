@@ -1,6 +1,10 @@
 ---
 title: "DAG Visualization"
 description: "Visualize the workflow dependency graph in ASCII, Mermaid, or structured JSON."
+meta:
+  contentType: How-to
+  goal: "Use DAG Visualization in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # crab workflow dag
@@ -11,7 +15,7 @@ topological structure in ASCII, Mermaid, or structured JSON format.
 
 ## Synopsis
 
-```
+```bash
 crab workflow dag [OPTIONS]
 ```
 
@@ -119,7 +123,7 @@ crab workflow dag
 
 Output for a three-stage linear pipeline:
 
-```
+```text
 ingest
 └─ (no deps)
 preprocess
@@ -136,7 +140,7 @@ crab workflow dag --format mermaid
 
 Output:
 
-```
+```text
 graph TD
     ingest["ingest"]
     preprocess["preprocess"]

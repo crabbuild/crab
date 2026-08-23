@@ -1,6 +1,10 @@
 ---
 title: "crab env"
 description: "Display environment and configuration information."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for crab env."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 # crab env
@@ -9,7 +13,7 @@ Display environment and configuration info.
 
 ## Synopsis
 
-```
+```bash
 crab env [OPTIONS]
 ```
 
@@ -31,10 +35,29 @@ For conceptual background, see [Environment Info](/docs/cli/authentication/envir
 
 ```bash
 crab env
+crab env --json
 ```
 
-## Related Commands
+Use the human view during interactive diagnosis. Use JSON when an incident tool
+needs to record the same environment fields without parsing labels. Compare the
+reported remote and Git filter configuration with the repository you intended
+to inspect.
 
-- [`crab config`](/docs/cli/reference/crab-config) — read/write settings.
-- [`crab auth status`](/docs/cli/reference/crab-auth-status) — authentication state.
-- [`crab doctor`](/docs/cli/reference/crab-doctor) — health checks.
+## Security boundary
+
+The command reports selected environment-variable presence and configuration,
+but it does not print secret credential values. Its output can still reveal
+repository URLs, provider names, and local paths, so review it before attaching
+it to a public issue. `crab env` is read-only and does not refresh credentials
+or test remote access.
+
+When environment data looks correct but an operation still fails, continue
+with `crab auth status` for cached authentication state and `crab doctor` for
+active health checks. Preserve all three outputs with the same Crab version so
+the evidence describes one configuration state.
+
+## Related commands
+
+- [`crab config`](/docs/cli/reference/crab-config): read or write settings.
+- [`crab auth status`](/docs/cli/reference/crab-auth-status): inspect authentication state.
+- [`crab doctor`](/docs/cli/reference/crab-doctor): run health checks.

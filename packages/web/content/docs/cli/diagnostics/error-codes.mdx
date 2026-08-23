@@ -1,6 +1,10 @@
 ---
 title: "Error Codes"
 description: "How to understand and resolve Crab error codes — structured identifiers that point you to causes and fixes."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Error Codes problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 ## Understanding Error Codes
@@ -11,8 +15,8 @@ When Crab encounters an error, it prints a structured error code like `CRAB-E001
 
 After encountering an error:
 
-```
-ERROR: CRAB-E0017: failed to acquire push lock
+```text
+ERROR: CRAB-E0017: non-fast-forward push rejected
 ```
 
 Look it up:
@@ -50,13 +54,13 @@ Errors fall into categories that tell you how to respond:
 
 ## Common Error Codes
 
-| Code | Name | Quick fix |
+| Code | Name | First response |
 |------|------|-----------|
 | `CRAB-E0001` | `NetworkTransient` | Retry — transient network issue |
 | `CRAB-E0017` | `NonFastForward` | Pull latest changes, then push again |
-| `CRAB-E0200` | `TierLifecycleConflict` | Use `--merge` or remove conflicting rules |
-| `CRAB-E0210` | `ArchiveRestoreRequired` | Run with `--restore` to initiate restore |
-| `CRAB-E0211` | `ArchiveRestoreTimeout` | Retry later — provider-side restore continues |
+| `CRAB-E0300` | `TierLifecycleConflict` | Use `--merge` or remove conflicting rules |
+| `CRAB-E0310` | `ArchiveRestoreRequired` | Run with `--restore` to initiate restore |
+| `CRAB-E0311` | `ArchiveRestoreTimeout` | Retry later; provider-side restore continues |
 
 ## Machine-Readable Output
 
@@ -80,6 +84,19 @@ crab errors CRAB-E0017 --json
   }
 }
 ```
+
+## Preserve the original failure context
+
+The catalog explains a stable category, but it cannot include the path,
+provider response, ref, or operation state from one failure. Record the original
+command, full error line, exit status, and relevant log before applying the
+suggested remediation. A retryable category means the condition can be
+temporary; it does not mean an unbounded retry loop is safe.
+
+For conflicts, reread the current remote state before retrying. For corruption,
+run a read-only integrity check before `--repair`. For permission failures,
+test a read-only operation with the intended identity instead of changing
+bucket policy until the denied boundary is known.
 
 ## CLI Reference
 

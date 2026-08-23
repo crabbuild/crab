@@ -1,15 +1,31 @@
 ---
-title: "Working with Files"
+title: "Work with managed files"
 description: "The everyday Crab loop: track, add, commit, push, hydrate, and dehydrate large files."
+meta:
+  contentType: "Tutorial"
+  goal: "Complete and verify the daily add, push, fetch, and hydration cycle."
+  audience: "Developers contributing files to an existing Crab repository."
 ---
 
-# Working with Files
+# Work with managed files
 
 Use this section when you are actively moving files through a Crab-backed
 repository. Crab keeps Git fast by committing small pointer files while storing
 the real bytes in object storage.
 
-## The Daily Loop
+<DocsPathDiagram
+  id="daily-file-path"
+  title="The daily publication loop"
+  caption="Commit records the pointer. Push makes the referenced data durable before another client fetches and hydrates it."
+  steps={[
+    { label: "Add", detail: "stage bytes", tone: "data" },
+    { label: "Commit", detail: "record pointer", tone: "git" },
+    { label: "Push", detail: "publish closure", tone: "store" },
+    { label: "Hydrate", detail: "verify content", tone: "safe" },
+  ]}
+/>
+
+## Run the daily loop
 
 ```bash
 crab track '*.safetensors'      # one-time pattern setup
@@ -35,7 +51,7 @@ crab ship . -m "Update model weights"
 `crab ship` combines `crab add`, `git commit`, and `crab push`. Use the
 individual commands when you need to inspect or adjust each step.
 
-## What Each Step Does
+## Understand each boundary
 
 | Step | Command | Result |
 | --- | --- | --- |
@@ -46,7 +62,7 @@ individual commands when you need to inspect or adjust each step.
 | Materialize | `crab hydrate <paths>` | Reconstructs full files from remote chunks or local cache. |
 | Free disk | `crab dehydrate <paths>` | Replaces clean hydrated files with pointers. |
 
-## Common Workflows
+## Apply the loop to common tasks
 
 ### Add and upload a model
 
@@ -86,7 +102,7 @@ Hydrated files can appear modified to Git because the working tree has full
 content while Git tracks pointers. Dehydrate clean files before branch switches
 or pulls when you want Git status to stay quiet.
 
-## Quick Checks
+## Verify local and remote state
 
 ```bash
 crab status              # hydration state
@@ -98,15 +114,15 @@ crab doctor              # environment and repository health
 If hydration reports missing chunks, run `crab fsck` and check whether the
 machine that produced the files completed `crab push`.
 
-## Pages in This Section
+## Continue with one file operation
 
-- [Adding Files](/docs/cli/daily-workflow/adding-files) - stage files with parallel chunking.
-- [Pushing Changes](/docs/cli/daily-workflow/pushing-changes) - upload chunks and refs.
-- [Fetching Updates](/docs/cli/daily-workflow/fetching-updates) - fetch remote changes.
-- [Hydrating Files](/docs/cli/daily-workflow/hydrating-files) - reconstruct full file content.
-- [Dehydrating Files](/docs/cli/daily-workflow/dehydrating-files) - replace full files with pointers.
-- [Resetting Staged Files](/docs/cli/daily-workflow/resetting-staged-files) - undo local staging.
-- [File Locking](/docs/cli/daily-workflow/file-locking) - coordinate edits to binary files.
-- [Comparing Changes](/docs/cli/daily-workflow/diffing-changes) - review chunk-level changes.
+- [Add files](/docs/cli/daily-workflow/adding-files): stage files with parallel chunking
+- [Push changes](/docs/cli/daily-workflow/pushing-changes): upload chunks and refs
+- [Fetch updates](/docs/cli/daily-workflow/fetching-updates): fetch remote changes
+- [Hydrate files](/docs/cli/daily-workflow/hydrating-files): reconstruct full file content
+- [Dehydrate files](/docs/cli/daily-workflow/dehydrating-files): replace full files with pointers
+- [Reset staged files](/docs/cli/daily-workflow/resetting-staged-files): undo local staging
+- [Coordinate file locks](/docs/cli/daily-workflow/file-locking): coordinate edits to binary files
+- [Compare changes](/docs/cli/daily-workflow/diffing-changes): review chunk-level changes
 
 For flags and output formats, use the [CLI reference](/docs/cli/reference).

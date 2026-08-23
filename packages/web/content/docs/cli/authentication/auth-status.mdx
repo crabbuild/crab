@@ -1,11 +1,15 @@
 ---
 title: "Auth Status"
 description: "How to check your current authentication state, token expiry, and provider configuration without contacting the identity provider."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for Auth Status."
+  audience: "Crab users who need exact command or configuration behavior."
 ---
 
 ## Checking Authentication State
 
-Before running operations that need valid credentials, you can quickly check whether you're authenticated and when your token expires. `crab auth status` reads only local state — it never contacts the identity provider, so it's instant and safe to run anytime.
+Before running operations that need valid credentials, inspect whether you are authenticated and when the token expires. `crab auth status` reads only local state. It never contacts the identity provider, so it is safe to run without triggering a refresh request.
 
 ## Usage
 
@@ -15,7 +19,7 @@ crab auth status
 
 When authenticated with a valid token:
 
-```
+```text
 Provider:     aws-oidc
 Identity:     alice@corp.example.com
 Token expiry: 2025-01-15T14:30:00Z (2h 15m remaining)
@@ -26,7 +30,7 @@ Region:       us-west-2
 
 When not authenticated:
 
-```
+```text
 Provider:     aws-oidc
 Status:       Not authenticated
 
@@ -35,7 +39,7 @@ Run `crab login` to authenticate.
 
 When the token has expired:
 
-```
+```text
 Provider:     crab-auth
 Identity:     bob@team.example.com
 Token expiry: 2025-01-14T09:00:00Z (expired)

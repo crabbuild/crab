@@ -1,6 +1,10 @@
 ---
 title: "Operations and Troubleshooting"
 description: "Recover from workflow cache misses, stuck journals, scheduler locks, missing deps, dirty outputs, and experiment cleanup problems."
+meta:
+  contentType: Troubleshooting
+  goal: "Diagnose Operations and Troubleshooting problems and choose a safe recovery step."
+  audience: "Crab operators investigating a failure or unexpected state."
 ---
 
 # Operations and Troubleshooting
@@ -18,6 +22,14 @@ crab run --dry --explain-miss
 ```
 
 These commands are read-oriented and safe to run before changing the workspace.
+
+| Symptom | First evidence | Mutation to avoid until classified |
+| --- | --- | --- |
+| Unexpected cache miss | `crab run --dry --explain-miss` | Deleting stage cache |
+| Missing dependency | `crab workflow dag` and lockfile state | Trusting undeclared local files |
+| Scheduler appears stuck | Journal list and selected run trajectory | Abandoning a live run |
+| Output would be overwritten | Git status and output diff | Replaying cache without `--no-overwrite` |
+| Lockfile conflict | Conflict blocks from both Git sides | Choosing one whole file without validation |
 
 ## Stage Keeps Missing Cache
 
@@ -118,7 +130,7 @@ outputs and rerun.
 Resolve conflict markers:
 
 ```bash
-crab workflow lockfile resolve crab.lock
+crab workflow lockfile resolve --path crab.lock
 crab run --validate
 crab run --dry
 ```

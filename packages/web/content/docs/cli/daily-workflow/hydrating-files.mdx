@@ -1,6 +1,10 @@
 ---
 title: "Hydrating Files"
 description: "Reconstruct full file content from Crab pointers."
+meta:
+  contentType: How-to
+  goal: "Use Hydrating Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Hydrating Files
@@ -57,6 +61,27 @@ crab hydrate 'models/**' 'data/eval/**'
   or the remote store was modified outside Crab.
 - For local recovery from a copy of the original file, use
   `crab hydrate --recover-from <path>`.
+
+## Verify materialized content
+
+Check the selected path instead of assuming a zero exit status hydrated every
+file in a broad pattern:
+
+```bash
+crab status
+crab why models/v2.bin
+test -s models/v2.bin
+```
+
+`crab status` gives the repository summary, while `crab why` explains the
+tracking rule and current representation for one path. The final shell check
+only proves that the file is nonempty; Crab's hydration path separately checks
+the reconstructed content hash before replacing the pointer atomically.
+
+Hydration changes the working-tree representation but not the committed Git
+blob. A normal Git diff may therefore notice that full content differs from the
+pointer stored in the index. Use Crab state commands to distinguish expected
+materialization from an edited file before resetting anything.
 
 For full pattern precedence, manifest format, output modes, and options, see
 the [crab hydrate reference](/docs/cli/reference/crab-hydrate).

@@ -1,6 +1,10 @@
 ---
 title: "Adding Files"
 description: "Stage large files for Crab storage with parallel chunking and Git pointer updates."
+meta:
+  contentType: How-to
+  goal: "Use Adding Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Adding Files
@@ -28,6 +32,10 @@ crab add .
 Run `crab track <glob>` first for reusable patterns, then commit the resulting
 `.gitattributes` change so collaborators use the same rules.
 
+`--dry-run` reports the candidate set without changing the Git index or Crab
+staging. Use it before a directory-wide add when ignore and tracking patterns
+overlap.
+
 ## After Adding
 
 ```bash
@@ -40,6 +48,26 @@ crab push origin main
 
 `crab add` stages Crab pointer blobs for Git. Keep using normal Git commands
 for review and commits.
+
+## Verify both staged layers
+
+Crab staging and the Git index represent different parts of the same pending
+change. Check both before committing:
+
+```bash
+crab staging verify
+git show :models/checkpoint.safetensors
+git status --short
+```
+
+The staging verification checks the local file metadata and chunk payloads.
+The `git show :<path>` command reads the index entry and should display a small
+Crab pointer rather than the full binary content. `git status` confirms which
+paths and tracking-rule changes will enter the commit.
+
+If verification fails, do not commit an incomplete pointer. Use
+[`crab reset`](/docs/cli/reference/crab-reset) to remove the selected paths from
+both staging layers, correct the source or configuration, and add them again.
 
 ## Common Pitfalls
 

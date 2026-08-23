@@ -30,7 +30,19 @@ function remarkMermaid() {
 // source.config.ts
 import { z } from "zod";
 var externalDocsSchema = pageSchema.extend({
-  title: z.string().optional()
+  title: z.string().optional(),
+  meta: z.object({
+    contentType: z.enum([
+      "Tutorial",
+      "How-to",
+      "Reference",
+      "Conceptual",
+      "Troubleshooting",
+      "Landing"
+    ]),
+    goal: z.string(),
+    audience: z.string()
+  }).optional()
 });
 var cliDocs = defineDocs({
   dir: "content/docs/cli",
@@ -48,7 +60,13 @@ var blog = defineDocs({
       tags: z.array(z.string()).optional(),
       excerpt: z.string().optional(),
       level: z.enum(["beginner", "intermediate", "deep-dive"]).optional(),
-      path: z.enum(["start-here", "first-workflow", "core-internals", "advanced-operations", "migration"]).optional(),
+      path: z.enum([
+        "start-here",
+        "first-workflow",
+        "core-internals",
+        "advanced-operations",
+        "migration"
+      ]).optional(),
       order: z.number().optional(),
       concepts: z.array(z.string()).optional(),
       prerequisites: z.array(z.string()).optional(),

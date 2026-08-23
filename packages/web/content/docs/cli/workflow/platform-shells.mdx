@@ -1,6 +1,10 @@
 ---
 title: "Workflow platform shells"
 description: "Choose native workflow commands that behave predictably on Unix and Windows."
+meta:
+  contentType: How-to
+  goal: "Use Workflow platform shells in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Workflow platform shells
@@ -16,6 +20,13 @@ Crab does not translate POSIX shell syntax to Windows or Windows batch syntax
 to Unix. A shell command that is valid on one platform can therefore still be
 invalid on another. Use argv form for cross-platform workflows, or select the
 platform-specific command in your workflow authoring layer.
+
+| Command form | Shell involved | Cross-platform guidance |
+| --- | --- | --- |
+| `cmd: { argv: [...] }` | None | Prefer when the program and arguments are portable |
+| String `cmd:` | Host default shell | Use only syntax valid for every target platform |
+| Command list | Host default shell for each item | Keep ordering explicit; failures stop the stage |
+| `on_cache_hit` hook | Same adapter as stages | Apply the same shell portability rules |
 
 ## Examples
 
@@ -43,3 +54,32 @@ execution (or vice versa).
 Hermetic workflow execution remains macOS-only. Requesting `hermetic: true` on
 Windows fails before Crab starts the stage, rather than silently running without
 the requested policy.
+
+## Verify on every target family
+
+Validate the declaration, then inspect a dry run on each operating system that
+will execute the workflow:
+
+```bash
+crab run --validate
+crab run train --dry-run --explain-miss
+```
+
+The stage hash includes operating system, architecture, and shell family, so a
+cache entry from one platform does not silently satisfy an incompatible shell
+execution on another. This protects correctness but also means a mixed runner
+fleet can need separate cache entries.
+
+Keep path separators and quoting inside the called program when possible. For
+example, a Python script can construct paths portably while a shell string with
+`sed`, redirection, or POSIX environment assignment cannot run unchanged under
+`cmd.exe`. If a native tool differs by platform, declare separate stages or
+generate the platform-specific workflow file before validation.
+
+## Diagnose a platform-only failure
+
+Capture `crab version --json`, the rendered stage command, and the target
+platform. Confirm that the expected executable is on `PATH` and that its
+arguments do not depend on shell expansion. A command that succeeds locally but
+fails before producing output in Windows CI usually points to shell syntax or
+path resolution, not a cache-integrity problem.

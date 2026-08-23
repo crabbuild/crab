@@ -1,7 +1,16 @@
-# foreach / matrix Reference
+---
+title: "Expand workflow stages with foreach and matrix"
+description: "Define one workflow stage template and expand it across a list or parameter matrix."
+meta:
+  contentType: Reference
+  goal: "Find the supported syntax and behavior for Expand workflow stages with foreach and matrix."
+  audience: "Crab users who need exact command or configuration behavior."
+---
+
+# Expand workflow stages with foreach and matrix
 
 Stage expansion lets you define a stage template once and expand it into
-multiple concrete stages — one per item (`foreach`) or one per
+multiple concrete stages, one per item (`foreach`) or one per
 combination (`matrix`). Expanded stages are regular DAG nodes: they
 participate in scheduling, caching, and the lockfile individually.
 
@@ -135,7 +144,7 @@ it with a clear error.
 If expansion produces a stage name that collides with another stage
 (expanded or not), the parser fails:
 
-```
+```text
 Error: WorkflowExpandedNameCollision
   name: "train@resnet"
   sources: ["train (foreach item 0)", "train_resnet (explicit stage)"]

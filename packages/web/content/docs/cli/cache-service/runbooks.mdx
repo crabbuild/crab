@@ -1,6 +1,10 @@
 ---
 title: "Runbooks"
 description: "Alert response procedures for cache-service incidents."
+meta:
+  contentType: How-to
+  goal: "Use Runbooks in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Runbooks
@@ -29,6 +33,17 @@ RustFS smoke:
 cd crab
 make cache-service-rustfs-smoke
 ```
+
+| Evidence | What it proves | First decision |
+| --- | --- | --- |
+| Liveness and readiness | Process state and origin reachability | Remove from rotation only when readiness fails |
+| Admin stats | Hit, miss, fallback, eviction, and repair behavior | Compare the alert window with a stable baseline |
+| Crab support bundle | Client config posture and authenticated probes | Separate client routing from server failure |
+| RustFS smoke report | Real CLI traffic respects cache and origin boundaries | Block a release when retained evidence fails |
+
+Do not restart or replace the cache volume before collecting these signals.
+The cache can fall back to origin, and an early restart can erase the warm-set
+and process evidence needed to distinguish expected misses from a regression.
 
 <a id="cache-service-release-evidence-gate-failed"></a>
 

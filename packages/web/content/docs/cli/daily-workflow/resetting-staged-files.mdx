@@ -1,6 +1,10 @@
 ---
 title: "Resetting Staged Files"
 description: "How to unstage files from Crab's staging area and clean up orphaned chunk data."
+meta:
+  contentType: How-to
+  goal: "Use Resetting Staged Files in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
 # Resetting Staged Files
@@ -44,6 +48,16 @@ crab reset --sync
 ```
 
 This scans the staging area, checks each entry against git's current index, and removes data for files that are no longer staged.
+
+| Check | Before reset | After reset |
+| --- | --- | --- |
+| `git diff --cached --name-only` | Lists selected pointer changes | Selected paths are absent |
+| `crab staging stats` | Includes their staged data | Reports only remaining staged work |
+| Working-tree file | Original full content remains available | Full content is unchanged |
+
+Run these checks after a broad pattern or `--sync`. Resetting is not the same
+as deleting a working-tree file, and it does not rewrite commits that already
+contain a pointer.
 
 ## Relationship to Git Reset
 

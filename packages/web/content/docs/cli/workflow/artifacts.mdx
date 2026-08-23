@@ -1,20 +1,60 @@
 ---
 title: Workflow artifacts
 description: Declare, version, inspect, and retrieve immutable workflow artifacts.
+meta:
+  contentType: How-to
+  goal: "Use Workflow artifacts in an existing Crab repository and verify the result."
+  audience: "Crab users completing this task in an existing repository."
 ---
 
+# Version workflow artifacts
+
 The top-level artifacts catalog preserves model and dataset declarations in
-crab.yaml. A declaration names a clean repository-relative path and its kind;
+`crab.yaml`. A declaration names a clean repository-relative path and its kind;
 it does not make a stage executable or infer a release version.
 
-The CLI lifecycle is:
+<DocsPathDiagram
+  id="artifact-version-path"
+  title="Artifact version path"
+  caption="A declaration identifies the output. Version creation hashes clean bytes, retrieval verifies them, and promotion moves only a mutable label."
+  steps={[
+    { label: "Declare", detail: "name + path", tone: "git" },
+    { label: "Version", detail: "BLAKE3 manifest", tone: "data" },
+    { label: "Retrieve", detail: "verified copy", tone: "store" },
+    { label: "Promote", detail: "stage label", tone: "safe" },
+  ]}
+/>
 
-- crab artifacts list and show inspect declarations, versions, and stage labels.
-- crab artifacts version create NAME creates an immutable BLAKE3-addressed
-  manifest from a clean output.
-- crab artifacts get NAME --version ID or --stage STAGE copies exactly one
-  immutable payload and never overwrites an existing destination.
-- crab artifacts history NAME reports promotion events.
+## Declare an artifact
+
+```yaml title="crab.yaml"
+artifacts:
+  fraud-model:
+    path: models/fraud-model.bin
+    type: model
+    desc: Model used by batch fraud scoring
+    labels: [fraud, batch]
+```
+
+The path must be repository-relative. The declaration is metadata; producing
+or updating the file remains the responsibility of a workflow stage or another
+tool.
+
+## Follow the CLI lifecycle
+
+| Command | Purpose | Mutation |
+| --- | --- | --- |
+| `crab artifacts list` | Inspect declarations, versions, and labels | None |
+| `crab artifacts version create <NAME>` | Create an immutable BLAKE3-addressed manifest from a clean output | Adds one version and payload when absent |
+| `crab artifacts get <NAME> --version <ID>` | Copy one verified immutable payload | Writes a new destination only |
+| `crab artifacts promote <NAME> <VERSION> <STAGE>` | Move a stage label | Compare-and-swap registry update |
+| `crab artifacts history <NAME>` | Inspect promotion events | None |
+
+```bash
+crab artifacts version create fraud-model --json
+crab artifacts show fraud-model
+crab artifacts get fraud-model --version <version-id> --output ./model.bin
+```
 
 Creation rejects missing or dirty outputs. The manifest records the source Git
 commit, content identity, size, creation time, and bounded annotations. A
@@ -28,3 +68,11 @@ the same commands operate on local Crab-owned state. Remote artifact refs and
 clean-clone retrieval are live-qualified on the RustFS file-artifact path;
 remote artifact GC retention is still a release gate, so no command removes
 old versions automatically.
+
+## Verify from a clean client
+
+After creating or promoting a remote artifact, use another clone to run
+`artifacts show` and retrieve the exact version into a new path. Confirm the
+downloaded version matches the requested manifest and that an existing
+destination is not overwritten. This proves registry visibility, payload
+availability, streaming hash verification, and the no-overwrite boundary.
