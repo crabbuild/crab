@@ -301,7 +301,6 @@ function NodeGlyph({ kind, color }: { kind: NodeKind; color: string }) {
 export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }) {
   const story = stories[storyName]
   const figureRef = useRef<HTMLElement>(null)
-  const stageScrollerRef = useRef<HTMLDivElement>(null)
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
   const [activeIndex, setActiveIndex] = useState(0)
   const [paused, setPaused] = useState(true)
@@ -314,6 +313,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   const controlsPaused = paused || reducedMotion
   const playbackPaused = controlsPaused || !inView
   const panelId = `${storyName}-stage-panel`
+  const activeNodes = story.nodes.filter((node) => step.activeNodes.includes(node.id))
 
   useEffect(() => {
     const figure = figureRef.current
@@ -343,20 +343,6 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
     [story.steps.length],
   )
 
-  useEffect(() => {
-    const scroller = stageScrollerRef.current
-    const tab = tabRefs.current[activeIndex]
-    if (!scroller || !tab) return
-
-    const tabStart = tab.offsetLeft
-    const tabEnd = tabStart + tab.offsetWidth
-    const visibleStart = scroller.scrollLeft
-    const visibleEnd = visibleStart + scroller.clientWidth
-
-    if (tabStart < visibleStart) scroller.scrollLeft = tabStart
-    if (tabEnd > visibleEnd) scroller.scrollLeft = tabEnd - scroller.clientWidth
-  }, [activeIndex])
-
   const moveTabFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     let nextIndex: number | undefined
     if (event.key === "ArrowRight") nextIndex = activeIndex + 1
@@ -374,22 +360,22 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   return (
     <figure
       ref={figureRef}
-      className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(55.5rem,calc(100vw-2rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] lg:w-[min(55.5rem,calc(100vw-24.5rem))]"
+      className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(62rem,calc(100vw-1rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)] sm:w-[min(62rem,calc(100vw-2rem))] lg:w-[min(62rem,calc(100vw-24.5rem))] min-[1400px]:-translate-x-[calc(50%+1.75rem)]"
     >
       <div className="border-b border-slate-800/90 bg-[#0b111a] px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
+          <div className="min-w-0 flex-1">
             <p className="m-0 font-mono text-[10px] font-semibold tracking-[0.22em] text-sky-400">{story.eyebrow}</p>
-            <h3 className="m-0 mt-1 text-base font-semibold tracking-tight text-slate-100 sm:text-lg">{story.title}</h3>
+            <h3 className="m-0 mt-1 break-words text-base font-semibold tracking-tight text-slate-100 sm:text-lg">{story.title}</h3>
           </div>
           <div className="font-mono text-[10px] tracking-[0.12em] text-slate-600" aria-hidden="true">
             INTERACTIVE TRACE
           </div>
         </div>
 
-        <div ref={stageScrollerRef} className="-mx-1 mt-4 overflow-x-auto px-1 pb-1">
+        <div className="-mx-1 mt-4 px-1 pb-1">
           <div
-            className="flex min-w-max items-center gap-1.5"
+            className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:flex xl:items-center xl:gap-1.5"
             role="tablist"
             aria-label={`${story.title} stages`}
             onKeyDown={moveTabFocus}
@@ -411,7 +397,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   tabIndex={isActive ? 0 : -1}
                   onClick={() => goTo(index)}
                   className={cn(
-                    "group flex min-h-11 items-center gap-2 rounded-md border px-3 font-mono text-xs font-semibold tracking-[0.08em] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none",
+                    "group flex min-h-11 min-w-0 items-center gap-2 rounded-md border px-2 font-mono text-[11px] font-semibold tracking-[0.06em] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none sm:px-3 sm:text-xs sm:tracking-[0.08em] xl:w-auto",
                     isActive
                       ? "border-sky-400/60 bg-sky-400/10 text-sky-300"
                       : isComplete
@@ -427,7 +413,9 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   >
                     {index + 1}
                   </span>
-                  {candidate.label}
+                  <span className="min-w-0 break-words text-left leading-4">
+                    {candidate.label}
+                  </span>
                 </button>
               )
             })}
@@ -435,7 +423,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
         </div>
       </div>
 
-      <div className="overflow-hidden" aria-hidden="true">
+      <div className="hidden overflow-hidden xl:block" aria-hidden="true">
         <svg
           className="block w-full"
           viewBox="0 0 1080 450"
@@ -513,6 +501,10 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
             const active = state === "active"
             const complete = state === "complete"
             const color = active ? activeColor : complete ? "#64748b" : STORY_COLORS[node.kind]
+            const titleWidth = node.width - 62
+            const detailWidth = node.width - 58
+            const fittedTitleWidth = node.title.length * 7.4 > titleWidth ? titleWidth : undefined
+            const fittedDetailWidth = node.detail.length * 6.1 > detailWidth ? detailWidth : undefined
             return (
               <g
                 key={node.id}
@@ -533,10 +525,27 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                 <g transform="translate(22 29)">
                   <NodeGlyph kind={node.kind} color={color} />
                 </g>
-                <text x="42" y="27" fill={active ? "#f8fafc" : "#cbd5e1"} fontFamily="Inter, ui-sans-serif, system-ui" fontSize="14" fontWeight="600">
+                <text
+                  x="42"
+                  y="27"
+                  fill={active ? "#f8fafc" : "#cbd5e1"}
+                  fontFamily="Inter, ui-sans-serif, system-ui"
+                  fontSize="14"
+                  fontWeight="600"
+                  lengthAdjust="spacingAndGlyphs"
+                  textLength={fittedTitleWidth}
+                >
                   {node.title}
                 </text>
-                <text x="42" y="46" fill={active ? "#94a3b8" : "#64748b"} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="10">
+                <text
+                  x="42"
+                  y="46"
+                  fill={active ? "#94a3b8" : "#64748b"}
+                  fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                  fontSize="10"
+                  lengthAdjust="spacingAndGlyphs"
+                  textLength={fittedDetailWidth}
+                >
                   {node.detail}
                 </text>
                 <circle cx={node.width - 14} cy="14" r="3" fill={color} opacity={active ? 1 : 0.55} />
@@ -544,6 +553,42 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
             )
           })}
         </svg>
+      </div>
+
+      <div className="border-y border-slate-800/90 bg-[#070b12] p-4 xl:hidden" aria-hidden="true">
+        <div className="mb-3 flex items-center gap-2 font-mono text-[10px] font-semibold tracking-[0.14em] text-slate-500">
+          <span className="size-1.5 rounded-full" style={{ backgroundColor: activeColor }} />
+          CURRENT STAGE PATH
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {activeNodes.map((node, index) => {
+            const color = STORY_COLORS[node.kind]
+            return (
+              <div
+                key={node.id}
+                className="relative min-w-0 rounded-lg border bg-[#0b111a] px-4 py-3"
+                style={{ borderColor: `${color}66` }}
+              >
+                <div className="flex min-w-0 items-start gap-3">
+                  <span
+                    className="mt-1 flex size-6 shrink-0 items-center justify-center rounded-md border font-mono text-[10px]"
+                    style={{ borderColor: `${color}88`, color }}
+                  >
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="break-words text-sm font-semibold leading-5 text-slate-100">
+                      {node.title}
+                    </div>
+                    <div className="mt-0.5 break-words font-mono text-xs leading-5 text-slate-400">
+                      {node.detail}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
 
       <div className="grid border-t border-slate-800/90 bg-[#0b111a] md:grid-cols-[1fr_auto]">
