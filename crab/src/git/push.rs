@@ -11206,6 +11206,14 @@ impl PushPipeline {
                     if resumed && let Some(metrics) = &metrics_for_task {
                         metrics.inc_multipart_resumed_uploads();
                     }
+                    // Multipart completes carry no provider-neutral
+                    // integrity guarantee (S3 ETags are md5-of-etags), so
+                    // fresh uploads get a full read-back hash check. A
+                    // mismatch fails the push loudly; a re-push recovers
+                    // via dedup proofs or overwrite repair.
+                    store_for_task
+                        .verify_size_and_hash(&path, file_len as u64, &payload_hash)
+                        .await?;
                     Ok(())
                 } else {
                     let data = match payload.read_bytes().await {
@@ -11244,7 +11252,16 @@ impl PushPipeline {
                                 &cancel_for_task,
                                 Some(&*on_part),
                             )
-                            .await
+                            .await?;
+                        // Same multipart read-back policy as the
+                        // file-backed branch above. The xorb id hashes
+                        // chunk pairs, not the body — verify against the
+                        // body blake3 itself.
+                        let expected: [u8; 32] = *blake3::hash(&data).as_bytes();
+                        store_for_task
+                            .verify_size_and_hash(&path, data_len, &expected)
+                            .await?;
+                        Ok(())
                     } else {
                         // Route through `Store::put` (not `inner_store.put`) so
                         // transient single-PUT failures are retried and errors
@@ -11265,6 +11282,10 @@ impl PushPipeline {
                         }
                         other => other,
                     };
+                    // Single-PUT uploads ride on provider checksums
+                    // (S3 enforces Content-MD5 equivalence on complete
+                    // PUTs); verification focuses on multipart completes,
+                    // whose ETags carry no such guarantee.
                     drop(data);
                     result
                 };
@@ -27194,6 +27215,160 @@ mod tests {
     }
 
     // --- Step 7: xorb uploads ---
+
+    /// Delegates to an in-memory store but serves a corrupted body for
+    /// one target object.
+    #[derive(Debug)]
+    struct TamperingStore {
+        inner: object_store::memory::InMemory,
+        target_path: Path,
+        corrupt_body: bool,
+    }
+
+    impl std::fmt::Display for TamperingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TamperingStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for TamperingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            let result = self.inner.get_opts(location, options).await?;
+            if location != &self.target_path {
+                return Ok(result);
+            }
+            // Inflate size metadata (HEAD-style checks see drift) and
+            // optionally swap the payload stream for a corrupted copy.
+            let range = result.range.clone();
+            let attributes = result.attributes.clone();
+            let extensions = result.extensions.clone();
+            let mut meta = result.meta.clone();
+            let payload = if !self.corrupt_body {
+                result.payload
+            } else {
+                let bytes = result.bytes().await?;
+                let mut tampered = bytes.to_vec();
+                if let Some(first) = tampered.first_mut() {
+                    *first ^= 0xFF;
+                }
+                object_store::GetResultPayload::Stream(Box::pin(futures_util::stream::once(
+                    async move { Ok(bytes::Bytes::from(tampered)) },
+                )))
+            };
+            Ok(object_store::GetResult {
+                meta,
+                payload,
+                range,
+                attributes,
+                extensions,
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    impl TamperingStore {
+        fn inner_clone(&self) -> Arc<dyn ObjectStore> {
+            Arc::new(object_store::memory::InMemory::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_xorb_upload_verifies_body_hash_after_put() {
+        use crate::storage::retry::RetryPolicy;
+
+        let payload = vec![0xAB_u8; XORB_MULTIPART_THRESHOLD + 1];
+        let hash = MerkleHash::from([8_u64, 8, 8, 8]);
+        let path = canonical_global_content_path("xorbs", &hash.hex());
+        let inner: Arc<dyn ObjectStore> = Arc::new(TamperingStore {
+            inner: object_store::memory::InMemory::new(),
+            target_path: path.clone(),
+            corrupt_body: true,
+        });
+        let store = Store::with_retry(inner, RetryPolicy::default());
+        let router = StoreLayout::new(store.clone(), "repo-verify-large".to_owned());
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store),
+            None,
+            None,
+            "repo-verify-large".to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        *pipeline.xorbs.lock().await = vec![
+            PackedXorb::from_result(XorbResult {
+                bytes: Bytes::from(payload),
+                hash,
+                payload_digest: [4; 32],
+                placements: Vec::new(),
+            })
+            .await
+            .expect("pack large xorb"),
+        ];
+
+        let err = pipeline
+            .upload_xorbs()
+            .await
+            .expect_err("corrupted read-back must fail");
+        assert!(
+            format!("{err}").to_lowercase().contains("hash"),
+            "expected hash-mismatch corruption error, got: {err}"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn upload_xorbs_drains_sibling_uploads_after_first_error() {
