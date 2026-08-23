@@ -86,12 +86,17 @@ pub fn walk_incremental_with_hidden(
     hidden_shas: &[&str],
     new_sha: &str,
 ) -> Result<(Vec<PointerBlob>, Vec<CommitEntry>)> {
+    // Linked worktrees keep their object database in the common Git
+    // directory; walking the private worktree directory fails before any
+    // ref-specific logic can run.
+    let git_dir = crate::git::discover::resolve_common_dir(git_dir);
+
     // No boundary — fall back to full walk.
     if hidden_shas.is_empty() {
         debug!("no hidden shas, falling back to full walk");
         let refs = vec![("(push)".to_owned(), new_sha.to_owned())];
-        let reachable = super::walk::walk_reachable(git_dir, &refs)?;
-        let entries = collect_entries_from_walk(git_dir, new_sha)?;
+        let reachable = super::walk::walk_reachable(&git_dir, &refs)?;
+        let entries = collect_entries_from_walk(&git_dir, new_sha)?;
         return Ok((reachable.pointers, entries));
     }
 

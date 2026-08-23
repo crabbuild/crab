@@ -197,6 +197,25 @@ class ProtocolV2PartialCloneSmoke:
             raise SmokeError(f"Git executable is not executable: {candidate}")
         return candidate
 
+    def git_supports_filter(self, filter_spec: str) -> tuple[bool, str]:
+        probe = subprocess.run(
+            [
+                str(self.git_bin),
+                "-C",
+                str(self.source),
+                "rev-list",
+                "--objects",
+                f"--filter={filter_spec}",
+                "--all",
+            ],
+            env=self.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        return probe.returncode == 0, probe.stderr.strip()
+
     def build_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
@@ -1017,13 +1036,25 @@ class ProtocolV2PartialCloneSmoke:
             ("blob-none", "blob:none", "blob:none", False, None),
             ("blob-limit", "blob:limit=1k", "blob:limit=1024", False, None),
             ("tree-depth", "tree:1", "tree:1", False, None),
-            ("object-type-tag", "object:type=tag", "object:type=tag", False, tag_oid),
-            ("object-type-commit", "object:type=commit", "object:type=commit", False, commit_oid),
-            ("object-type-tree", "object:type=tree", "object:type=tree", False, tree_oid),
-            ("object-type-blob", "object:type=blob", "object:type=blob", True, small_oid),
             ("sparse", f"sparse:oid={sparse_oid}", "sparse:oid=<oid>", False, None),
             ("combine", "combine:blob:none+tree:1", "combine:blob:none+tree:1", False, None),
         ]
+        object_type_supported, object_type_probe_error = self.git_supports_filter(
+            "object:type=tag"
+        )
+        if object_type_supported:
+            filters[3:3] = [
+                ("object-type-tag", "object:type=tag", "object:type=tag", False, tag_oid),
+                (
+                    "object-type-commit",
+                    "object:type=commit",
+                    "object:type=commit",
+                    False,
+                    commit_oid,
+                ),
+                ("object-type-tree", "object:type=tree", "object:type=tree", False, tree_oid),
+                ("object-type-blob", "object:type=blob", "object:type=blob", True, small_oid),
+            ]
         before = self.store_snapshot("before-filter-matrix")
         nested_oid = self.git_value(
             self.source,
@@ -1222,6 +1253,10 @@ class ProtocolV2PartialCloneSmoke:
         after = self.store_snapshot("after-filter-matrix")
         self.report["performance"]["filter-matrix"] = {
             "filters": rows,
+            "client_capabilities": {
+                "object_type_filter": object_type_supported,
+                "object_type_probe_error": object_type_probe_error or None,
+            },
             "remote_unchanged": after["objects"] == before["objects"]
             and after["bytes"] == before["bytes"],
             "before": before,
