@@ -26,19 +26,21 @@ candidates, even when they are absent from current branches and tags. Use
 `crab recover history prune --keep-last N` to preview an explicit retention
 boundary, apply it with `--apply`, and then rerun GC.
 
-Destructive repository GC takes a renewable repository-maintenance lease. A
-destructive bucket GC takes that lease for every registered repository. Neither
-can run concurrently with history pruning or history restoration.
+Destructive repository and bucket GC take renewable exclusive sweep fences, and
+writers take shared fences through their publication boundary. Neither can run
+concurrently with history pruning or history restoration. Bucket destruction
+also requires complete registry and coordinator safety proof.
 
 Bucket GC reads current and retained historical shard roots for registered
-repositories in parallel, downloads referenced shards with bounded concurrency,
-and adaptively lists the complete global shard and xorb namespaces. Small
+repositories in parallel, validates strict durable shard closures without
+referenced-shard body GETs, and adaptively lists the complete global shard and xorb namespaces. Small
 namespaces use one recursive stream per kind; larger namespaces switch to
 concurrent populated hash partitions after a bounded provider-aware probe. The
 crossover waits until recursive pagination reaches the cost of the complete
-256-way fan-out, bounding restart overhead to about 2x at the threshold. It also
-tombstones generation-pinned `file_index_db` rows that are outside each
-repository's retained shard closure.
+256-way fan-out, bounding restart overhead to about 2x at the threshold. It
+persists partitioned reachability marks and candidate batches in the durable
+run journal, then tombstones generation-pinned `file_index_db` rows before
+object deletion. A crash retries that reconciliation idempotently.
 
 If any repository-scope object deletion or post-delete reconciliation fails,
 Crab exits non-zero with `CRAB-E0322`. Its structured error details report the
@@ -55,9 +57,11 @@ For conceptual background, see [Garbage Collection](/docs/cli/storage/garbage-co
 | `--scope` | `repo` | Collect repository objects, or use `bucket` for global deduplicated objects |
 | `--bucket` | — | Physical bucket name required by bucket scope and registry maintenance |
 | `--list-profile` | configured value | Override bucket listing with `adaptive`, `cost`, or `latency` |
-| `--grace-period` | `1h` | Don't delete objects newer than this |
+| `--grace-period` | configured value (`24h` by default) | Don't delete objects newer than this |
 | `--force` | `false` | Bypass age checks without bypassing registry or coordinator safety proof |
-| `--yes` | `false` | Skip repository force-mode confirmation |
+| `--yes` | `false` | Skip force-mode confirmation |
+| `--resume <RUN_ID>` | — | Resume an interrupted destructive run |
+| `--repair-closures` | `false` | Backfill and verify missing bucket shard closures |
 | `--json` | `false` | Emit structured JSON output |
 | `--jsonl` | `false` | Emit streaming structured output |
 

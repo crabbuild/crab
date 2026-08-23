@@ -375,14 +375,21 @@ enum Cmd {
         #[arg(long, value_name = "PROFILE", value_parser = ["adaptive", "cost", "latency"])]
         list_profile: Option<String>,
         /// Minimum age before unreferenced objects are deleted (e.g. `1h`, `24h`).
-        #[arg(long, default_value = "1h")]
-        grace_period: String,
+        /// Defaults to the resolved `gc_grace_period` config value.
+        #[arg(long)]
+        grace_period: Option<String>,
+        /// Resume an interrupted destructive GC run by its durable UUIDv7 id.
+        #[arg(long, value_name = "RUN_ID")]
+        resume: Option<String>,
         /// Remove a repo's entry from the ref-registry.
         #[arg(long, conflicts_with = "repair_registry")]
         deregister: Option<String>,
         /// Rebuild the bucket ref-registry from every current repo manifest.
         #[arg(long, conflicts_with = "deregister")]
         repair_registry: bool,
+        /// Backfill and verify durable shard reachability closures.
+        #[arg(long, conflicts_with_all = ["deregister", "repair_registry", "resume"])]
+        repair_closures: bool,
         /// Structured JSON output (single envelope with terminal result).
         #[arg(long, conflicts_with = "jsonl")]
         json: bool,
@@ -3646,15 +3653,33 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             bucket,
             list_profile,
             grace_period,
+            resume,
             deregister,
             repair_registry,
+            repair_closures,
             json,
             jsonl,
         }) => {
             let _span = tracing::info_span!("gc").entered();
 
             let mode = OutputMode::from_flags(json, jsonl);
-            let parsed_grace = parse_duration_str(&grace_period)?;
+            let parsed_grace_override = grace_period
+                .as_deref()
+                .map(parse_duration_str)
+                .transpose()?;
+
+            if repair_closures && dry_run {
+                return Err(CrabError::Configuration {
+                    key: "gc.repair_closures".into(),
+                    origin: "closure repair writes durable sidecars; remove --dry-run".into(),
+                });
+            }
+            if repair_closures && scope != "bucket" {
+                return Err(CrabError::Configuration {
+                    key: "gc.repair_closures".into(),
+                    origin: "closure repair is only available for --scope=bucket".into(),
+                });
+            }
 
             if repair_registry {
                 let bucket_name = bucket.as_deref().ok_or_else(|| CrabError::Configuration {
@@ -3700,13 +3725,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             origin: "cli".into(),
                         })?;
                     let config = Config::resolve_local()?;
+                    let parsed_grace = parsed_grace_override.unwrap_or(config.gc_grace_period);
                     let list_profile = list_profile
                         .as_deref()
                         .map(crab::core::config::GcListProfile::parse)
                         .transpose()?
                         .unwrap_or(config.gc.list_profile);
                     let store = create_cli_store(bucket_name, &config, "gc", &cancel).await?;
-                    let registry = crab::cmd::gc::bucket::load_ref_registry(&store, force).await?;
                     let current_repo_prefix = if config
                         .replication
                         .as_ref()
@@ -3724,26 +3749,61 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                     } else {
                         None
                     };
-                    let protection = crab::replication::active_active_bucket_gc_protection(
-                        &config,
-                        &registry,
-                        current_repo_prefix.as_deref(),
-                    )
-                    .await?;
+                    if repair_closures {
+                        let repaired = crab::cmd::gc::bucket::repair_bucket_closures_with_config(
+                            &store,
+                            &config,
+                            current_repo_prefix.as_deref(),
+                            config.gc_list_concurrency,
+                            &cancel,
+                        )
+                        .await?;
+                        if mode.is_machine() {
+                            let payload = serde_json::json!({
+                                "repaired_closures": repaired,
+                                "dry_run": false,
+                            });
+                            match mode {
+                                OutputMode::Json => {
+                                    crab::core::output::emit_json(
+                                        "gc.repair_closures",
+                                        "1.0",
+                                        &payload,
+                                    );
+                                }
+                                OutputMode::Jsonl => {
+                                    let mut stream = JsonlStream::new(
+                                        "gc.repair_closures.event",
+                                        "1.0",
+                                        std::io::stdout(),
+                                    );
+                                    stream.emit_result(&payload);
+                                }
+                                OutputMode::Text => {}
+                            }
+                        } else {
+                            eprintln!(
+                                "crab gc: repaired and verified {repaired} shard closure(s)."
+                            );
+                        }
+                        return Ok(ExitCode::SUCCESS);
+                    }
                     let args = crab::cmd::gc::bucket::BucketGcArgs {
                         bucket: bucket_name.to_string(),
                         dry_run,
                         grace_period: parsed_grace,
                         force,
+                        yes,
                         list_concurrency: config.gc_list_concurrency,
                         list_profile,
                         delete_concurrency: config.gc_delete_concurrency,
+                        resume_run_id: resume,
                     };
-                    let outcome = crab::cmd::gc::bucket::run_bucket_gc(
+                    let outcome = crab::cmd::gc::bucket::run_bucket_gc_with_config(
                         &args,
                         &store,
-                        &protection.protected_keys,
-                        &protection.protected_repos,
+                        &config,
+                        current_repo_prefix.as_deref(),
                         &cancel,
                     )
                     .await?;
@@ -3770,6 +3830,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 }
                 "repo" => {
                     let config = Config::resolve_local().unwrap_or_default();
+                    let parsed_grace = parsed_grace_override.unwrap_or(config.gc_grace_period);
                     let args = crab::cmd::gc::GcArgs {
                         dry_run,
                         force,
@@ -3779,6 +3840,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         yes_really: false,
                         delete_concurrency: config.gc_delete_concurrency,
                         list_concurrency: config.gc_list_concurrency,
+                        resume_run_id: resume,
                     };
                     tracing::info!(
                         dry_run = args.dry_run,
@@ -3836,12 +3898,25 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             crab::replication::StoreResolver::new(&config, &parsed_url, &cancel)
                                 .write_store("gc")
                                 .await?;
-                        let coordinator_protected_keys =
-                            crab::replication::active_active_gc_protected_keys(
+                        let active_active_fence = if args.dry_run {
+                            None
+                        } else {
+                            crab::replication::ActiveActiveGcFence::acquire(
                                 &config,
                                 selection.router.repo_prefix(),
                             )
-                            .await?;
+                            .await?
+                        };
+                        let coordinator_protected_keys = match &active_active_fence {
+                            Some(fence) => fence.protected_keys().clone(),
+                            None => {
+                                crab::replication::active_active_gc_protected_keys(
+                                    &config,
+                                    selection.router.repo_prefix(),
+                                )
+                                .await?
+                            }
+                        };
                         let jsonl_stream = if mode == OutputMode::Jsonl {
                             Some(std::sync::Mutex::new(JsonlStream::new(
                                 "gc.event",
@@ -3851,7 +3926,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         } else {
                             None
                         };
-                        let outcome = crab::cmd::gc::run_repo_remote_gc(
+                        let operation = crab::cmd::gc::run_repo_remote_gc(
                             &args,
                             &selection.store,
                             &selection.router,
@@ -3860,7 +3935,15 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             parsed_grace,
                             jsonl_stream.as_ref(),
                         )
-                        .await?;
+                        .await;
+                        let release = match active_active_fence {
+                            Some(fence) => fence.release().await,
+                            None => Ok(()),
+                        };
+                        let outcome = match (operation, release) {
+                            (Ok(outcome), Ok(())) => outcome,
+                            (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+                        };
                         let summary = outcome.to_summary();
                         match mode {
                             OutputMode::Text => {
@@ -6992,5 +7075,29 @@ mod tests {
     #[test]
     fn parse_duration_invalid_errors() {
         assert!(super::parse_duration_str("abc").is_err());
+    }
+
+    #[test]
+    fn gc_grace_period_uses_config_when_omitted() {
+        parse_cli_on_large_stack(|| {
+            let cli = Cli::try_parse_from(["crab", "gc"]).unwrap();
+            match cli.cmd {
+                Some(Cmd::Gc { grace_period, .. }) => assert_eq!(grace_period, None),
+                _ => unreachable!("gc command should parse"),
+            }
+        });
+    }
+
+    #[test]
+    fn gc_grace_period_preserves_explicit_override() {
+        parse_cli_on_large_stack(|| {
+            let cli = Cli::try_parse_from(["crab", "gc", "--grace-period", "2h"]).unwrap();
+            match cli.cmd {
+                Some(Cmd::Gc { grace_period, .. }) => {
+                    assert_eq!(grace_period.as_deref(), Some("2h"));
+                }
+                _ => unreachable!("gc command should parse"),
+            }
+        });
     }
 }

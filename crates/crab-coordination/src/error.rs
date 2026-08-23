@@ -54,4 +54,18 @@ pub enum CoordinationError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("GC fence held for {domain} by {holder} (sweep={sweep}, epoch={epoch})")]
+    GcFenceHeld {
+        domain: String,
+        holder: String,
+        sweep: bool,
+        epoch: u64,
+    },
+
+    #[error("GC fence lost for {domain} by {holder}")]
+    GcFenceLost { domain: String, holder: String },
+
+    #[error("malformed GC fence at {path}: {reason}")]
+    GcFenceMalformed { path: String, reason: String },
 }

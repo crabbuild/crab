@@ -1,7 +1,10 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crab_auth::{PushFinalizeResponse, PushRefUpdate};
+use crab_coordination::{GcFenceHeartbeat, GcFenceLease};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use super::GitVisibilityPublication;
 use super::git_workspace::verify_source_push;
@@ -16,9 +19,75 @@ use super::{
     validate_push_plan_shape, validate_staged_object_shapes,
     write_service_generation_index_receipt,
 };
-use crate::error::Result;
+use crate::error::{AuthServerError, Result};
 
 const VERIFIED_RECEIVE_SCHEMA_VERSION: u32 = 1;
+const GC_FENCE_TTL: Duration = crab_coordination::DEFAULT_GC_FENCE_TTL;
+
+struct ReceiveFenceLease {
+    lease: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+impl ReceiveFenceLease {
+    async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.lease.release().await.map_err(Into::into)
+    }
+}
+
+struct ReceiveWriterFences {
+    global: ReceiveFenceLease,
+    repo: ReceiveFenceLease,
+}
+
+impl ReceiveWriterFences {
+    async fn acquire(ctx: &ReceiveContext, cancel: &CancellationToken) -> Result<Self> {
+        let global = GcFenceLease::acquire_writer(
+            ctx.store().inner(),
+            ctx.router().global_prefix(),
+            GC_FENCE_TTL,
+        )
+        .await
+        .map_err(AuthServerError::from)?;
+        let global_heartbeat = GcFenceHeartbeat::spawn(&global, cancel.clone(), GC_FENCE_TTL / 3);
+        let repo = match GcFenceLease::acquire_writer(
+            ctx.store().inner(),
+            ctx.repo_prefix(),
+            GC_FENCE_TTL,
+        )
+        .await
+        .map_err(AuthServerError::from)
+        {
+            Ok(repo) => repo,
+            Err(error) => {
+                global_heartbeat.stop().await;
+                let _ = global.release().await;
+                return Err(error);
+            }
+        };
+        let repo_heartbeat = GcFenceHeartbeat::spawn(&repo, cancel.clone(), GC_FENCE_TTL / 3);
+        Ok(Self {
+            global: ReceiveFenceLease {
+                lease: global,
+                heartbeat: global_heartbeat,
+            },
+            repo: ReceiveFenceLease {
+                lease: repo,
+                heartbeat: repo_heartbeat,
+            },
+        })
+    }
+
+    async fn release(self) -> Result<()> {
+        let repo_result = self.repo.release().await;
+        let global_result = self.global.release().await;
+        match repo_result {
+            Err(error) => Err(error),
+            Ok(()) => global_result,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +230,27 @@ pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
 
 /// Commits a verified protected-push receive plan.
 pub async fn commit_receive(
+    ctx: &ReceiveContext,
+    repo_url: &str,
+    plan_digest: &str,
+    active_active_json: Option<&str>,
+) -> Result<PushFinalizeResponse> {
+    let operation_cancel = CancellationToken::new();
+    let fences = ReceiveWriterFences::acquire(ctx, &operation_cancel).await?;
+    let operation = tokio::select! {
+        result = commit_receive_inner(ctx, repo_url, plan_digest, active_active_json) => result,
+        _ = operation_cancel.cancelled() => {
+            Err(conflict("GC writer fence lease lost during protected receive"))
+        }
+    };
+    let release = fences.release().await;
+    match (operation, release) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn commit_receive_inner(
     ctx: &ReceiveContext,
     repo_url: &str,
     plan_digest: &str,

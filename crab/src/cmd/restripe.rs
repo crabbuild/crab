@@ -467,7 +467,15 @@ async fn run_apply(
 
     let (store, parsed) = try_build_store(cfg, cancel).await?;
     let router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    let sources = if recorded_run.is_none() {
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &store,
+        router.global_prefix(),
+        router.repo_prefix(),
+        cancel,
+    )
+    .await?;
+    let operation = async {
+        let sources = if recorded_run.is_none() {
         enumerate_sources(&store, cancel).await?
     } else {
         Vec::new()
@@ -633,7 +641,14 @@ async fn run_apply(
         }
     }
 
-    Ok(())
+        Ok(())
+    }
+    .await;
+    let release = gc_writer.release().await;
+    match (operation, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 fn profile_label(profile: &Profile) -> String {

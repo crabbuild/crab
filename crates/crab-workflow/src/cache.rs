@@ -736,6 +736,26 @@ pub async fn push_remote_with_artifact_stores(
     entry: &StageCacheEntry,
     cache_root: &Path,
 ) -> Result<bool> {
+    let fence = store.acquire_gc_writer(prefix).await?;
+    let cancel = fence.cancellation();
+    let operation = tokio::select! {
+        result = push_remote_inner(store, prefix, artifact_stores, entry, cache_root) => result,
+        _ = cancel.cancelled() => Err(crate::store::WorkflowGcWriter::lease_lost_error(prefix)),
+    };
+    let release = fence.release().await;
+    match (operation, release) {
+        (Ok(wrote), Ok(())) => Ok(wrote),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn push_remote_inner(
+    store: &Store,
+    prefix: &str,
+    artifact_stores: Option<&RemoteArtifactStores>,
+    entry: &StageCacheEntry,
+    cache_root: &Path,
+) -> Result<bool> {
     validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     if !entry.remote_push_enabled() {
         debug!(

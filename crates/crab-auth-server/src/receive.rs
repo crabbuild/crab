@@ -34,8 +34,8 @@ use crab_storage::{
     canonical_global_content_path, content_hash_from_path,
 };
 use crab_types::time::now_rfc3339_millis;
-use crab_xet::hash::MerkleHash;
-use crab_xet::shard::MDBShardInfo;
+use crab_xet::hash::{MerkleHash, compute_data_hash};
+use crab_xet::shard::{MDBShardInfo, ShardReader};
 use crab_xet::xorb::format::FOOTER_SIZE;
 use crab_xet::xorb::parser::{XorbParser, xorb_payload_digest_from_footer};
 use object_store::path::Path as ObjectPath;
@@ -63,6 +63,20 @@ const MAX_PUSH_STAGED_OBJECTS: usize = 100_000;
 const MAX_PUSH_STAGED_OBJECTS: usize = 16;
 const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
 const SHARD_V2_TRAILER_SIZE: usize = 12;
+const SHARD_CLOSURE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectedShardClosure {
+    schema_version: u32,
+    shard_hash: String,
+    content_hash: String,
+    content_size: u64,
+    xorb_count: u64,
+    file_count: u64,
+    xorb_hashes: Vec<String>,
+    file_hashes: Vec<String>,
+}
 
 /// Chunk metadata that a staged xorb must expose to satisfy staged shard terms.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,10 +542,104 @@ pub async fn promote_staged_objects(store: &Store, plan: &ProtectedPushPlan) -> 
         if is_pack_metadata_key(&object.canonical_key) {
             promote_pack_metadata_union(store, &canonical, bytes).await?;
         } else {
+            let shard_body = content_hash_from_path(&object.canonical_key, "shards")
+                .is_some()
+                .then(|| bytes.clone());
             store.put(&canonical, bytes).await?;
+            if let Some(shard_body) = shard_body {
+                publish_protected_shard_closure(store, &object.canonical_key, &shard_body).await?;
+            }
         }
     }
     Ok(())
+}
+
+async fn publish_protected_shard_closure(
+    store: &Store,
+    shard_path: &str,
+    body: &[u8],
+) -> Result<()> {
+    let Some(hash_hex) = content_hash_from_path(shard_path, "shards") else {
+        return Ok(());
+    };
+    let expected_hash = MerkleHash::from_hex(hash_hex)
+        .map_err(|error| invalid(format!("protected shard hash is invalid: {error}")))?;
+    let actual_hash = compute_data_hash(body);
+    if actual_hash != expected_hash {
+        return Err(invalid(format!(
+            "protected shard body hash is {}, expected {}",
+            actual_hash.hex(),
+            expected_hash.hex()
+        )));
+    }
+
+    let reader = ShardReader::from_bytes(bytes::Bytes::copy_from_slice(body), expected_hash);
+    let shard_info = reader
+        .shard_info_public()
+        .map_err(|error| invalid(format!("protected shard closure parse failed: {error}")))?;
+    let v1_bytes = reader.v1_data();
+    let mut xorb_hashes = HashSet::new();
+    let mut cursor = Cursor::new(v1_bytes);
+    let blocks = shard_info
+        .read_all_xorb_blocks_full(&mut cursor)
+        .map_err(|error| invalid(format!("protected shard xorb closure failed: {error}")))?;
+    for block in &blocks {
+        xorb_hashes.insert(block.metadata.xorb_hash.hex());
+    }
+    let mut file_hashes = HashSet::new();
+    let mut cursor = Cursor::new(v1_bytes);
+    let files = shard_info
+        .read_all_file_info_sections(&mut cursor)
+        .map_err(|error| invalid(format!("protected shard file closure failed: {error}")))?;
+    for file in &files {
+        file_hashes.insert(file.metadata.file_hash.hex());
+    }
+    let mut xorb_hashes = xorb_hashes.into_iter().collect::<Vec<_>>();
+    let mut file_hashes = file_hashes.into_iter().collect::<Vec<_>>();
+    xorb_hashes.sort_unstable();
+    file_hashes.sort_unstable();
+    let content_size = u64::try_from(body.len())
+        .map_err(|_| invalid("protected shard size overflows closure metadata"))?;
+    let closure = ProtectedShardClosure {
+        schema_version: SHARD_CLOSURE_SCHEMA_VERSION,
+        shard_hash: expected_hash.hex(),
+        content_hash: actual_hash.hex(),
+        content_size,
+        xorb_count: u64::try_from(xorb_hashes.len())
+            .map_err(|_| invalid("protected shard xorb count overflows closure metadata"))?,
+        file_count: u64::try_from(file_hashes.len())
+            .map_err(|_| invalid("protected shard file count overflows closure metadata"))?,
+        xorb_hashes,
+        file_hashes,
+    };
+    let Some(prefix_end) = shard_path.rfind("/shards/") else {
+        return Err(invalid("protected shard path has no global prefix"));
+    };
+    let closure_path = ObjectPath::from(format!(
+        "{}/gc/closures/{}.json",
+        &shard_path[..prefix_end],
+        hash_hex
+    ));
+    let encoded = serde_json::to_vec(&closure).map_err(|error| {
+        invalid(format!(
+            "protected shard closure serialization failed: {error}"
+        ))
+    })?;
+    let encoded = bytes::Bytes::from(encoded);
+    match store.create_strict(&closure_path, encoded.clone()).await {
+        Ok(()) => Ok(()),
+        Err(StorageError::StateConflict { .. }) => {
+            let (existing, _) = store.get_with_etag(&closure_path).await?;
+            if existing == encoded {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "existing protected shard closure conflicts with the content-addressed publication",
+                ))
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Validates candidate segmented metadata and every staged object reference.

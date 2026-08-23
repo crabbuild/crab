@@ -3943,10 +3943,25 @@ async fn publish_diagnostics_bundle(
     );
     let body = serde_json::to_vec_pretty(payload)
         .map_err(|err| CrabError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
-    selection
-        .store
-        .put(&ObjectPath::from(object_key.as_str()), Bytes::from(body))
-        .await?;
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &selection.store,
+        selection.router.global_prefix(),
+        selection.router.repo_prefix(),
+        cancel,
+    )
+    .await?;
+    let object_path = ObjectPath::from(object_key.as_str());
+    let body = Bytes::from(body);
+    let operation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = selection.store.put(&object_path, body) => result,
+    };
+    let release = gc_writer.release().await;
+    match (operation, release) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), _) | (Ok(()), Err(error)) => return Err(error),
+    }
 
     Ok(DiagnosticsPublication {
         primary: primary.to_owned(),

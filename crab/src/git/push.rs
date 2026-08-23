@@ -3919,6 +3919,10 @@ pub struct PushPipeline {
     /// Push locks + heartbeats acquired in step 12, released in step 13/14.
     lock_state: tokio::sync::Mutex<Option<LockState>>,
     lock_acquired_at: tokio::sync::Mutex<Option<Instant>>,
+    /// Active-active pushes keep the GC writer fence from object upload
+    /// through coordinator commit. Protected pushes use the receive service's
+    /// equivalent fence and therefore do not populate this slot.
+    gc_writer: tokio::sync::Mutex<Option<crate::maintenance::GcWriterLeases>>,
     /// Shard bytes + hash pairs produced by step 8, consumed by step 9.
     shard_results: tokio::sync::Mutex<Vec<(Vec<u8>, MerkleHash)>>,
     /// Maps file_hash → index into `shard_results`, so step 9 knows which
@@ -5218,6 +5222,7 @@ pub(crate) async fn acquire_push_lock_leases(
 async fn acquire_push_admission_lock(
     store: &Store,
     prefix: &str,
+    global_prefix: &str,
     required_slots: usize,
     ttl: Duration,
     cancel: &CancellationToken,
@@ -5225,9 +5230,10 @@ async fn acquire_push_admission_lock(
     // Admission bounds expensive repository-wide work, while per-ref locks
     // provide correctness. Waiting contenders own no object-store state.
     let deadline = Instant::now() + ttl.saturating_mul(PUSH_ADMISSION_WAIT_TTL_MULTIPLIER);
-    let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted(
+    let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted_with_global(
         store.inner(),
         prefix,
+        Some(global_prefix),
         PUSH_ADMISSION_SLOTS,
         required_slots,
         ttl,
@@ -5470,6 +5476,7 @@ pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
 
 async fn while_admitted_until_commit<T>(
     mut permit: crab_coordination::PushAdmissionTicket,
+    failure_cancel: CancellationToken,
     operation: impl Future<Output = Result<T>>,
     mut committed: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<T> {
@@ -5516,6 +5523,10 @@ async fn while_admitted_until_commit<T>(
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
                 if let Err(error) = permit.renew().await {
+                    // A lost GC fence is a correctness failure, not merely a
+                    // late diagnostic. Stop the push before the lease can
+                    // expire and expose uploaded-but-unrooted objects to GC.
+                    failure_cancel.cancel();
                     renewal_error = Some(error);
                 }
             }
@@ -6446,6 +6457,7 @@ impl PushPipeline {
             commit_entries: tokio::sync::Mutex::new(Vec::new()),
             lock_state: tokio::sync::Mutex::new(None),
             lock_acquired_at: tokio::sync::Mutex::new(None),
+            gc_writer: tokio::sync::Mutex::new(None),
             shard_results: tokio::sync::Mutex::new(Vec::new()),
             file_shard_index: tokio::sync::Mutex::new(HashMap::new()),
             pending_file_index_plan: tokio::sync::Mutex::new(Vec::new()),
@@ -11788,6 +11800,30 @@ impl PushPipeline {
         .try_collect::<Vec<()>>()
         .await?;
 
+        // Persist shard reachability closures so bucket GC can mark large
+        // repositories without downloading every shard. Older shards are
+        // backfilled lazily by the GC path.
+        if self.config.protected_push.is_none() {
+            let closure_store = store.clone();
+            futures_util::stream::iter(shard_payloads.iter().map(|(shard_hash, path, body)| {
+                let closure_store = closure_store.clone();
+                let object_path = path.to_string();
+                async move {
+                    crate::cmd::gc::closure::publish(
+                        &closure_store,
+                        self.router.global_prefix(),
+                        shard_hash,
+                        body.clone(),
+                        &object_path,
+                    )
+                    .await
+                }
+            }))
+            .buffer_unordered(concurrency)
+            .try_collect::<Vec<()>>()
+            .await?;
+        }
+
         // Record shard hashes for step 11 shard-list CAS. Populated after
         // the shard stream completes so step 11 (manifest CAS) observes
         // every shard that was durably written in this step.
@@ -14901,6 +14937,7 @@ impl PushPipeline {
     /// after all uploads succeed. If any step fails, the early return
     /// leaves staging untouched.
     async fn on_failure(&self) {
+        self.release_active_active_gc_writer().await;
         self.stop_heartbeat_and_release_lock().await;
         self.clear_staging_push_inflight().await;
         debug!("step 14: failure path — staging/ChunkIndex unchanged");
@@ -14934,6 +14971,37 @@ impl PushPipeline {
         CrabError::PushPartialOutcome {
             outcomes: Box::new(PushResult::new(outcomes)),
             source: Box::new(source),
+        }
+    }
+
+    async fn acquire_active_active_gc_writer(&self) -> Result<()> {
+        if self.config.protected_push.is_some() || self.config.active_active_replication.is_none() {
+            return Ok(());
+        }
+        let Some(store) = &self.store else {
+            return Err(CrabError::Configuration {
+                key: "replication.gc_fence".to_owned(),
+                origin: "active-active push requires a write store for GC writer admission"
+                    .to_owned(),
+            });
+        };
+        let leases = crate::maintenance::GcWriterLeases::acquire(
+            store,
+            self.router.global_prefix(),
+            self.router.repo_prefix(),
+            &self.cancel,
+        )
+        .await?;
+        *self.gc_writer.lock().await = Some(leases);
+        Ok(())
+    }
+
+    async fn release_active_active_gc_writer(&self) {
+        let leases = self.gc_writer.lock().await.take();
+        if let Some(leases) = leases
+            && let Err(error) = leases.release().await
+        {
+            warn!(error = %error, "failed to release active-active GC writer fence");
         }
     }
 
@@ -14997,6 +15065,7 @@ impl PushPipeline {
                 // A pre-locked native push can return an all-rejected outcome
                 // before post-success cleanup. Release here as the final owner
                 // boundary; completed pushes have already cleared this state.
+                self.release_active_active_gc_writer().await;
                 self.stop_heartbeat_and_release_lock().await;
                 outcomes
             }
@@ -15134,6 +15203,10 @@ impl PushPipeline {
         // This preserves lock-then-push serialization while immutable xorb
         // uploads overlap the remaining staged reads.
         self.at_stage(PushFailureStage::Lock, self.acquire_push_lock().await)?;
+        self.at_stage(
+            PushFailureStage::Admission,
+            self.acquire_active_active_gc_writer().await,
+        )?;
         if let Some((sha_map, decisions)) = preflight.as_mut() {
             *decisions = self.at_stage(
                 PushFailureStage::Preflight,
@@ -15184,6 +15257,7 @@ impl PushPipeline {
                         acquire_push_admission_lock(
                             store,
                             self.router.repo_prefix(),
+                            self.router.global_prefix(),
                             required_admission_slots,
                             self.config.lock_ttl,
                             &self.cancel,
@@ -15203,6 +15277,7 @@ impl PushPipeline {
                     PushFailureStage::Admission,
                     while_admitted_until_commit(
                         lock,
+                        self.cancel.clone(),
                         Box::pin(self.execute_admitted(preflight, Some(committed_tx))),
                         committed_rx,
                     )
@@ -20254,6 +20329,7 @@ mod tests {
         let lock = acquire_push_admission_lock(
             &store,
             "repo",
+            ".crab",
             1,
             Duration::from_secs(3),
             &CancellationToken::new(),
@@ -20333,6 +20409,7 @@ mod tests {
         let operation = tokio::spawn(async move {
             while_admitted_until_commit(
                 permit,
+                CancellationToken::new(),
                 async move {
                     committed_tx.send(()).unwrap();
                     finish_rx.await.unwrap();
@@ -20383,6 +20460,7 @@ mod tests {
 
         let result = while_admitted_until_commit(
             permit,
+            CancellationToken::new(),
             async {
                 Err::<(), _>(CrabError::Throttled {
                     retry_after: Some(Duration::from_secs(2)),
@@ -30134,7 +30212,9 @@ mod tests {
         coordinator: Arc<dyn crab_coordination::write_coordinator::WriteCoordinator>,
         seal_candidate: bool,
     ) -> Result<ActiveActivePushMaterialization> {
-        use crate::metadata::manifest::{Manifest, create_manifest, read_manifest};
+        use crate::metadata::manifest::{
+            Manifest, PackManifestEntry, append_pack_index, create_manifest, read_manifest,
+        };
         use crab_metadata::ref_registry::RefRegistry;
 
         // Source ref resolution consults the process-wide test GitDir. Hold

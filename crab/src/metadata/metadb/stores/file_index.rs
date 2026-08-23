@@ -235,7 +235,19 @@ impl FileIndexStore {
         dry_run: bool,
         batch_size: usize,
     ) -> Result<u64> {
-        let mut rows = self.db.scan_prefix(&[PREFIX_COMMITTED]).await?;
+        self.gc_unreferenced_committed_prefix(&[PREFIX_COMMITTED], referenced, dry_run, batch_size)
+            .await
+    }
+
+    /// Remove unreferenced rows from one first-byte hash partition.
+    pub(crate) async fn gc_unreferenced_committed_prefix(
+        &self,
+        prefix: &[u8],
+        referenced: &HashSet<MerkleHash>,
+        dry_run: bool,
+        batch_size: usize,
+    ) -> Result<u64> {
+        let mut rows = self.db.scan_prefix(prefix).await?;
         let mut batch = slatedb::WriteBatch::new();
         let mut pending = 0usize;
         let mut removed = 0u64;
@@ -270,6 +282,29 @@ impl FileIndexStore {
             self.db.write(batch).await?;
         }
         Ok(removed)
+    }
+
+    /// Return the occupied first-four-byte hash partitions for committed rows.
+    ///
+    /// The bounded prefix set lets bucket GC avoid issuing one empty SlateDB
+    /// scan for every possible partition while retaining a deterministic,
+    /// exact sweep of every occupied hash range.
+    pub(crate) async fn committed_hash_prefixes(&self) -> Result<HashSet<[u8; 4]>> {
+        let mut rows = self.db.scan_prefix(&[PREFIX_COMMITTED]).await?;
+        let mut prefixes = HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|source| {
+            CrabError::from(crate::core::error::MetaDbError::Read {
+                db: DB_LABEL.to_owned(),
+                prefix: String::from("<committed-file-prefixes>"),
+                source,
+            })
+        })? {
+            let (file_hash, _) = decode_committed_file_key(&row.key)
+                .map_err(|error| super::map_value_codec_error(error, DB_LABEL, &row.key))?;
+            let bytes: [u8; 32] = file_hash.into();
+            prefixes.insert([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        Ok(prefixes)
     }
 }
 

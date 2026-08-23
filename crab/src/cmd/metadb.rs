@@ -1272,6 +1272,16 @@ async fn run_rebuild_in(
     mode: OutputMode,
     config: &Config,
 ) -> Result<()> {
+    let storage = crate::storage::Store::new(Arc::clone(&store));
+    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let cancel = CancellationToken::new();
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &storage,
+        router.global_prefix(),
+        router.repo_prefix(),
+        &cancel,
+    )
+    .await?;
     // Rebuild writes fresh entries into one or both databases — must
     // use read-write mode, which fences any concurrent writer on
     // purpose.
@@ -1284,8 +1294,17 @@ async fn run_rebuild_in(
     );
     let guard = MetaDbGuard::new(metadb);
     let emit_progress = !matches!(mode, OutputMode::Json);
-    let result = rebuild_with_guard(&store, &repo_prefix, db, emit_progress, &guard).await;
-    let payload = close_rebuild_guard(guard, result).await?;
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = rebuild_with_guard(&store, &repo_prefix, db, emit_progress, &guard) => result,
+    };
+    let result = close_rebuild_guard(guard, result).await;
+    let release = gc_writer.release().await;
+    let payload = match (result, release) {
+        (Ok(payload), Ok(())) => payload,
+        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+    };
     render_rebuild_payload(&payload, mode);
     Ok(())
 }
@@ -1296,6 +1315,16 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
     let (store, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
+    let storage = crate::storage::Store::new(Arc::clone(&store));
+    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+    let cancel = CancellationToken::new();
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &storage,
+        router.global_prefix(),
+        router.repo_prefix(),
+        &cancel,
+    )
+    .await?;
     let metadb = build_metadb(
         Arc::clone(&store),
         repo_prefix.clone(),
@@ -1305,23 +1334,31 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     );
     let guard = MetaDbGuard::new(metadb);
 
-    let result: Result<Vec<bool>> = async {
-        rebuild_with_guard(&store, &repo_prefix, DbSelector::FileIndex, false, &guard).await?;
-        let file_store = guard.file_index().await?;
-        let file_hashes: Vec<MerkleHash> =
-            entries.iter().map(|(file_hash, _)| *file_hash).collect();
-        let rebuilt = file_store.get_committed_batch(&file_hashes).await?;
-        Ok(rebuilt
-            .into_iter()
-            .zip(entries.iter())
-            .map(|(actual, (_, expected))| {
-                actual.is_some_and(|record| record.shard_hash == *expected)
-            })
-            .collect())
-    }
-    .await;
+    let result: Result<Vec<bool>> = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = async {
+            rebuild_with_guard(&store, &repo_prefix, DbSelector::FileIndex, false, &guard).await?;
+            let file_store = guard.file_index().await?;
+            let file_hashes: Vec<MerkleHash> =
+                entries.iter().map(|(file_hash, _)| *file_hash).collect();
+            let rebuilt = file_store.get_committed_batch(&file_hashes).await?;
+            Ok(rebuilt
+                .into_iter()
+                .zip(entries.iter())
+                .map(|(actual, (_, expected))| {
+                    actual.is_some_and(|record| record.shard_hash == *expected)
+                })
+                .collect())
+        } => result,
+    };
 
-    close_rebuild_guard(guard, result).await
+    let result = close_rebuild_guard(guard, result).await;
+    let release = gc_writer.release().await;
+    match (result, release) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result<T> {

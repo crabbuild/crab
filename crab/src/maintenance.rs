@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crab_coordination::PushLock;
+use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::coordination::heartbeat::LockHeartbeat;
@@ -10,25 +10,169 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::Store;
 
 const MAINTENANCE_LOCK_TTL: Duration = Duration::from_mins(5);
+const GC_FENCE_TTL: Duration = crab_coordination::DEFAULT_GC_FENCE_TTL;
+
+/// Renewable exclusive fence for one repo or bucket GC domain.
+pub(crate) struct GcSweepLease {
+    fence: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+/// Renewable shared admission for bucket-global administrative writers such
+/// as ref-registry repair. These operations have no single repository domain.
+pub(crate) struct GcGlobalWriterLease {
+    fence: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+impl GcGlobalWriterLease {
+    pub(crate) async fn acquire(
+        store: &Store,
+        domain: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancel)?;
+        let fence = GcFenceLease::acquire_writer(store.inner(), domain, GC_FENCE_TTL)
+            .await
+            .map_err(CrabError::from)?;
+        let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_FENCE_TTL / 3);
+        Ok(Self { fence, heartbeat })
+    }
+
+    pub(crate) async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.fence.release().await.map_err(CrabError::from)
+    }
+}
+
+/// Renewable shared writer admission for one global and one repository domain.
+pub(crate) struct GcWriterLeases {
+    global: GcFenceLeaseWithHeartbeat,
+    repo: GcFenceLeaseWithHeartbeat,
+    operation_cancel: CancellationToken,
+}
+
+impl GcWriterLeases {
+    /// Acquire global content admission before repository admission.
+    pub(crate) async fn acquire(
+        store: &Store,
+        global_domain: &str,
+        repo_domain: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancel)?;
+        let global = GcFenceLease::acquire_writer(store.inner(), global_domain, GC_FENCE_TTL)
+            .await
+            .map_err(CrabError::from)?;
+        let global_heartbeat = GcFenceHeartbeat::spawn(&global, cancel.clone(), GC_FENCE_TTL / 3);
+        let repo = match GcFenceLease::acquire_writer(store.inner(), repo_domain, GC_FENCE_TTL)
+            .await
+            .map_err(CrabError::from)
+        {
+            Ok(repo) => repo,
+            Err(error) => {
+                global_heartbeat.stop().await;
+                let _ = global.release().await;
+                return Err(error);
+            }
+        };
+        let repo_heartbeat = GcFenceHeartbeat::spawn(&repo, cancel.clone(), GC_FENCE_TTL / 3);
+        // Keep the heartbeat handles alive by wrapping them in the private
+        // lease type below; both domains must renew for the whole publication.
+        Ok(Self {
+            global: GcFenceLeaseWithHeartbeat {
+                lease: global,
+                heartbeat: global_heartbeat,
+            },
+            repo: GcFenceLeaseWithHeartbeat {
+                lease: repo,
+                heartbeat: repo_heartbeat,
+            },
+            operation_cancel: cancel.clone(),
+        })
+    }
+
+    /// Stop both heartbeats and release repository before global admission.
+    pub(crate) async fn release(self) -> Result<()> {
+        let cancelled = self.operation_cancel.is_cancelled();
+        let repo_result = self.repo.release().await;
+        let global_result = self.global.release().await;
+        match repo_result {
+            Err(error) => Err(error),
+            Ok(()) => match global_result {
+                Err(error) => Err(error),
+                Ok(()) if cancelled => Err(CrabError::Cancelled),
+                Ok(()) => Ok(()),
+            },
+        }
+    }
+}
+
+struct GcFenceLeaseWithHeartbeat {
+    lease: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+impl GcFenceLeaseWithHeartbeat {
+    async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.lease.release().await.map_err(CrabError::from)
+    }
+}
+
+impl GcSweepLease {
+    /// Acquire an exclusive sweep fence and renew it until release.
+    pub(crate) async fn acquire(
+        store: &Store,
+        domain: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancel)?;
+        let fence = GcFenceLease::acquire_sweep(store.inner(), domain, GC_FENCE_TTL)
+            .await
+            .map_err(CrabError::from)?;
+        let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_FENCE_TTL / 3);
+        Ok(Self { fence, heartbeat })
+    }
+
+    /// Stop renewal and release the exclusive fence.
+    pub(crate) async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.fence.release().await.map_err(CrabError::from)
+    }
+}
 
 /// Renewable lease shared by destructive repository maintenance commands.
 pub(crate) struct RepositoryMaintenanceLease {
     lock: PushLock,
     heartbeat: LockHeartbeat,
+    gc_writer: GcWriterLeases,
 }
 
 impl RepositoryMaintenanceLease {
-    /// Acquire the repository maintenance lease and start renewing it.
-    pub async fn acquire(store: &Store, prefix: &str, cancel: &CancellationToken) -> Result<Self> {
+    /// Acquire the repository maintenance lease and the GC writer fence.
+    pub async fn acquire(
+        store: &Store,
+        global_domain: &str,
+        prefix: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
         check_cancelled(cancel)?;
-        let lock = PushLock::acquire_internal(
+        let gc_writer = GcWriterLeases::acquire(store, global_domain, prefix, cancel).await?;
+        let lock = match PushLock::acquire_internal(
             store.inner(),
             prefix,
             crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
             MAINTENANCE_LOCK_TTL,
         )
         .await
-        .map_err(CrabError::from)?;
+        {
+            Ok(lock) => lock,
+            Err(error) => {
+                let _ = gc_writer.release().await;
+                return Err(CrabError::from(error));
+            }
+        };
         let heartbeat = LockHeartbeat::spawn(
             store.clone(),
             lock.path().to_owned(),
@@ -37,99 +181,21 @@ impl RepositoryMaintenanceLease {
             lock.ttl() / 3,
             cancel.clone(),
         );
-        Ok(Self { lock, heartbeat })
+        Ok(Self {
+            lock,
+            heartbeat,
+            gc_writer,
+        })
     }
 
     /// Stop renewal and release the holder-checked lease.
     pub async fn release(self) -> Result<()> {
         self.heartbeat.stop().await;
-        self.lock.release().await.map_err(CrabError::from)
-    }
-}
-
-/// Ordered set of repository maintenance leases for bucket-wide GC.
-pub(crate) struct RepositoryMaintenanceLeases {
-    leases: Vec<RepositoryMaintenanceLease>,
-}
-
-impl RepositoryMaintenanceLeases {
-    /// Acquire each repository lease in sorted order, releasing partial work on failure.
-    pub(crate) async fn acquire(
-        store: &Store,
-        prefixes: impl IntoIterator<Item = String>,
-        cancel: &CancellationToken,
-    ) -> Result<Self> {
-        let mut prefixes = prefixes.into_iter().collect::<Vec<_>>();
-        prefixes.sort_unstable();
-        prefixes.dedup();
-        let mut leases = Vec::with_capacity(prefixes.len());
-        for prefix in prefixes {
-            let lease = match RepositoryMaintenanceLease::acquire(store, &prefix, cancel).await {
-                Ok(lease) => lease,
-                Err(error) => {
-                    let _ = Self { leases }.release().await;
-                    return Err(error);
-                }
-            };
-            leases.push(lease);
+        let lock_result = self.lock.release().await.map_err(CrabError::from);
+        let gc_result = self.gc_writer.release().await;
+        match lock_result {
+            Err(error) => Err(error),
+            Ok(()) => gc_result,
         }
-        Ok(Self { leases })
-    }
-
-    /// Release all leases in reverse acquisition order.
-    pub(crate) async fn release(mut self) -> Result<()> {
-        let mut first_error = None;
-        while let Some(lease) = self.leases.pop() {
-            if let Err(error) = lease.release().await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test assertions")]
-mod tests {
-    use std::sync::Arc;
-
-    use object_store::memory::InMemory;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn multi_repo_acquisition_releases_partial_leases_on_contention() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let store = Store::new(inner);
-        let held = PushLock::acquire_internal_default(
-            store.inner(),
-            "org/b",
-            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
-        )
-        .await
-        .unwrap();
-
-        let result = RepositoryMaintenanceLeases::acquire(
-            &store,
-            ["org/b".to_owned(), "org/a".to_owned()],
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(matches!(result, Err(CrabError::PushLockHeld { .. })));
-
-        let released_partial = PushLock::acquire_internal_default(
-            store.inner(),
-            "org/a",
-            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
-        )
-        .await
-        .unwrap();
-        released_partial.release().await.unwrap();
-        held.release().await.unwrap();
     }
 }

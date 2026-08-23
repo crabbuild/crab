@@ -1943,38 +1943,50 @@ async fn restore_shards_from_plan(
         cancel,
     )
     .await?;
-    let mut item_repaired = vec![false; plan.items.len()];
-    let mut shards = 0u64;
-    let mut bytes = 0u64;
+    let result = async {
+        let mut item_repaired = vec![false; plan.items.len()];
+        let mut shards = 0u64;
+        let mut bytes = 0u64;
 
-    for (idx, item) in plan.items.iter().enumerate() {
-        let Some(candidate) = verified_shard_restore_candidate(item)? else {
-            continue;
-        };
-        let shard_hash = MerkleHash::from(parse_b3_digest(&item.file_hash)?);
-        let shard_path = remote.router.shard_path(&shard_hash.hex());
-        remote
-            .store
-            .put(&shard_path, candidate.bytes.clone())
+        for (idx, item) in plan.items.iter().enumerate() {
+            let Some(candidate) = verified_shard_restore_candidate(item)? else {
+                continue;
+            };
+            let shard_hash = MerkleHash::from(parse_b3_digest(&item.file_hash)?);
+            let shard_path = remote.router.shard_path(&shard_hash.hex());
+            remote
+                .store
+                .put(&shard_path, candidate.bytes.clone())
+                .await?;
+            crate::cmd::gc::closure::publish(
+                &remote.store,
+                remote.router.global_prefix(),
+                &shard_hash,
+                candidate.bytes.clone(),
+                shard_path.as_ref(),
+            )
             .await?;
-        item_repaired[idx] = true;
-        shards = shards.saturating_add(1);
-        bytes = bytes.saturating_add(candidate.size);
-    }
+            item_repaired[idx] = true;
+            shards = shards.saturating_add(1);
+            bytes = bytes.saturating_add(candidate.size);
+        }
 
-    if shards == 0 {
-        return Err(CrabError::Configuration {
-            key: "recover apply --restore-shards".to_owned(),
-            origin: "recovery plan has no repairable shard entries with verified candidates"
-                .to_owned(),
-        });
-    }
+        if shards == 0 {
+            return Err(CrabError::Configuration {
+                key: "recover apply --restore-shards".to_owned(),
+                origin: "recovery plan has no repairable shard entries with verified candidates"
+                    .to_owned(),
+            });
+        }
 
-    Ok(ShardRestoreResult {
-        item_repaired,
-        shards,
-        bytes,
-    })
+        Ok(ShardRestoreResult {
+            item_repaired,
+            shards,
+            bytes,
+        })
+    }
+    .await;
+    remote.finish(result).await
 }
 
 struct VerifiedShardCandidate {
@@ -2052,38 +2064,42 @@ async fn restore_xorbs_from_plan(
         cancel,
     )
     .await?;
-    let mut item_repaired = vec![false; plan.items.len()];
-    let mut xorbs = 0u64;
-    let mut bytes = 0u64;
+    let result = async {
+        let mut item_repaired = vec![false; plan.items.len()];
+        let mut xorbs = 0u64;
+        let mut bytes = 0u64;
 
-    for (idx, item) in plan.items.iter().enumerate() {
-        let Some(candidate) = verified_xorb_restore_candidate(item)? else {
-            continue;
-        };
-        let xorb_hash = parse_merkle_digest(&item.file_hash)?;
-        let xorb_path = remote.router.xorb_path(&xorb_hash.hex());
-        remote
-            .store
-            .put(&xorb_path, candidate.bytes.clone())
-            .await?;
-        item_repaired[idx] = true;
-        xorbs = xorbs.saturating_add(1);
-        bytes = bytes.saturating_add(candidate.size);
+        for (idx, item) in plan.items.iter().enumerate() {
+            let Some(candidate) = verified_xorb_restore_candidate(item)? else {
+                continue;
+            };
+            let xorb_hash = parse_merkle_digest(&item.file_hash)?;
+            let xorb_path = remote.router.xorb_path(&xorb_hash.hex());
+            remote
+                .store
+                .put(&xorb_path, candidate.bytes.clone())
+                .await?;
+            item_repaired[idx] = true;
+            xorbs = xorbs.saturating_add(1);
+            bytes = bytes.saturating_add(candidate.size);
+        }
+
+        if xorbs == 0 {
+            return Err(CrabError::Configuration {
+                key: "recover apply --restore-xorbs".to_owned(),
+                origin: "recovery plan has no repairable xorb entries with verified candidates"
+                    .to_owned(),
+            });
+        }
+
+        Ok(XorbRestoreResult {
+            item_repaired,
+            xorbs,
+            bytes,
+        })
     }
-
-    if xorbs == 0 {
-        return Err(CrabError::Configuration {
-            key: "recover apply --restore-xorbs".to_owned(),
-            origin: "recovery plan has no repairable xorb entries with verified candidates"
-                .to_owned(),
-        });
-    }
-
-    Ok(XorbRestoreResult {
-        item_repaired,
-        xorbs,
-        bytes,
-    })
+    .await;
+    remote.finish(result).await
 }
 
 #[derive(Debug)]
@@ -2186,43 +2202,47 @@ async fn restore_packs_from_plan(
         cancel,
     )
     .await?;
-    let mut item_repaired = vec![false; plan.items.len()];
-    let mut packs = 0u64;
-    let mut bytes = 0u64;
+    let result = async {
+        let mut item_repaired = vec![false; plan.items.len()];
+        let mut packs = 0u64;
+        let mut bytes = 0u64;
 
-    for (idx, item) in plan.items.iter().enumerate() {
-        let Some(candidate) = verified_pack_restore_candidate(item)? else {
-            continue;
-        };
-        let pack_id = item.file_hash.trim_start_matches("b3:");
-        let pack_path = remote.router.pack_path(pack_id);
-        let metadata_path = remote.router.pack_metadata_path(pack_id);
-        remote
-            .store
-            .put(&pack_path, candidate.bytes.clone())
-            .await?;
-        remote
-            .store
-            .put(&metadata_path, candidate.metadata.clone())
-            .await?;
-        item_repaired[idx] = true;
-        packs = packs.saturating_add(1);
-        bytes = bytes.saturating_add(candidate.size);
+        for (idx, item) in plan.items.iter().enumerate() {
+            let Some(candidate) = verified_pack_restore_candidate(item)? else {
+                continue;
+            };
+            let pack_id = item.file_hash.trim_start_matches("b3:");
+            let pack_path = remote.router.pack_path(pack_id);
+            let metadata_path = remote.router.pack_metadata_path(pack_id);
+            remote
+                .store
+                .put(&pack_path, candidate.bytes.clone())
+                .await?;
+            remote
+                .store
+                .put(&metadata_path, candidate.metadata.clone())
+                .await?;
+            item_repaired[idx] = true;
+            packs = packs.saturating_add(1);
+            bytes = bytes.saturating_add(candidate.size);
+        }
+
+        if packs == 0 {
+            return Err(CrabError::Configuration {
+                key: "recover apply --restore-packs".to_owned(),
+                origin: "recovery plan has no repairable pack entries with verified candidates"
+                    .to_owned(),
+            });
+        }
+
+        Ok(PackRestoreResult {
+            item_repaired,
+            packs,
+            bytes,
+        })
     }
-
-    if packs == 0 {
-        return Err(CrabError::Configuration {
-            key: "recover apply --restore-packs".to_owned(),
-            origin: "recovery plan has no repairable pack entries with verified candidates"
-                .to_owned(),
-        });
-    }
-
-    Ok(PackRestoreResult {
-        item_repaired,
-        packs,
-        bytes,
-    })
+    .await;
+    remote.finish(result).await
 }
 
 struct VerifiedPackCandidate {
@@ -2437,6 +2457,17 @@ fn pack_metadata_from_plan_item(
 struct RecoveryWriteRemote {
     store: crate::storage::Store,
     router: crate::storage::StoreLayout,
+    gc_writer: crate::maintenance::GcWriterLeases,
+}
+
+impl RecoveryWriteRemote {
+    async fn finish<T>(self, result: Result<T>) -> Result<T> {
+        let release = self.gc_writer.release().await;
+        match (result, release) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
 }
 
 async fn open_recovery_write_remote(
@@ -2451,9 +2482,17 @@ async fn open_recovery_write_remote(
     let selection = crate::replication::StoreResolver::new(&config, &parsed, cancel)
         .write_store(operation)
         .await?;
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &selection.store,
+        selection.router.global_prefix(),
+        selection.router.repo_prefix(),
+        cancel,
+    )
+    .await?;
     Ok(RecoveryWriteRemote {
         store: selection.store,
         router: selection.router,
+        gc_writer,
     })
 }
 

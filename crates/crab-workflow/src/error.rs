@@ -45,6 +45,10 @@ pub enum WorkflowError {
     #[error("storage error: {0}")]
     StorageDomain(#[source] crab_storage::StorageError),
 
+    /// GC writer admission failed before a remote workflow publication.
+    #[error("GC writer admission failed: {0}")]
+    GcFence(#[source] crab_coordination::CoordinationError),
+
     /// An internal workflow invariant failed.
     #[error("internal workflow error: {0}")]
     Internal(String),

@@ -597,6 +597,14 @@ async fn upload_replacements(
         check_cancelled(cancel)?;
         let path = router.shard_path(&replacement.new_hash);
         store.put(&path, replacement.bytes.clone()).await?;
+        crate::cmd::gc::closure::publish(
+            store,
+            router.global_prefix(),
+            &replacement.new_hash,
+            replacement.bytes.clone(),
+            path.as_ref(),
+        )
+        .await?;
         let (verified, _) = store.get_with_etag(&path).await?;
         let actual_hash = crab_xet::hash::compute_data_hash(&verified);
         if actual_hash != replacement.new_hash {

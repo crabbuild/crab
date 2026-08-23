@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::coordination::cas::cas_update_default;
@@ -83,6 +84,26 @@ impl CompactOutcome {
 /// xet-core's `merge_shards()`, uploads the results, and CAS-updates
 /// the shard-list and ref-registry.
 pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
+    if args.dry_run {
+        return run_compact_inner(args, store).await;
+    }
+    let cancel = CancellationToken::new();
+    let writer =
+        crate::maintenance::GcWriterLeases::acquire(store, GLOBAL_PREFIX, &args.repo, &cancel)
+            .await?;
+    let operation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = run_compact_inner(args, store) => result,
+    };
+    let release = writer.release().await;
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
     let shard_list_path = format!("{}/manifests/shard-list", args.repo);
 
     // Step 1: Read the per-repo shard-list.
@@ -216,7 +237,14 @@ pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOut
         }
 
         debug!(hash = %hash_hex, size = buf.len(), "uploading compacted shard");
-        store.put(&shard_path, Bytes::from(buf)).await?;
+        let body = Bytes::from(buf);
+        store.put(&shard_path, body.clone()).await?;
+        let hash = MerkleHash::from_hex(&hash_hex).map_err(|error| CrabError::CorruptObject {
+            path: shard_path.to_string(),
+            reason: format!("invalid compacted shard hash: {error}"),
+        })?;
+        crate::cmd::gc::closure::publish(store, GLOBAL_PREFIX, &hash, body, shard_path.as_ref())
+            .await?;
         new_hashes.push(hash_hex);
     }
 

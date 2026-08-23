@@ -7,8 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -545,6 +547,25 @@ pub async fn publish_remote_artifact(
     manifest: &ArtifactManifest,
     payload: &Path,
 ) -> Result<()> {
+    let fence = store.acquire_gc_writer(prefix).await?;
+    let cancel = fence.cancellation();
+    let operation = tokio::select! {
+        result = publish_remote_artifact_inner(store, prefix, manifest, payload) => result,
+        _ = cancel.cancelled() => Err(crate::store::WorkflowGcWriter::lease_lost_error(prefix)),
+    };
+    let release = fence.release().await;
+    match (operation, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+async fn publish_remote_artifact_inner(
+    store: &WorkflowStore,
+    prefix: &str,
+    manifest: &ArtifactManifest,
+    payload: &Path,
+) -> Result<()> {
     let envelope = build_remote_envelope(manifest, payload)?;
     validate_manifest(manifest)?;
     validate_remote_envelope(&envelope)?;
@@ -701,6 +722,29 @@ pub async fn read_remote_artifact_registry(
     Ok(registry)
 }
 
+/// Receives one validated reachable remote artifact object key.
+pub trait RemoteArtifactReachabilityVisitor<E> {
+    /// Consume one key. The returned future may borrow the visitor state.
+    fn visit<'a>(
+        &'a mut self,
+        key: String,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), E>> + 'a>>;
+}
+
+struct ReachableArtifactSet<'a>(&'a mut BTreeSet<String>);
+
+impl RemoteArtifactReachabilityVisitor<WorkflowError> for ReachableArtifactSet<'_> {
+    fn visit<'a>(
+        &'a mut self,
+        key: String,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), WorkflowError>> + 'a>> {
+        Box::pin(async move {
+            self.0.insert(key);
+            Ok(())
+        })
+    }
+}
+
 /// Return remote artifact objects that are reachable from immutable version
 /// refs, mutable stage refs, and promotion history.
 ///
@@ -713,23 +757,40 @@ pub async fn reachable_remote_artifact_objects(
     store: &WorkflowStore,
     prefix: &str,
 ) -> Result<BTreeSet<String>> {
+    let mut reachable = BTreeSet::new();
+    let mut visitor = ReachableArtifactSet(&mut reachable);
+    visit_reachable_remote_artifact_objects(store, prefix, &mut visitor).await?;
+    Ok(reachable)
+}
+
+/// Visit reachable remote artifact objects without materializing the returned
+/// key set. Validation and payload completeness checks remain identical to the
+/// collection helper above; only the final key sink is caller-owned.
+pub async fn visit_reachable_remote_artifact_objects<V, E>(
+    store: &WorkflowStore,
+    prefix: &str,
+    visitor: &mut V,
+) -> std::result::Result<(), E>
+where
+    V: RemoteArtifactReachabilityVisitor<E>,
+    E: From<WorkflowError>,
+{
     let registry = read_remote_artifact_registry(store, prefix).await?;
     let pending = read_remote_pending_promotions(store, prefix).await?;
     let refs_prefix = ObjectPath::from(remote_join(prefix, "refs/crab/artifacts"));
-    let mut reachable = BTreeSet::new();
     let mut manifest_paths = BTreeSet::new();
     let mut seen_manifests = BTreeSet::new();
 
     for object in store.list_prefix(&refs_prefix).await? {
         let key = object.location.as_ref().to_owned();
-        reachable.insert(key.clone());
+        visitor.visit(key.clone()).await?;
         if let Some((name, version)) = parse_version_ref_key(prefix, &key) {
             let (bytes, _) = store.get_with_etag(&object.location).await?;
             let manifest_path = String::from_utf8(bytes.to_vec())
                 .map_err(|_| invalid("artifact_remote_version_ref_invalid", key.clone()))?;
             let expected = remote_artifact_manifest_path(prefix, &name, &version)?;
             if manifest_path != expected.to_string() {
-                return Err(invalid("artifact_remote_version_ref_invalid", key));
+                return Err(invalid("artifact_remote_version_ref_invalid", key).into());
             }
             manifest_paths.insert(manifest_path);
         } else if let Some((name, stage)) = parse_stage_key(prefix, &key) {
@@ -745,7 +806,8 @@ pub async fn reachable_remote_artifact_objects(
                 return Err(invalid(
                     "artifact_remote_stage_version_missing",
                     format!("{stage}:{version}"),
-                ));
+                )
+                .into());
             }
             manifest_paths.insert(manifest_path.to_string());
         }
@@ -757,7 +819,7 @@ pub async fn reachable_remote_artifact_objects(
         if !key.ends_with(".json") {
             continue;
         }
-        reachable.insert(key.clone());
+        visitor.visit(key.clone()).await?;
         let (bytes, _) = store.get_with_etag(&object.location).await?;
         let event: ArtifactPromotion = serde_json::from_slice(&bytes)
             .map_err(|error| invalid_detail("artifact_remote_history_parse", error))?;
@@ -768,10 +830,9 @@ pub async fn reachable_remote_artifact_objects(
             )
         })?;
         if !versions.contains_key(&event.version_id) {
-            return Err(invalid(
-                "artifact_remote_history_version_missing",
-                event.version_id,
-            ));
+            return Err(
+                invalid("artifact_remote_history_version_missing", event.version_id).into(),
+            );
         }
         manifest_paths.insert(
             remote_artifact_manifest_path(prefix, &event.name, &event.version_id)?.to_string(),
@@ -779,7 +840,7 @@ pub async fn reachable_remote_artifact_objects(
     }
 
     for (key, _, event) in &pending {
-        reachable.insert(key.clone());
+        visitor.visit(key.clone()).await?;
         let versions = registry.versions.get(&event.name).ok_or_else(|| {
             invalid(
                 "artifact_remote_pending_version_missing",
@@ -790,7 +851,8 @@ pub async fn reachable_remote_artifact_objects(
             return Err(invalid(
                 "artifact_remote_pending_version_missing",
                 event.version_id.clone(),
-            ));
+            )
+            .into());
         }
         manifest_paths.insert(
             remote_artifact_manifest_path(prefix, &event.name, &event.version_id)?.to_string(),
@@ -809,7 +871,7 @@ pub async fn reachable_remote_artifact_objects(
         let envelope: RemoteArtifactEnvelope = serde_json::from_slice(&bytes)
             .map_err(|error| invalid_detail("artifact_remote_manifest_parse", error))?;
         validate_remote_envelope(&envelope)?;
-        reachable.insert(key.to_owned());
+        visitor.visit(key.to_owned()).await?;
         seen_manifests.insert(key.to_owned());
         let payload_root = remote_artifact_payload_root(prefix, &envelope.manifest.content_hash)?;
         match envelope.payload_kind {
@@ -831,10 +893,7 @@ pub async fn reachable_remote_artifact_objects(
     }
 
     if let Some(missing) = manifest_paths.difference(&seen_manifests).next() {
-        return Err(invalid(
-            "artifact_remote_manifest_missing",
-            missing.to_owned(),
-        ));
+        return Err(invalid("artifact_remote_manifest_missing", missing.to_owned()).into());
     }
 
     let payload_prefix = ObjectPath::from(remote_join(prefix, "workflow/artifacts/payloads"));
@@ -846,22 +905,40 @@ pub async fn reachable_remote_artifact_objects(
             .iter()
             .any(|root| key.starts_with(&format!("{root}/")))
         {
-            reachable.insert(key.to_owned());
+            visitor.visit(key.to_owned()).await?;
         }
     }
 
     if let Some(missing) = expected_payloads.difference(&listed_payloads).next() {
-        return Err(invalid(
-            "artifact_remote_payload_missing",
-            missing.to_owned(),
-        ));
+        return Err(invalid("artifact_remote_payload_missing", missing.to_owned()).into());
     }
 
-    Ok(reachable)
+    Ok(())
 }
 
 /// Promote a remote immutable version using a compare-and-swap stage label.
 pub async fn promote_remote_artifact(
+    store: &WorkflowStore,
+    prefix: &str,
+    name: &str,
+    version_id: &str,
+    stage: &str,
+    expected: Option<&str>,
+) -> Result<ArtifactPromotion> {
+    let fence = store.acquire_gc_writer(prefix).await?;
+    let cancel = fence.cancellation();
+    let operation = tokio::select! {
+        result = promote_remote_artifact_inner(store, prefix, name, version_id, stage, expected) => result,
+        _ = cancel.cancelled() => Err(crate::store::WorkflowGcWriter::lease_lost_error(prefix)),
+    };
+    let release = fence.release().await;
+    match (operation, release) {
+        (Ok(event), Ok(())) => Ok(event),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+async fn promote_remote_artifact_inner(
     store: &WorkflowStore,
     prefix: &str,
     name: &str,
