@@ -859,7 +859,8 @@ mod tests {
             "b".repeat(64),
             "d".repeat(64),
             refs.clone(),
-        );
+        )
+        .expect("valid visibility proof");
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest.generation = 4;
         manifest.pack_index_hash = "c".repeat(64);
@@ -873,7 +874,7 @@ mod tests {
             rebound.git_validation_digest,
             manifest.git_validation_digest
         );
-        assert_eq!(rebound.refs, refs);
+        assert_eq!(rebound.ref_closures(), refs);
     }
 
     #[tokio::test]
@@ -1017,9 +1018,11 @@ mod tests {
             &committed.git_validation_digest,
         )
         .await?;
-        assert_eq!(visibility.refs.len(), 1);
+        assert_eq!(visibility.ref_count(), 1);
         assert!(
-            visibility.refs["refs/heads/main"]
+            visibility
+                .objects_for_ref("refs/heads/main")
+                .expect("main closure")
                 .binary_search(&tip)
                 .is_ok()
         );

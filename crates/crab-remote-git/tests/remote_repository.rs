@@ -1187,7 +1187,7 @@ async fn visibility_rebuild_batches_remote_object_reads() {
         .await
         .expect("rebuild visibility");
 
-    assert_eq!(index.refs.len(), fixture.repository.refs().entries.len());
+    assert_eq!(index.ref_count(), fixture.repository.refs().entries.len());
     let pack_gets = fixture.backend.pack_gets();
     assert!(
         pack_gets <= 14,

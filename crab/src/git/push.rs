@@ -8454,7 +8454,7 @@ impl PushPipeline {
                             .and_then(|_| {
                                 compacted_visibility
                                     .as_ref()
-                                    .and_then(|index| index.refs.get(&edit.ref_name).cloned())
+                                    .and_then(|index| index.objects_for_ref(&edit.ref_name))
                             }),
                     )
                 })
@@ -16083,9 +16083,7 @@ async fn build_git_visibility_index_from_remote_packs(
 
     check_cancelled(cancel)?;
     let index = build_git_visibility_index_from_storage_git_dir(git_dir.path(), manifest).await?;
-    let logical_objects = index.refs.values().fold(0u64, |total, objects| {
-        total.saturating_add(objects.len() as u64)
-    });
+    let logical_objects = index.membership_count();
     info!(
         target: "crab::git::visibility",
         telemetry_event = "operation_summary",
@@ -16108,12 +16106,13 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     manifest: &Manifest,
 ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
     if manifest.refs.is_empty() {
-        return Ok(crab_metadata::git_visibility::GitVisibilityIndex::new(
+        return crab_metadata::git_visibility::GitVisibilityIndex::new(
             manifest.generation,
             manifest.pack_index_hash.clone(),
             manifest.git_validation_digest.clone(),
             BTreeMap::new(),
-        ));
+        )
+        .map_err(CrabError::from);
     }
     let refs = manifest
         .refs
@@ -16153,7 +16152,8 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
         manifest.pack_index_hash.clone(),
         manifest.git_validation_digest.clone(),
         refs,
-    );
+    )
+    .map_err(CrabError::from)?;
     Ok(index)
 }
 
@@ -18420,7 +18420,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             current.format,
-            crab_metadata::git_visibility::GitVisibilityFormat::V3
+            crab_metadata::git_visibility::GitVisibilityFormat::V4
         );
     }
 
@@ -20128,8 +20128,9 @@ mod tests {
             manifest.generation,
             manifest.pack_index_hash.clone(),
             manifest.git_validation_digest.clone(),
-            visibility.refs,
-        );
+            visibility.ref_closures(),
+        )
+        .expect("valid next visibility proof");
         crab_metadata::git_visibility::upload_if_absent(
             store.as_storage(),
             &storage_router,
@@ -20326,13 +20327,13 @@ mod tests {
         )
         .await
         .expect("read repaired visibility proof");
-        assert!(repaired.refs.keys().eq(manifest.refs.keys()));
-        assert!(manifest.refs.iter().all(|(name, tip)| {
-            repaired
+        assert_eq!(repaired.ref_count(), manifest.refs.len());
+        assert!(
+            manifest
                 .refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-        }));
+                .iter()
+                .all(|(name, tip)| { repaired.contains_hex_in_ref(name, tip) })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -21548,7 +21549,7 @@ mod tests {
         )
         .await
         .expect("journal compaction publishes visibility evidence");
-        assert!(visibility.refs.contains_key("refs/heads/main"));
+        assert!(visibility.contains_ref("refs/heads/main"));
     }
 
     // --- Step 10: remote-aware pack generation ---

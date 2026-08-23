@@ -59,16 +59,19 @@ A client request for an unsupported form receives a protocol error; Crab never
 acknowledges it and downloads a complete pack as a substitute.
 
 Fresh, unfiltered fetches of exact visible ref targets use the visibility
-proof's complete per-ref closure directly. Requests with haves, shallow or
-depth semantics, filters, tag expansion, or a want that is not an exact ref
-target use the bounded traversal planner. Pack generation reads up to the
-operation's default 10,000-object bound as one locator batch so adjacent pack
-ranges can be coalesced; fetched-byte and inflated-byte budgets remain the
-memory and I/O bounds. Locator batches spanning at least one exact-read wave
-and at least half of the pinned pack inventory use one ordered SlateDB scan,
-clipped to the requested SHA-1 range. The scan abandons itself and returns to
-exact reads if stale rows would make it examine more than twice the requested
-object count, so sparse and stale-heavy repositories remain bounded.
+proof's complete per-ref closure directly. Each monotonic ref update retains a
+bounded transition from recent prior tips to the current tip, so an unfiltered
+incremental fetch can select the proven `want - have` closure without walking
+the complete object graph. A rewrite, deletion, missing transition, shallow or
+depth request, filter, or want that is not an exact ref target uses the bounded
+traversal planner. Pack generation reads up to the operation's default
+10,000-object bound as one locator batch so adjacent pack ranges can be
+coalesced; fetched-byte and inflated-byte budgets remain the memory and I/O
+bounds. Locator batches spanning at least one exact-read wave and at least half
+of the pinned pack inventory use one ordered SlateDB scan, clipped to the
+requested SHA-1 range. The scan abandons itself and returns to exact reads if
+stale rows would make it examine more than twice the requested object count,
+so sparse and stale-heavy repositories remain bounded.
 
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
@@ -82,7 +85,12 @@ sorted dictionary and represents each ref closure as sparse dictionary
 positions or a dense bitmap, avoiding repeated 40-byte IDs and integer-heavy
 closures for shared history. Invalid or missing
 proof suppresses v2 advertisement; it never triggers a silent complete
-filtered fetch. Crab 1.0.15 proofs keyed only by generation and pack-index hash
+filtered fetch. At runtime, the proof retains one binary SHA-1 dictionary and
+sparse-or-bitmap ordinal closures; ref authorization, unions, differences, and
+counts do not expand per-ref hexadecimal strings. The current version-4 codec
+also stores up to 64 monotonic transitions per ref. Version-3 proofs normalize
+directly into the same runtime model and acquire transitions as later journal
+edits are compacted. Crab 1.0.15 proofs keyed only by generation and pack-index hash
 remain an explicit read migration: write and repair owners backfill the
 digest-bound key, and GC retains both roots while that tagged-data migration is
 supported. If a valid legacy key contains a different ref closure from the

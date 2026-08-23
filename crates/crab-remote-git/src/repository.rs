@@ -535,6 +535,7 @@ impl RemoteGitRepository {
                 self.state.git_validation_digest.as_ref(),
                 std::collections::BTreeMap::new(),
             )
+            .map_err(Error::Metadata)?
         } else {
             return Err(Error::EmptyRepository);
         };
@@ -542,16 +543,20 @@ impl RemoteGitRepository {
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
 
-        if index.refs.len() != self.state.refs.entries.len()
+        if index.ref_count() != self.state.refs.entries.len()
             || self.state.refs.entries.iter().any(|reference| {
-                let Some(objects) = index.refs.get(&reference.name) else {
+                if !index.contains_ref(&reference.name) {
+                    return true;
+                }
+                let Ok(target) = reference.target.as_bytes().try_into() else {
                     return true;
                 };
-                let target = reference.target.to_hex().to_string();
-                objects.binary_search(&target).is_err()
+                !index.contains_in_ref(&reference.name, &target)
                     || reference.peeled.is_some_and(|peeled| {
-                        let peeled = peeled.to_hex().to_string();
-                        objects.binary_search(&peeled).is_err()
+                        let Ok(peeled) = peeled.as_bytes().try_into() else {
+                            return true;
+                        };
+                        !index.contains_in_ref(&reference.name, &peeled)
                     })
             })
         {

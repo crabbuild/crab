@@ -302,10 +302,9 @@ fn validate_fetch_wants(
         if policy.allow_any_sha_in_want
             || (policy.allow_tip_sha_in_want && advertised_tips.contains(want))
             || (policy.allow_reachable_sha_in_want
-                && visibility.contains_for_refs(
-                    visible_ref_names.iter().map(String::as_str),
-                    &want.to_hex().to_string(),
-                ))
+                && want.as_bytes().try_into().ok().is_some_and(|oid| {
+                    visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+                }))
         {
             continue;
         }
@@ -775,10 +774,9 @@ fn common_haves(
         .haves
         .iter()
         .filter(|have| {
-            visibility.contains_for_refs(
-                visible_ref_names.iter().map(String::as_str),
-                &have.to_hex().to_string(),
-            )
+            have.as_bytes().try_into().ok().is_some_and(|oid| {
+                visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+            })
         })
         .copied()
         .collect()
@@ -1412,7 +1410,8 @@ mod tests {
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
             )]),
-        );
+        )
+        .expect("valid visibility proof");
 
         let error = validate_fetch_wants(
             &HashSet::from([tip]),
@@ -1443,7 +1442,8 @@ mod tests {
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
             )]),
-        );
+        )
+        .expect("valid visibility proof");
         let policy = FetchAdmissionPolicy {
             allow_reachable_sha_in_want: true,
             ..FetchAdmissionPolicy::default()

@@ -5,8 +5,7 @@
 //! complete object closure of the refs visible to the caller. This module
 //! stores that closure in one generation-bound, immutable object.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +13,7 @@ use crate::error::{MetadataError, Result};
 use crate::manifests::Manifest;
 
 /// Current serialized visibility-index format.
-pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 3;
+pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 4;
 
 /// Maximum serialized proof accepted from object storage.
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
@@ -174,6 +173,133 @@ fn validate_sorted_oids(objects: &[String], field: &str) -> Result<()> {
     Ok(())
 }
 
+/// Binary SHA-1 object identity used by a visibility proof.
+pub type GitVisibilityOid = [u8; 20];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitVisibilityClosure {
+    Sparse(Vec<u32>),
+    Bitmap(Vec<u8>),
+}
+
+const MAX_VISIBILITY_TRANSITIONS_PER_REF: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitVisibilityTransition {
+    from_oid: GitVisibilityOid,
+    to_oid: GitVisibilityOid,
+    objects: GitVisibilityClosure,
+}
+
+impl GitVisibilityClosure {
+    fn from_positions(positions: Vec<u32>, object_count: usize) -> Result<Self> {
+        let bitmap_len = object_count.div_ceil(8);
+        if bitmap_len >= positions.len().saturating_mul(std::mem::size_of::<u32>()) {
+            return Ok(Self::Sparse(positions));
+        }
+        let mut bitmap = vec![0u8; bitmap_len];
+        for position in positions {
+            let position = usize::try_from(position)
+                .map_err(|_| corrupt("visibility closure position cannot be represented"))?;
+            let byte = bitmap
+                .get_mut(position / 8)
+                .ok_or_else(|| corrupt("visibility closure position is outside its dictionary"))?;
+            *byte |= 1 << (position % 8);
+        }
+        Ok(Self::Bitmap(bitmap))
+    }
+
+    fn validate(&self, object_count: usize) -> Result<u64> {
+        match self {
+            Self::Sparse(positions) => {
+                let mut previous = None;
+                for position in positions {
+                    let raw_position = *position;
+                    if previous.is_some_and(|previous| previous >= raw_position) {
+                        return Err(corrupt(
+                            "visibility closure positions must be sorted and deduplicated",
+                        ));
+                    }
+                    let position = usize::try_from(raw_position).map_err(|_| {
+                        corrupt("visibility closure position cannot be represented")
+                    })?;
+                    if position >= object_count {
+                        return Err(corrupt(
+                            "visibility closure position is outside its dictionary",
+                        ));
+                    }
+                    previous = Some(raw_position);
+                }
+                u64::try_from(positions.len())
+                    .map_err(|_| corrupt("visibility closure object count cannot be represented"))
+            }
+            Self::Bitmap(bitmap) => {
+                if bitmap.len() != object_count.div_ceil(8) {
+                    return Err(corrupt(
+                        "visibility closure bitmap length does not match its dictionary",
+                    ));
+                }
+                if let Some(last) = bitmap.last()
+                    && !object_count.is_multiple_of(8)
+                    && last >> (object_count % 8) != 0
+                {
+                    return Err(corrupt(
+                        "visibility closure bitmap sets a position outside its dictionary",
+                    ));
+                }
+                bitmap.iter().try_fold(0u64, |count, byte| {
+                    count
+                        .checked_add(u64::from(byte.count_ones()))
+                        .ok_or_else(|| corrupt("visibility closure object count overflows"))
+                })
+            }
+        }
+    }
+
+    fn contains(&self, position: u32) -> bool {
+        match self {
+            Self::Sparse(positions) => positions.binary_search(&position).is_ok(),
+            Self::Bitmap(bitmap) => usize::try_from(position)
+                .ok()
+                .and_then(|position| bitmap.get(position / 8).map(|byte| (*byte, position)))
+                .is_some_and(|(byte, position)| byte & (1 << (position % 8)) != 0),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Sparse(positions) => u64::try_from(positions.len()).unwrap_or(u64::MAX),
+            Self::Bitmap(bitmap) => bitmap.iter().map(|byte| u64::from(byte.count_ones())).sum(),
+        }
+    }
+
+    fn union_into(&self, union: &mut [u8]) {
+        match self {
+            Self::Sparse(positions) => {
+                for position in positions {
+                    if let Ok(position) = usize::try_from(*position)
+                        && let Some(byte) = union.get_mut(position / 8)
+                    {
+                        *byte |= 1 << (position % 8);
+                    }
+                }
+            }
+            Self::Bitmap(bitmap) => {
+                for (output, input) in union.iter_mut().zip(bitmap) {
+                    *output |= input;
+                }
+            }
+        }
+    }
+
+    fn positions(&self) -> Vec<u32> {
+        match self {
+            Self::Sparse(positions) => positions.clone(),
+            Self::Bitmap(bitmap) => bitmap_positions(bitmap),
+        }
+    }
+}
+
 /// Complete ref-rooted Git object visibility proof for one repository snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitVisibilityIndex {
@@ -185,35 +311,101 @@ pub struct GitVisibilityIndex {
     pub pack_index_hash: String,
     /// Digest binding the complete manifest Git state described by this proof.
     pub git_validation_digest: String,
-    /// Complete object closure for each manifest ref, including the ref tip.
-    pub refs: BTreeMap<String, Vec<String>>,
+    objects: Vec<GitVisibilityOid>,
+    positions: HashMap<GitVisibilityOid, u32>,
+    refs: BTreeMap<String, GitVisibilityClosure>,
+    transitions: BTreeMap<String, Vec<GitVisibilityTransition>>,
 }
 
 impl GitVisibilityIndex {
     /// Build a normalized proof from ref-rooted object sets.
-    #[must_use]
     pub fn new(
         generation: u64,
         pack_index_hash: impl Into<String>,
         git_validation_digest: impl Into<String>,
         refs: BTreeMap<String, Vec<String>>,
-    ) -> Self {
-        let refs = refs
+    ) -> Result<Self> {
+        if refs.len() > MAX_GIT_VISIBILITY_REFS {
+            return Err(corrupt("visibility index contains too many refs"));
+        }
+        let mut decoded_refs = BTreeMap::new();
+        let mut dictionary = BTreeSet::new();
+        let mut membership_count = 0u64;
+        for (name, objects) in refs {
+            validate_ref_name(&name)?;
+            let mut decoded = objects
+                .into_iter()
+                .map(|oid| decode_oid(&oid))
+                .collect::<Result<Vec<_>>>()?;
+            decoded.sort_unstable();
+            decoded.dedup();
+            membership_count =
+                membership_count
+                    .checked_add(u64::try_from(decoded.len()).map_err(|_| {
+                        corrupt("visibility index object count cannot be represented")
+                    })?)
+                    .ok_or_else(|| corrupt("visibility index object count overflows"))?;
+            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(corrupt("visibility index contains too many objects"));
+            }
+            dictionary.extend(decoded.iter().copied());
+            decoded_refs.insert(name, decoded);
+        }
+        let objects = dictionary.into_iter().collect::<Vec<_>>();
+        let positions = build_positions(&objects)?;
+        let refs = decoded_refs
             .into_iter()
             .map(|(name, objects)| {
-                let mut objects = objects;
-                objects.sort_unstable();
-                objects.dedup();
-                (name, objects)
+                let closure = objects
+                    .into_iter()
+                    .map(|oid| {
+                        positions.get(&oid).copied().ok_or_else(|| {
+                            corrupt("visibility closure object is absent from its dictionary")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((
+                    name,
+                    GitVisibilityClosure::from_positions(closure, positions.len())?,
+                ))
             })
-            .collect();
-        Self {
+            .collect::<Result<_>>()?;
+        let index = Self {
             version: GIT_VISIBILITY_INDEX_VERSION,
             generation,
             pack_index_hash: pack_index_hash.into(),
             git_validation_digest: git_validation_digest.into(),
+            objects,
+            positions,
             refs,
-        }
+            transitions: BTreeMap::new(),
+        };
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn from_parts(
+        version: u32,
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        objects: Vec<GitVisibilityOid>,
+        refs: BTreeMap<String, GitVisibilityClosure>,
+        transitions: BTreeMap<String, Vec<GitVisibilityTransition>>,
+    ) -> Result<Self> {
+        let positions = build_positions(&objects)?;
+        let index = Self {
+            version,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+            objects,
+            positions,
+            refs,
+            transitions,
+        };
+        index.validate()?;
+        Ok(index)
     }
 
     /// Validate the object before it is used for authorization.
@@ -225,7 +417,61 @@ impl GitVisibilityIndex {
             validate_hash(&self.pack_index_hash, "pack index hash")?;
         }
         validate_hash(&self.git_validation_digest, "Git validation digest")?;
-        validate_ref_closures(&self.refs)
+        if self.objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt(
+                "visibility object dictionary contains too many objects",
+            ));
+        }
+        if self.positions.len() != self.objects.len()
+            || self.objects.iter().enumerate().any(|(position, oid)| {
+                self.positions
+                    .get(oid)
+                    .and_then(|position| usize::try_from(*position).ok())
+                    != Some(position)
+            })
+        {
+            return Err(corrupt(
+                "visibility object lookup does not match its dictionary",
+            ));
+        }
+        if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
+            return Err(corrupt("visibility index contains too many refs"));
+        }
+        let mut membership_count = 0u64;
+        for (name, closure) in &self.refs {
+            validate_ref_name(name)?;
+            membership_count = membership_count
+                .checked_add(closure.validate(self.objects.len())?)
+                .ok_or_else(|| corrupt("visibility index object count overflows"))?;
+            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(corrupt("visibility index contains too many objects"));
+            }
+        }
+        for (name, transitions) in &self.transitions {
+            if !self.refs.contains_key(name)
+                || transitions.len() > MAX_VISIBILITY_TRANSITIONS_PER_REF
+            {
+                return Err(corrupt("visibility transitions do not match their ref"));
+            }
+            for transition in transitions {
+                let ref_closure = self
+                    .refs
+                    .get(name)
+                    .ok_or_else(|| corrupt("visibility transition ref closure is absent"))?;
+                if !self.contains_in_ref(name, &transition.from_oid)
+                    || !self.contains_in_ref(name, &transition.to_oid)
+                    || transition.objects.validate(self.objects.len())? > MAX_GIT_VISIBILITY_OBJECTS
+                    || transition
+                        .objects
+                        .positions()
+                        .into_iter()
+                        .any(|position| !ref_closure.contains(position))
+                {
+                    return Err(corrupt("visibility transition is invalid"));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "storage")]
@@ -254,27 +500,135 @@ impl GitVisibilityIndex {
             && self.git_validation_digest == manifest.git_validation_digest
             && self.refs.keys().eq(manifest.refs.keys())
             && manifest.refs.iter().all(|(name, tip)| {
-                self.refs
-                    .get(name)
-                    .is_some_and(|objects| objects.binary_search(tip).is_ok())
+                decode_oid(tip)
+                    .ok()
+                    .is_some_and(|oid| self.contains_in_ref(name, &oid))
             })
             && manifest.peeled_refs.iter().all(|(name, peeled)| {
-                self.refs
-                    .get(name)
-                    .is_some_and(|objects| objects.binary_search(peeled).is_ok())
+                decode_oid(peeled)
+                    .ok()
+                    .is_some_and(|oid| self.contains_in_ref(name, &oid))
             })
+    }
+
+    /// Return the number of refs in this proof.
+    #[must_use]
+    pub fn ref_count(&self) -> usize {
+        self.refs.len()
+    }
+
+    /// Return whether this proof contains the named ref.
+    #[must_use]
+    pub fn contains_ref(&self, name: &str) -> bool {
+        self.refs.contains_key(name)
+    }
+
+    /// Return whether one ref closure contains an object.
+    #[must_use]
+    pub fn contains_in_ref(&self, name: &str, oid: &GitVisibilityOid) -> bool {
+        self.positions.get(oid).is_some_and(|position| {
+            self.refs
+                .get(name)
+                .is_some_and(|closure| closure.contains(*position))
+        })
+    }
+
+    /// Return whether one ref closure contains a canonical hexadecimal object ID.
+    #[must_use]
+    pub fn contains_hex_in_ref(&self, name: &str, oid: &str) -> bool {
+        decode_oid(oid)
+            .ok()
+            .is_some_and(|oid| self.contains_in_ref(name, &oid))
+    }
+
+    /// Return one ref closure as canonical hexadecimal IDs.
+    #[must_use]
+    pub fn objects_for_ref(&self, name: &str) -> Option<Vec<String>> {
+        self.refs.get(name).map(|closure| {
+            closure
+                .positions()
+                .into_iter()
+                .filter_map(|position| usize::try_from(position).ok())
+                .filter_map(|position| self.objects.get(position))
+                .map(encode_oid)
+                .collect()
+        })
+    }
+
+    /// Materialize all ref closures for migration and rebuild boundaries.
+    #[must_use]
+    pub fn ref_closures(&self) -> BTreeMap<String, Vec<String>> {
+        self.refs
+            .keys()
+            .filter_map(|name| {
+                self.objects_for_ref(name)
+                    .map(|objects| (name.clone(), objects))
+            })
+            .collect()
     }
 
     /// Return the union of objects rooted at the supplied visible refs.
     #[must_use]
-    pub fn objects_for_refs<'a, I>(&self, refs: I) -> BTreeSet<String>
+    pub fn objects_for_refs<'a, I>(&self, refs: I) -> Vec<GitVisibilityOid>
     where
         I: IntoIterator<Item = &'a str>,
     {
-        refs.into_iter()
-            .filter_map(|name| self.refs.get(name))
-            .flat_map(|objects| objects.iter().cloned())
+        let union = self.union_for_refs(refs);
+        bitmap_positions(&union)
+            .into_iter()
+            .filter_map(|position| usize::try_from(position).ok())
+            .filter_map(|position| self.objects.get(position).copied())
             .collect()
+    }
+
+    /// Return the selected-ref union minus the excluded-ref union.
+    #[must_use]
+    pub fn objects_for_ref_difference<'a, I, J>(
+        &self,
+        selected: I,
+        excluded: J,
+    ) -> Vec<GitVisibilityOid>
+    where
+        I: IntoIterator<Item = &'a str>,
+        J: IntoIterator<Item = &'a str>,
+    {
+        let mut selected = self.union_for_refs(selected);
+        let excluded = self.union_for_refs(excluded);
+        for (selected, excluded) in selected.iter_mut().zip(excluded) {
+            *selected &= !excluded;
+        }
+        bitmap_positions(&selected)
+            .into_iter()
+            .filter_map(|position| usize::try_from(position).ok())
+            .filter_map(|position| self.objects.get(position).copied())
+            .collect()
+    }
+
+    /// Return a proven incremental closure for one exact prior ref tip.
+    #[must_use]
+    pub fn incremental_objects(
+        &self,
+        name: &str,
+        to_oid: &GitVisibilityOid,
+        haves: &[GitVisibilityOid],
+    ) -> Option<Vec<GitVisibilityOid>> {
+        let transition = self
+            .transitions
+            .get(name)?
+            .iter()
+            .rev()
+            .find(|transition| {
+                transition.to_oid == *to_oid && haves.contains(&transition.from_oid)
+            })?;
+        Some(
+            transition
+                .objects
+                .positions()
+                .into_iter()
+                .filter_map(|position| usize::try_from(position).ok())
+                .filter_map(|position| self.objects.get(position).copied())
+                .collect(),
+        )
     }
 
     /// Count the distinct objects rooted at the supplied visible refs.
@@ -283,76 +637,167 @@ impl GitVisibilityIndex {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let lists = refs
-            .into_iter()
-            .filter_map(|name| self.refs.get(name).map(Vec::as_slice))
-            .collect::<Vec<_>>();
-        let mut pending = BinaryHeap::new();
-        for (list_index, objects) in lists.iter().enumerate() {
-            if let Some(value) = objects.first() {
-                pending.push(Reverse((value.as_str(), list_index, 0usize)));
-            }
-        }
-
-        let mut count = 0usize;
-        let mut previous: Option<&str> = None;
-        while let Some(Reverse((value, list_index, object_index))) = pending.pop() {
-            if previous != Some(value) {
-                count = count.saturating_add(1);
-                previous = Some(value);
-            }
-            let next_index = object_index.saturating_add(1);
-            if let Some(next) = lists[list_index].get(next_index) {
-                pending.push(Reverse((next.as_str(), list_index, next_index)));
-            }
-        }
-        count
+        self.union_for_refs(refs)
+            .iter()
+            .map(|byte| byte.count_ones() as usize)
+            .sum()
     }
 
     /// Return whether an object is proven reachable from one of the supplied refs.
     #[must_use]
-    pub fn contains_for_refs<'a, I>(&self, refs: I, oid: &str) -> bool
+    pub fn contains_for_refs<'a, I>(&self, refs: I, oid: &GitVisibilityOid) -> bool
     where
         I: IntoIterator<Item = &'a str>,
     {
-        refs.into_iter().any(|name| {
-            self.refs.get(name).is_some_and(|objects| {
-                objects
-                    .binary_search_by(|value| value.as_str().cmp(oid))
-                    .is_ok()
+        self.positions.get(oid).is_some_and(|position| {
+            refs.into_iter().any(|name| {
+                self.refs
+                    .get(name)
+                    .is_some_and(|closure| closure.contains(*position))
             })
         })
     }
+
+    /// Return total ref memberships without materializing object IDs.
+    #[must_use]
+    pub fn membership_count(&self) -> u64 {
+        self.refs.values().map(GitVisibilityClosure::len).sum()
+    }
+
+    fn remove_ref(&mut self, name: &str) {
+        self.refs.remove(name);
+        self.transitions.remove(name);
+    }
+
+    fn apply_edit(&mut self, name: String, edit: &GitVisibilityEdit) -> Result<()> {
+        let prior = self.objects_for_ref(&name);
+        let closure = edit.apply(prior.as_deref())?;
+        let mut positions = Vec::with_capacity(closure.len());
+        for oid in closure {
+            let oid = decode_oid(&oid)?;
+            let position = match self.positions.get(&oid).copied() {
+                Some(position) => position,
+                None => {
+                    let position = u32::try_from(self.objects.len())
+                        .map_err(|_| corrupt("visibility object dictionary is too large"))?;
+                    self.objects.push(oid);
+                    self.positions.insert(oid, position);
+                    position
+                }
+            };
+            positions.push(position);
+        }
+        positions.sort_unstable();
+        let bitmap_len = self.objects.len().div_ceil(8);
+        for closure in self.refs.values_mut() {
+            if let GitVisibilityClosure::Bitmap(bitmap) = closure {
+                bitmap.resize(bitmap_len, 0);
+            }
+        }
+        self.refs.insert(
+            name.clone(),
+            GitVisibilityClosure::from_positions(positions, self.objects.len())?,
+        );
+        let from_oid = edit.old_oid.as_deref().map(decode_oid).transpose()?;
+        let to_oid = decode_oid(&edit.new_oid)?;
+        if edit.replaces || !edit.removed.is_empty() {
+            self.transitions.remove(&name);
+            return Ok(());
+        }
+        let added = edit
+            .added
+            .iter()
+            .map(|oid| {
+                let oid = decode_oid(oid)?;
+                self.positions
+                    .get(&oid)
+                    .copied()
+                    .ok_or_else(|| corrupt("visibility transition object is absent"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let transitions = self.transitions.entry(name).or_default();
+        for transition in transitions.iter_mut() {
+            let mut positions = transition.objects.positions();
+            positions.extend(added.iter().copied());
+            positions.sort_unstable();
+            positions.dedup();
+            transition.to_oid = to_oid;
+            transition.objects =
+                GitVisibilityClosure::from_positions(positions, self.objects.len())?;
+        }
+        if let Some(from_oid) = from_oid {
+            transitions.retain(|transition| transition.from_oid != from_oid);
+            transitions.push(GitVisibilityTransition {
+                from_oid,
+                to_oid,
+                objects: GitVisibilityClosure::from_positions(added, self.objects.len())?,
+            });
+            if transitions.len() > MAX_VISIBILITY_TRANSITIONS_PER_REF {
+                transitions.remove(0);
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_identity(
+        &mut self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<()> {
+        self.version = GIT_VISIBILITY_INDEX_VERSION;
+        self.generation = generation;
+        self.pack_index_hash = pack_index_hash.to_owned();
+        self.git_validation_digest = git_validation_digest.to_owned();
+        self.validate()
+    }
+
+    fn union_for_refs<'a, I>(&self, refs: I) -> Vec<u8>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut union = vec![0u8; self.objects.len().div_ceil(8)];
+        for closure in refs.into_iter().filter_map(|name| self.refs.get(name)) {
+            closure.union_into(&mut union);
+        }
+        union
+    }
 }
 
-fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
-    if refs.len() > MAX_GIT_VISIBILITY_REFS {
-        return Err(corrupt("visibility index contains too many refs"));
+fn build_positions(objects: &[GitVisibilityOid]) -> Result<HashMap<GitVisibilityOid, u32>> {
+    let mut positions = HashMap::with_capacity(objects.len());
+    for (position, oid) in objects.iter().copied().enumerate() {
+        let position = u32::try_from(position)
+            .map_err(|_| corrupt("visibility object dictionary is too large"))?;
+        if positions.insert(oid, position).is_some() {
+            return Err(corrupt("visibility object dictionary must be deduplicated"));
+        }
     }
-    let mut object_count = 0u64;
-    for (name, objects) in refs {
-        if name.is_empty() || name.bytes().any(|byte| byte.is_ascii_control()) {
-            return Err(corrupt("visibility index contains an invalid ref name"));
-        }
-        object_count = object_count
-            .checked_add(
-                u64::try_from(objects.len())
-                    .map_err(|_| corrupt("visibility index object count cannot be represented"))?,
-            )
-            .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-        if object_count > MAX_GIT_VISIBILITY_OBJECTS {
-            return Err(corrupt("visibility index contains too many objects"));
-        }
-        let mut previous: Option<&str> = None;
-        for object in objects {
-            validate_oid(object)?;
-            if previous.is_some_and(|value| value >= object.as_str()) {
-                return Err(corrupt(
-                    "visibility index object lists must be sorted and deduplicated",
-                ));
+    Ok(positions)
+}
+
+fn bitmap_positions(bitmap: &[u8]) -> Vec<u32> {
+    let mut positions = Vec::new();
+    for (byte_index, byte) in bitmap.iter().enumerate() {
+        for bit_index in 0..8 {
+            if byte & (1 << bit_index) == 0 {
+                continue;
             }
-            previous = Some(object.as_str());
+            if let Some(position) = byte_index
+                .checked_mul(8)
+                .and_then(|position| position.checked_add(bit_index))
+                .and_then(|position| u32::try_from(position).ok())
+            {
+                positions.push(position);
+            }
         }
+    }
+    positions
+}
+
+fn validate_ref_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(corrupt("visibility index contains an invalid ref name"));
     }
     Ok(())
 }
@@ -364,6 +809,54 @@ fn validate_oid(value: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return Err(corrupt("visibility index contains an invalid object ID"));
+    }
+    Ok(())
+}
+
+fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
+    validate_oid(value)?;
+    let mut decoded = [0u8; 20];
+    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *output = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
+    }
+    Ok(decoded)
+}
+
+fn hex_value(value: u8) -> u8 {
+    match value {
+        b'0'..=b'9' => value - b'0',
+        b'a'..=b'f' => value - b'a' + 10,
+        _ => 0,
+    }
+}
+
+fn encode_oid(oid: &GitVisibilityOid) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(40);
+    for byte in oid {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    if refs.len() > MAX_GIT_VISIBILITY_REFS {
+        return Err(corrupt("visibility index contains too many refs"));
+    }
+    let mut object_count = 0u64;
+    for (name, objects) in refs {
+        validate_ref_name(name)?;
+        object_count = object_count
+            .checked_add(
+                u64::try_from(objects.len())
+                    .map_err(|_| corrupt("visibility index object count cannot be represented"))?,
+            )
+            .ok_or_else(|| corrupt("visibility index object count overflows"))?;
+        if object_count > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt("visibility index contains too many objects"));
+        }
+        validate_sorted_oids(objects, "closure")?;
     }
     Ok(())
 }
@@ -388,7 +881,7 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 
 #[cfg(feature = "storage")]
 mod storage {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -407,11 +900,14 @@ mod storage {
     use crate::ref_journal::RefJournalEdit;
 
     const LEGACY_GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
+    const GIT_VISIBILITY_INDEX_V3_VERSION: u32 = 3;
 
     /// Stored format used to satisfy a visibility read.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum GitVisibilityFormat {
-        /// Dictionary-compressed, digest-bound proof written by current Crab versions.
+        /// Binary-runtime proof with retained incremental ref transitions.
+        V4,
+        /// Dictionary-compressed, digest-bound proof written by earlier Crab versions.
         V3,
         /// Generation-and-pack-bound proof shipped by Crab 1.0.15.
         V1,
@@ -435,8 +931,8 @@ mod storage {
         refs: BTreeMap<String, Vec<String>>,
     }
 
-    // Runtime authorization uses per-ref OID slices. Persistence keeps that API
-    // out of the storage contract by deduplicating shared OIDs here.
+    // Version 3 stores a sorted hexadecimal dictionary. Reads normalize it to
+    // the binary runtime dictionary without expanding per-ref OID ownership.
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct GitVisibilityIndexV3 {
@@ -449,6 +945,31 @@ mod storage {
     }
 
     #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityIndexV4 {
+        version: u32,
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        objects: Vec<String>,
+        refs: BTreeMap<String, GitVisibilityClosureV3>,
+        transitions: BTreeMap<String, Vec<GitVisibilityTransitionV4>>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityTransitionV4 {
+        from_oid: String,
+        to_oid: String,
+        objects: GitVisibilityClosureV3,
+    }
+
+    #[derive(Deserialize)]
+    struct GitVisibilityVersion {
+        version: u32,
+    }
+
+    #[derive(Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum GitVisibilityClosureV3 {
         Sparse(Vec<u32>),
@@ -458,37 +979,54 @@ mod storage {
     impl GitVisibilityIndexV3 {
         fn from_index(index: &GitVisibilityIndex) -> Result<Self> {
             index.validate()?;
-            let objects = index
-                .refs
-                .values()
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let positions = objects
+            let mut used = vec![false; index.objects.len()];
+            for closure in index.refs.values() {
+                for position in closure.positions() {
+                    let position = usize::try_from(position).map_err(|_| {
+                        super::corrupt("visibility closure position cannot be represented")
+                    })?;
+                    let covered = used.get_mut(position).ok_or_else(|| {
+                        super::corrupt("visibility closure position is outside its dictionary")
+                    })?;
+                    *covered = true;
+                }
+            }
+            let mut ordered = index
+                .objects
                 .iter()
+                .copied()
                 .enumerate()
-                .map(|(position, oid)| {
-                    u32::try_from(position)
-                        .map(|position| (oid.as_str(), position))
-                        .map_err(|_| super::corrupt("visibility object dictionary is too large"))
-                })
-                .collect::<Result<BTreeMap<_, _>>>()?;
+                .filter(|(position, _)| used[*position])
+                .collect::<Vec<_>>();
+            ordered.sort_unstable_by_key(|(_, oid)| *oid);
+            let mut remapped = vec![None; index.objects.len()];
+            let mut objects = Vec::with_capacity(ordered.len());
+            for (new_position, (old_position, oid)) in ordered.into_iter().enumerate() {
+                let new_position = u32::try_from(new_position)
+                    .map_err(|_| super::corrupt("visibility object dictionary is too large"))?;
+                remapped[old_position] = Some(new_position);
+                objects.push(super::encode_oid(&oid));
+            }
             let refs = index
                 .refs
                 .iter()
                 .map(|(name, closure)| {
                     let positions = closure
-                        .iter()
-                        .map(|oid| {
-                            positions.get(oid.as_str()).copied().ok_or_else(|| {
-                                super::corrupt(
-                                    "visibility closure object is absent from its dictionary",
-                                )
-                            })
+                        .positions()
+                        .into_iter()
+                        .map(|position| {
+                            usize::try_from(position)
+                                .ok()
+                                .and_then(|position| remapped.get(position).copied().flatten())
+                                .ok_or_else(|| {
+                                    super::corrupt(
+                                        "visibility closure position is outside its dictionary",
+                                    )
+                                })
                         })
                         .collect::<Result<Vec<_>>>()?;
+                    let mut positions = positions;
+                    positions.sort_unstable();
                     Ok((
                         name.clone(),
                         GitVisibilityClosureV3::from_positions(positions, objects.len())?,
@@ -496,7 +1034,7 @@ mod storage {
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
             Ok(Self {
-                version: GIT_VISIBILITY_INDEX_VERSION,
+                version: GIT_VISIBILITY_INDEX_V3_VERSION,
                 generation: index.generation,
                 pack_index_hash: index.pack_index_hash.clone(),
                 git_validation_digest: index.git_validation_digest.clone(),
@@ -506,7 +1044,7 @@ mod storage {
         }
 
         fn into_index(self) -> Result<GitVisibilityIndex> {
-            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+            if self.version != GIT_VISIBILITY_INDEX_V3_VERSION {
                 return Err(super::corrupt(
                     "visibility index storage version is unsupported",
                 ));
@@ -533,8 +1071,13 @@ mod storage {
             if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
                 return Err(super::corrupt("visibility index contains too many refs"));
             }
+            let objects = self
+                .objects
+                .iter()
+                .map(|oid| super::decode_oid(oid))
+                .collect::<Result<Vec<_>>>()?;
             let mut membership_count = 0u64;
-            let mut covered = vec![false; self.objects.len()];
+            let mut covered = vec![false; objects.len()];
             let refs = self
                 .refs
                 .into_iter()
@@ -544,7 +1087,7 @@ mod storage {
                             "visibility index contains an invalid ref name",
                         ));
                     }
-                    let positions = closure.into_positions(self.objects.len())?;
+                    let positions = closure.into_positions(objects.len())?;
                     membership_count = membership_count
                         .checked_add(u64::try_from(positions.len()).map_err(|_| {
                             super::corrupt("visibility index object count cannot be represented")
@@ -554,7 +1097,7 @@ mod storage {
                         return Err(super::corrupt("visibility index contains too many objects"));
                     }
                     let mut prior_position = None;
-                    let objects = positions
+                    let positions = positions
                         .into_iter()
                         .map(|position| {
                             if prior_position.is_some_and(|prior| prior >= position) {
@@ -566,16 +1109,21 @@ mod storage {
                             let position = usize::try_from(position).map_err(|_| {
                                 super::corrupt("visibility closure position cannot be represented")
                             })?;
-                            let oid = self.objects.get(position).ok_or_else(|| {
+                            objects.get(position).ok_or_else(|| {
                                 super::corrupt(
                                     "visibility closure position is outside its dictionary",
                                 )
                             })?;
                             covered[position] = true;
-                            Ok(oid.clone())
+                            u32::try_from(position).map_err(|_| {
+                                super::corrupt("visibility closure position cannot be represented")
+                            })
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    Ok((name, objects))
+                    Ok((
+                        name,
+                        super::GitVisibilityClosure::from_positions(positions, objects.len())?,
+                    ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
             if covered.iter().any(|covered| !covered) {
@@ -583,13 +1131,115 @@ mod storage {
                     "visibility object dictionary contains an unreferenced object",
                 ));
             }
-            let index = GitVisibilityIndex {
-                version: self.version,
+            GitVisibilityIndex::from_parts(
+                GIT_VISIBILITY_INDEX_VERSION,
+                self.generation,
+                self.pack_index_hash,
+                self.git_validation_digest,
+                objects,
+                refs,
+                BTreeMap::new(),
+            )
+        }
+    }
+
+    impl GitVisibilityIndexV4 {
+        fn from_index(index: &GitVisibilityIndex) -> Result<Self> {
+            let encoded = GitVisibilityIndexV3::from_index(index)?;
+            let positions = encoded
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(position, oid)| {
+                    u32::try_from(position)
+                        .map(|position| (oid.as_str(), position))
+                        .map_err(|_| super::corrupt("visibility object dictionary is too large"))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let transitions = index
+                .transitions
+                .iter()
+                .map(|(name, transitions)| {
+                    let transitions = transitions
+                        .iter()
+                        .map(|transition| {
+                            let mut objects = transition
+                                .objects
+                                .positions()
+                                .into_iter()
+                                .map(|position| {
+                                    usize::try_from(position)
+                                        .ok()
+                                        .and_then(|position| index.objects.get(position))
+                                        .map(super::encode_oid)
+                                        .and_then(|oid| positions.get(oid.as_str()).copied())
+                                        .ok_or_else(|| {
+                                            super::corrupt("visibility transition object is absent")
+                                        })
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            objects.sort_unstable();
+                            Ok(GitVisibilityTransitionV4 {
+                                from_oid: super::encode_oid(&transition.from_oid),
+                                to_oid: super::encode_oid(&transition.to_oid),
+                                objects: GitVisibilityClosureV3::from_positions(
+                                    objects,
+                                    encoded.objects.len(),
+                                )?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((name.clone(), transitions))
+                })
+                .collect::<Result<_>>()?;
+            Ok(Self {
+                version: GIT_VISIBILITY_INDEX_VERSION,
+                generation: encoded.generation,
+                pack_index_hash: encoded.pack_index_hash,
+                git_validation_digest: encoded.git_validation_digest,
+                objects: encoded.objects,
+                refs: encoded.refs,
+                transitions,
+            })
+        }
+
+        fn into_index(self) -> Result<GitVisibilityIndex> {
+            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+                return Err(super::corrupt(
+                    "visibility index storage version is unsupported",
+                ));
+            }
+            let object_count = self.objects.len();
+            let transitions = self
+                .transitions
+                .into_iter()
+                .map(|(name, transitions)| {
+                    let transitions = transitions
+                        .into_iter()
+                        .map(|transition| {
+                            Ok(super::GitVisibilityTransition {
+                                from_oid: super::decode_oid(&transition.from_oid)?,
+                                to_oid: super::decode_oid(&transition.to_oid)?,
+                                objects: super::GitVisibilityClosure::from_positions(
+                                    transition.objects.into_positions(object_count)?,
+                                    object_count,
+                                )?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((name, transitions))
+                })
+                .collect::<Result<_>>()?;
+            let mut index = GitVisibilityIndexV3 {
+                version: GIT_VISIBILITY_INDEX_V3_VERSION,
                 generation: self.generation,
                 pack_index_hash: self.pack_index_hash,
                 git_validation_digest: self.git_validation_digest,
-                refs,
-            };
+                objects: self.objects,
+                refs: self.refs,
+            }
+            .into_index()?;
+            index.transitions = transitions;
             index.validate()?;
             Ok(index)
         }
@@ -740,24 +1390,59 @@ mod storage {
         Ok(body)
     }
 
-    async fn read_v3(
-        store: &Store,
-        router: &StoreLayout<Store>,
-        generation: u64,
-        pack_index_hash: &str,
-        git_validation_digest: &str,
-    ) -> Result<GitVisibilityIndex> {
-        let path = router.git_visibility_path(git_validation_digest);
-        let body = read_bounded(store, &path).await?;
-        let index: GitVisibilityIndexV3 = serde_json::from_slice(&body).map_err(|error| {
+    fn decode_digest_bound(
+        body: &[u8],
+        path: &ObjectPath,
+    ) -> Result<(GitVisibilityIndex, GitVisibilityFormat)> {
+        let version: GitVisibilityVersion = serde_json::from_slice(body).map_err(|error| {
             crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
                 reason: format!("invalid visibility index JSON: {error}"),
             }
         })?;
-        let index = index.into_index()?;
+        match version.version {
+            GIT_VISIBILITY_INDEX_VERSION => {
+                let index: GitVisibilityIndexV4 =
+                    serde_json::from_slice(body).map_err(|error| {
+                        crate::error::MetadataError::CorruptObject {
+                            path: path.as_ref().to_owned(),
+                            reason: format!("invalid visibility index JSON: {error}"),
+                        }
+                    })?;
+                index
+                    .into_index()
+                    .map(|index| (index, GitVisibilityFormat::V4))
+            }
+            GIT_VISIBILITY_INDEX_V3_VERSION => {
+                let index: GitVisibilityIndexV3 =
+                    serde_json::from_slice(body).map_err(|error| {
+                        crate::error::MetadataError::CorruptObject {
+                            path: path.as_ref().to_owned(),
+                            reason: format!("invalid visibility index JSON: {error}"),
+                        }
+                    })?;
+                index
+                    .into_index()
+                    .map(|index| (index, GitVisibilityFormat::V3))
+            }
+            _ => Err(super::corrupt(
+                "visibility index storage version is unsupported",
+            )),
+        }
+    }
+
+    async fn read_digest_bound(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<(GitVisibilityIndex, GitVisibilityFormat)> {
+        let path = router.git_visibility_path(git_validation_digest);
+        let body = read_bounded(store, &path).await?;
+        let (index, format) = decode_digest_bound(&body, &path)?;
         index.validate_identity(generation, pack_index_hash, git_validation_digest)?;
-        Ok(index)
+        Ok((index, format))
     }
 
     async fn read_v1(
@@ -787,7 +1472,7 @@ mod storage {
             pack_index_hash,
             git_validation_digest,
             index.refs,
-        );
+        )?;
         index.validate()?;
         Ok(index)
     }
@@ -801,7 +1486,7 @@ mod storage {
         git_validation_digest: &str,
     ) -> Result<GitVisibilityRead> {
         validate_hash(git_validation_digest, "Git validation digest")?;
-        match read_v3(
+        match read_digest_bound(
             store,
             router,
             generation,
@@ -810,10 +1495,7 @@ mod storage {
         )
         .await
         {
-            Ok(index) => Ok(GitVisibilityRead {
-                index,
-                format: GitVisibilityFormat::V3,
-            }),
+            Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
             Err(crate::error::MetadataError::Storage {
                 source: StorageError::NotFound { .. },
             }) => read_v1(
@@ -894,7 +1576,7 @@ mod storage {
         index: &GitVisibilityIndex,
     ) -> Result<()> {
         index.validate()?;
-        let stored = GitVisibilityIndexV3::from_index(index)?;
+        let stored = GitVisibilityIndexV4::from_index(index)?;
         let body = serde_json::to_vec(&stored).map_err(|error| {
             crate::error::MetadataError::Internal(format!("visibility index serialize: {error}"))
         })?;
@@ -936,14 +1618,7 @@ mod storage {
                         ),
                     });
                 }
-                let existing: GitVisibilityIndexV3 =
-                    serde_json::from_slice(&existing).map_err(|error| {
-                        crate::error::MetadataError::CorruptObject {
-                            path: path.as_ref().to_owned(),
-                            reason: format!("invalid existing visibility index JSON: {error}"),
-                        }
-                    })?;
-                let existing = existing.into_index()?;
+                let (existing, _) = decode_digest_bound(&existing, &path)?;
                 existing.validate_identity(
                     index.generation,
                     &index.pack_index_hash,
@@ -1040,8 +1715,13 @@ mod storage {
         git_validation_digest: &str,
         final_refs: &BTreeMap<String, String>,
     ) -> Result<Option<GitVisibilityIndex>> {
-        let mut refs = if base.refs.is_empty() {
-            BTreeMap::new()
+        let mut index = if base.refs.is_empty() {
+            GitVisibilityIndex::new(
+                base.generation,
+                base.pack_index_hash.clone(),
+                base.git_validation_digest.clone(),
+                BTreeMap::new(),
+            )?
         } else {
             match read_for_manifest(store, router, base).await? {
                 Some(read) => {
@@ -1049,7 +1729,7 @@ mod storage {
                     if read.format == GitVisibilityFormat::V1 {
                         upload_if_absent(store, router, &index).await?;
                     }
-                    index.refs
+                    index
                 }
                 None => return Ok(None),
             }
@@ -1058,7 +1738,7 @@ mod storage {
         for edit in edits {
             match &edit.new_oid {
                 None => {
-                    refs.remove(&edit.ref_name);
+                    index.remove_ref(&edit.ref_name);
                 }
                 Some(new_oid) => {
                     let Some(evidence_hash) = edit.visibility_evidence_hash.as_deref() else {
@@ -1075,35 +1755,28 @@ mod storage {
                                 .to_owned(),
                         });
                     }
-                    let closure = evidence.apply(refs.get(&edit.ref_name).map(Vec::as_slice))?;
-                    refs.insert(edit.ref_name.clone(), closure);
+                    index.apply_edit(edit.ref_name.clone(), &evidence)?;
                 }
             }
         }
 
-        if refs.keys().ne(final_refs.keys()) {
+        if index.refs.keys().ne(final_refs.keys()) {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: "git-visibility-index".to_owned(),
                 reason: "compacted visibility refs do not match the manifest".to_owned(),
             });
         }
         for (name, tip) in final_refs {
-            if !refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-            {
+            let tip = super::decode_oid(tip)?;
+            if !index.contains_in_ref(name, &tip) {
                 return Err(crate::error::MetadataError::CorruptObject {
                     path: "git-visibility-index".to_owned(),
                     reason: format!("compacted visibility proof does not contain ref tip {name}"),
                 });
             }
         }
-        Ok(Some(GitVisibilityIndex::new(
-            generation,
-            pack_index_hash,
-            git_validation_digest,
-            refs,
-        )))
+        index.bind_identity(generation, pack_index_hash, git_validation_digest)?;
+        Ok(Some(index))
     }
 }
 
@@ -1115,7 +1788,100 @@ pub use storage::{
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn bitmap_queries_match_sorted_closure_sets(
+            closures in prop::collection::vec(prop::collection::vec(0_u8..64, 0..64), 1..8),
+            selected in prop::collection::vec(0_usize..16, 0..16),
+            query in 0_u8..64,
+        ) {
+            let refs = closures
+                .iter()
+                .enumerate()
+                .map(|(index, objects)| {
+                    (
+                        format!("refs/heads/{index}"),
+                        objects.iter().map(|object| format!("{object:040x}")).collect(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let index = GitVisibilityIndex::new(
+                4,
+                "a".repeat(64),
+                "b".repeat(64),
+                refs,
+            )
+            .expect("generated visibility index is valid");
+            let selected = selected
+                .into_iter()
+                .map(|value| format!("refs/heads/{}", value % closures.len()))
+                .collect::<BTreeSet<_>>();
+            let expected = selected
+                .iter()
+                .filter_map(|name| name.rsplit('/').next())
+                .filter_map(|index| index.parse::<usize>().ok())
+                .flat_map(|index| closures[index].iter().copied())
+                .collect::<BTreeSet<_>>();
+            let selected_names = selected.iter().map(String::as_str).collect::<Vec<_>>();
+            let actual = index
+                .objects_for_refs(selected_names.iter().copied())
+                .into_iter()
+                .map(|oid| oid[19])
+                .collect::<BTreeSet<_>>();
+            let query_oid = decode_oid(&format!("{query:040x}"))
+                .expect("generated OID is valid");
+
+            prop_assert_eq!(actual, expected.clone());
+            prop_assert_eq!(
+                index.object_count_for_refs(selected_names.iter().copied()),
+                expected.len(),
+            );
+            prop_assert_eq!(
+                index.contains_for_refs(selected_names.iter().copied(), &query_oid),
+                expected.contains(&query),
+            );
+            prop_assert_eq!(
+                index.membership_count(),
+                closures
+                    .iter()
+                    .map(|closure| closure.iter().collect::<BTreeSet<_>>().len() as u64)
+                    .sum::<u64>(),
+            );
+        }
+
+        #[test]
+        fn visibility_edits_match_set_difference(
+            old_tail in prop::collection::vec(2_u8..64, 0..64),
+            new_tail in prop::collection::vec(2_u8..64, 0..64),
+        ) {
+            let old = old_tail
+                .into_iter()
+                .chain([0])
+                .map(|object| format!("{object:040x}"))
+                .collect::<BTreeSet<_>>();
+            let new = new_tail
+                .into_iter()
+                .chain([1])
+                .map(|object| format!("{object:040x}"))
+                .collect::<BTreeSet<_>>();
+            let edit = GitVisibilityEdit::delta(
+                Some(format!("{:040x}", 0)),
+                format!("{:040x}", 1),
+                &old,
+                &new,
+            );
+
+            prop_assert_eq!(
+                edit.apply(Some(&old.into_iter().collect::<Vec<_>>()))
+                    .expect("generated edit is valid"),
+                new.into_iter().collect::<Vec<_>>(),
+            );
+        }
+    }
 
     #[test]
     fn normalizes_and_authorizes_ref_closure() {
@@ -1127,10 +1893,11 @@ mod tests {
                 "refs/heads/main".to_owned(),
                 vec!["b".repeat(40), "a".repeat(40), "b".repeat(40)],
             )]),
-        );
+        )
+        .expect("valid visibility index");
 
         assert!(index.validate().is_ok());
-        assert!(index.contains_for_refs(["refs/heads/main"], &"a".repeat(40)));
+        assert!(index.contains_hex_in_ref("refs/heads/main", &"a".repeat(40)));
         assert_eq!(index.objects_for_refs(["refs/heads/main"]).len(), 2);
         assert_eq!(
             index.object_count_for_refs(["refs/heads/main", "refs/heads/main"]),
@@ -1140,11 +1907,13 @@ mod tests {
 
     #[test]
     fn rejects_stale_or_malformed_proof() {
-        let mut index = GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), BTreeMap::new());
-        index
-            .refs
-            .insert("refs/heads/main".to_owned(), vec!["A".repeat(40)]);
-        assert!(index.validate().is_err());
+        let index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["A".repeat(40)])]),
+        );
+        assert!(index.is_err());
     }
 
     #[test]
@@ -1152,8 +1921,7 @@ mod tests {
         let refs = (0..=MAX_GIT_VISIBILITY_REFS)
             .map(|index| (format!("refs/heads/{index}"), Vec::new()))
             .collect();
-        let index = GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), refs);
-        assert!(index.validate().is_err());
+        assert!(GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), refs).is_err());
     }
 
     #[test]
@@ -1168,7 +1936,7 @@ mod tests {
             .peeled_refs
             .insert("refs/tags/release".to_owned(), "2".repeat(40));
         manifest.seal_git_validation();
-        let mut index = GitVisibilityIndex::new(
+        let index = GitVisibilityIndex::new(
             manifest.generation,
             &manifest.pack_index_hash,
             &manifest.git_validation_digest,
@@ -1176,11 +1944,18 @@ mod tests {
                 "refs/tags/release".to_owned(),
                 vec!["1".repeat(40), "2".repeat(40)],
             )]),
-        );
+        )
+        .expect("valid visibility index");
 
         assert!(index.matches_manifest(&manifest));
-        index.refs.get_mut("refs/tags/release").unwrap().pop();
-        assert!(!index.matches_manifest(&manifest));
+        let missing_peeled = GitVisibilityIndex::new(
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+            BTreeMap::from([("refs/tags/release".to_owned(), vec!["1".repeat(40)])]),
+        )
+        .expect("valid incomplete proof");
+        assert!(!missing_peeled.matches_manifest(&manifest));
     }
 
     #[test]
@@ -1193,6 +1968,85 @@ mod tests {
             edit.apply(Some(&old.into_iter().collect::<Vec<_>>()))
                 .unwrap(),
             new.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fast_forward_transitions_compose_and_rewrites_invalidate_them() {
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec!["1".repeat(40), "2".repeat(40)],
+            )]),
+        )
+        .expect("valid visibility index");
+        let first = GitVisibilityEdit::delta(
+            Some("1".repeat(40)),
+            "3".repeat(40),
+            &BTreeSet::from(["1".repeat(40), "2".repeat(40)]),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+            ]),
+        );
+        index
+            .apply_edit("refs/heads/main".to_owned(), &first)
+            .expect("first fast-forward");
+        let second = GitVisibilityEdit::delta(
+            Some("3".repeat(40)),
+            "5".repeat(40),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+            ]),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+                "5".repeat(40),
+            ]),
+        );
+        index
+            .apply_edit("refs/heads/main".to_owned(), &second)
+            .expect("second fast-forward");
+        let first_tip = decode_oid(&"1".repeat(40)).expect("valid OID");
+        let second_tip = decode_oid(&"3".repeat(40)).expect("valid OID");
+        let current_tip = decode_oid(&"5".repeat(40)).expect("valid OID");
+
+        assert_eq!(
+            index.incremental_objects("refs/heads/main", &current_tip, &[first_tip]),
+            Some(vec![
+                decode_oid(&"3".repeat(40)).expect("valid OID"),
+                decode_oid(&"4".repeat(40)).expect("valid OID"),
+                current_tip,
+            ])
+        );
+        assert_eq!(
+            index.incremental_objects("refs/heads/main", &current_tip, &[second_tip]),
+            Some(vec![current_tip])
+        );
+
+        let rewrite = GitVisibilityEdit::replacement(
+            Some("5".repeat(40)),
+            "6".repeat(40),
+            &BTreeSet::from(["6".repeat(40)]),
+        );
+        index
+            .apply_edit("refs/heads/main".to_owned(), &rewrite)
+            .expect("replacement update");
+        let rewritten_tip = decode_oid(&"6".repeat(40)).expect("valid OID");
+
+        assert_eq!(
+            index.incremental_objects("refs/heads/main", &rewritten_tip, &[first_tip]),
+            None
         );
     }
 
@@ -1212,13 +2066,15 @@ mod tests {
             &pack_hash,
             "b".repeat(64),
             BTreeMap::from([("refs/heads/left".to_owned(), vec!["1".repeat(40)])]),
-        );
+        )
+        .expect("valid left visibility index");
         let right = GitVisibilityIndex::new(
             7,
             &pack_hash,
             "c".repeat(64),
             BTreeMap::from([("refs/heads/right".to_owned(), vec!["2".repeat(40)])]),
-        );
+        )
+        .expect("valid right visibility index");
 
         upload_if_absent(&store, &router, &left).await.unwrap();
         upload_if_absent(&store, &router, &right).await.unwrap();
@@ -1235,7 +2091,7 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
-    async fn shipped_v1_proof_is_read_and_can_be_backfilled_to_v3() {
+    async fn shipped_v1_proof_is_read_and_can_be_backfilled_to_current_format() {
         use std::sync::Arc;
 
         use bytes::Bytes;
@@ -1273,7 +2129,7 @@ mod tests {
         let current = read_with_format(&store, &router, generation, &pack_hash, &digest)
             .await
             .unwrap();
-        assert_eq!(current.format, GitVisibilityFormat::V3);
+        assert_eq!(current.format, GitVisibilityFormat::V4);
         assert_eq!(current.index, migrated.index);
     }
 
@@ -1323,13 +2179,14 @@ mod tests {
             &pack_hash,
             &manifest.git_validation_digest,
             BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
-        );
+        )
+        .expect("valid current visibility index");
         upload_if_absent(&store, &router, &current).await.unwrap();
         let read = read_for_manifest(&store, &router, &manifest)
             .await
             .unwrap()
             .expect("digest-bound proof should supersede the orphaned v1 candidate");
-        assert_eq!(read.format, GitVisibilityFormat::V3);
+        assert_eq!(read.format, GitVisibilityFormat::V4);
         assert_eq!(read.index, current);
     }
 
@@ -1350,13 +2207,15 @@ mod tests {
             .map(|position| (format!("refs/heads/branch-{position}"), objects.clone()))
             .collect::<BTreeMap<_, _>>();
         refs.insert("refs/heads/sparse".to_owned(), vec![objects[0].clone()]);
-        let index = GitVisibilityIndex::new(7, "a".repeat(64), "b".repeat(64), refs);
+        let expanded_refs = refs.clone();
+        let index = GitVisibilityIndex::new(7, "a".repeat(64), "b".repeat(64), refs)
+            .expect("valid visibility index");
         let expanded = serde_json::to_vec(&serde_json::json!({
             "version": index.version,
             "generation": index.generation,
             "pack_index_hash": &index.pack_index_hash,
             "git_validation_digest": &index.git_validation_digest,
-            "refs": &index.refs,
+            "refs": expanded_refs,
         }))
         .unwrap();
 
@@ -1451,6 +2310,274 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
+    async fn stored_v3_proof_reads_into_the_binary_runtime_model() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "a".repeat(64);
+        let digest = "b".repeat(64);
+        let stored = serde_json::json!({
+            "version": 3,
+            "generation": 7,
+            "pack_index_hash": pack_hash.clone(),
+            "git_validation_digest": digest.clone(),
+            "objects": ["1".repeat(40), "2".repeat(40)],
+            "refs": {"refs/heads/main": {"sparse": [0, 1]}},
+        });
+        store
+            .put(
+                &router.git_visibility_path(&digest),
+                Bytes::from(serde_json::to_vec(&stored).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let read = read_with_format(&store, &router, 7, &pack_hash, &digest)
+            .await
+            .unwrap();
+
+        assert_eq!(read.format, GitVisibilityFormat::V3);
+        assert_eq!(read.index.object_count_for_refs(["refs/heads/main"]), 2);
+        assert!(
+            read.index
+                .contains_hex_in_ref("refs/heads/main", &"2".repeat(40))
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn stored_proofs_reject_dictionary_order_and_identity_mismatches() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "a".repeat(64);
+        let digest = "b".repeat(64);
+        let malformed = serde_json::json!({
+            "version": 3,
+            "generation": 7,
+            "pack_index_hash": pack_hash.clone(),
+            "git_validation_digest": digest.clone(),
+            "objects": ["2".repeat(40), "1".repeat(40)],
+            "refs": {"refs/heads/main": {"sparse": [0, 1]}},
+        });
+        store
+            .put(
+                &router.git_visibility_path(&digest),
+                Bytes::from(serde_json::to_vec(&malformed).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert!(read(&store, &router, 7, &pack_hash, &digest).await.is_err());
+
+        let valid_digest = "c".repeat(64);
+        let valid = GitVisibilityIndex::new(
+            7,
+            &pack_hash,
+            &valid_digest,
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["1".repeat(40)])]),
+        )
+        .expect("valid visibility index");
+        upload_if_absent(&store, &router, &valid).await.unwrap();
+
+        assert!(
+            read(&store, &router, 8, &pack_hash, &valid_digest)
+                .await
+                .is_err()
+        );
+        assert!(
+            read(&store, &router, 7, &"d".repeat(64), &valid_digest)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn current_storage_rejects_invalid_transitions() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let cases = [
+            serde_json::json!({
+                "version": 4,
+                "generation": 7,
+                "pack_index_hash": "a".repeat(64),
+                "git_validation_digest": "b".repeat(64),
+                "objects": ["1".repeat(40)],
+                "refs": {"refs/heads/main": {"sparse": [0]}},
+                "transitions": {
+                    "refs/heads/absent": [{
+                        "from_oid": "1".repeat(40),
+                        "to_oid": "1".repeat(40),
+                        "objects": {"sparse": [0]},
+                    }],
+                },
+            }),
+            serde_json::json!({
+                "version": 4,
+                "generation": 7,
+                "pack_index_hash": "a".repeat(64),
+                "git_validation_digest": "b".repeat(64),
+                "objects": ["1".repeat(40), "2".repeat(40)],
+                "refs": {
+                    "refs/heads/main": {"sparse": [0]},
+                    "refs/heads/hidden": {"sparse": [1]},
+                },
+                "transitions": {
+                    "refs/heads/main": [{
+                        "from_oid": "1".repeat(40),
+                        "to_oid": "1".repeat(40),
+                        "objects": {"sparse": [1]},
+                    }],
+                },
+            }),
+            serde_json::json!({
+                "version": 4,
+                "generation": 7,
+                "pack_index_hash": "a".repeat(64),
+                "git_validation_digest": "b".repeat(64),
+                "objects": ["1".repeat(40)],
+                "refs": {"refs/heads/main": {"sparse": [0]}},
+                "transitions": {
+                    "refs/heads/main": [{
+                        "from_oid": "1".repeat(40),
+                        "to_oid": "1".repeat(40),
+                        "objects": {"bitmap": "AAA"},
+                    }],
+                },
+            }),
+        ];
+
+        for body in cases {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            let digest = "b".repeat(64);
+            store
+                .put(
+                    &router.git_visibility_path(&digest),
+                    Bytes::from(serde_json::to_vec(&body).unwrap()),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                read(&store, &router, 7, &"a".repeat(64), &digest)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn journal_fast_forward_retains_the_exact_incremental_closure() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        use crate::ref_journal::RefJournalEdit;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.generation = 4;
+        base.pack_index_hash = "a".repeat(64);
+        base.refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        base.seal_git_validation();
+        let base_index = GitVisibilityIndex::new(
+            base.generation,
+            &base.pack_index_hash,
+            &base.git_validation_digest,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec!["1".repeat(40), "2".repeat(40)],
+            )]),
+        )
+        .unwrap();
+        upload_if_absent(&store, &router, &base_index)
+            .await
+            .unwrap();
+
+        let old = BTreeSet::from(["1".repeat(40), "2".repeat(40)]);
+        let new = BTreeSet::from([
+            "1".repeat(40),
+            "2".repeat(40),
+            "3".repeat(40),
+            "4".repeat(40),
+        ]);
+        let evidence = GitVisibilityEdit::delta(Some("1".repeat(40)), "3".repeat(40), &old, &new);
+        let evidence_hash = upload_edit(&store, &router, &evidence).await.unwrap();
+        let edits = [RefJournalEdit {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: Some("1".repeat(40)),
+            new_oid: Some("3".repeat(40)),
+            peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: Some(evidence_hash),
+        }];
+        let final_refs = BTreeMap::from([("refs/heads/main".to_owned(), "3".repeat(40))]);
+        let mut final_manifest = base.clone();
+        final_manifest.generation = 5;
+        final_manifest.pack_index_hash = "c".repeat(64);
+        final_manifest.refs.clone_from(&final_refs);
+        final_manifest.seal_git_validation();
+
+        let compacted = compact_journal_edits(
+            &store,
+            &router,
+            &base,
+            &edits,
+            final_manifest.generation,
+            &final_manifest.pack_index_hash,
+            &final_manifest.git_validation_digest,
+            &final_refs,
+        )
+        .await
+        .unwrap()
+        .expect("complete edit evidence");
+        upload_if_absent(&store, &router, &compacted).await.unwrap();
+        let current = read_with_format(
+            &store,
+            &router,
+            final_manifest.generation,
+            &final_manifest.pack_index_hash,
+            &final_manifest.git_validation_digest,
+        )
+        .await
+        .unwrap();
+        let from = decode_oid(&"1".repeat(40)).unwrap();
+        let to = decode_oid(&"3".repeat(40)).unwrap();
+
+        assert_eq!(current.format, GitVisibilityFormat::V4);
+        assert_eq!(
+            current
+                .index
+                .incremental_objects("refs/heads/main", &to, &[from]),
+            Some(vec![
+                decode_oid(&"3".repeat(40)).unwrap(),
+                decode_oid(&"4".repeat(40)).unwrap(),
+            ])
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
     async fn journal_compaction_combines_independent_writer_evidence() {
         use std::sync::Arc;
 
@@ -1485,7 +2612,8 @@ mod tests {
                     vec!["2".repeat(40), "b".repeat(40)],
                 ),
             ]),
-        );
+        )
+        .expect("valid base visibility index");
         upload_if_absent(&store, &router, &base_index)
             .await
             .unwrap();
@@ -1547,12 +2675,12 @@ mod tests {
         .expect("every writer published visibility evidence");
 
         assert_eq!(
-            compacted.refs["refs/heads/left"],
-            vec!["1".repeat(40), "3".repeat(40), "c".repeat(40)]
+            compacted.objects_for_ref("refs/heads/left"),
+            Some(vec!["1".repeat(40), "3".repeat(40), "c".repeat(40)])
         );
         assert_eq!(
-            compacted.refs["refs/heads/right"],
-            vec!["2".repeat(40), "4".repeat(40), "d".repeat(40)]
+            compacted.objects_for_ref("refs/heads/right"),
+            Some(vec!["2".repeat(40), "4".repeat(40), "d".repeat(40)])
         );
     }
 }

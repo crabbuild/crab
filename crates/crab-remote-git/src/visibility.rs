@@ -36,12 +36,13 @@ pub(crate) async fn rebuild(
     cancellation: &CancellationToken,
 ) -> Result<GitVisibilityIndex> {
     if repository.refs().is_empty() {
-        return Ok(GitVisibilityIndex::new(
+        return GitVisibilityIndex::new(
             repository.generation(),
             pack_index_hash,
             repository.git_validation_digest(),
             BTreeMap::new(),
-        ));
+        )
+        .map_err(Error::Metadata);
     }
 
     let operation = repository
@@ -139,12 +140,13 @@ async fn rebuild_with_operation(
         refs.insert(reference.name.clone(), objects);
     }
 
-    Ok(GitVisibilityIndex::new(
+    GitVisibilityIndex::new(
         repository.generation(),
         pack_index_hash,
         repository.git_validation_digest(),
         refs,
-    ))
+    )
+    .map_err(Error::Metadata)
 }
 
 fn insert_terminals(

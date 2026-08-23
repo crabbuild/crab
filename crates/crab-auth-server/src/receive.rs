@@ -1012,7 +1012,8 @@ pub(crate) async fn publish_materialized_git_visibility(
         manifest.pack_index_hash.clone(),
         manifest.git_validation_digest.clone(),
         refs.clone(),
-    );
+    )
+    .map_err(AuthServerError::from)?;
     if !index.matches_manifest(manifest) {
         return Err(invalid(
             "materialized Git visibility does not match the candidate manifest",

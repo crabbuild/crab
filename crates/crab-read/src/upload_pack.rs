@@ -386,10 +386,11 @@ fn authorize_wants(
     wants: &[ObjectId],
 ) -> Result<()> {
     for want in wants {
-        if !visibility.contains_for_refs(
-            visible_ref_names.iter().map(String::as_str),
-            &want.to_hex().to_string(),
-        ) {
+        let oid = want
+            .as_bytes()
+            .try_into()
+            .map_err(|_| ReadError::UnauthorizedObject)?;
+        if !visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid) {
             return Err(ReadError::UnauthorizedObject);
         }
     }
@@ -413,13 +414,19 @@ async fn plan_with_operation(
         request,
         maximum_objects,
     )? {
+        let strategy = if request.haves.is_empty() {
+            "full_closure"
+        } else {
+            "incremental_transition"
+        };
         tracing::debug!(
             planned_objects = plan.object_ids.len(),
-            "planned full ref closure from visibility proof"
+            strategy,
+            "planned object closure from visibility proof"
         );
         tracing::info!(
             telemetry_event = "visibility_plan",
-            strategy = "full_closure",
+            strategy,
             planned_objects = plan.object_ids.len(),
             visibility_plan_ms = started.elapsed().as_millis() as u64,
             "upload-pack object plan completed"
@@ -431,10 +438,9 @@ async fn plan_with_operation(
         .haves
         .iter()
         .filter(|oid| {
-            visibility.contains_for_refs(
-                visible_ref_names.iter().map(String::as_str),
-                &oid.to_hex().to_string(),
-            )
+            oid.as_bytes().try_into().ok().is_some_and(|oid| {
+                visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+            })
         })
         .copied()
         .collect::<HashSet<_>>();
@@ -653,7 +659,6 @@ fn plan_from_visibility(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.wants.is_empty()
-        || !request.haves.is_empty()
         || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
@@ -683,23 +688,94 @@ fn plan_from_visibility(
     };
 
     for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
-        let target = want.to_hex().to_string();
-        if visibility
-            .refs
-            .get(*reference_name)
-            .is_none_or(|objects| objects.binary_search(&target).is_err())
-        {
+        let target = want
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RemoteGitError::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            })?;
+        if !visibility.contains_in_ref(reference_name, &target) {
             return Err(RemoteGitError::RepositoryState {
                 reason: RepositoryStateError::VisibilityProofMismatch,
             });
         }
     }
 
+    if !request.haves.is_empty() {
+        let haves = request
+            .haves
+            .iter()
+            .filter_map(|have| {
+                let oid: [u8; 20] = have.as_bytes().try_into().ok()?;
+                visibility
+                    .contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+                    .then_some((*have, oid))
+            })
+            .collect::<Vec<_>>();
+        let have_oids = haves.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let mut objects = Vec::new();
+        for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
+            let want = want
+                .as_bytes()
+                .try_into()
+                .map_err(|_| RemoteGitError::RepositoryState {
+                    reason: RepositoryStateError::VisibilityProofMismatch,
+                })?;
+            let Some(increment) = visibility.incremental_objects(reference_name, &want, &have_oids)
+            else {
+                return Ok(None);
+            };
+            objects.extend(increment);
+        }
+
+        if request.include_tags {
+            let selected = objects.iter().copied().collect::<HashSet<_>>();
+            for reference in references {
+                let Some(peeled) = reference.peeled else {
+                    continue;
+                };
+                let peeled: std::result::Result<[u8; 20], _> = peeled.as_bytes().try_into();
+                let Ok(peeled) = peeled else {
+                    continue;
+                };
+                if reference.name.starts_with("refs/tags/")
+                    && visible.contains(reference.name.as_str())
+                    && selected.contains(&peeled)
+                {
+                    objects.extend(visibility.objects_for_ref_difference(
+                        [reference.name.as_str()],
+                        selected_refs.iter().copied(),
+                    ));
+                }
+            }
+        }
+        objects.sort_unstable();
+        objects.dedup();
+        let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
+        if actual > maximum_objects {
+            return Err(RemoteGitError::LimitExceeded {
+                limit: "upload-pack planned objects",
+                actual,
+                maximum: maximum_objects,
+            });
+        }
+        return Ok(Some(PackPlan {
+            wants: request.wants.clone(),
+            common_haves: haves.into_iter().map(|(have, _)| have).collect(),
+            filter: request.filter.clone(),
+            include_tags: request.include_tags,
+            object_ids: objects.into_iter().map(ObjectId::from).collect(),
+            required_bases: Vec::new(),
+            shallow: Vec::new(),
+            unshallow: Vec::new(),
+        }));
+    }
+
     if request.include_tags {
         let selected_objects = visibility.objects_for_refs(selected_refs.iter().copied());
         selected_refs.extend(references.iter().filter_map(|reference| {
             let peeled = reference.peeled?;
-            let peeled = peeled.to_hex().to_string();
+            let peeled: [u8; 20] = peeled.as_bytes().try_into().ok()?;
             (reference.name.starts_with("refs/tags/")
                 && visible.contains(reference.name.as_str())
                 && selected_objects.contains(&peeled))
@@ -716,14 +792,7 @@ fn plan_from_visibility(
             maximum: maximum_objects,
         });
     }
-    let object_ids = objects
-        .into_iter()
-        .map(|oid| {
-            ObjectId::from_hex(oid.as_bytes()).map_err(|_| RemoteGitError::RepositoryState {
-                reason: RepositoryStateError::VisibilityProofMismatch,
-            })
-        })
-        .collect::<crab_remote_git::Result<Vec<_>>>()?;
+    let object_ids = objects.into_iter().map(ObjectId::from).collect::<Vec<_>>();
 
     Ok(Some(PackPlan {
         wants: request.wants.clone(),
@@ -887,10 +956,9 @@ fn ensure_visible_objects(
     object_ids: &[ObjectId],
 ) -> crab_remote_git::Result<()> {
     if object_ids.iter().any(|oid| {
-        !visibility.contains_for_refs(
-            visible_ref_names.iter().map(String::as_str),
-            &oid.to_hex().to_string(),
-        )
+        oid.as_bytes().try_into().ok().is_none_or(|oid| {
+            !visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+        })
     }) {
         return Err(RemoteGitError::AuthorizationDenied);
     }
@@ -1233,7 +1301,15 @@ fn enqueue(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use crab_metadata::git_visibility::{compact_journal_edits, upload_edit, upload_if_absent};
+    use crab_metadata::manifests::Manifest;
+    use crab_metadata::ref_journal::RefJournalEdit;
     use crab_remote_git::RepositoryRef;
+    use crab_storage::{Store, StoreLayout};
+    use object_store::memory::InMemory;
 
     use super::*;
 
@@ -1259,6 +1335,7 @@ mod tests {
             .into_iter()
             .collect(),
         )
+        .expect("valid visibility proof")
     }
 
     fn references() -> Vec<RepositoryRef> {
@@ -1391,7 +1468,8 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-        );
+        )
+        .expect("valid visibility proof");
         let request = UploadPackRequest {
             wants: vec![oid('1')],
             include_tags: true,
@@ -1449,7 +1527,8 @@ mod tests {
             [("refs/heads/main".to_owned(), vec![oid('3').to_string()])]
                 .into_iter()
                 .collect(),
-        );
+        )
+        .expect("valid visibility proof");
         let request = UploadPackRequest {
             wants: vec![oid('1')],
             ..UploadPackRequest::default()
@@ -1464,6 +1543,96 @@ mod tests {
         .expect_err("a visibility closure must contain its exact ref target");
 
         assert!(matches!(error, RemoteGitError::RepositoryState { .. }));
+    }
+
+    #[tokio::test]
+    async fn visibility_plan_uses_a_proven_fast_forward_transition_for_haves() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.generation = 1;
+        base.pack_index_hash = "a".repeat(64);
+        base.refs
+            .insert("refs/heads/main".to_owned(), oid('1').to_string());
+        base.seal_git_validation();
+        let base_index = GitVisibilityIndex::new(
+            base.generation,
+            &base.pack_index_hash,
+            &base.git_validation_digest,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec![oid('1').to_string(), oid('2').to_string()],
+            )]),
+        )
+        .expect("base visibility");
+        upload_if_absent(&store, &router, &base_index)
+            .await
+            .expect("upload base visibility");
+        let old = BTreeSet::from([oid('1').to_string(), oid('2').to_string()]);
+        let new = BTreeSet::from([
+            oid('1').to_string(),
+            oid('2').to_string(),
+            oid('3').to_string(),
+            oid('4').to_string(),
+        ]);
+        let evidence = crab_metadata::git_visibility::GitVisibilityEdit::delta(
+            Some(oid('1').to_string()),
+            oid('3').to_string(),
+            &old,
+            &new,
+        );
+        let evidence_hash = upload_edit(&store, &router, &evidence)
+            .await
+            .expect("upload transition evidence");
+        let edits = [RefJournalEdit {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: Some(oid('1').to_string()),
+            new_oid: Some(oid('3').to_string()),
+            peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: Some(evidence_hash),
+        }];
+        let refs = BTreeMap::from([("refs/heads/main".to_owned(), oid('3').to_string())]);
+        let mut current = base.clone();
+        current.generation = 2;
+        current.pack_index_hash = "c".repeat(64);
+        current.refs.clone_from(&refs);
+        current.seal_git_validation();
+        let visibility = compact_journal_edits(
+            &store,
+            &router,
+            &base,
+            &edits,
+            current.generation,
+            &current.pack_index_hash,
+            &current.git_validation_digest,
+            &refs,
+        )
+        .await
+        .expect("compact transition")
+        .expect("complete evidence");
+        let request = UploadPackRequest {
+            wants: vec![oid('3')],
+            haves: vec![oid('1'), oid('f')],
+            ..UploadPackRequest::default()
+        };
+
+        let plan = plan_from_visibility(
+            &[RepositoryRef {
+                name: "refs/heads/main".to_owned(),
+                target: oid('3'),
+                peeled: None,
+            }],
+            &["refs/heads/main".to_owned()],
+            &visibility,
+            &request,
+            10,
+        )
+        .expect("valid transition plan")
+        .expect("transition avoids object traversal");
+
+        assert_eq!(plan.object_ids, vec![oid('3'), oid('4')]);
+        assert_eq!(plan.common_haves, vec![oid('1')]);
     }
 
     #[test]

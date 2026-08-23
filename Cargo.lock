@@ -2230,6 +2230,7 @@ dependencies = [
  "crab-xet",
  "futures-util",
  "object_store",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",

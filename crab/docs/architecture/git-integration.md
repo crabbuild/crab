@@ -54,6 +54,13 @@ local Git satisfy the fetch; it is retained for older Git clients, repositories
 above the synchronous 100,000-object proof profile, and recovery while derived
 proof coverage is unavailable.
 
+The current visibility proof uses one binary object dictionary with
+sparse-or-bitmap per-ref closures. Fresh exact-ref fetches plan from closure
+unions, while ordinary fast-forward updates retain a bounded set of proven
+prior-tip transitions for incremental `want - have` planning. Rewrites and
+missing transition history fall back to bounded traversal; neither path
+weakens hidden-ref authorization.
+
 Source: `crab/src/git/remote_helper.rs`
 
 ### Direct object-store support contract

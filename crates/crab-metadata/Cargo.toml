@@ -35,5 +35,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+proptest = "1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
