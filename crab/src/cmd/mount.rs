@@ -6970,17 +6970,25 @@ mod mount_overlay_context_tests {
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod nfs_mount_registration_tests {
     use super::*;
+    use crate::test::git_repo::GIT_DIR_MUTEX;
     use crate::vfs::mounts_registry;
 
     struct CurrentDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         original: PathBuf,
     }
 
     impl CurrentDirGuard {
         fn set(path: &Path) -> Self {
+            let lock = GIT_DIR_MUTEX
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let original = std::env::current_dir().unwrap();
             std::env::set_current_dir(path).unwrap();
-            Self { original }
+            Self {
+                _lock: lock,
+                original,
+            }
         }
     }
 
@@ -7008,7 +7016,6 @@ mod nfs_mount_registration_tests {
     #[test]
     fn background_registration_stores_canonical_local_source() {
         let tmp = tempfile::tempdir().unwrap();
-        let _home = set_test_home(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let mountpoint = tmp.path().join("view");
@@ -7016,6 +7023,7 @@ mod nfs_mount_registration_tests {
         let control_endpoint = Some("tcp:127.0.0.1:50000?token=parent-secret".to_owned());
         std::fs::create_dir_all(&mountpoint).unwrap();
         let _cwd = CurrentDirGuard::set(tmp.path());
+        let _home = set_test_home(tmp.path());
 
         register_nfs_background_mount(
             &opts("./repo", mountpoint.clone()),

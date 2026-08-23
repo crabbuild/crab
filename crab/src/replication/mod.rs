@@ -8004,17 +8004,34 @@ async fn replicate_git_visibility_index(
         source_store.as_storage().clone(),
         source_router.repo_prefix().to_owned(),
     );
-    let index = match crab_metadata::git_visibility::read_for_manifest(
+    // Repair can only copy an existing proof; unlike push publication it
+    // cannot reconstruct a digest-bound proof before materializing the target
+    // manifest. Treat a mismatched legacy proof as corruption instead of
+    // silently publishing a manifest without its visibility guard.
+    let index = match crab_metadata::git_visibility::read(
         source_store.as_storage(),
         &source_storage_router,
-        manifest,
+        manifest.generation,
+        &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
     )
     .await
     {
-        Ok(Some(read)) => read.index,
-        Ok(None) => return Ok(()),
+        Ok(index) => index,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => return Ok(()),
         Err(error) => return Err(CrabError::from(error)),
     };
+    if !index.matches_manifest(manifest) {
+        return Err(CrabError::CorruptObject {
+            path: source_storage_router
+                .git_visibility_path(&manifest.git_validation_digest)
+                .as_ref()
+                .to_owned(),
+            reason: "Git visibility proof does not match its source manifest".to_owned(),
+        });
+    }
     let target_storage_router = crab_storage::StoreLayout::new(
         target_store.as_storage().clone(),
         target_router.repo_prefix().to_owned(),

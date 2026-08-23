@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_read::{
@@ -29,7 +30,10 @@ use crate::core::error::{CrabError, Result};
 const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const LOCATOR_READ_REPAIR_LOCK_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
+const LOCATOR_READ_RETRY_LIMIT: usize = 5;
+const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
+const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Packet {
@@ -315,49 +319,72 @@ pub(crate) async fn open_repository(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<RemoteGitRepository> {
-    let open = open_repository_snapshot(store, prefix, cancellation).await;
-    let (observed_generation, required_generation) = match open {
-        Ok(repository) => return Ok(repository),
-        Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
-        Err(error) => return Err(remote_error(error)),
+    let mut last_indexing = None;
+    for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
+        let open = open_repository_snapshot(store, prefix, cancellation).await;
+        let (observed_generation, required_generation) = match open {
+            Ok(repository) => return Ok(repository),
+            Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
+            Err(error) => return Err(remote_error(error)),
+        };
+        last_indexing = Some((observed_generation, required_generation));
+
+        // The manifest generation check distinguishes derived publication lag
+        // from an active ref-journal transaction, which must remain unavailable.
+        let repair_store = crate::storage::Store::from_storage(store.clone());
+        let repair_layout = crab_storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+        if matches!(
+            super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+            Ok(true)
+        ) {
+            return Err(remote_error(RemoteGitError::RepositoryIndexing {
+                observed: observed_generation,
+                required: required_generation,
+            }));
+        }
+        let repaired = super::push::repair_git_object_locator_if_current(
+            &repair_store,
+            &repair_layout,
+            required_generation,
+            LOCATOR_READ_REPAIR_LOCK_TTL,
+            cancellation,
+        )
+        .await?;
+        if repaired {
+            tracing::info!(
+                observed_generation,
+                required_generation,
+                "repaired current Git locator before upload-pack admission"
+            );
+            continue;
+        }
+        if attempt == LOCATOR_READ_RETRY_LIMIT {
+            break;
+        }
+
+        let delay = locator_read_retry_delay(attempt);
+        tracing::debug!(
+            attempt = attempt + 1,
+            ?delay,
+            observed_generation,
+            required_generation,
+            "waiting for current Git locator publication before upload-pack admission"
+        );
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+        }
+    }
+
+    let Some((observed, required)) = last_indexing else {
+        return Err(CrabError::Internal(
+            "upload-pack repository admission ended without a result".to_owned(),
+        ));
     };
-
-    // The manifest generation check distinguishes derived publication lag from
-    // an active ref-journal transaction, which must remain unavailable.
-    let repair_store = crate::storage::Store::from_storage(store.clone());
-    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-    if matches!(
-        super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-        Ok(true)
-    ) {
-        return Err(remote_error(RemoteGitError::RepositoryIndexing {
-            observed: observed_generation,
-            required: required_generation,
-        }));
-    }
-    let repaired = super::push::repair_git_object_locator_if_current(
-        &repair_store,
-        &repair_layout,
-        required_generation,
-        LOCATOR_READ_REPAIR_LOCK_TTL,
-        cancellation,
-    )
-    .await?;
-    if !repaired {
-        return Err(remote_error(RemoteGitError::RepositoryIndexing {
-            observed: observed_generation,
-            required: required_generation,
-        }));
-    }
-    tracing::info!(
-        observed_generation,
-        required_generation,
-        "repaired current Git locator before upload-pack admission"
-    );
-
-    open_repository_snapshot(store, prefix, cancellation)
-        .await
-        .map_err(remote_error)
+    Err(remote_error(RemoteGitError::RepositoryIndexing {
+        observed,
+        required,
+    }))
 }
 
 async fn open_repository_snapshot(
@@ -379,6 +406,14 @@ async fn open_repository_snapshot(
         cancellation,
     )
     .await
+}
+
+fn locator_read_retry_delay(attempt: usize) -> Duration {
+    let shift = u32::try_from(attempt).unwrap_or(u32::MAX);
+    let multiplier = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
+    LOCATOR_READ_RETRY_BASE
+        .saturating_mul(multiplier)
+        .min(LOCATOR_READ_RETRY_CAP)
 }
 
 pub(crate) fn visible_ref_names(
@@ -1116,6 +1151,14 @@ mod tests {
         };
 
         assert!(visibility_index_needs_repair(&error));
+    }
+
+    #[test]
+    fn locator_read_retry_delay_is_bounded() {
+        assert_eq!(locator_read_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(locator_read_retry_delay(3), Duration::from_millis(800));
+        assert_eq!(locator_read_retry_delay(4), Duration::from_secs(1));
+        assert_eq!(locator_read_retry_delay(usize::MAX), Duration::from_secs(1));
     }
 
     #[test]

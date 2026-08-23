@@ -7159,10 +7159,7 @@ impl PushPipeline {
         // local ODB or peeling an individual tag can fail for a
         // corrupted or partially-fetched repo, and a missing peel
         // entry only costs a second round-trip at clone time.
-        let git_dir = self
-            .git_dir_override()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(crab_git::discover::discover_git_dir);
+        let git_dir = self.common_git_dir()?;
         new_manifest.peeled_refs =
             match crab_git::tag::peeled_tag_refs_at(&git_dir, &new_manifest.refs) {
                 Ok(peeled_refs) => peeled_refs,
@@ -8407,10 +8404,7 @@ impl PushPipeline {
             return Ok(());
         }
 
-        let git_dir = self
-            .git_dir_override()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(crab_git::discover::discover_git_dir);
+        let git_dir = self.common_git_dir()?;
         let evidence = tokio::task::spawn_blocking(move || {
             let mut evidence = Vec::with_capacity(plans.len());
             for (index, ref_name, old_oid, new_oid, old_peeled, new_peeled, known_old) in plans {
@@ -8494,10 +8488,7 @@ impl PushPipeline {
         {
             return Ok(GitVisibilityPublication::CompletePackOnly(capacity));
         }
-        let git_dir = self
-            .git_dir_override()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(crab_git::discover::discover_git_dir);
+        let git_dir = self.common_git_dir()?;
         publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router).await?;
         Ok(GitVisibilityPublication::Published)
     }
@@ -9734,11 +9725,9 @@ impl PushPipeline {
             return self.verify_xorb_refs(refs).await;
         };
 
-        // A cache+dedup hit already carries a cache-server proof for the
-        // referenced chunk. Read that immutable body from the cache service
-        // and validate it locally before falling back to canonical-origin
-        // range reads; this keeps a warm duplicate push off the origin read
-        // path while retaining the repair path for a missing origin object.
+        // A cache+dedup hit is useful for planning, so validate its immutable
+        // body before falling back to canonical-origin reads. Do not record a
+        // canonical payload proof here: publication must verify origin bytes.
         let mut refs_by_xorb: HashMap<XorbHash, Vec<(MerkleHash, XorbRef)>> = HashMap::new();
         for (chunk_hash, xorb_ref) in refs {
             refs_by_xorb
@@ -9781,12 +9770,6 @@ impl PushPipeline {
             match origin.head(&path).await {
                 Ok(meta) if meta.size == body_len => {
                     record_remote_xorb_index(cache.local_cache(), &xorb_hash, &meta, &index);
-                    record_remote_xorb_payload_proof(
-                        cache.local_cache(),
-                        &xorb_hash,
-                        &index,
-                        &meta,
-                    );
                     verified.extend(xorb_refs);
                 }
                 Ok(_) => unresolved.extend(xorb_refs),
@@ -11763,9 +11746,12 @@ impl PushPipeline {
             .iter()
             .map(|(shard_hash, path, _)| (*shard_hash, path.clone()))
             .collect();
+        // A cache body plus an origin HEAD is not a canonical payload proof.
+        // Read existing shards from origin before allowing the manifest to
+        // reference them; cache reads remain available to recovery probes.
         let existing_shards = verified_existing_remote_shards_with_cache(
             store,
-            self.caching_store.as_ref(),
+            None,
             &shard_checks,
             self.config.head_check_concurrency,
         )
@@ -12816,9 +12802,7 @@ impl PushPipeline {
             })?;
         let writer = build_push_metadb_guard_with_object_store(
             store,
-            self.caching_store
-                .as_ref()
-                .map(crab_cache_store::CachingStore::object_store),
+            None,
             &self.router,
             self.metrics.clone(),
             &self.config.metadb,
@@ -15836,7 +15820,10 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
     let peeled_refs = manifest.peeled_refs.clone();
-    let git_dir = git_dir.to_owned();
+    // Linked worktrees keep objects in the shared Git directory while the
+    // per-worktree directory only contains refs, an index, and metadata.
+    // Visibility walks always need the object-bearing common directory.
+    let git_dir = crate::git::discover::resolve_common_dir(git_dir);
     let closures = tokio::task::spawn_blocking(move || {
         crab_git::walk::walk_reachable_by_ref_bounded(
             &git_dir,
@@ -17999,7 +17986,7 @@ mod tests {
         guard.close().await.expect("close writer");
     }
 
-    use crate::test::git_repo::GitDirGuard;
+    use crate::test::git_repo::{GitDirGuard, TEST_GIT_REPO};
 
     fn pack_manifest_entry_with_tips(ref_tips: Vec<String>) -> PackManifestEntry {
         let pack_id = "a".repeat(64);
@@ -30137,8 +30124,6 @@ mod tests {
     }
 
     const ACTIVE_ACTIVE_PUSH_OLD_SHA: &str = "1111111111111111111111111111111111111111";
-    const ACTIVE_ACTIVE_PUSH_NEW_SHA: &str = "2222222222222222222222222222222222222222";
-
     #[derive(Debug)]
     struct ActiveActivePushMaterialization {
         outcome: crab_coordination::write_coordinator::CommitOutcome,
@@ -30152,12 +30137,19 @@ mod tests {
         use crate::metadata::manifest::{Manifest, create_manifest, read_manifest};
         use crab_metadata::ref_registry::RefRegistry;
 
+        // Source ref resolution consults the process-wide test GitDir. Hold
+        // its guard for the entire async exercise so parallel tests cannot
+        // swap the repository between preflight and commit.
+        let _guard = GitDirGuard::new();
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let store = crate::storage::store::Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_string());
         let old_sha = ACTIVE_ACTIVE_PUSH_OLD_SHA;
-        let new_sha = ACTIVE_ACTIVE_PUSH_NEW_SHA;
+        // The visibility proof is built from the shared test repository's
+        // object database, so the candidate tip must be a real reachable
+        // commit rather than a placeholder object ID.
+        let new_sha = TEST_GIT_REPO.commit_sha.as_str();
 
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs.insert("refs/heads/main".into(), old_sha.into());
@@ -30193,12 +30185,26 @@ mod tests {
         candidate
             .refs
             .insert("refs/heads/main".into(), new_sha.into());
+        let pack = PackManifestEntry {
+            pack_id: "a".repeat(64),
+            size: 1,
+            content_hash: "a".repeat(64),
+            ref_tips: vec![new_sha.into()],
+            object_count: 1,
+        };
+        let (pack_index_hash, _, pack_index) = append_pack_index(
+            crab_metadata::segmented::SegmentIndex::default(),
+            1,
+            &[pack],
+        )
+        .unwrap();
+        candidate.pack_index_hash = pack_index_hash;
         if seal_candidate {
             candidate.seal_git_validation();
         }
         let bulk = BulkData {
             shard_index: crab_metadata::segmented::SegmentWrite::default(),
-            pack_index: crab_metadata::segmented::SegmentWrite::default(),
+            pack_index,
         };
         let decisions =
             HashMap::from([(spec.dst.clone(), RefUpdateDecision::Proceed { etag: None })]);

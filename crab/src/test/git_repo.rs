@@ -10,7 +10,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 /// Temporary git repo created once per test binary.
 pub static TEST_GIT_REPO: LazyLock<TestGitRepo> = LazyLock::new(TestGitRepo::create);
 
-/// Process-wide mutex for `GIT_DIR` env var manipulation.
+/// Process-wide mutex for Git environment and current-directory manipulation.
 pub static GIT_DIR_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Process-wide mutex for `CRAB_CACHE_DIR` env var manipulation.

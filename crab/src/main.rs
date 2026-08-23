@@ -55,6 +55,9 @@ const SYMLINK_PREFIX: &str = "crab-";
 /// Default parallelism for file-processing commands that stream local files.
 const DEFAULT_FILE_PROCESSING_JOBS: usize = 16;
 
+/// The full Clap command tree exceeds the default Windows main-thread stack.
+const CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 #[derive(Parser)]
 #[command(
     name = "crab",
@@ -2623,7 +2626,27 @@ fn main() -> ExitCode {
     // Detect `crab-{subcommand}` symlink patterns (e.g. `crab-gc` → `gc`).
     let symlink_subcmd = symlink_subcommand_for_stem(stem);
 
-    match run(is_remote_helper, symlink_subcmd) {
+    let run_result = match std::thread::Builder::new()
+        .name("crab-cli".to_owned())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(move || run(is_remote_helper, symlink_subcmd))
+    {
+        Ok(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err((
+                OutputMode::Text,
+                "error",
+                CrabError::Internal("CLI worker thread panicked".to_owned()),
+            )),
+        },
+        Err(error) => Err((
+            OutputMode::Text,
+            "error",
+            CrabError::Internal(format!("failed to start CLI worker thread: {error}")),
+        )),
+    };
+
+    match run_result {
         Ok(code) => code,
         Err((mode, schema, err)) => {
             tracing::error!(%err, "fatal error");

@@ -406,8 +406,15 @@ Write-Host "run_id=$RunId"
 Write-Host "artifact_root=$RunRoot"
 Write-Host "drive=$Drive"
 
+# Keep the runner's Rust installation visible after isolating the smoke's test
+# profile; otherwise rustup looks in the temporary profile and cannot find cargo.
+$hostUserProfile = $env:USERPROFILE
+$hostCargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $hostUserProfile ".cargo" }
+$hostRustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $hostUserProfile ".rustup" }
 $env:HOME = $TestHome
 $env:USERPROFILE = $TestHome
+$env:CARGO_HOME = $hostCargoHome
+$env:RUSTUP_HOME = $hostRustupHome
 $env:CRAB_CACHE_DIR = Join-Path $RunRoot "crab-cache"
 $env:GIT_TERMINAL_PROMPT = "0"
 $env:PATH = "$DebugDir;$env:PATH"

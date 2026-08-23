@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tempfile
@@ -76,6 +77,30 @@ class LocatorRequestBudgetTest(unittest.TestCase):
                 {"successful_pushes": 0, "categories": {"git_locator_db/wal": 1}}
             )
         )
+
+
+class PushArgsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.smoke = object.__new__(ConcurrentPushSmoke)
+        self.smoke.args = argparse.Namespace(
+            crab_bin="crab",
+            manifest_cas_retries=3,
+            upload_concurrency=4,
+            omit_lock_wait_secs=False,
+            lock_wait_secs=5,
+            rebase_on_non_fast_forward=True,
+            rebase_retry_limit=6,
+        )
+
+    def test_can_disable_rebase_for_immediate_lock_probe(self) -> None:
+        args = self.smoke.push_args(
+            "HEAD:refs/heads/recovery",
+            lock_wait_secs=0,
+            rebase_on_non_fast_forward=False,
+        )
+
+        self.assertNotIn("--rebase-on-non-fast-forward", args)
+        self.assertEqual(args[args.index("--lock-wait-secs") + 1], "0")
 
 
 class PushFailureStagesTest(unittest.TestCase):

@@ -1005,7 +1005,7 @@ class ProtocolV2PartialCloneSmoke:
         return commit, large_oid, small_oid, batch_first_oid, batch_second_oid, sparse_oid, lfs_oid
 
     def filter_matrix(self, large_oid: str, small_oid: str, sparse_oid: str) -> None:
-        """Qualify every advertised rev-list filter through real Git."""
+        """Qualify every client-supported rev-list filter through real Git."""
         filter_root = self.run_root / "filter-matrix"
         filter_root.mkdir()
         commit_oid = self.git_value(self.source, ["rev-parse", "HEAD"], name="matrix commit oid")
@@ -1032,6 +1032,34 @@ class ProtocolV2PartialCloneSmoke:
         )
         rows: dict[str, Any] = {}
         for label, filter_spec, expected_canonical, expect_large, object_probe in filters:
+            if filter_spec.startswith("object:type="):
+                support = self.run_git(
+                    self.source,
+                    ["rev-list", "--objects", "--all", f"--filter={filter_spec}"],
+                    name=f"probe {label} filter support",
+                    check=False,
+                )
+                if support["exit_code"] != 0:
+                    support_stderr = Path(support["stderr_log"]).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    if "invalid filter-spec" not in support_stderr:
+                        raise SmokeError(
+                            f"{label} filter capability probe failed: {support['stderr_log']}"
+                        )
+                    rows[label] = {
+                        "requested_filter": filter_spec,
+                        "skipped": True,
+                        "reason": "Git client rejected this filter syntax",
+                        "probe_exit_code": support["exit_code"],
+                        "probe_stderr_log": support["stderr_log"],
+                    }
+                    self.check(
+                        f"filter-matrix-{label}-client-support",
+                        True,
+                        rows[label],
+                    )
+                    continue
             clone = filter_root / label
             clone_record = self.run_git(
                 self.run_root,
