@@ -22,6 +22,7 @@ blake3 = { workspace = true }
 md-5 = { workspace = true }
 bytes = { workspace = true }
 crab-storage = { workspace = true }
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-types = { workspace = true }
 fs4 = "0.13"
 futures-util = { workspace = true }

@@ -7117,6 +7117,94 @@ pub async fn active_active_gc_protected_keys(
     }
 }
 
+/// Coordinator fence held while a repo-scope GC run seals and deletes a batch.
+///
+/// A protected-key snapshot without this authority fence is only advisory:
+/// another coordinator transaction could upload and commit between the read
+/// and the object-store delete. The guard leaves a pre-fenced coordinator
+/// untouched and deliberately requires operator resume after process loss.
+pub struct ActiveActiveGcFence {
+    coordinator: Arc<dyn WriteCoordinator>,
+    repo_prefix: String,
+    previous_healthy: bool,
+    protected_keys: HashSet<String>,
+    coordinator_epoch: u64,
+}
+
+impl ActiveActiveGcFence {
+    /// Fences the configured coordinator and captures its protected objects.
+    pub async fn acquire(config: &Config, repo_prefix: &str) -> Result<Option<Self>> {
+        let Some(replication) = config.replication.as_ref() else {
+            return Ok(None);
+        };
+        if !replication.is_active_active() {
+            return Ok(None);
+        }
+        validate_active_active_config(replication)?;
+        let coordinator = active_active_write_coordinator_for_repo(config, repo_prefix).await?;
+        let health = coordinator.health().await.map_err(CrabError::from)?;
+        if !health.healthy || !health.linearizable {
+            return Err(CrabError::Configuration {
+                key: "replication.coordinator".to_owned(),
+                origin: health.reason.unwrap_or_else(|| {
+                    "active-active coordinator is not healthy and linearizable for GC fencing"
+                        .to_owned()
+                }),
+            });
+        }
+        let fence = coordinator
+            .fence_writes(Some("repo garbage collection".to_owned()))
+            .await
+            .map_err(CrabError::from)?;
+        let snapshot = match coordinator.gc_safety_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if fence.previous_healthy {
+                    let _ = coordinator.resume_writes().await;
+                }
+                return Err(CrabError::from(error));
+            }
+        };
+        Ok(Some(Self {
+            coordinator,
+            repo_prefix: repo_prefix.to_owned(),
+            previous_healthy: fence.previous_healthy,
+            protected_keys: snapshot.protected_keys(),
+            coordinator_epoch: snapshot.coordinator_epoch,
+        }))
+    }
+
+    /// Returns the fenced coordinator's protected object set.
+    #[must_use]
+    pub fn protected_keys(&self) -> &HashSet<String> {
+        &self.protected_keys
+    }
+
+    /// Returns the epoch captured after fencing.
+    #[must_use]
+    pub fn coordinator_epoch(&self) -> u64 {
+        self.coordinator_epoch
+    }
+
+    /// Resumes writes only when this guard created the fence.
+    pub async fn release(self) -> Result<()> {
+        if !self.previous_healthy {
+            return Ok(());
+        }
+        self.coordinator
+            .resume_writes()
+            .await
+            .map(|_| ())
+            .map_err(|error| CrabError::Configuration {
+                key: "replication.coordinator".to_owned(),
+                origin: format!(
+                    "failed to resume coordinator for repo {} after GC: {error}",
+                    self.repo_prefix
+                ),
+            })
+    }
+}
+
 /// Collect coordinator-owned objects for every active-active repo in a bucket.
 pub async fn active_active_bucket_gc_protection(
     config: &Config,
@@ -7959,34 +8047,54 @@ async fn apply_active_active_repair_action(
     let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
     let source_router = StoreLayout::new(source_store.clone(), source_prefix.clone());
     let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
+    let cancel = CancellationToken::new();
+    let writer = crate::maintenance::GcWriterLeases::acquire(
+        &target_store,
+        target_router.global_prefix(),
+        target_router.repo_prefix(),
+        &cancel,
+    )
+    .await?;
 
-    let (manifest, _) = read_manifest(&source_store, &source_router).await?;
-    if manifest.generation < action.manifest_generation {
-        return Err(CrabError::Configuration {
-            key: "replication.repair.source_manifest".into(),
-            origin: format!(
-                "source region {} manifest generation {} is behind coordinator generation {}",
-                action.source_region, manifest.generation, action.manifest_generation
-            ),
-        });
+    let operation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = async {
+            let (manifest, _) = read_manifest(&source_store, &source_router).await?;
+            if manifest.generation < action.manifest_generation {
+                return Err(CrabError::Configuration {
+                    key: "replication.repair.source_manifest".into(),
+                    origin: format!(
+                        "source region {} manifest generation {} is behind coordinator generation {}",
+                        action.source_region, manifest.generation, action.manifest_generation
+                    ),
+                });
+            }
+
+            verify_repair_uploaded_objects_present(
+                &target_store,
+                &action.uploaded_objects,
+                &source_prefix,
+                &target_prefix,
+            )
+            .await?;
+            replicate_git_visibility_index(
+                &source_store,
+                &source_router,
+                &target_store,
+                &target_router,
+                &manifest,
+            )
+            .await?;
+            materialize_active_active_manifest_projection(&target_store, &target_router, &manifest)
+                .await
+        } => result,
+    };
+    let release = writer.release().await;
+    match (operation, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
     }
-
-    verify_repair_uploaded_objects_present(
-        &target_store,
-        &action.uploaded_objects,
-        &source_prefix,
-        &target_prefix,
-    )
-    .await?;
-    replicate_git_visibility_index(
-        &source_store,
-        &source_router,
-        &target_store,
-        &target_router,
-        &manifest,
-    )
-    .await?;
-    materialize_active_active_manifest_projection(&target_store, &target_router, &manifest).await
 }
 
 async fn replicate_git_visibility_index(

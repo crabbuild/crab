@@ -8,6 +8,7 @@ use object_store::{ObjectStore, UpdateVersion};
 use tracing::warn;
 
 use crate::error::{CoordinationError, Result};
+use crate::gc_fence::GcFenceLease;
 use crate::push_lock::{
     BackendClock, PushLockPayload, create_strict, deserialize_payload,
     get_with_version_and_modified, push_locks_prefix, serialize_payload, store_error, unix_now,
@@ -26,6 +27,9 @@ pub struct PushAdmissionTicket {
     occupied_slots: usize,
     backend_clock: BackendClock,
     leases: Vec<(String, Option<UpdateVersion>)>,
+    global_domain: Option<String>,
+    global_fence: Option<GcFenceLease>,
+    repo_fence: Option<GcFenceLease>,
     released: bool,
 }
 
@@ -49,6 +53,20 @@ impl PushAdmissionTicket {
     pub fn new_weighted(
         store: &Arc<dyn ObjectStore>,
         prefix: &str,
+        capacity: usize,
+        required_slots: usize,
+        lease_ttl: Duration,
+    ) -> Result<Self> {
+        Self::new_weighted_with_global(store, prefix, None, capacity, required_slots, lease_ttl)
+    }
+
+    /// Creates a weighted admission contender that also protects a global
+    /// content domain. The global domain is acquired before the repository
+    /// domain and released after it, preventing bucket-sweep races.
+    pub fn new_weighted_with_global(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        global_domain: Option<&str>,
         capacity: usize,
         required_slots: usize,
         lease_ttl: Duration,
@@ -78,6 +96,9 @@ impl PushAdmissionTicket {
             occupied_slots: 0,
             backend_clock: BackendClock::default(),
             leases: Vec::with_capacity(required_slots),
+            global_domain: global_domain.map(str::to_owned),
+            global_fence: None,
+            repo_fence: None,
             released: false,
         })
     }
@@ -120,7 +141,7 @@ impl PushAdmissionTicket {
                             Ok(etag) => {
                                 self.admit(path, etag);
                                 if self.is_admitted() {
-                                    return Ok(true);
+                                    return self.finish_admission().await;
                                 }
                             }
                             Err(error) if is_cas_conflict(&error) => continue,
@@ -145,7 +166,7 @@ impl PushAdmissionTicket {
                     Ok(etag) => {
                         self.admit(path, etag);
                         if self.is_admitted() {
-                            return Ok(true);
+                            return self.finish_admission().await;
                         }
                     }
                     Err(error) if is_cas_conflict(&error) => continue,
@@ -175,7 +196,7 @@ impl PushAdmissionTicket {
                 Ok(etag) => {
                     self.admit(path, etag);
                     if self.is_admitted() {
-                        return Ok(true);
+                        return self.finish_admission().await;
                     }
                 }
                 Err(error) if is_cas_conflict(&error) => {}
@@ -196,7 +217,14 @@ impl PushAdmissionTicket {
                 origin: "cannot renew an unadmitted push contender".to_owned(),
             });
         }
-        self.update_lease_duration(self.lease_ttl).await
+        self.update_lease_duration(self.lease_ttl).await?;
+        if let Some(fence) = &self.global_fence {
+            fence.renew().await?;
+        }
+        if let Some(fence) = &self.repo_fence {
+            fence.renew().await?;
+        }
+        Ok(())
     }
 
     /// Releases this writer's slots for other pushes.
@@ -220,6 +248,7 @@ impl PushAdmissionTicket {
             });
         }
         validate_ttl(cooldown)?;
+        self.release_fences().await?;
         self.update_lease_duration(cooldown).await?;
         self.released = true;
         Ok(())
@@ -265,10 +294,72 @@ impl PushAdmissionTicket {
             }
         }
         self.leases = failed;
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        let fence_result = self.release_fences().await;
+        match (first_error, fence_result) {
+            (Some(error), _) => Err(error),
+            (None, Err(error)) => Err(error),
+            (None, Ok(())) => Ok(()),
         }
+    }
+
+    async fn finish_admission(&mut self) -> Result<bool> {
+        match self.acquire_fences().await {
+            Ok(()) => Ok(true),
+            Err(CoordinationError::GcFenceHeld { .. }) => {
+                self.release_acquired().await?;
+                Ok(false)
+            }
+            Err(error) => {
+                self.release_acquired().await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn acquire_fences(&mut self) -> Result<()> {
+        if self.repo_fence.is_some() {
+            return Ok(());
+        }
+        if let Some(global_domain) = self.global_domain.as_deref() {
+            match GcFenceLease::acquire_writer(&self.store, global_domain, self.lease_ttl).await {
+                Ok(fence) => self.global_fence = Some(fence),
+                Err(error) => return Err(error),
+            }
+        }
+        match GcFenceLease::acquire_writer(&self.store, &self.repo_domain(), self.lease_ttl).await {
+            Ok(fence) => {
+                self.repo_fence = Some(fence);
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(fence) = self.global_fence.take() {
+                    fence.release().await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn release_fences(&mut self) -> Result<()> {
+        let repo_result = match self.repo_fence.take() {
+            Some(fence) => fence.release().await,
+            None => Ok(()),
+        };
+        let global_result = match self.global_fence.take() {
+            Some(fence) => fence.release().await,
+            None => Ok(()),
+        };
+        match repo_result {
+            Err(error) => Err(error),
+            Ok(()) => global_result,
+        }
+    }
+
+    fn repo_domain(&self) -> String {
+        self.prefix
+            .strip_suffix("/internal/push-admission/slots")
+            .unwrap_or(&self.prefix)
+            .to_owned()
     }
 
     async fn abort_partial<T>(&mut self, error: CoordinationError) -> Result<T> {
@@ -333,6 +424,8 @@ impl Drop for PushAdmissionTicket {
                 }
             });
         }
+        self.global_fence.take();
+        self.repo_fence.take();
     }
 }
 

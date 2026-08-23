@@ -120,13 +120,35 @@ pub async fn run_repack(
     let start = Instant::now();
     check_cancelled(cancel)?;
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
-    let lock = PushLock::acquire_internal(
+    let gc_writer = if config.dry_run {
+        None
+    } else {
+        Some(
+            crate::maintenance::GcWriterLeases::acquire(
+                store,
+                router.global_prefix(),
+                router.repo_prefix(),
+                cancel,
+            )
+            .await?,
+        )
+    };
+    let lock = match PushLock::acquire_internal(
         store.inner(),
         router.repo_prefix(),
         crab_coordination::REPACK_RESOURCE,
         config.lock_ttl,
     )
-    .await?;
+    .await
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            if let Some(lease) = gc_writer {
+                let _ = lease.release().await;
+            }
+            return Err(error.into());
+        }
+    };
     let operation_cancel = cancel.child_token();
     let heartbeat = LockHeartbeat::spawn(
         store.clone(),
@@ -139,9 +161,13 @@ pub async fn run_repack(
     let result = run_repack_locked(store, &router, config, &operation_cancel, start).await;
     heartbeat.stop().await;
     let release_result = lock.release().await.map_err(CrabError::from);
-    match (result, release_result) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    let gc_release_result = match gc_writer {
+        Some(lease) => lease.release().await,
+        None => Ok(()),
+    };
+    match (result, release_result, gc_release_result) {
+        (Ok(outcome), Ok(()), Ok(())) => Ok(outcome),
+        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
     }
 }
 

@@ -1,12 +1,17 @@
 //! Workflow-facing object-store adapter.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
+use crab_coordination::{CoordinationError, GcFenceHeartbeat, GcFenceLease};
 use object_store::path::Path;
 use object_store::{ObjectMeta, ObjectStore};
+use tokio_util::sync::CancellationToken;
 
-use crate::Result;
+use crate::{Result, WorkflowError};
+
+const GC_FENCE_TTL: Duration = crab_coordination::DEFAULT_GC_FENCE_TTL;
 
 /// Object store used for remote workflow cache manifests and artifacts.
 ///
@@ -16,6 +21,85 @@ use crate::Result;
 #[derive(Clone)]
 pub struct WorkflowStore {
     inner: crab_storage::Store,
+}
+
+struct WorkflowFenceLease {
+    lease: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+impl WorkflowFenceLease {
+    async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.lease.release().await.map_err(WorkflowError::GcFence)
+    }
+}
+
+/// Shared GC writer admission covering the global and repository workflow roots.
+pub struct WorkflowGcWriter {
+    global: WorkflowFenceLease,
+    repo: WorkflowFenceLease,
+    cancel: CancellationToken,
+}
+
+impl WorkflowGcWriter {
+    async fn acquire(store: &WorkflowStore, prefix: &str) -> Result<Self> {
+        let cancel = CancellationToken::new();
+        let router = crab_storage::StoreLayout::new(store.inner.clone(), prefix.to_owned());
+        let global =
+            GcFenceLease::acquire_writer(store.inner.inner(), router.global_prefix(), GC_FENCE_TTL)
+                .await
+                .map_err(WorkflowError::GcFence)?;
+        let global_heartbeat = GcFenceHeartbeat::spawn(&global, cancel.clone(), GC_FENCE_TTL / 3);
+        let repo = match GcFenceLease::acquire_writer(
+            store.inner.inner(),
+            router.repo_prefix(),
+            GC_FENCE_TTL,
+        )
+        .await
+        .map_err(WorkflowError::GcFence)
+        {
+            Ok(repo) => repo,
+            Err(error) => {
+                global_heartbeat.stop().await;
+                let _ = global.release().await;
+                return Err(error);
+            }
+        };
+        let repo_heartbeat = GcFenceHeartbeat::spawn(&repo, cancel.clone(), GC_FENCE_TTL / 3);
+        Ok(Self {
+            global: WorkflowFenceLease {
+                lease: global,
+                heartbeat: global_heartbeat,
+            },
+            repo: WorkflowFenceLease {
+                lease: repo,
+                heartbeat: repo_heartbeat,
+            },
+            cancel,
+        })
+    }
+
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    pub(crate) fn lease_lost_error(prefix: &str) -> WorkflowError {
+        WorkflowError::GcFence(CoordinationError::GcFenceLost {
+            domain: prefix.to_owned(),
+            holder: "workflow-heartbeat".to_owned(),
+        })
+    }
+
+    /// Release repository admission before global admission.
+    pub async fn release(self) -> Result<()> {
+        let repo_result = self.repo.release().await;
+        let global_result = self.global.release().await;
+        match repo_result {
+            Err(error) => Err(error),
+            Ok(()) => global_result,
+        }
+    }
 }
 
 impl WorkflowStore {
@@ -41,6 +125,11 @@ impl WorkflowStore {
     #[must_use]
     pub fn as_storage(&self) -> &crab_storage::Store {
         &self.inner
+    }
+
+    /// Acquire shared admission while publishing remote workflow objects.
+    pub async fn acquire_gc_writer(&self, prefix: &str) -> Result<WorkflowGcWriter> {
+        WorkflowGcWriter::acquire(self, prefix).await
     }
 
     /// Writes a content-addressed object if absent.

@@ -72,9 +72,10 @@ use crab_workflow::{
 };
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
 use crate::git::url::CrabUrl;
+use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crate::workflow::cache;
 use crate::workflow::discover::{self, DiscoverMode};
@@ -2549,9 +2550,31 @@ pub async fn run_exp_push(args: &PushArgs, repo_root: &Path) -> Result<ExpPushPa
         ExperimentRemoteAccess::Write,
     )
     .await?;
-    let payload =
-        push_experiments_to_remote(&remote.store, &remote.prefix, repo_root, &ids, args.force)
-            .await?;
+    let remote_router = StoreLayout::new(remote.store.clone(), remote.prefix.clone());
+    let cancel = CancellationToken::new();
+    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+        &remote.store,
+        remote_router.global_prefix(),
+        remote_router.repo_prefix(),
+        &cancel,
+    )
+    .await?;
+    let operation = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CrabError::Cancelled),
+        result = push_experiments_to_remote(
+            &remote.store,
+            &remote.prefix,
+            repo_root,
+            &ids,
+            args.force,
+        ) => result,
+    };
+    let release = gc_writer.release().await;
+    let payload = match (operation, release) {
+        (Ok(payload), Ok(())) => payload,
+        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+    };
     emit_push(&payload, args.output_mode());
     Ok(payload)
 }
@@ -2706,7 +2729,27 @@ async fn run_exp_remove_remote(args: &RemoveArgs, repo_root: &Path) -> Result<Ex
         ExperimentRemoteAccess::Write,
     )
     .await?;
-    let payload = remove_remote_experiments(&remote.store, &remote.prefix, args, repo_root).await?;
+    let cancel = CancellationToken::new();
+    let remote_router = StoreLayout::new(remote.store.clone(), remote.prefix.clone());
+    let payload = if args.dry_run {
+        remove_remote_experiments(&remote.store, &remote.prefix, args, repo_root, &cancel).await?
+    } else {
+        let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+            &remote.store,
+            remote_router.global_prefix(),
+            remote_router.repo_prefix(),
+            &cancel,
+        )
+        .await?;
+        let operation =
+            remove_remote_experiments(&remote.store, &remote.prefix, args, repo_root, &cancel)
+                .await;
+        let release = gc_writer.release().await;
+        match (operation, release) {
+            (Ok(payload), Ok(())) => payload,
+            (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+        }
+    };
     emit_remove(&payload, args.output_mode());
     Ok(payload)
 }
@@ -3296,7 +3339,9 @@ async fn remove_remote_experiments(
     prefix: &str,
     args: &RemoveArgs,
     repo_root: &Path,
+    cancel: &CancellationToken,
 ) -> Result<ExpRemovePayload> {
+    check_cancelled(cancel)?;
     if args.all && args.keep {
         return Err(CrabError::Configuration {
             key: "exp remove --git-remote".to_owned(),
@@ -3331,6 +3376,7 @@ async fn remove_remote_experiments(
     }
 
     let all_ids = list_remote_experiment_ids(store, prefix).await?;
+    check_cancelled(cancel)?;
     let selected_ids = if args.rev.is_some() || args.limit.is_some() {
         select_remote_experiment_ids_by_revs(
             store,
@@ -3370,6 +3416,7 @@ async fn remove_remote_experiments(
 
     if !args.dry_run {
         for id in &removed_remote {
+            check_cancelled(cancel)?;
             let exp_id = parse_experiment_id(id)?;
             delete_remote_experiment(store, prefix, &exp_id).await?;
         }
@@ -8088,6 +8135,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let cancel = CancellationToken::new();
 
         let payload = remove_remote_experiments(
             &store,
@@ -8095,6 +8143,7 @@ mod tests {
             &RemoveArgs::try_parse_from(["remove", "-g", "crab://bucket/repo", "urban-sign"])
                 .unwrap(),
             root,
+            &cancel,
         )
         .await
         .unwrap();
@@ -8156,6 +8205,7 @@ mod tests {
             .await;
         write_remote_metadata_for_test(&store, prefix, &test_exp_metadata(id_oldest, &commits[2]))
             .await;
+        let cancel = CancellationToken::new();
 
         let payload = remove_remote_experiments(
             &store,
@@ -8173,6 +8223,7 @@ mod tests {
             ])
             .unwrap(),
             root,
+            &cancel,
         )
         .await
         .unwrap();

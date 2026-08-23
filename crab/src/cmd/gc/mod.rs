@@ -14,10 +14,16 @@
 
 pub mod bucket;
 pub mod class_aware;
+pub mod closure;
+pub mod inventory;
+pub mod journal;
+pub mod marks;
 pub mod parallel_enum;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::Stdout;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -42,6 +48,12 @@ const REPO_GC_PREFIXES: &[&str] = &[
     "manifests/",
     "workflow/artifacts/",
     "refs/crab/artifacts/",
+    "workflow/stages/",
+    "workflow/exp/",
+    "workflow/xorbs/",
+    "refs/crab/stages/",
+    "refs/crab/exp/",
+    "refs/crab/exp-meta/",
 ];
 const DEFAULT_DELETE_CONCURRENCY: usize = 64;
 const DEFAULT_LIST_CONCURRENCY: usize = 32;
@@ -72,6 +84,8 @@ pub struct GcArgs {
     pub delete_concurrency: usize,
     /// Maximum concurrent object-store LIST and history-closure reads.
     pub list_concurrency: usize,
+    /// Resume a durable destructive run by UUIDv7 run id.
+    pub resume_run_id: Option<String>,
 }
 
 impl Default for GcArgs {
@@ -85,6 +99,7 @@ impl Default for GcArgs {
             yes_really: false,
             delete_concurrency: DEFAULT_DELETE_CONCURRENCY,
             list_concurrency: DEFAULT_LIST_CONCURRENCY,
+            resume_run_id: None,
         }
     }
 }
@@ -430,12 +445,22 @@ pub trait ObjectDeleter: Send + Sync {
 
     /// Perform manifest CAS to remove deleted entries.
     ///
-    /// Called once after all deletes complete. The `deleted_keys` are the
-    /// keys that were successfully deleted.
+    /// Called once after all deletes complete when [`Self::reconciliation_required`]
+    /// is true. The `deleted_keys` are the keys that were successfully deleted.
     fn reconcile_manifest(
         &self,
         deleted_keys: &[String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
+
+    /// Whether the caller must retain deleted keys for reconciliation.
+    ///
+    /// Store-only deletion has no manifest to update, so durable sweeps can
+    /// keep memory bounded by the journal batch size. Implementations that
+    /// maintain a secondary index keep the default and receive the complete
+    /// durable key set at the reconciliation boundary.
+    fn reconciliation_required(&self) -> bool {
+        true
+    }
 }
 
 /// A no-op deleter for dry-run mode and tests.
@@ -454,6 +479,10 @@ impl ObjectDeleter for NullDeleter {
         _deleted_keys: &[String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn reconciliation_required(&self) -> bool {
+        false
     }
 }
 
@@ -484,6 +513,10 @@ impl ObjectDeleter for StoreObjectDeleter {
         _deleted_keys: &[String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn reconciliation_required(&self) -> bool {
+        false
     }
 }
 
@@ -541,6 +574,64 @@ async fn list_repo_gc_candidates_with_concurrency(
     ))
 }
 
+/// Streams repo-local LIST results directly into the durable candidate plan.
+/// The old helper remains available to callers that need a preview vector;
+/// destructive runs never retain the full candidate namespace in memory.
+async fn plan_repo_gc_candidates_streaming(
+    store: &Store,
+    router: &StoreLayout,
+    reachable_keys: &mut marks::DurableMarkReader,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    t0: SystemTime,
+    grace_period: Duration,
+    force: bool,
+    journal: &mut journal::GcRunJournal,
+) -> Result<ListOutcome> {
+    let started = Instant::now();
+    let cutoff = t0 - grace_period.max(MIN_GRACE_PERIOD);
+    let mut batch = Vec::with_capacity(journal::DEFAULT_BATCH_SIZE);
+    for prefix in REPO_GC_PREFIXES {
+        check_cancelled(cancel)?;
+        let object_prefix = router.repo_path(prefix);
+        let mut objects = store.inner().list(Some(&object_prefix));
+        while let Some(meta) = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            next = objects.try_next() => next.map_err(CrabError::Storage)?,
+        } {
+            let object = ObjectMeta {
+                key: meta.location.to_string(),
+                size: meta.size,
+                last_modified: meta.last_modified.into(),
+                storage_class: None,
+                transitioned_at: None,
+            };
+            if reachable_keys.contains(&object.key).await?
+                || coordinator_protected_keys.contains(&object.key)
+                || (!force && object.last_modified >= cutoff)
+            {
+                continue;
+            }
+            batch.push(object);
+            if batch.len() == journal::DEFAULT_BATCH_SIZE {
+                journal.append_candidates(&batch).await?;
+                batch.clear();
+            }
+        }
+    }
+    if !batch.is_empty() {
+        journal.append_candidates(&batch).await?;
+    }
+    journal.finish_plan().await?;
+    Ok(ListOutcome {
+        requests: REPO_GC_PREFIXES.len() as u64,
+        parallelism: 1,
+        wall_seconds: started.elapsed().as_secs_f64(),
+        failed_prefixes: Vec::new(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Main GC entry point
 // ---------------------------------------------------------------------------
@@ -572,6 +663,265 @@ pub async fn run_gc(
     list_outcome: ListOutcome,
     deleter: &dyn ObjectDeleter,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+) -> Result<GcOutcome> {
+    run_gc_impl(
+        args,
+        listed_objects,
+        reachable_keys,
+        coordinator_protected_keys,
+        shard_snapshot,
+        cancel,
+        delete_concurrency,
+        grace_period,
+        list_outcome,
+        deleter,
+        jsonl_stream,
+        None,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The durable GC execution seam keeps storage, policy, cancellation, and output explicit"
+)]
+async fn finish_repo_gc_from_marks(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    mut journal: journal::GcRunJournal,
+    t0: SystemTime,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+    deleter: &dyn ObjectDeleter,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    sweep_lease: Option<&crate::maintenance::GcSweepLease>,
+) -> Result<GcOutcome> {
+    if journal.state().phase != journal::GcRunPhase::Planning {
+        return Err(CrabError::Configuration {
+            key: "gc.journal".to_owned(),
+            origin: "durable repository GC can only seal a plan from the planning phase".to_owned(),
+        });
+    }
+    let mut reachable_reader = marks::DurableMarkReader::new_keys(
+        store.clone(),
+        journal.marks_prefix(),
+        "reachable-objects",
+    );
+    let list_outcome = plan_repo_gc_candidates_streaming(
+        store,
+        router,
+        &mut reachable_reader,
+        coordinator_protected_keys,
+        cancel,
+        t0,
+        grace_period,
+        args.force,
+        &mut journal,
+    )
+    .await?;
+    let mut outcome = GcOutcome {
+        list_requests: list_outcome.requests,
+        list_parallelism: list_outcome.parallelism,
+        list_wall_seconds: list_outcome.wall_seconds,
+        dry_run: false,
+        partial_enumeration: !list_outcome.failed_prefixes.is_empty(),
+        ..GcOutcome::default()
+    };
+    check_cancelled(cancel)?;
+    let delete_outcome = execute_journaled_deletes(
+        &mut journal,
+        cancel,
+        args.delete_concurrency,
+        deleter,
+        &mut outcome,
+        jsonl_stream,
+        sweep_lease
+            .is_none()
+            .then_some((store, router.repo_prefix())),
+    )
+    .await;
+    if cancel.is_cancelled() {
+        outcome.cancelled = true;
+        outcome.log();
+        return Err(CrabError::Cancelled);
+    }
+    check_cancelled(cancel)?;
+    outcome.delete_failures = delete_outcome.failure_count;
+    let reconciliation_error =
+        if delete_outcome.first_error.is_none() && deleter.reconciliation_required() {
+            deleter
+                .reconcile_manifest(&delete_outcome.deleted_keys)
+                .await
+                .err()
+        } else {
+            None
+        };
+    outcome.reconciliation_failed = reconciliation_error.is_some();
+    if delete_outcome.first_error.is_none() && reconciliation_error.is_none() {
+        journal.complete().await?;
+    }
+    outcome.log();
+    if let Some(source) = delete_outcome.first_error {
+        if matches!(&source, CrabError::PushLockHeld { .. }) {
+            return Err(source);
+        }
+        return Err(CrabError::GcPartialFailure {
+            objects_deleted: delete_outcome.deleted_count,
+            delete_failures: outcome.delete_failures,
+            reconciliation_failed: outcome.reconciliation_failed,
+            source: Box::new(source),
+        });
+    }
+    if let Some(source) = reconciliation_error {
+        return Err(CrabError::GcPartialFailure {
+            objects_deleted: delete_outcome.deleted_count,
+            delete_failures: outcome.delete_failures,
+            reconciliation_failed: outcome.reconciliation_failed,
+            source: Box::new(source),
+        });
+    }
+    Ok(outcome)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The repository sweep boundary keeps the durable journal, root walk, policy, and lease explicit"
+)]
+async fn run_repo_gc_durable_streaming_roots(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+    deleter: &dyn ObjectDeleter,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    sweep_lease: Option<&crate::maintenance::GcSweepLease>,
+) -> Result<GcOutcome> {
+    if args.force && !confirm_force(args)? {
+        return Ok(GcOutcome {
+            dry_run: false,
+            ..GcOutcome::default()
+        });
+    }
+
+    let (mut journal, t0, planning) = match args.resume_run_id.as_deref() {
+        Some(run_id) => {
+            let journal = journal::GcRunJournal::resume(
+                store.clone(),
+                router.repo_prefix(),
+                run_id,
+                "repo",
+                router.repo_prefix(),
+            )
+            .await?;
+            journal.ensure_policy(grace_period, args.force)?;
+            let t0 = journal.snapshot_at()?;
+            let planning = journal.state().phase == journal::GcRunPhase::Planning;
+            (journal, t0, planning)
+        }
+        None => {
+            let t0 = SystemTime::now();
+            let journal = journal::GcRunJournal::start(
+                store.clone(),
+                router.repo_prefix(),
+                "repo",
+                router.repo_prefix(),
+                t0,
+                grace_period,
+                args.force,
+            )
+            .await?;
+            (journal, t0, true)
+        }
+    };
+
+    if !planning {
+        let roots = stream_repo_reachability(
+            store,
+            router,
+            args.list_concurrency,
+            coordinator_protected_keys,
+            cancel,
+            None,
+        )
+        .await?;
+        journal.ensure_root_identity(&roots.root_identity)?;
+        return resume_gc_run(
+            args,
+            &mut journal,
+            cancel,
+            args.delete_concurrency,
+            deleter,
+            jsonl_stream,
+            ListOutcome::default(),
+            sweep_lease
+                .is_none()
+                .then_some((store, router.repo_prefix())),
+        )
+        .await;
+    }
+
+    if args.resume_run_id.is_some() {
+        journal.reset_partial_plan().await?;
+    }
+    let mut reachable_marks = marks::DurableMarkWriter::new_keys(
+        store.clone(),
+        journal.marks_prefix(),
+        "reachable-objects",
+    );
+    let roots = stream_repo_reachability(
+        store,
+        router,
+        args.list_concurrency,
+        coordinator_protected_keys,
+        cancel,
+        Some(&mut reachable_marks),
+    )
+    .await?;
+    reachable_marks.finish().await?;
+    if journal.state().root_identity.is_empty() {
+        journal.set_root_identity(&roots.root_identity).await?;
+    } else {
+        journal.ensure_root_identity(&roots.root_identity)?;
+    }
+    finish_repo_gc_from_marks(
+        args,
+        store,
+        router,
+        journal,
+        t0,
+        coordinator_protected_keys,
+        cancel,
+        grace_period,
+        deleter,
+        jsonl_stream,
+        sweep_lease,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC implementation keeps the existing testable seam while adding an optional journal"
+)]
+async fn run_gc_impl(
+    args: &GcArgs,
+    listed_objects: Vec<ObjectMeta>,
+    reachable_keys: &HashSet<String, impl std::hash::BuildHasher>,
+    coordinator_protected_keys: &HashSet<String, impl std::hash::BuildHasher>,
+    shard_snapshot: &ShardListSnapshot,
+    cancel: &CancellationToken,
+    delete_concurrency: usize,
+    grace_period: Duration,
+    list_outcome: ListOutcome,
+    deleter: &dyn ObjectDeleter,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    mut journal: Option<&mut journal::GcRunJournal>,
+    sweep: Option<(&Store, &str)>,
 ) -> Result<GcOutcome> {
     let t0 = SystemTime::now();
     let partial_enumeration = !list_outcome.failed_prefixes.is_empty();
@@ -651,15 +1001,29 @@ pub async fn run_gc(
 
     // Phase 5: Parallel deletes bounded by delete_concurrency.
     check_cancelled(cancel)?;
-    let delete_outcome = execute_deletes(
-        &to_delete,
-        cancel,
-        delete_concurrency,
-        deleter,
-        &mut outcome,
-        jsonl_stream,
-    )
-    .await;
+    let delete_outcome = if let Some(journal) = journal.as_deref_mut() {
+        journal.plan(&to_delete).await?;
+        execute_journaled_deletes(
+            journal,
+            cancel,
+            delete_concurrency,
+            deleter,
+            &mut outcome,
+            jsonl_stream,
+            sweep,
+        )
+        .await
+    } else {
+        execute_deletes(
+            &to_delete,
+            cancel,
+            delete_concurrency,
+            deleter,
+            &mut outcome,
+            jsonl_stream,
+        )
+        .await
+    };
 
     if cancel.is_cancelled() {
         outcome.cancelled = true;
@@ -670,17 +1034,40 @@ pub async fn run_gc(
     // Phase 6: Manifest CAS to remove deleted entries.
     check_cancelled(cancel)?;
     outcome.delete_failures = delete_outcome.failure_count;
-    let reconciliation_error = deleter
-        .reconcile_manifest(&delete_outcome.deleted_keys)
-        .await
-        .err();
+    let reconciliation_error =
+        if delete_outcome.first_error.is_none() && deleter.reconciliation_required() {
+            deleter
+                .reconcile_manifest(&delete_outcome.deleted_keys)
+                .await
+                .err()
+        } else {
+            None
+        };
     outcome.reconciliation_failed = reconciliation_error.is_some();
+
+    if reconciliation_error.is_none()
+        && delete_outcome.first_error.is_none()
+        && let Some(journal) = journal
+    {
+        journal.complete().await?;
+    }
 
     // Phase 7: Log structured outcome.
     outcome.log();
-    if let Some(source) = delete_outcome.first_error.or(reconciliation_error) {
+    if let Some(source) = delete_outcome.first_error {
+        if matches!(&source, CrabError::PushLockHeld { .. }) {
+            return Err(source);
+        }
         return Err(CrabError::GcPartialFailure {
-            objects_deleted: delete_outcome.deleted_keys.len() as u64,
+            objects_deleted: delete_outcome.deleted_count,
+            delete_failures: outcome.delete_failures,
+            reconciliation_failed: outcome.reconciliation_failed,
+            source: Box::new(source),
+        });
+    }
+    if let Some(source) = reconciliation_error {
+        return Err(CrabError::GcPartialFailure {
+            objects_deleted: delete_outcome.deleted_count,
             delete_failures: outcome.delete_failures,
             reconciliation_failed: outcome.reconciliation_failed,
             source: Box::new(source),
@@ -700,8 +1087,205 @@ pub async fn run_gc(
 /// cancellation and result accounting between batches.
 struct DeleteOutcome {
     deleted_keys: Vec<String>,
+    deleted_count: u64,
     failure_count: u64,
     first_error: Option<CrabError>,
+}
+
+async fn execute_journaled_deletes(
+    journal: &mut journal::GcRunJournal,
+    cancel: &CancellationToken,
+    concurrency: usize,
+    deleter: &dyn ObjectDeleter,
+    outcome: &mut GcOutcome,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    sweep: Option<(&Store, &str)>,
+) -> DeleteOutcome {
+    let mut aggregate = DeleteOutcome {
+        deleted_keys: Vec::new(),
+        deleted_count: 0,
+        failure_count: 0,
+        first_error: None,
+    };
+    loop {
+        let lease = match sweep {
+            Some((store, domain)) => {
+                match crate::maintenance::GcSweepLease::acquire(store, domain, cancel).await {
+                    Ok(lease) => Some(lease),
+                    Err(error) => {
+                        aggregate.first_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            None => None,
+        };
+        let objects = match journal.next_batch().await {
+            Ok(Some(objects)) => objects,
+            Ok(None) => {
+                if let Some(lease) = lease
+                    && let Err(error) = lease.release().await
+                {
+                    aggregate.first_error = Some(error);
+                }
+                break;
+            }
+            Err(error) => {
+                if let Some(lease) = lease {
+                    let _ = lease.release().await;
+                }
+                aggregate.first_error = Some(error);
+                break;
+            }
+        };
+        let batch = execute_deletes(
+            &objects,
+            cancel,
+            concurrency,
+            deleter,
+            outcome,
+            jsonl_stream,
+        )
+        .await;
+        aggregate.deleted_keys.extend(
+            batch
+                .deleted_keys
+                .iter()
+                .filter(|_| deleter.reconciliation_required())
+                .cloned(),
+        );
+        aggregate.deleted_count = aggregate.deleted_count.saturating_add(batch.deleted_count);
+        aggregate.failure_count = aggregate.failure_count.saturating_add(batch.failure_count);
+        let batch_failed = batch.failure_count > 0 || batch.first_error.is_some();
+        if aggregate.first_error.is_none() {
+            aggregate.first_error = batch.first_error;
+        }
+        if cancel.is_cancelled() || batch_failed {
+            if let Some(lease) = lease {
+                if let Err(error) = lease.release().await
+                    && aggregate.first_error.is_none()
+                {
+                    aggregate.first_error = Some(error);
+                }
+            }
+            break;
+        }
+        if let Err(error) = check_cancelled(cancel) {
+            aggregate.first_error = Some(error);
+            if let Some(lease) = lease {
+                let _ = lease.release().await;
+            }
+            break;
+        }
+        let bytes = batch
+            .deleted_keys
+            .iter()
+            .filter_map(|key| objects.iter().find(|object| object.key == *key))
+            .try_fold(0u64, |total, object| total.checked_add(object.size))
+            .unwrap_or(u64::MAX);
+        if let Err(error) = journal.complete_batch(&batch.deleted_keys, bytes).await {
+            aggregate.first_error = Some(error);
+            if let Some(lease) = lease {
+                let _ = lease.release().await;
+            }
+            break;
+        }
+        if let Some(lease) = lease
+            && let Err(error) = lease.release().await
+        {
+            aggregate.first_error = Some(error);
+            break;
+        }
+    }
+    aggregate
+}
+
+async fn resume_gc_run(
+    args: &GcArgs,
+    journal: &mut journal::GcRunJournal,
+    cancel: &CancellationToken,
+    delete_concurrency: usize,
+    deleter: &dyn ObjectDeleter,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    list_outcome: ListOutcome,
+    sweep: Option<(&Store, &str)>,
+) -> Result<GcOutcome> {
+    if args.dry_run {
+        return Err(CrabError::Configuration {
+            key: "gc.resume".to_owned(),
+            origin: "a durable destructive GC run cannot be resumed as a dry-run".to_owned(),
+        });
+    }
+    let mut outcome = GcOutcome {
+        list_requests: list_outcome.requests,
+        list_parallelism: list_outcome.parallelism,
+        list_wall_seconds: list_outcome.wall_seconds,
+        dry_run: false,
+        partial_enumeration: !list_outcome.failed_prefixes.is_empty(),
+        ..GcOutcome::default()
+    };
+    check_cancelled(cancel)?;
+    let delete_outcome = execute_journaled_deletes(
+        journal,
+        cancel,
+        delete_concurrency,
+        deleter,
+        &mut outcome,
+        jsonl_stream,
+        sweep,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        outcome.cancelled = true;
+        outcome.log();
+        return Err(CrabError::Cancelled);
+    }
+    check_cancelled(cancel)?;
+    outcome.delete_failures = delete_outcome.failure_count;
+    let (objects_deleted, reconciliation_error) = if deleter.reconciliation_required() {
+        if delete_outcome.first_error.is_none() {
+            let mut all_deleted_keys = journal.deleted_keys().await?;
+            all_deleted_keys.extend(delete_outcome.deleted_keys.iter().cloned());
+            all_deleted_keys.sort_unstable();
+            all_deleted_keys.dedup();
+            let objects_deleted =
+                u64::try_from(all_deleted_keys.len()).map_err(|_| CrabError::CorruptObject {
+                    path: "gc/runs".to_owned(),
+                    reason: "GC deleted-key count overflows".to_owned(),
+                })?;
+            let reconciliation_error = deleter.reconcile_manifest(&all_deleted_keys).await.err();
+            (objects_deleted, reconciliation_error)
+        } else {
+            let objects_deleted = journal
+                .deleted_key_count()
+                .await?
+                .saturating_add(delete_outcome.deleted_count);
+            (objects_deleted, None)
+        }
+    } else {
+        let objects_deleted = journal
+            .deleted_key_count()
+            .await?
+            .saturating_add(delete_outcome.deleted_count);
+        (objects_deleted, None)
+    };
+    outcome.reconciliation_failed = reconciliation_error.is_some();
+    if delete_outcome.first_error.is_none() && reconciliation_error.is_none() {
+        journal.complete().await?;
+    }
+    outcome.log();
+    if let Some(source) = delete_outcome.first_error.or(reconciliation_error) {
+        if matches!(&source, CrabError::PushLockHeld { .. }) {
+            return Err(source);
+        }
+        return Err(CrabError::GcPartialFailure {
+            objects_deleted,
+            delete_failures: outcome.delete_failures,
+            reconciliation_failed: outcome.reconciliation_failed,
+            source: Box::new(source),
+        });
+    }
+    Ok(outcome)
 }
 
 async fn execute_deletes(
@@ -713,6 +1297,7 @@ async fn execute_deletes(
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> DeleteOutcome {
     let mut deleted_keys = Vec::new();
+    let mut deleted_count = 0u64;
     let mut failure_count = 0u64;
     let mut first_error = None;
     let start = Instant::now();
@@ -745,6 +1330,7 @@ async fn execute_deletes(
                 Ok(()) => {
                     tally(categorize_key(&key), outcome, size);
                     deleted_keys.push(key.clone());
+                    deleted_count = deleted_count.saturating_add(1);
                     debug!(key = %key, "deleted");
 
                     if let Some(stream) = jsonl_stream
@@ -757,6 +1343,12 @@ async fn execute_deletes(
                             status: "ok".to_owned(),
                         });
                     }
+                }
+                Err(CrabError::NotFound { .. }) => {
+                    // Deletes are idempotent across crash/retry boundaries.
+                    tally(categorize_key(&key), outcome, size);
+                    deleted_keys.push(key);
+                    deleted_count = deleted_count.saturating_add(1);
                 }
                 Err(e) => {
                     warn!(key = %key, error = %e, "delete failed, skipping");
@@ -771,6 +1363,7 @@ async fn execute_deletes(
 
     DeleteOutcome {
         deleted_keys,
+        deleted_count,
         failure_count,
         first_error,
     }
@@ -980,6 +1573,484 @@ struct RepoGcReachability {
     shard_snapshot: ShardListSnapshot,
 }
 
+#[derive(Default)]
+struct ReachabilityDigest {
+    count: u64,
+    xor: [u8; 32],
+    sum: [u8; 32],
+}
+
+impl ReachabilityDigest {
+    fn add(&mut self, category: &str, value: &str) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(category.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(value.as_bytes());
+        let digest = hasher.finalize();
+        for (index, byte) in digest.as_bytes().iter().copied().enumerate() {
+            self.xor[index] ^= byte;
+            self.sum[index] = self.sum[index].wrapping_add(byte);
+        }
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn finish(self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.count.to_le_bytes());
+        hasher.update(&self.xor);
+        hasher.update(&self.sum);
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
+/// Streams repository roots into a run-owned mark set while computing the
+/// sealed root identity. The optional writer is absent when a deleting run is
+/// resumed; in that case the same walk only revalidates the identity.
+struct RepoReachabilitySink<'a> {
+    writer: Option<&'a mut marks::DurableMarkWriter>,
+    digest: &'a mut ReachabilityDigest,
+    cancel: &'a CancellationToken,
+}
+
+impl RepoReachabilitySink<'_> {
+    async fn add(&mut self, key: String) -> Result<()> {
+        check_cancelled(self.cancel)?;
+        self.digest.add("reachable", &key);
+        if let Some(writer) = self.writer.as_deref_mut() {
+            writer.add(&key).await?;
+        }
+        Ok(())
+    }
+}
+
+struct StreamedRepoRootSnapshot {
+    root_identity: String,
+}
+
+/// Walks the repository roots without constructing a process-wide reachable
+/// key set. Mark chunks are flushed by [`DurableMarkWriter`] as they fill.
+async fn stream_repo_reachability(
+    store: &Store,
+    router: &StoreLayout,
+    concurrency: usize,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    mut writer: Option<&mut marks::DurableMarkWriter>,
+) -> Result<StreamedRepoRootSnapshot> {
+    check_cancelled(cancel)?;
+    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
+    let manifest = snapshot.manifest;
+    let mut digest = ReachabilityDigest::default();
+    digest.add("generation", &manifest.generation.to_string());
+    digest.add("git-validation", &manifest.git_validation_digest);
+    digest.add("shard-index", &manifest.shard_index_hash);
+    digest.add("pack-index", &manifest.pack_index_hash);
+    let mut sink = RepoReachabilitySink {
+        writer: writer.take(),
+        digest: &mut digest,
+        cancel,
+    };
+
+    stream_reachable_bulk_objects(store, router, &manifest, &mut sink).await?;
+    stream_reachable_workflow_objects(store, router, &mut sink).await?;
+    sink.add(router.manifest_path().as_ref().to_owned()).await?;
+
+    for pack in &snapshot.journal.packs {
+        for key in pack_object_keys(router, &pack.pack_id) {
+            sink.add(key).await?;
+        }
+    }
+    for edit in &snapshot.journal.ordered_edits {
+        if let Some(hash) = &edit.visibility_evidence_hash {
+            sink.add(router.git_visibility_edit_path(hash).as_ref().to_owned())
+                .await?;
+        }
+    }
+
+    // Journal objects remain recovery roots until the corresponding frontier
+    // is compacted. Stream this prefix instead of collecting its listing.
+    let journal_prefix = router.repo_path("refs/journal");
+    let mut journal_objects = store.inner().list(Some(&journal_prefix));
+    while let Some(object) = journal_objects
+        .try_next()
+        .await
+        .map_err(CrabError::Storage)?
+    {
+        sink.add(object.location.as_ref().to_owned()).await?;
+    }
+
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    let mut history = crab_metadata::manifest_store::stream_manifest_history(
+        store.as_storage(),
+        &storage_router,
+        concurrency,
+    );
+    while let Some(entry) = history.try_next().await.map_err(CrabError::from)? {
+        sink.add(entry.path).await?;
+        stream_reachable_bulk_objects(store, router, &entry.manifest, &mut sink).await?;
+    }
+
+    // Artifact validation already owns the registry/pending-promotion
+    // contract. Its result is fed into the same durable sink so payloads and
+    // manifests cannot be collected just because this path is streaming.
+    let workflow_store = crab_workflow::WorkflowStore::from_storage(store.clone().into());
+    let mut artifact_visitor = WorkflowArtifactReachabilityVisitor { sink: &mut sink };
+    crab_workflow::visit_reachable_remote_artifact_objects(
+        &workflow_store,
+        router.repo_prefix(),
+        &mut artifact_visitor,
+    )
+    .await?;
+
+    for key in coordinator_protected_keys {
+        digest.add("protected", key);
+    }
+    for hash in &snapshot.journal.shards {
+        digest.add(
+            "shard-snapshot",
+            &format!("shards/{}/{hash}", &hash[..2.min(hash.len())]),
+        );
+    }
+    Ok(StreamedRepoRootSnapshot {
+        root_identity: digest.finish(),
+    })
+}
+
+async fn stream_reachable_bulk_objects(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    sink: &mut RepoReachabilitySink<'_>,
+) -> Result<()> {
+    if !manifest.shard_index_hash.is_empty() {
+        sink.add(
+            router
+                .repo_path(&crab_metadata::segmented::index_relative_path(
+                    crab_metadata::segmented::SegmentKind::Shard,
+                    &manifest.shard_index_hash,
+                ))
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+        let index =
+            crate::metadata::manifest::read_shard_index(store, router, &manifest.shard_index_hash)
+                .await?;
+        for segment in index.segments {
+            sink.add(router.repo_path(&segment.path).as_ref().to_owned())
+                .await?;
+        }
+    }
+
+    if !manifest.pack_index_hash.is_empty() {
+        sink.add(
+            router
+                .repo_path(&crab_metadata::segmented::index_relative_path(
+                    crab_metadata::segmented::SegmentKind::Pack,
+                    &manifest.pack_index_hash,
+                ))
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+        let index =
+            crate::metadata::manifest::read_pack_index(store, router, &manifest.pack_index_hash)
+                .await?;
+        for segment in index.segments {
+            sink.add(router.repo_path(&segment.path).as_ref().to_owned())
+                .await?;
+        }
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let mut visitor = PackReachabilityVisitor { router, sink };
+        crab_metadata::manifest_store::visit_bulk_pack_list(
+            store.as_storage(),
+            &storage_router,
+            &manifest.pack_index_hash,
+            &mut visitor,
+        )
+        .await
+        .map_err(CrabError::from)?;
+    }
+
+    if let Some(hash) = &manifest.commit_graph_hash {
+        sink.add(
+            router
+                .bulk_manifest_path("commit-graph", hash)
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+    }
+    if let Some(hash) = &manifest.ref_registry_hash {
+        sink.add(
+            router
+                .bulk_manifest_path("ref-registry", hash)
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+    }
+    if !manifest.refs.is_empty() && !manifest.pack_index_hash.is_empty() {
+        sink.add(
+            router
+                .git_visibility_path(&manifest.git_validation_digest)
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+        sink.add(
+            router
+                .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash)
+                .as_ref()
+                .to_owned(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 4] {
+    [
+        router.pack_path(pack_id).as_ref().to_owned(),
+        router.pack_index_path(pack_id).as_ref().to_owned(),
+        router.pack_reverse_index_path(pack_id).as_ref().to_owned(),
+        router.pack_metadata_path(pack_id).as_ref().to_owned(),
+    ]
+}
+
+struct PackReachabilityVisitor<'router, 'sink, 'roots> {
+    router: &'router StoreLayout,
+    sink: &'sink mut RepoReachabilitySink<'roots>,
+}
+
+impl
+    crab_metadata::segmented_store::AsyncRecordVisitor<
+        crate::metadata::manifest::PackManifestEntry,
+        CrabError,
+    > for PackReachabilityVisitor<'_, '_, '_>
+{
+    fn visit<'a>(
+        &'a mut self,
+        pack: crate::metadata::manifest::PackManifestEntry,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            for key in pack_object_keys(self.router, &pack.pack_id) {
+                self.sink.add(key).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+struct WorkflowArtifactReachabilityVisitor<'sink, 'roots> {
+    sink: &'sink mut RepoReachabilitySink<'roots>,
+}
+
+impl crab_workflow::RemoteArtifactReachabilityVisitor<CrabError>
+    for WorkflowArtifactReachabilityVisitor<'_, '_>
+{
+    fn visit<'a>(&'a mut self, key: String) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move { self.sink.add(key).await })
+    }
+}
+
+const MAX_WORKFLOW_ROOT_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+async fn stream_reachable_workflow_objects(
+    store: &Store,
+    router: &StoreLayout,
+    sink: &mut RepoReachabilitySink<'_>,
+) -> Result<()> {
+    let stage_prefix = router.repo_path("refs/crab/stages/");
+    let mut stage_refs = store.inner().list(Some(&stage_prefix));
+    while let Some(object) = stage_refs.try_next().await.map_err(CrabError::Storage)? {
+        let key = object.location.as_ref().to_owned();
+        sink.add(key.clone()).await?;
+        let relative = key
+            .strip_prefix(&format!("{}/", router.repo_prefix()))
+            .and_then(|value| value.strip_prefix("refs/crab/stages/"))
+            .map(|value| value.trim_end_matches('/'))
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: key.clone(),
+                reason: "workflow stage ref is outside its repository namespace".to_owned(),
+            })?;
+        let stage_hash = crab_xet::hash::MerkleHash::from_hex(relative).map_err(|error| {
+            CrabError::CorruptObject {
+                path: key.clone(),
+                reason: format!("invalid workflow stage ref hash: {error}"),
+            }
+        })?;
+        let manifest_path =
+            stream_workflow_stage_manifest(store, router, &stage_hash, sink).await?;
+        let (body, _) = store.get_with_etag(&object.location).await?;
+        if body.len() > MAX_WORKFLOW_ROOT_BODY_BYTES {
+            return Err(CrabError::Configuration {
+                key: "gc.workflow.root_bytes".to_owned(),
+                origin: format!("workflow stage ref {} exceeds the bounded body budget", key),
+            });
+        }
+        let target = std::str::from_utf8(&body).map_err(|error| CrabError::CorruptObject {
+            path: key.clone(),
+            reason: format!("workflow stage ref is not UTF-8: {error}"),
+        })?;
+        if target != manifest_path {
+            return Err(CrabError::CorruptObject {
+                path: key,
+                reason: format!(
+                    "workflow stage ref points to {target:?}, expected {manifest_path:?}"
+                ),
+            });
+        }
+    }
+
+    for ref_prefix in ["refs/crab/exp/", "refs/crab/exp-meta/"] {
+        let prefix = router.repo_path(ref_prefix);
+        let mut refs = store.inner().list(Some(&prefix));
+        while let Some(object) = refs.try_next().await.map_err(CrabError::Storage)? {
+            let key = object.location.as_ref().to_owned();
+            sink.add(key.clone()).await?;
+            let raw_id = key
+                .strip_prefix(&format!("{}/", router.repo_prefix()))
+                .and_then(|value| value.strip_prefix(ref_prefix))
+                .map(|value| value.trim_end_matches('/'))
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: key.clone(),
+                    reason: "workflow experiment ref is outside its repository namespace"
+                        .to_owned(),
+                })?;
+            let id = raw_id
+                .parse::<crab_workflow::ExperimentId>()
+                .map_err(|error| CrabError::CorruptObject {
+                    path: key.clone(),
+                    reason: format!("invalid workflow experiment ref: {error}"),
+                })?;
+            let experiment_prefix = router.repo_path(&format!("workflow/exp/{id}/"));
+            let mut objects = store.inner().list(Some(&experiment_prefix));
+            while let Some(object) = objects.try_next().await.map_err(CrabError::Storage)? {
+                let object_key = object.location.as_ref().to_owned();
+                sink.add(object_key.clone()).await?;
+                if !object_key.ends_with("/stage-refs.json") {
+                    continue;
+                }
+                let (body, _) = store.get_with_etag(&object.location).await?;
+                if body.len() > MAX_WORKFLOW_ROOT_BODY_BYTES {
+                    return Err(CrabError::Configuration {
+                        key: "gc.workflow.root_bytes".to_owned(),
+                        origin: format!(
+                            "workflow stage refs {} exceed the bounded body budget",
+                            object_key
+                        ),
+                    });
+                }
+                let stages: Vec<String> =
+                    serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
+                        path: object_key.clone(),
+                        reason: format!("invalid experiment stage refs: {error}"),
+                    })?;
+                for stage in stages {
+                    let stage_hash =
+                        crab_xet::hash::MerkleHash::from_hex(&stage).map_err(|error| {
+                            CrabError::CorruptObject {
+                                path: object_key.clone(),
+                                reason: format!("invalid experiment stage hash: {error}"),
+                            }
+                        })?;
+                    stream_workflow_stage_manifest(store, router, &stage_hash, sink).await?;
+                    sink.add(
+                        router
+                            .repo_path(&format!("refs/crab/stages/{}", stage_hash.hex()))
+                            .as_ref()
+                            .to_owned(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn stream_workflow_stage_manifest(
+    store: &Store,
+    router: &StoreLayout,
+    stage_hash: &crab_xet::hash::MerkleHash,
+    sink: &mut RepoReachabilitySink<'_>,
+) -> Result<String> {
+    let hex = stage_hash.hex();
+    let manifest_path = router
+        .repo_path(&format!("workflow/stages/{}/{}.json", &hex[..2], hex))
+        .as_ref()
+        .to_owned();
+    sink.add(manifest_path.clone()).await?;
+    let (body, _) = store
+        .get_with_etag(&ObjectPath::from(manifest_path.as_str()))
+        .await?;
+    if body.len() > MAX_WORKFLOW_ROOT_BODY_BYTES {
+        return Err(CrabError::Configuration {
+            key: "gc.workflow.root_bytes".to_owned(),
+            origin: format!(
+                "workflow stage manifest {} exceeds the bounded body budget",
+                manifest_path
+            ),
+        });
+    }
+    let entry: crab_workflow::StageCacheEntry =
+        serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!("invalid workflow stage manifest JSON: {error}"),
+        })?;
+    crab_workflow::validate_stage_cache_entry(&entry).map_err(|error| {
+        CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!("invalid workflow stage manifest: {error}"),
+        }
+    })?;
+    if entry.stage_hash.as_hex() != hex {
+        return Err(CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!(
+                "workflow stage manifest hash is {}, expected {hex}",
+                entry.stage_hash.as_hex()
+            ),
+        });
+    }
+    for output in crab_workflow::cached_artifacts(&entry) {
+        match output.kind {
+            crab_workflow::OutKind::File | crab_workflow::OutKind::Stdout => {
+                sink.add(
+                    router
+                        .repo_path(&format!("workflow/xorbs/{}.xorb", output.file_hash))
+                        .as_ref()
+                        .to_owned(),
+                )
+                .await?;
+            }
+            crab_workflow::OutKind::Directory => {
+                let Some(tree) = output.tree_manifest.as_ref() else {
+                    return Err(CrabError::CorruptObject {
+                        path: manifest_path.clone(),
+                        reason: format!("directory output {:?} has no tree manifest", output.path),
+                    });
+                };
+                for entry in tree.iter().filter(|entry| entry.kind == "file") {
+                    sink.add(
+                        router
+                            .repo_path(&format!("workflow/xorbs/{}.xorb", entry.hash))
+                            .as_ref()
+                            .to_owned(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(manifest_path)
+}
+
 async fn reachable_repo_objects_from_manifest_with_concurrency(
     store: &Store,
     router: &StoreLayout,
@@ -989,6 +2060,7 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     let manifest = snapshot.manifest;
     let mut reachable = HashSet::new();
     extend_reachable_bulk_objects(store, router, &manifest, &mut reachable).await?;
+    extend_reachable_workflow_objects(store, router, &mut reachable).await?;
     reachable.insert(router.manifest_path().as_ref().to_string());
 
     for pack in &snapshot.journal.packs {
@@ -1008,26 +2080,25 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
 
     let storage_router =
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    let history = crab_metadata::manifest_store::list_manifest_history_with_concurrency(
+    crab_metadata::manifest_store::stream_manifest_history(
         store.as_storage(),
         &storage_router,
         concurrency,
     )
-    .await?;
-    let historical_reachable =
-        futures_util::stream::iter(history.into_iter().map(|entry| async move {
-            let mut keys = HashSet::new();
-            keys.insert(entry.path);
-            extend_reachable_bulk_objects(store, router, &entry.manifest, &mut keys).await?;
-            extend_reachable_pack_objects(store, router, &entry.manifest, &mut keys).await?;
-            Ok::<_, CrabError>(keys)
-        }))
-        .buffer_unordered(concurrency.max(1))
-        .try_collect::<Vec<_>>()
-        .await?;
-    for keys in historical_reachable {
+    .map(|entry| async move {
+        let entry = entry.map_err(CrabError::from)?;
+        let mut keys = HashSet::new();
+        keys.insert(entry.path);
+        extend_reachable_bulk_objects(store, router, &entry.manifest, &mut keys).await?;
+        extend_reachable_pack_objects(store, router, &entry.manifest, &mut keys).await?;
+        Ok::<_, CrabError>(keys)
+    })
+    .buffer_unordered(concurrency.max(1))
+    .try_for_each(|keys| {
         reachable.extend(keys);
-    }
+        futures_util::future::ready(Ok::<_, CrabError>(()))
+    })
+    .await?;
 
     let shard_snapshot = ShardListSnapshot {
         generation: manifest.generation,
@@ -1073,6 +2144,198 @@ fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut Hash
     reachable.insert(router.pack_metadata_path(pack_id).as_ref().to_owned());
 }
 
+/// Add live workflow refs and their immutable objects to the repo mark set.
+/// Workflow refs are the authoritative roots for stage-cache and experiment
+/// namespaces; malformed roots abort the mark phase instead of allowing a
+/// partially parsed live set to authorize deletion.
+async fn extend_reachable_workflow_objects(
+    store: &Store,
+    router: &StoreLayout,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    let mut stage_manifests_seen = HashSet::new();
+    let stage_ref_prefix = router.repo_path("refs/crab/stages/");
+    for object in store.list_prefix(&stage_ref_prefix).await? {
+        let key = object.location.as_ref().to_owned();
+        let Some(hash) = key
+            .strip_prefix(&format!("{}/", router.repo_prefix()))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        reachable.insert(key);
+        let Some(hash) = hash.strip_prefix("refs/crab/stages/") else {
+            continue;
+        };
+        let hash = hash.trim_end_matches('/');
+        let parsed = crab_xet::hash::MerkleHash::from_hex(hash).map_err(|error| {
+            CrabError::CorruptObject {
+                path: object.location.to_string(),
+                reason: format!("invalid workflow stage ref hash: {error}"),
+            }
+        })?;
+        let manifest_path = protect_workflow_stage_manifest(
+            store,
+            router,
+            &parsed,
+            reachable,
+            &mut stage_manifests_seen,
+        )
+        .await?;
+        let (ref_body, _) = store.get_with_etag(&object.location).await?;
+        let ref_target =
+            std::str::from_utf8(&ref_body).map_err(|error| CrabError::CorruptObject {
+                path: object.location.to_string(),
+                reason: format!("workflow stage ref is not UTF-8: {error}"),
+            })?;
+        if ref_target != manifest_path {
+            return Err(CrabError::CorruptObject {
+                path: object.location.to_string(),
+                reason: format!(
+                    "workflow stage ref points to {ref_target:?}, expected {manifest_path:?}"
+                ),
+            });
+        }
+    }
+
+    let mut experiment_ids = HashSet::new();
+    for ref_prefix in ["refs/crab/exp/", "refs/crab/exp-meta/"] {
+        let prefix = router.repo_path(ref_prefix);
+        for object in store.list_prefix(&prefix).await? {
+            let key = object.location.as_ref().to_owned();
+            reachable.insert(key.clone());
+            let Some(raw_id) = key.strip_prefix(&format!("{}/", router.repo_prefix())) else {
+                continue;
+            };
+            let Some(raw_id) = raw_id.strip_prefix(ref_prefix) else {
+                continue;
+            };
+            let raw_id = raw_id.trim_end_matches('/');
+            let id = raw_id
+                .parse::<crab_workflow::ExperimentId>()
+                .map_err(|error| CrabError::CorruptObject {
+                    path: object.location.to_string(),
+                    reason: format!("invalid workflow experiment ref: {error}"),
+                })?;
+            experiment_ids.insert(id.to_string());
+        }
+    }
+
+    for id in experiment_ids {
+        let prefix = router.repo_path(&format!("workflow/exp/{id}/"));
+        for object in store.list_prefix(&prefix).await? {
+            let key = object.location.as_ref().to_owned();
+            reachable.insert(key.clone());
+            if !key.ends_with("/stage-refs.json") {
+                continue;
+            }
+            let (body, _) = store.get_with_etag(&object.location).await?;
+            let stages: Vec<String> =
+                serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
+                    path: key.clone(),
+                    reason: format!("invalid experiment stage refs: {error}"),
+                })?;
+            for stage in stages {
+                let parsed = crab_xet::hash::MerkleHash::from_hex(&stage).map_err(|error| {
+                    CrabError::CorruptObject {
+                        path: key.clone(),
+                        reason: format!("invalid experiment stage hash: {error}"),
+                    }
+                })?;
+                protect_workflow_stage_manifest(
+                    store,
+                    router,
+                    &parsed,
+                    reachable,
+                    &mut stage_manifests_seen,
+                )
+                .await?;
+                reachable.insert(
+                    router
+                        .repo_path(&format!("refs/crab/stages/{}", parsed.hex()))
+                        .as_ref()
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn protect_workflow_stage_manifest(
+    store: &Store,
+    router: &StoreLayout,
+    stage_hash: &crab_xet::hash::MerkleHash,
+    reachable: &mut HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> Result<String> {
+    let hex = stage_hash.hex();
+    let manifest_path = router
+        .repo_path(&format!("workflow/stages/{}/{}.json", &hex[..2], hex))
+        .as_ref()
+        .to_owned();
+    reachable.insert(manifest_path.clone());
+    if !seen.insert(manifest_path.clone()) {
+        return Ok(manifest_path);
+    }
+
+    let (body, _) = store
+        .get_with_etag(&ObjectPath::from(manifest_path.as_str()))
+        .await?;
+    let entry: crab_workflow::StageCacheEntry =
+        serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!("invalid workflow stage manifest JSON: {error}"),
+        })?;
+    crab_workflow::validate_stage_cache_entry(&entry).map_err(|error| {
+        CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!("invalid workflow stage manifest: {error}"),
+        }
+    })?;
+    if entry.stage_hash.as_hex() != hex {
+        return Err(CrabError::CorruptObject {
+            path: manifest_path.clone(),
+            reason: format!(
+                "workflow stage manifest hash is {}, expected {hex}",
+                entry.stage_hash.as_hex()
+            ),
+        });
+    }
+
+    for output in crab_workflow::cached_artifacts(&entry) {
+        match output.kind {
+            crab_workflow::OutKind::File | crab_workflow::OutKind::Stdout => {
+                reachable.insert(
+                    router
+                        .repo_path(&format!("workflow/xorbs/{}.xorb", output.file_hash))
+                        .as_ref()
+                        .to_owned(),
+                );
+            }
+            crab_workflow::OutKind::Directory => {
+                let Some(tree) = output.tree_manifest.as_ref() else {
+                    return Err(CrabError::CorruptObject {
+                        path: manifest_path.clone(),
+                        reason: format!("directory output {:?} has no tree manifest", output.path),
+                    });
+                };
+                for entry in tree {
+                    if entry.kind == "file" {
+                        reachable.insert(
+                            router
+                                .repo_path(&format!("workflow/xorbs/{}.xorb", entry.hash))
+                                .as_ref()
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(manifest_path)
+}
+
 /// Run remote repo-scope GC against the primary/write store.
 pub async fn run_repo_remote_gc(
     args: &GcArgs,
@@ -1092,28 +2355,25 @@ pub async fn run_repo_remote_gc(
             cancel,
             grace_period,
             jsonl_stream,
+            None,
         )
         .await;
     }
 
-    let operation_cancel = cancel.child_token();
-    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
-        store,
-        router.repo_prefix(),
-        &operation_cancel,
-    )
-    .await?;
+    let sweep =
+        crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?;
     let operation = run_repo_remote_gc_under_maintenance(
         args,
         store,
         router,
         coordinator_protected_keys,
-        &operation_cancel,
+        cancel,
         grace_period,
         jsonl_stream,
+        Some(&sweep),
     )
     .await;
-    let release = lease.release().await;
+    let release = sweep.release().await;
     match (operation, release) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
@@ -1128,7 +2388,24 @@ async fn run_repo_remote_gc_under_maintenance(
     cancel: &CancellationToken,
     grace_period: Duration,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    sweep_lease: Option<&crate::maintenance::GcSweepLease>,
 ) -> Result<GcOutcome> {
+    let deleter = StoreObjectDeleter::new(store.clone());
+    if !args.dry_run {
+        return run_repo_gc_durable_streaming_roots(
+            args,
+            store,
+            router,
+            coordinator_protected_keys,
+            cancel,
+            grace_period,
+            &deleter,
+            jsonl_stream,
+            sweep_lease,
+        )
+        .await;
+    }
+
     let reachability_started = Instant::now();
     let reachability =
         reachable_repo_objects_from_manifest_with_concurrency(store, router, args.list_concurrency)
@@ -1145,9 +2422,9 @@ async fn run_repo_remote_gc_under_maintenance(
         wall_seconds = reachability_started.elapsed().as_secs_f64(),
         "repo GC reachability scan complete"
     );
+
     let (listed_objects, list_outcome) =
         list_repo_gc_candidates_with_concurrency(store, router, args.list_concurrency).await?;
-    let deleter = StoreObjectDeleter::new(store.clone());
 
     run_gc(
         args,
@@ -1906,8 +3183,8 @@ mod tests {
         let (candidates, outcome) = list_repo_gc_candidates(&store, &router).await.unwrap();
         let keys: HashSet<_> = candidates.into_iter().map(|object| object.key).collect();
 
-        assert_eq!(outcome.requests, 5);
-        assert_eq!(outcome.parallelism, 5);
+        assert_eq!(outcome.requests, REPO_GC_PREFIXES.len() as u64);
+        assert_eq!(outcome.parallelism, REPO_GC_PREFIXES.len());
         assert!(keys.contains("org/repo/packs/pack-old.pack"));
         assert!(keys.contains("org/repo/metadata/pack/indexes/old.json"));
         assert!(keys.contains("org/repo/manifests/pack-list-old"));
@@ -2325,11 +3602,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_lease_blocks_destructive_repo_gc_but_not_preview() {
+    async fn gc_writer_fence_blocks_destructive_repo_gc_but_not_preview() {
         use crate::metadata::manifest::{Manifest, create_manifest};
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
-        use crab_coordination::PushLock;
+        use crab_coordination::{DEFAULT_GC_FENCE_TTL, GcFenceLease};
         use object_store::memory::InMemory;
         use std::sync::Arc;
 
@@ -2343,13 +3620,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let lock = PushLock::acquire_internal_default(
-            store.inner(),
-            router.repo_prefix(),
-            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
-        )
-        .await
-        .unwrap();
+        let writer =
+            GcFenceLease::acquire_writer(store.inner(), router.repo_prefix(), DEFAULT_GC_FENCE_TTL)
+                .await
+                .unwrap();
 
         let error = run_repo_remote_gc(
             &GcArgs::default(),
@@ -2379,7 +3653,7 @@ mod tests {
         .await
         .unwrap();
         assert!(preview.dry_run);
-        lock.release().await.unwrap();
+        writer.release().await.unwrap();
     }
 
     // --- GC compaction (Task 8.5) ---

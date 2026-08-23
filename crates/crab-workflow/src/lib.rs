@@ -59,10 +59,12 @@ pub mod yaml;
 pub use artifact::{
     ARTIFACT_REF_PREFIX, ARTIFACT_REMOTE_SCHEMA_VERSION, ARTIFACT_SCHEMA_VERSION, ArtifactCatalog,
     ArtifactDecl, ArtifactManifest, ArtifactPromotion, ArtifactRegistry, RemoteArtifactEnvelope,
-    RemoteArtifactPayloadKind, RemoteArtifactTreeEntry, artifact_stage_ref, artifact_version_ref,
-    download_remote_artifact, manifest_from_path, promote_remote_artifact, publish_remote_artifact,
-    reachable_remote_artifact_objects, read_remote_artifact, read_remote_artifact_registry,
-    remote_artifact_manifest_path, snapshot_payload, validate_artifact_name, verify_payload,
+    RemoteArtifactPayloadKind, RemoteArtifactReachabilityVisitor, RemoteArtifactTreeEntry,
+    artifact_stage_ref, artifact_version_ref, download_remote_artifact, manifest_from_path,
+    promote_remote_artifact, publish_remote_artifact, reachable_remote_artifact_objects,
+    read_remote_artifact, read_remote_artifact_registry, remote_artifact_manifest_path,
+    snapshot_payload, validate_artifact_name, verify_payload,
+    visit_reachable_remote_artifact_objects,
 };
 pub use checkpoint::{
     CHECKPOINT_PROTOCOL_VERSION, CHECKPOINT_SCHEMA_VERSION, CheckpointLineage, CheckpointRecord,

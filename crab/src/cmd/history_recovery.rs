@@ -403,6 +403,7 @@ async fn prune_history(
     let operation_cancel = cancel.child_token();
     let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
         store,
+        router.global_prefix(),
         router.repo_prefix(),
         &operation_cancel,
     )
@@ -444,6 +445,7 @@ async fn restore_history(
     let operation_cancel = cancel.child_token();
     let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
         store,
+        router.global_prefix(),
         router.repo_prefix(),
         &operation_cancel,
     )

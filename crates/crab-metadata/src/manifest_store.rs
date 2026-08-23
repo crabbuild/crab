@@ -197,6 +197,32 @@ pub async fn list_manifest_history_with_concurrency(
     Ok(entries)
 }
 
+/// Streams validated historical manifests without retaining the complete
+/// history listing or body set in memory. Consumers that need deterministic
+/// ordering must impose it on their durable mark/output stream; GC only needs
+/// each immutable root exactly once.
+pub fn stream_manifest_history<'a>(
+    store: &'a Store,
+    router: &'a StoreLayout<Store>,
+    concurrency: usize,
+) -> impl futures_util::Stream<Item = Result<ManifestHistoryEntry>> + 'a {
+    let prefix = router.manifest_history_prefix();
+    let error_prefix = prefix.as_ref().to_owned();
+    store
+        .inner()
+        .list(Some(&prefix))
+        .map(move |item| {
+            let error_prefix = error_prefix.clone();
+            async move {
+                let object = item.map_err(|error| MetadataError::Storage {
+                    source: crab_storage::map_object_store_error(error, &error_prefix),
+                })?;
+                read_history_entry(store, router, &object.location).await
+            }
+        })
+        .buffered(concurrency.max(1))
+}
+
 /// Select one historical generation, rejecting absent or ambiguous matches.
 pub async fn select_manifest_history(
     store: &Store,
@@ -413,6 +439,31 @@ pub async fn read_bulk_shard_list(
         .map(|entries| entries.into_iter().map(|entry| entry.shard_hash).collect())
 }
 
+/// Visit shard-list records one at a time, keeping at most one metadata
+/// segment decoded in memory. This is the production path for bucket GC root
+/// discovery; callers that need a complete vector should use
+/// [`read_bulk_shard_list`] explicitly.
+pub async fn visit_bulk_shard_list<F, Fut, E>(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    hash: &str,
+    visit: F,
+) -> std::result::Result<(), E>
+where
+    F: FnMut(ShardSegmentEntry) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    E: From<MetadataError>,
+{
+    segmented_store::visit_records::<ShardSegmentEntry, _, _, E>(
+        store,
+        router,
+        SegmentKind::Shard,
+        hash,
+        visit,
+    )
+    .await
+}
+
 /// Read the segmented pack-index object and parse it into pack records.
 pub async fn read_bulk_pack_list(
     store: &Store,
@@ -426,6 +477,29 @@ pub async fn read_bulk_pack_list(
         validate_pack_manifest_entry(pack)?;
     }
     Ok(packs)
+}
+
+/// Visit pack-list records one at a time without retaining the complete
+/// pack inventory. The bounded segment reader validates each record before
+/// handing it to the caller.
+pub async fn visit_bulk_pack_list<V, E>(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    hash: &str,
+    visitor: &mut V,
+) -> std::result::Result<(), E>
+where
+    V: segmented_store::AsyncRecordVisitor<PackManifestEntry, E>,
+    E: From<MetadataError>,
+{
+    segmented_store::visit_records_async::<PackManifestEntry, _, E>(
+        store,
+        router,
+        SegmentKind::Pack,
+        hash,
+        visitor,
+    )
+    .await
 }
 
 /// Read a shard segment index by hash.

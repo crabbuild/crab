@@ -1164,6 +1164,7 @@ impl From<crab_workflow::WorkflowError> for CrabError {
             }
             crab_workflow::WorkflowError::Storage(source) => Self::Storage(source),
             crab_workflow::WorkflowError::StorageDomain(source) => Self::from(source),
+            crab_workflow::WorkflowError::GcFence(source) => Self::from(source),
             crab_workflow::WorkflowError::Internal(message) => Self::Internal(message),
             crab_workflow::WorkflowError::ExperimentIdInvalid { raw, reason } => {
                 Self::WorkflowExperimentIdInvalid { raw, reason }
@@ -1917,6 +1918,22 @@ impl From<crab_coordination::error::CoordinationError> for CrabError {
                     path,
                     reason: source.to_string(),
                 }
+            }
+            crab_coordination::error::CoordinationError::GcFenceHeld { domain, holder, .. } => {
+                Self::PushLockHeld {
+                    ref_name: format!("gc-fence/{domain}"),
+                    holder,
+                    expires_at_unix: None,
+                }
+            }
+            crab_coordination::error::CoordinationError::GcFenceLost { domain, holder } => {
+                Self::Configuration {
+                    key: domain,
+                    origin: format!("GC fence lease lost for holder {holder}"),
+                }
+            }
+            crab_coordination::error::CoordinationError::GcFenceMalformed { path, reason } => {
+                Self::CorruptObject { path, reason }
             }
         }
     }

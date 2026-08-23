@@ -25,6 +25,9 @@ Garbage collection operates on the remote store, not the local cache. Use
 | `--dry-run` | `false` | List unreachable objects without deleting anything |
 | `--force` | `false` | Bypass the grace period — delete all unreachable objects immediately |
 | `--yes` | `false` | Skip interactive confirmation when `--force` is used |
+| `--grace-period <duration>` | configured value (24h by default) | Override the minimum age, such as `1h` or `7d` |
+| `--resume <run-id>` | — | Resume an interrupted destructive run |
+| `--scope <repo\|bucket>` | `repo` | Select repository-local or bucket-global GC |
 | `--list-profile <profile>` | configured value | Override bucket listing with `adaptive`, `cost`, or `latency` |
 
 Bucket administrators can rebuild the shared GC root registry with
@@ -43,11 +46,26 @@ calls or `latency` to prefer parallel wall time. The logged `list_requests`
 value counts logical streams; provider pagination and retries can issue
 additional API requests.
 
+Destructive bucket runs persist candidate batches and partitioned reachability
+marks under the run journal. Mark membership is loaded one hash partition at a
+time, and an interrupted planning phase is replayed from its original snapshot
+before any delete is allowed. Referenced shard closures are authoritative: a
+missing or corrupt closure fails closed instead of downloading an unverified
+shard body. File-index reconciliation is committed before the run advances to
+object deletion and is retried idempotently after a crash.
+
+Destructive repository runs use the same durable plan, but walk current,
+historical, journal, workflow, and pack roots directly into key-partitioned
+marks. Pack-list segments and delete outcomes are consumed in bounded batches;
+store-only deletion does not build a process-wide deleted-key list. Preview
+and repair commands intentionally retain their collection-oriented behavior.
+
 ## How It Works
 
 1. Takes a snapshot of all current git refs (branches, tags).
-2. Builds a set of all objects (xorbs, shards, and repo-scoped packs) reachable from
-   those refs.
+2. Streams all repository roots (and, for bucket scope, all registered
+   repositories' roots) into durable partitioned marks. Dry runs may build a
+   preview set for reporting.
 3. Lists all objects in the remote store under the repository prefix.
 4. Computes the set of unreachable objects (present in store but not reachable
    from any ref).
@@ -61,12 +79,15 @@ additional API requests.
 
 ### Grace Period
 
-By default, objects must be unreachable for at least one hour before they are
-eligible for deletion. This prevents race conditions where a concurrent push
-creates objects that haven't been linked to a ref yet.
+When `--grace-period` is omitted, Crab uses the resolved
+`gc_grace_period` config value (24 hours by default). This prevents race
+conditions where a concurrent push creates objects that have not yet been
+linked to a ref. Non-force runs also clamp the effective value to the one-hour
+minimum.
 
-The `--force` flag bypasses object-age checks. It does not bypass bucket
-ref-registry completeness, active-active coordinator proof, or reachability.
+The `--force` flag bypasses object-age checks after an explicit confirmation.
+It does not bypass writer/sweep fencing, bucket ref-registry completeness,
+active-active coordinator proof, closure coverage, or reachability.
 
 ### Object Categories
 
@@ -122,10 +143,11 @@ crab gc --force --yes
 - The grace period protects against deleting objects from concurrent pushes.
 - `--force` requires explicit confirmation (or `--yes`) to prevent accidents.
 - GC never deletes objects that are reachable from any ref.
-- Without `--force`, GC never deletes objects inside the one-hour minimum
-  grace period.
-- With `--force`, age protection is disabled, but reachability and bucket
-  registry/coordinator safety checks still apply.
+- Without `--force`, GC never deletes objects inside the configured grace
+  period (or the one-hour minimum, if the configured value is shorter).
+- With `--force`, age protection is disabled, but writer fencing,
+  reachability, closure coverage, and bucket registry/coordinator safety checks
+  still apply.
 
 ## Prerequisites
 
