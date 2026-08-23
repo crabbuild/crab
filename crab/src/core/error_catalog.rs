@@ -1039,7 +1039,7 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
             summary: "Xorb optimization profile target size out of range",
             causes: "\
   - `target_xorb_bytes` is outside the allowed range of 4 MiB to 2 GiB\n\
-  - A custom profile in `[restripe.profiles.<name>]` has an invalid value",
+  - A custom profile in `[optimize.xorbs.profiles.<name>]` has an invalid value",
             remediation: "\
   Set `target_xorb_bytes` to a value between 4194304 (4 MiB) and\n\
   2147483648 (2 GiB). Use one of the built-in profiles (`ml`,\n\
@@ -1507,9 +1507,9 @@ pub fn error_code(err: &CrabError) -> &'static str {
         CrabError::GcEarlyDeleteBlocked { .. } => "CRAB-E0320",
         CrabError::ObjectLockedRetention { .. } => "CRAB-E0321",
         CrabError::GcPartialFailure { .. } => "CRAB-E0322",
-        CrabError::RestripeProfileOutOfRange { .. } => "CRAB-E0330",
-        CrabError::RestripeCorruptSource { .. } => "CRAB-E0331",
-        CrabError::RestripeAlreadyInProgress { .. } => "CRAB-E0332",
+        CrabError::OptimizeXorbsProfileOutOfRange { .. } => "CRAB-E0330",
+        CrabError::OptimizeXorbsCorruptSource { .. } => "CRAB-E0331",
+        CrabError::OptimizeXorbsAlreadyInProgress { .. } => "CRAB-E0332",
         CrabError::ConcurrentMaintenance { .. } => "CRAB-E0333",
         CrabError::CostPricingMissing { .. } => "CRAB-E0340",
         CrabError::CostInventoryReportStale { .. } => "CRAB-E0341",

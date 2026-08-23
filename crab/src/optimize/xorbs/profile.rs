@@ -1,4 +1,4 @@
-//! Restripe profile types and built-in profiles.
+//! Xorb optimization profile types and built-in profiles.
 //!
 //! A [`Profile`] describes how xorbs should be shaped: target size,
 //! maximum xorbs per file, grouping strategy, and compression. Three
@@ -14,7 +14,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::{CompressionConfig, ProfileOverride, RestripeConfig};
+use crate::core::config::{CompressionConfig, OptimizeXorbsConfig, ProfileOverride};
 use crate::core::error::{CrabError, Result};
 
 /// Minimum allowed `target_xorb_bytes`: 4 MiB.
@@ -76,7 +76,7 @@ impl GroupBy {
     }
 }
 
-/// A restripe profile describing the target xorb shape.
+/// An optimization profile describing the target xorb shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     /// Target xorb size in bytes. Must be in `[4 MiB, 2 GiB]`.
@@ -131,10 +131,10 @@ impl Profile {
     /// Look up a profile by name, applying config overrides.
     ///
     /// Resolution order:
-    /// 1. Check config overrides (`[restripe.profiles.<name>]`).
+    /// 1. Check config overrides (`[optimize.xorbs.profiles.<name>]`).
     /// 2. Fall back to built-in profiles.
     /// 3. Return `NotFound` if neither exists.
-    pub fn from_name(name: &str, cfg: &RestripeConfig) -> Result<Self> {
+    pub fn from_name(name: &str, cfg: &OptimizeXorbsConfig) -> Result<Self> {
         // Start with the built-in base (if any).
         let base = match name {
             "ml" => Some(Self::ml()),
@@ -157,7 +157,7 @@ impl Profile {
         match base {
             Some(profile) => Ok(profile),
             None => Err(CrabError::Configuration {
-                key: format!("restripe.profiles.{name}"),
+                key: format!("optimize.xorbs.profiles.{name}"),
                 origin: "profile lookup".to_string(),
             }),
         }
@@ -173,7 +173,7 @@ impl Profile {
         if self.target_xorb_bytes < MIN_TARGET_XORB_BYTES
             || self.target_xorb_bytes > MAX_TARGET_XORB_BYTES
         {
-            return Err(CrabError::RestripeProfileOutOfRange {
+            return Err(CrabError::OptimizeXorbsProfileOutOfRange {
                 name: name.to_string(),
                 bytes: self.target_xorb_bytes,
             });
@@ -186,16 +186,16 @@ impl Profile {
         serde_json::to_string(&ProfileJson::from(self)).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Restore a profile recorded in a restripe journal.
+    /// Restore a profile recorded in an xorb optimization journal.
     pub fn from_json(raw: &str) -> Result<Self> {
         let stored: ProfileJson =
             serde_json::from_str(raw).map_err(|error| CrabError::Configuration {
-                key: "restripe journal profile".to_string(),
+                key: "xorb optimization journal profile".to_string(),
                 origin: format!("invalid profile JSON: {error}"),
             })?;
         let group_by =
             GroupBy::from_str_value(&stored.group_by).ok_or_else(|| CrabError::Configuration {
-                key: "restripe journal profile.group_by".to_string(),
+                key: "xorb optimization journal profile.group_by".to_string(),
                 origin: format!("unknown grouping strategy: {}", stored.group_by),
             })?;
         let compression = parse_compression_str(&stored.compression, "journal")?;
@@ -219,7 +219,7 @@ pub fn is_reserved_name(name: &str) -> bool {
 pub fn validate_profile_name(name: &str) -> Result<()> {
     if !is_valid_profile_name(name) {
         return Err(CrabError::Configuration {
-            key: format!("restripe.profiles.{name}"),
+            key: format!("optimize.xorbs.profiles.{name}"),
             origin: "profile name must match [a-z][a-z0-9-]{{0,30}}".to_string(),
         });
     }
@@ -237,7 +237,7 @@ fn apply_override(profile: &mut Profile, over: &ProfileOverride, name: &str) -> 
     if let Some(ref group) = over.group_by {
         profile.group_by =
             GroupBy::from_str_value(group).ok_or_else(|| CrabError::Configuration {
-                key: format!("restripe.profiles.{name}.group_by"),
+                key: format!("optimize.xorbs.profiles.{name}.group_by"),
                 origin: format!("invalid group_by value: {group}"),
             })?;
     }
@@ -264,13 +264,13 @@ fn parse_compression_str(s: &str, profile_name: &str) -> Result<CompressionConfi
             });
             if let Some(level_str) = inner {
                 let level: i32 = level_str.parse().map_err(|_| CrabError::Configuration {
-                    key: format!("restripe.profiles.{profile_name}.compression"),
+                    key: format!("optimize.xorbs.profiles.{profile_name}.compression"),
                     origin: format!("invalid zstd level: {level_str}"),
                 })?;
                 return Ok(CompressionConfig::Zstd { level });
             }
             Err(CrabError::Configuration {
-                key: format!("restripe.profiles.{profile_name}.compression"),
+                key: format!("optimize.xorbs.profiles.{profile_name}.compression"),
                 origin: format!("unknown compression: {other}"),
             })
         }
@@ -405,14 +405,14 @@ mod tests {
 
     #[test]
     fn from_name_returns_builtin() {
-        let cfg = RestripeConfig::default();
+        let cfg = OptimizeXorbsConfig::default();
         let p = Profile::from_name("ml", &cfg).unwrap();
         assert_eq!(p, Profile::ml());
     }
 
     #[test]
     fn from_name_applies_override() {
-        let mut cfg = RestripeConfig::default();
+        let mut cfg = OptimizeXorbsConfig::default();
         cfg.profiles.insert(
             "ml".to_string(),
             ProfileOverride {
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn from_name_unknown_profile_errors() {
-        let cfg = RestripeConfig::default();
+        let cfg = OptimizeXorbsConfig::default();
         let err = Profile::from_name("nonexistent", &cfg).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }

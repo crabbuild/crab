@@ -109,7 +109,7 @@ restore_tier             = "standard"  # expedited | standard | bulk (S3); high 
 restore_duration_days    = 7           # how long restored copies stay readable
 restore_max_concurrency  = 16          # max parallel RestoreObject calls
 restore_timeout_secs     = 21600       # 6 hours; ArchiveRestoreTimeout [E0211] after this
-restripe_output_class    = "standard"  # class for newly written xorbs during `crab optimize xorbs`
+optimize_xorbs_output_class = "standard" # class for newly written xorbs during `crab optimize xorbs`
 ```
 
 Related hydrate setting:

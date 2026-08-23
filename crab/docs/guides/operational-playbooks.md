@@ -195,7 +195,7 @@ crab gc --force-early-delete --yes-really
 
 ```bash
 # Check if xorb optimization is running
-ls .crab/restripe/journal.db
+ls .crab/optimize/xorbs/journal.db
 
 # If the process crashed, the lock may be stale
 # Resume or abort the xorb optimization first, then run GC

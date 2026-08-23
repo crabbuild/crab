@@ -36,7 +36,7 @@ struct BudgetFile {
     hydrate_post_restore: OverheadBudget,
     doctor_cost_live: ScaleBudgetSecs,
     doctor_cost_report: ScaleBudgetSecs,
-    restripe_throughput: ThroughputBudget,
+    optimize_xorbs_throughput: ThroughputBudget,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,11 +137,11 @@ fn perf_doctor_cost_report() {
 
 #[test]
 #[ignore]
-fn perf_restripe_throughput() {
+fn perf_optimize_xorbs_throughput() {
     let b = load_budgets();
     eprintln!(
-        "[perf] restripe_throughput: fixture {} GiB, target >= push throughput — {}",
-        b.restripe_throughput.fixture_gib, b.restripe_throughput.description,
+        "[perf] optimize_xorbs_throughput: fixture {} GiB, target >= push throughput — {}",
+        b.optimize_xorbs_throughput.fixture_gib, b.optimize_xorbs_throughput.description,
     );
 }
 
@@ -158,7 +158,7 @@ fn budget_toml_parses() {
     assert!(b.hydrate_post_restore.max_overhead_percent > 0.0);
     assert!(b.doctor_cost_live.max_secs > 0);
     assert!(b.doctor_cost_report.max_secs > 0);
-    assert!(b.restripe_throughput.fixture_gib > 0);
+    assert!(b.optimize_xorbs_throughput.fixture_gib > 0);
 }
 
 // ---------------------------------------------------------------------------

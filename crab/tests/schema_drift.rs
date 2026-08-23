@@ -44,6 +44,7 @@ use crab::cmd::history_recovery::{
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
 use crab::cmd::optimize::OptimizePayload;
+use crab::cmd::optimize::xorbs::OptimizeXorbsEventPayload;
 use crab::cmd::prune::PruneSummary;
 use crab::cmd::push::{PushRefOutcome, PushSummaryPayload};
 use crab::cmd::recover::{RecoverApplyPayload, RecoverPlanPayload, RecoverStatusPayload};
@@ -51,7 +52,6 @@ use crab::cmd::release::{
     ReleaseCreatePayload, ReleaseExportPayload, ReleaseListPayload, ReleaseVerifyPayload,
 };
 use crab::cmd::repack::RepackSummary;
-use crab::cmd::restripe::OptimizeXorbsEventPayload;
 use crab::cmd::staging::StagingStatsPayload;
 use crab::cmd::stat::{StatClassesPayload, StatPayload, StatPushPlanPayload};
 use crab::cmd::status::{StatusEntry, StatusPayload};
@@ -60,8 +60,8 @@ use crab::cmd::track::{TrackPattern, TrackPayload};
 use crab::cmd::version::VersionPayload;
 use crab::cost::report::CostReport;
 use crab::import::{ExtensionBucket, ImportPlanSummary, ImportSummary};
+use crab::optimize::xorbs::planner::OptimizeXorbsEstimate;
 use crab::release::ReleaseManifest;
-use crab::restripe::planner::RestripeEstimate;
 
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas")
@@ -144,7 +144,10 @@ fn schemas_up_to_date() {
             "optimize.xorbs.event",
             schema_value::<OptimizeXorbsEventPayload>(),
         ),
-        ("optimize.xorbs.plan", schema_value::<RestripeEstimate>()),
+        (
+            "optimize.xorbs.plan",
+            schema_value::<OptimizeXorbsEstimate>(),
+        ),
         ("prune", schema_value::<PruneSummary>()),
         ("push", schema_value::<PushSummaryPayload>()),
         ("push.ref_outcome", schema_value::<PushRefOutcome>()),

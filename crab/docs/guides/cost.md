@@ -160,7 +160,7 @@ operator checklist:
 - active-active maintenance admission before any mutating apply step.
 - lifecycle tiering through `crab tier plan --apply --merge` when
   `[tier] enabled = true`.
-- xorb restriping is exposed as a planned step, but apply is currently
+- xorb optimization is exposed as a planned step, but apply is currently
   blocked until destination xorbs can be committed with their file-index and
   shard metadata atomically. Use `crab optimize xorbs --dry-run` for estimates.
 - local cache pruning through `crab prune`.
@@ -242,7 +242,7 @@ ones (requirement C1.6):
 | `.crab/tier/` | No |
 | `.crab/audit/` | Never |
 | `.crab/tombstones/` | No |
-| `.crab/restripe/` | No |
+| `.crab/optimize/xorbs/` | No |
 
 ## Access-Pattern Input
 

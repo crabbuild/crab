@@ -246,7 +246,7 @@ mod gc_class_aware_integration {
         );
 
         // Create journal — GC should be blocked
-        let journal_dir = tmp.path().join(".crab/restripe");
+        let journal_dir = tmp.path().join(".crab/optimize/xorbs");
         std::fs::create_dir_all(&journal_dir).expect("create dirs");
         std::fs::write(journal_dir.join("journal.db"), b"fake").expect("write journal");
 

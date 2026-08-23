@@ -24,15 +24,14 @@ profile from median file size:
 Custom profiles live in `.crab/config.toml`:
 
 ```toml
-[restripe.profiles.my-profile]
+[optimize.xorbs.profiles.my-profile]
 target_xorb_bytes = 134217728   # 128 MiB
 max_xorbs_per_file = 8
 group_by = "file"
 compression = "zstd:5"
 ```
 
-The config section still uses `[restripe.profiles]` because it stores
-the xorb rewrite engine profile configuration.
+Custom profiles live under the same command namespace as `crab optimize xorbs`.
 
 ## Usage
 

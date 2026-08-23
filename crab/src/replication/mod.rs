@@ -13535,9 +13535,9 @@ mod tests {
                 reason: "release publication creates repository release manifest objects and must write to the primary authority",
             },
             DirectStoreClassification {
-                call: "src/cmd/restripe.rs::try_build_store",
+                call: "src/cmd/optimize/xorbs.rs::try_build_store",
                 class: "primary-maintenance",
-                reason: "restripe reads and rewrites storage layout state and must not use a stale replica",
+                reason: "xorb optimization reads and rewrites storage layout state and must not use a stale replica",
             },
             DirectStoreClassification {
                 call: "src/cmd/workflow.rs::build_remote_store_for",

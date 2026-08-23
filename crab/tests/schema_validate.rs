@@ -32,6 +32,10 @@ use crab::cmd::fetch::FetchSummary;
 use crab::cmd::fsck::FsckSummary;
 use crab::cmd::gc::GcSummary;
 use crab::cmd::hydrate::HydrateSummaryPayload;
+use crab::cmd::optimize::xorbs::{
+    OptimizeXorbsControlEvent, OptimizeXorbsControlEventKind, OptimizeXorbsCounts,
+    OptimizeXorbsEventPayload, OptimizeXorbsSummary,
+};
 use crab::cmd::optimize::{
     OptimizePayload, OptimizeStep, OptimizeStepKind, OptimizeStepStatus, OptimizeSummary,
     OptimizeWorkflowMode,
@@ -39,17 +43,13 @@ use crab::cmd::optimize::{
 use crab::cmd::prune::PruneSummary;
 use crab::cmd::push::{PushRefOutcome, PushSummaryPayload};
 use crab::cmd::repack::RepackSummary;
-use crab::cmd::restripe::{
-    OptimizeXorbsControlEvent, OptimizeXorbsControlEventKind, OptimizeXorbsEventPayload,
-    RestripeCounts, RestripeSummary,
-};
 use crab::cmd::stat::{ClassEntry, StatClassesPayload};
 use crab::cmd::tier::{TierEventPayload, TierPlanPayload, TierRulePayload, TierTransitionPayload};
 use crab::cmd::track::{TrackPattern, TrackPayload};
 use crab::cmd::version::VersionPayload;
 use crab::cost::recommendations::{Recommendation, RiskLevel};
 use crab::cost::report::{ClassCost, ColdObjectSummary, CostReport, InventorySummary};
-use crab::restripe::planner::RestripeEstimate;
+use crab::optimize::xorbs::planner::OptimizeXorbsEstimate;
 use crab::tier::classes::StorageClass;
 
 fn schemas_dir() -> PathBuf {
@@ -506,7 +506,7 @@ fn validate_hydrate() {
 fn validate_optimize_xorbs_plan() {
     validate(
         "optimize.xorbs.plan",
-        &RestripeEstimate {
+        &OptimizeXorbsEstimate {
             profile: "ml".into(),
             source_count: 4,
             source_bytes: 1024,
@@ -523,10 +523,10 @@ fn validate_optimize_xorbs_plan() {
 #[test]
 fn validate_optimize_xorbs_event_variants() {
     let cases = [
-        serde_json::to_value(OptimizeXorbsEventPayload::Summary(RestripeSummary {
+        serde_json::to_value(OptimizeXorbsEventPayload::Summary(OptimizeXorbsSummary {
             run_id: "01976b86-12b7-7000-8000-000000000001".into(),
             profile: "ml".into(),
-            counts: RestripeCounts {
+            counts: OptimizeXorbsCounts {
                 done: 2,
                 corrupt: 0,
                 skipped: 1,

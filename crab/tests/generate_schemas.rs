@@ -49,6 +49,7 @@ use crab::cmd::history_recovery::{
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
 use crab::cmd::optimize::OptimizePayload;
+use crab::cmd::optimize::xorbs::OptimizeXorbsEventPayload;
 use crab::cmd::prune::PruneSummary;
 use crab::cmd::push::{PushRefOutcome, PushSummaryPayload};
 use crab::cmd::recover::{RecoverApplyPayload, RecoverPlanPayload, RecoverStatusPayload};
@@ -60,7 +61,6 @@ use crab::cmd::replica::{
     CertificationPayload, EvidenceVerifyPayload, LiveControlPlaneEvidencePayload,
     LiveSmokeEvidencePayload,
 };
-use crab::cmd::restripe::OptimizeXorbsEventPayload;
 use crab::cmd::staging::StagingStatsPayload;
 use crab::cmd::stat::{StatClassesPayload, StatPayload, StatPushPlanPayload};
 use crab::cmd::status::{StatusEntry, StatusPayload};
@@ -69,8 +69,8 @@ use crab::cmd::track::{TrackPattern, TrackPayload};
 use crab::cmd::version::VersionPayload;
 use crab::cost::report::CostReport;
 use crab::import::{ExtensionBucket, ImportPlanSummary, ImportSummary};
+use crab::optimize::xorbs::planner::OptimizeXorbsEstimate;
 use crab::release::ReleaseManifest;
-use crab::restripe::planner::RestripeEstimate;
 
 /// Directory where generated schemas are written, relative to the crate root.
 fn schemas_dir() -> PathBuf {
@@ -166,7 +166,7 @@ fn regenerate_schemas() {
         "optimize.xorbs.event",
         &schema_for!(OptimizeXorbsEventPayload),
     );
-    write_schema("optimize.xorbs.plan", &schema_for!(RestripeEstimate));
+    write_schema("optimize.xorbs.plan", &schema_for!(OptimizeXorbsEstimate));
     write_schema("prune", &schema_for!(PruneSummary));
     write_schema("push", &schema_for!(PushSummaryPayload));
     write_schema("push.ref_outcome", &schema_for!(PushRefOutcome));

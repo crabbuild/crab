@@ -208,7 +208,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         | CrabError::JournalDiskFull { .. }
         | CrabError::WorkflowExperimentIdInvalid { .. }
         | CrabError::WorkflowExperimentMetadataSchemaNewer { .. } => RetryClass::Fatal,
-        // Storage economy errors: tier, restripe, cost. These are
+        // Storage economy errors: tier, xorb optimization, cost. These are
         // user-facing operational errors — retrying won't help.
         CrabError::TierLifecycleConflict { .. }
         | CrabError::TierApplyUnauthorized { .. }
@@ -218,9 +218,9 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         | CrabError::RestoreTierUnsupported { .. }
         | CrabError::GcEarlyDeleteBlocked { .. }
         | CrabError::ObjectLockedRetention { .. }
-        | CrabError::RestripeProfileOutOfRange { .. }
-        | CrabError::RestripeCorruptSource { .. }
-        | CrabError::RestripeAlreadyInProgress { .. }
+        | CrabError::OptimizeXorbsProfileOutOfRange { .. }
+        | CrabError::OptimizeXorbsCorruptSource { .. }
+        | CrabError::OptimizeXorbsAlreadyInProgress { .. }
         | CrabError::ConcurrentMaintenance { .. }
         | CrabError::CostPricingMissing { .. }
         | CrabError::CostInventoryReportStale { .. }

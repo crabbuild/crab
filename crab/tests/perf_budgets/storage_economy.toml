@@ -25,6 +25,6 @@ max_secs = 600
 objects = 100_000_000
 description = "doctor --cost via inventory-report, 100M objects"
 
-[restripe_throughput]
+[optimize_xorbs_throughput]
 fixture_gib = 10
-description = "restripe throughput >= push throughput on same host"
+description = "xorb optimization throughput >= push throughput on same host"

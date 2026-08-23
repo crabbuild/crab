@@ -1,4 +1,4 @@
-//! CLI entry point for `crab optimize xorbs` — xorb-level optimization
+//! CLI implementation for `crab optimize xorbs` — xorb-level optimization
 //! with named profiles, dry-run estimation, and crash-safe execution.
 //!
 //! This is **not** `cmd::repack` (git-pack consolidation). The existing
@@ -27,12 +27,12 @@ use tracing::info;
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
-use crate::restripe::executor::{self, ExecutorConfig};
-use crate::restripe::inference::{self, RepoStats};
-use crate::restripe::journal::RestripeJournal;
-use crate::restripe::planner::{self, CalibrationConfig, SourceXorbMeta};
-use crate::restripe::profile::Profile;
-use crate::restripe::reconcile;
+use crate::optimize::xorbs::executor::{self, ExecutorConfig};
+use crate::optimize::xorbs::inference::{self, RepoStats};
+use crate::optimize::xorbs::journal::OptimizeXorbsJournal;
+use crate::optimize::xorbs::planner::{self, CalibrationConfig, SourceXorbMeta};
+use crate::optimize::xorbs::profile::Profile;
+use crate::optimize::xorbs::reconcile;
 use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
@@ -48,7 +48,7 @@ const OPTIMIZE_XORBS_EVENT_SCHEMA: &str = "optimize.xorbs.event";
 ///
 /// Resolve the configured remote and build the store used by planning and
 /// execution. Remote operations fail closed because an empty source snapshot
-/// would make a restripe plan look successful without touching the bucket.
+/// would make an xorb optimization plan look successful without touching the bucket.
 async fn try_build_store(
     cfg: &Config,
     cancel: &CancellationToken,
@@ -74,7 +74,7 @@ async fn try_build_store(
 
 /// Arguments for `crab optimize xorbs`.
 #[derive(Debug, clap::Parser)]
-pub struct RestripeArgs {
+pub struct OptimizeXorbsArgs {
     /// Named xorb optimization profile: `ml`, `dataset`, `code`, or a custom name.
     /// When omitted, the profile is auto-inferred from repository statistics.
     #[arg(long)]
@@ -132,13 +132,13 @@ pub struct RestripeArgs {
 
 /// Final summary payload for `--json` / `--jsonl` output.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct RestripeSummary {
+pub struct OptimizeXorbsSummary {
     /// Run identifier.
     pub run_id: String,
     /// Profile used.
     pub profile: String,
     /// Counts by status.
-    pub counts: RestripeCounts,
+    pub counts: OptimizeXorbsCounts,
     /// Total bytes read.
     pub bytes_read: u64,
     /// Total bytes written.
@@ -151,7 +151,7 @@ pub struct RestripeSummary {
 
 /// Per-status counts in the summary.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct RestripeCounts {
+pub struct OptimizeXorbsCounts {
     pub done: u64,
     pub corrupt: u64,
     pub skipped: u64,
@@ -178,8 +178,8 @@ pub enum OptimizeXorbsControlEventKind {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum OptimizeXorbsEventPayload {
-    Plan(planner::RestripeEstimate),
-    Summary(RestripeSummary),
+    Plan(planner::OptimizeXorbsEstimate),
+    Summary(OptimizeXorbsSummary),
     Control(OptimizeXorbsControlEvent),
 }
 
@@ -188,11 +188,7 @@ pub enum OptimizeXorbsEventPayload {
 // ---------------------------------------------------------------------------
 
 /// Run the `crab optimize xorbs` command.
-pub async fn run_restripe(
-    args: &RestripeArgs,
-    cfg: &Config,
-    cancel: &CancellationToken,
-) -> Result<()> {
+pub async fn run(args: &OptimizeXorbsArgs, cfg: &Config, cancel: &CancellationToken) -> Result<()> {
     let output_mode = OutputMode::from_flags(args.json, args.jsonl);
 
     let journal_path = resolve_journal_path()?;
@@ -205,8 +201,8 @@ pub async fn run_restripe(
                 origin: "--drop-journal requires --yes-really for safety".to_string(),
             });
         }
-        if RestripeJournal::exists(&journal_path) {
-            RestripeJournal::drop_journal(&journal_path)?;
+        if OptimizeXorbsJournal::exists(&journal_path) {
+            OptimizeXorbsJournal::drop_journal(&journal_path)?;
             info!("xorb optimization journal dropped");
             if output_mode == OutputMode::Json {
                 emit_json(
@@ -280,17 +276,27 @@ fn resolve_journal_path() -> Result<PathBuf> {
             key: ".crab".to_string(),
             origin: "run this command inside a Crab Git repository".to_string(),
         })?;
-    Ok(crab_dir.join("restripe/journal.db"))
+    Ok(crab_dir.join("optimize/xorbs/journal.db"))
+}
+
+fn crab_dir_from_journal_path(journal_path: &Path) -> Result<&Path> {
+    journal_path
+        .ancestors()
+        .find(|path| path.file_name() == Some(std::ffi::OsStr::new(".crab")))
+        .ok_or_else(|| CrabError::Configuration {
+            key: "xorb optimization journal".to_string(),
+            origin: "journal path has no .crab ancestor".to_string(),
+        })
 }
 
 /// Resolve the profile from CLI args or auto-inference.
 fn resolve_profile(
-    args: &RestripeArgs,
+    args: &OptimizeXorbsArgs,
     cfg: &Config,
     sources: Option<&[SourceXorbMeta]>,
 ) -> Result<(String, Profile)> {
     if let Some(ref name) = args.profile {
-        let profile = Profile::from_name(name, &cfg.restripe)?;
+        let profile = Profile::from_name(name, &cfg.optimize.xorbs)?;
         profile.validate()?;
         Ok((name.clone(), profile))
     } else {
@@ -399,12 +405,12 @@ fn run_dry_run(
 
 /// Abort the current xorb optimization run.
 fn run_abort(journal_path: &Path, output_mode: OutputMode) -> Result<()> {
-    if !RestripeJournal::exists(journal_path) {
+    if !OptimizeXorbsJournal::exists(journal_path) {
         info!("no xorb optimization journal found — nothing to abort");
         return Ok(());
     }
 
-    let journal = RestripeJournal::open(journal_path)?;
+    let journal = OptimizeXorbsJournal::open(journal_path)?;
     if let Some(run) = journal.active_run()? {
         journal.abort_run(&run.run_id)?;
         info!(run_id = %run.run_id, "xorb optimization run aborted");
@@ -431,7 +437,7 @@ fn run_abort(journal_path: &Path, output_mode: OutputMode) -> Result<()> {
 
 /// Execute or resume a xorb optimization run.
 async fn run_apply(
-    args: &RestripeArgs,
+    args: &OptimizeXorbsArgs,
     journal_path: &Path,
     output_mode: OutputMode,
     cfg: &Config,
@@ -440,17 +446,11 @@ async fn run_apply(
     let start = Instant::now();
 
     // Check for concurrent GC.
-    let crab_dir = journal_path
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| CrabError::Configuration {
-            key: "restripe journal".to_string(),
-            origin: "journal path has no .crab parent".to_string(),
-        })?;
+    let crab_dir = crab_dir_from_journal_path(journal_path)?;
     executor::check_gc_not_running(crab_dir)?;
 
     // Open journal (acquires exclusive lock).
-    let journal = RestripeJournal::open(journal_path)?;
+    let journal = OptimizeXorbsJournal::open(journal_path)?;
 
     let recorded_run = if args.resume {
         Some(
@@ -484,7 +484,7 @@ async fn run_apply(
     let (run_id, profile_name, profile) = if let Some(run) = recorded_run {
         let recorded_profile = Profile::from_json(&run.profile)?;
         let profile_name = if let Some(name) = args.profile.as_deref() {
-            let requested = Profile::from_name(name, &cfg.restripe)?;
+            let requested = Profile::from_name(name, &cfg.optimize.xorbs)?;
             if requested != recorded_profile {
                 return Err(CrabError::Configuration {
                     key: "--profile".to_string(),
@@ -519,13 +519,13 @@ async fn run_apply(
         output_class: args
             .output_class
             .clone()
-            .unwrap_or_else(|| cfg.tier.restripe_output_class.clone()),
+            .unwrap_or_else(|| cfg.tier.optimize_xorbs_output_class.clone()),
         ..ExecutorConfig::default()
     };
 
-    // Audit: record restripe start.
+    // Record the optimization boundary before any source rewrite begins.
     audit_shim::record(
-        AuditOp::RestripeStart,
+        AuditOp::OptimizeXorbsStart,
         &serde_json::json!({
             "run_id": run_id,
             "profile": profile_name,
@@ -570,7 +570,7 @@ async fn run_apply(
     let counts = journal.count_by_status(&run_id)?;
     if counts.pending > 0 || counts.staged > 0 {
         return Err(CrabError::Configuration {
-            key: "restripe run pending sources".to_string(),
+            key: "xorb optimization run pending sources".to_string(),
             origin: format!(
                 "{} source(s) remain incomplete; rerun with --resume",
                 counts.pending + counts.staged
@@ -581,9 +581,9 @@ async fn run_apply(
     // Complete the run.
     journal.complete_run(&run_id)?;
 
-    // Audit: record restripe finalize.
+    // Finalization is auditable only after reconciliation succeeds.
     audit_shim::record(
-        AuditOp::RestripeFinalize,
+        AuditOp::OptimizeXorbsFinalize,
         &serde_json::json!({
             "run_id": run_id,
             "profile": profile_name,
@@ -597,10 +597,10 @@ async fn run_apply(
     let elapsed = start.elapsed();
 
     // Emit summary.
-    let summary = RestripeSummary {
+    let summary = OptimizeXorbsSummary {
         run_id: run_id.clone(),
         profile: profile_name.clone(),
-        counts: RestripeCounts {
+        counts: OptimizeXorbsCounts {
             done: counts.done,
             corrupt: counts.corrupt,
             skipped: counts.skipped,
@@ -660,5 +660,20 @@ fn profile_label(profile: &Profile) -> String {
         "code".to_string()
     } else {
         "recorded".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crab_dir_from_journal_path;
+
+    #[test]
+    fn nested_journal_path_resolves_crab_directory() {
+        let path = std::path::Path::new("/repo/.crab/optimize/xorbs/journal.db");
+
+        assert_eq!(
+            crab_dir_from_journal_path(path).unwrap(),
+            std::path::Path::new("/repo/.crab")
+        );
     }
 }

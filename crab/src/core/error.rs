@@ -807,13 +807,13 @@ pub enum CrabError {
     #[error(
         "xorb optimization profile '{name}' out of range [CRAB-E0330]: target_xorb_bytes={bytes} (allowed 4 MiB..2 GiB)"
     )]
-    RestripeProfileOutOfRange { name: String, bytes: u64 },
+    OptimizeXorbsProfileOutOfRange { name: String, bytes: u64 },
 
     #[error("xorb optimization source {xorb} is corrupt (hash mismatch) [CRAB-E0331]; skipping")]
-    RestripeCorruptSource { xorb: String },
+    OptimizeXorbsCorruptSource { xorb: String },
 
     #[error("xorb optimization already in progress [CRAB-E0332] (pid={pid}, started={started_at})")]
-    RestripeAlreadyInProgress { pid: u32, started_at: String },
+    OptimizeXorbsAlreadyInProgress { pid: u32, started_at: String },
 
     #[error("concurrent maintenance operation detected [CRAB-E0333]: {other} is running")]
     ConcurrentMaintenance { other: &'static str },
@@ -2076,7 +2076,7 @@ impl CrabError {
             | Self::FileChangedDuringStaging { .. }
             | Self::StageCacheMiss { .. }
             | Self::TierLifecycleConflict { .. }
-            | Self::RestripeAlreadyInProgress { .. }
+            | Self::OptimizeXorbsAlreadyInProgress { .. }
             | Self::ConcurrentMaintenance { .. } => 3,
 
             Self::CorruptObject { .. }
@@ -2101,7 +2101,7 @@ impl CrabError {
             | Self::CacheEntryCorrupt { .. }
             | Self::CacheEntryHashMismatch { .. }
             | Self::WorkflowExperimentMetadataSchemaNewer { .. }
-            | Self::RestripeCorruptSource { .. } => 4,
+            | Self::OptimizeXorbsCorruptSource { .. } => 4,
 
             Self::Io(_)
             | Self::Storage(_)
@@ -2234,7 +2234,7 @@ impl CrabError {
             | Self::GcEarlyDeleteBlocked { .. }
             | Self::ObjectLockedRetention { .. }
             | Self::GcPartialFailure { .. }
-            | Self::RestripeProfileOutOfRange { .. }
+            | Self::OptimizeXorbsProfileOutOfRange { .. }
             | Self::CostPricingMissing { .. }
             | Self::CostInventoryReportStale { .. }
             | Self::ManifestParse { .. }
@@ -2384,9 +2384,9 @@ impl CrabError {
             Self::GcEarlyDeleteBlocked { .. } => "CRAB-E0320",
             Self::ObjectLockedRetention { .. } => "CRAB-E0321",
             Self::GcPartialFailure { .. } => "CRAB-E0322",
-            Self::RestripeProfileOutOfRange { .. } => "CRAB-E0330",
-            Self::RestripeCorruptSource { .. } => "CRAB-E0331",
-            Self::RestripeAlreadyInProgress { .. } => "CRAB-E0332",
+            Self::OptimizeXorbsProfileOutOfRange { .. } => "CRAB-E0330",
+            Self::OptimizeXorbsCorruptSource { .. } => "CRAB-E0331",
+            Self::OptimizeXorbsAlreadyInProgress { .. } => "CRAB-E0332",
             Self::ConcurrentMaintenance { .. } => "CRAB-E0333",
             Self::CostPricingMissing { .. } => "CRAB-E0340",
             Self::CostInventoryReportStale { .. } => "CRAB-E0341",
@@ -2599,7 +2599,7 @@ impl CrabError {
             | Self::ExperimentCollision { .. }
             | Self::WorkflowLockTimeout { .. }
             | Self::TierLifecycleConflict { .. }
-            | Self::RestripeAlreadyInProgress { .. }
+            | Self::OptimizeXorbsAlreadyInProgress { .. }
             | Self::ConcurrentMaintenance { .. }
             | Self::PullConflict { .. } => ErrorCategory::Conflict,
 
@@ -2626,14 +2626,14 @@ impl CrabError {
             // Storage economy: config-shape problems.
             Self::TierProviderUnsupported { .. }
             | Self::RestoreTierUnsupported { .. }
-            | Self::RestripeProfileOutOfRange { .. }
+            | Self::OptimizeXorbsProfileOutOfRange { .. }
             | Self::CostPricingMissing { .. } => ErrorCategory::Config,
 
             // Storage economy: permanent user-facing errors.
             Self::TierApplyUnauthorized { .. } => ErrorCategory::Permanent,
 
             // Storage economy: integrity.
-            Self::RestripeCorruptSource { .. } => ErrorCategory::Integrity,
+            Self::OptimizeXorbsCorruptSource { .. } => ErrorCategory::Integrity,
 
             // Hydrate manifest: config-shape problem (bad manifest content).
             Self::ManifestParse { .. } | Self::PrefetchParse { .. } => ErrorCategory::Config,
@@ -2788,9 +2788,9 @@ impl CrabError {
             | Self::GcEarlyDeleteBlocked { .. }
             | Self::ObjectLockedRetention { .. }
             | Self::GcPartialFailure { .. }
-            | Self::RestripeProfileOutOfRange { .. }
-            | Self::RestripeCorruptSource { .. }
-            | Self::RestripeAlreadyInProgress { .. }
+            | Self::OptimizeXorbsProfileOutOfRange { .. }
+            | Self::OptimizeXorbsCorruptSource { .. }
+            | Self::OptimizeXorbsAlreadyInProgress { .. }
             | Self::ConcurrentMaintenance { .. }
             | Self::CostPricingMissing { .. }
             | Self::CostInventoryReportStale { .. }
@@ -3468,16 +3468,16 @@ impl CrabError {
                     "source": source.to_string(),
                 })
             }
-            Self::RestripeProfileOutOfRange { name, bytes } => {
+            Self::OptimizeXorbsProfileOutOfRange { name, bytes } => {
                 serde_json::json!({
                     "name": name,
                     "bytes": bytes,
                 })
             }
-            Self::RestripeCorruptSource { xorb } => {
+            Self::OptimizeXorbsCorruptSource { xorb } => {
                 serde_json::json!({ "xorb": xorb })
             }
-            Self::RestripeAlreadyInProgress { pid, started_at } => {
+            Self::OptimizeXorbsAlreadyInProgress { pid, started_at } => {
                 serde_json::json!({
                     "pid": pid,
                     "started_at": started_at,
@@ -4703,14 +4703,14 @@ mod tests {
                 reconciliation_failed: false,
                 source: Box::new(CrabError::Internal("delete failed".into())),
             },
-            CrabError::RestripeProfileOutOfRange {
+            CrabError::OptimizeXorbsProfileOutOfRange {
                 name: "custom".into(),
                 bytes: 3_221_225_472,
             },
-            CrabError::RestripeCorruptSource {
+            CrabError::OptimizeXorbsCorruptSource {
                 xorb: "def456".into(),
             },
-            CrabError::RestripeAlreadyInProgress {
+            CrabError::OptimizeXorbsAlreadyInProgress {
                 pid: 12345,
                 started_at: "2026-03-15T10:00:00Z".into(),
             },
@@ -4742,7 +4742,7 @@ mod tests {
                 class: "Glacier".into(),
                 estimated_eta: None,
             },
-            CrabError::RestripeProfileOutOfRange {
+            CrabError::OptimizeXorbsProfileOutOfRange {
                 name: "ml".into(),
                 bytes: 3_000_000_000,
             },

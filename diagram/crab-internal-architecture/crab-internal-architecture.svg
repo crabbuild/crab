@@ -196,7 +196,7 @@
   <rect x="325" y="505" width="160" height="70" rx="6" class="mask"/>
   <rect x="325" y="505" width="160" height="70" rx="6" class="box neutral"/>
   <text x="405" y="529" class="name" text-anchor="middle">Operations</text>
-  <text x="405" y="545" class="sub" text-anchor="middle">GC, fsck, tier, restripe</text>
+  <text x="405" y="545" class="sub" text-anchor="middle">GC, fsck, tier, optimize</text>
   <text x="405" y="559" class="sub" text-anchor="middle">locks + replication</text>
 
   <rect x="545" y="505" width="170" height="70" rx="6" class="mask"/>

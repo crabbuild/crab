@@ -282,7 +282,7 @@ pub fn total_estimated_penalty(objects: &[ObjectMeta], prices: &PriceInfo) -> St
 // ---------------------------------------------------------------------------
 
 /// Path to the xorb optimization journal relative to the repo root.
-const RESTRIPE_JOURNAL_PATH: &str = ".crab/restripe/journal.db";
+const OPTIMIZE_XORBS_JOURNAL_PATH: &str = ".crab/optimize/xorbs/journal.db";
 
 /// Check for concurrent maintenance operations that conflict with GC.
 ///
@@ -295,7 +295,7 @@ const RESTRIPE_JOURNAL_PATH: &str = ".crab/restripe/journal.db";
 /// Returns `ConcurrentMaintenance { other: "optimize xorbs" }` when the
 /// journal file exists.
 pub fn check_concurrent_maintenance(repo_root: &Path) -> Result<()> {
-    let journal_path = repo_root.join(RESTRIPE_JOURNAL_PATH);
+    let journal_path = repo_root.join(OPTIMIZE_XORBS_JOURNAL_PATH);
     if journal_path.exists() {
         warn!(
             journal = %journal_path.display(),
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn journal_present_blocks_gc() {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let journal_dir = tmp.path().join(".crab/restripe");
+        let journal_dir = tmp.path().join(".crab/optimize/xorbs");
         std::fs::create_dir_all(&journal_dir).expect("create dirs");
         std::fs::write(journal_dir.join("journal.db"), b"fake journal").expect("write journal");
 

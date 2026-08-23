@@ -1,14 +1,14 @@
-//! Property test for the restripe reconciliation invariant (design B5).
+//! Property test for the xorb optimization reconciliation invariant (design B5).
 //!
 //! The three-part invariant states that for any file-index entry `E`
-//! present at the end of a restripe:
+//! present at the end of xorb optimization:
 //!
 //! 1. If `E` existed at `run.started_at` AND its xorbs were in the
 //!    source set, `E` now points at dest xorbs.
 //! 2. If `E` was added during the run by a concurrent push, `E` is
 //!    byte-identical to what the push wrote.
 //! 3. Every chunk `E` references resolves to a live xorb (either a
-//!    newly-written dest xorb or a xorb out of restripe scope).
+//!    newly-written dest xorb or a xorb outside the optimization scope).
 //!
 //! This test models the invariant using an in-memory simulation of the
 //! file-index, source/dest xorb mapping, and concurrent push events.
@@ -28,12 +28,12 @@ struct FileEntry {
     content_hash: String,
 }
 
-/// A simulated restripe run.
+/// A simulated xorb optimization run.
 #[derive(Debug, Clone)]
 struct SimulatedRun {
     /// File-index snapshot at run start.
     pre_run_entries: Vec<FileEntry>,
-    /// Source xorbs selected for restripe.
+    /// Source xorbs selected for optimization.
     source_xorbs: BTreeSet<String>,
     /// Mapping from source xorb → destination xorbs.
     src_to_dest: HashMap<String, Vec<String>>,
@@ -51,7 +51,7 @@ fn reconcile(run: &SimulatedRun) -> Vec<FileEntry> {
 
         for xorb in &entry.xorb_refs {
             if run.source_xorbs.contains(xorb) {
-                // This xorb was restriped — replace with dest xorbs.
+                // This xorb was optimized — replace it with destination xorbs.
                 if let Some(dests) = run.src_to_dest.get(xorb) {
                     new_refs.extend(dests.iter().cloned());
                 }
@@ -237,7 +237,7 @@ proptest! {
     /// The three-part reconciliation invariant holds for any combination
     /// of pre-run entries, source/dest mappings, and concurrent pushes.
     #[test]
-    fn prop_restripe_reconcile_invariant(run in simulated_run_strategy()) {
+    fn prop_optimize_xorbs_reconcile_invariant(run in simulated_run_strategy()) {
         let final_entries = reconcile(&run);
 
         // Invariant 1: pre-run entries with source xorbs point at dest xorbs.

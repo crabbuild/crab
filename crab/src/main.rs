@@ -1145,7 +1145,7 @@ enum OptimizeCmd {
     /// Apply the combined cost optimization workflow.
     Apply(crab::cmd::optimize::OptimizeApplyArgs),
     /// Rewrite content-addressed xorbs for the selected size/grouping profile.
-    Xorbs(crab::cmd::restripe::RestripeArgs),
+    Xorbs(crab::cmd::optimize::xorbs::OptimizeXorbsArgs),
     /// Consolidate remote Git pack files.
     Packs {
         /// Report pack statistics without modifying the remote.
@@ -5285,7 +5285,7 @@ async fn run_optimize_command(
             );
 
             let config = Config::resolve_local()?;
-            crab::cmd::restripe::run_restripe(&args, &config, cancel).await?;
+            crab::cmd::optimize::xorbs::run(&args, &config, cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
         OptimizeCmd::Packs {
@@ -5554,7 +5554,7 @@ async fn run_optimize_apply(
                     let cmd = crab::cmd::optimize::tier_apply_command_args();
                     crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
                 }
-                crab::cmd::optimize::OptimizeStepKind::XorbRestripe => {
+                crab::cmd::optimize::OptimizeStepKind::OptimizeXorbs => {
                     let cmd = crab::cmd::optimize::xorb_apply_command_args(&args);
                     crab::cmd::optimize::run_child_step(step, mode, &cmd, cancel).await
                 }
@@ -6785,7 +6785,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_restripe_is_removed() {
+    fn legacy_xorb_rewrite_command_is_removed() {
         parse_cli_on_large_stack(|| {
             assert!(Cli::try_parse_from(["crab", "restripe", "--dry-run"]).is_err());
         });

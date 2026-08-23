@@ -163,8 +163,8 @@ const DEFAULT_TIER_RESTORE_MAX_CONCURRENCY: u32 = 16;
 /// Default restore timeout: 6 hours.
 const DEFAULT_TIER_RESTORE_TIMEOUT_SECS: u64 = 21600;
 
-/// Default output storage class for restripe destinations.
-const DEFAULT_TIER_RESTRIPE_OUTPUT_CLASS: &str = "standard";
+/// Default output storage class for xorb optimization destinations.
+const DEFAULT_TIER_OPTIMIZE_XORBS_OUTPUT_CLASS: &str = "standard";
 
 /// Lifecycle tiering configuration from the `[tier]` TOML section.
 ///
@@ -190,8 +190,8 @@ pub struct TierConfig {
     pub restore_max_concurrency: u32,
     /// Restore timeout in seconds.
     pub restore_timeout_secs: u64,
-    /// Output storage class for restripe destinations.
-    pub restripe_output_class: String,
+    /// Output storage class for xorb optimization destinations.
+    pub optimize_xorbs_output_class: String,
 }
 
 impl Default for TierConfig {
@@ -205,7 +205,7 @@ impl Default for TierConfig {
             restore_duration_days: DEFAULT_TIER_RESTORE_DURATION_DAYS,
             restore_max_concurrency: DEFAULT_TIER_RESTORE_MAX_CONCURRENCY,
             restore_timeout_secs: DEFAULT_TIER_RESTORE_TIMEOUT_SECS,
-            restripe_output_class: DEFAULT_TIER_RESTRIPE_OUTPUT_CLASS.to_string(),
+            optimize_xorbs_output_class: DEFAULT_TIER_OPTIMIZE_XORBS_OUTPUT_CLASS.to_string(),
         }
     }
 }
@@ -242,10 +242,10 @@ impl TierConfig {
         if let Some(v) = env_parse::<u64>("CRAB_TIER_RESTORE_TIMEOUT_SECS") {
             self.restore_timeout_secs = v;
         }
-        if let Ok(raw) = std::env::var("CRAB_TIER_RESTRIPE_OUTPUT_CLASS") {
+        if let Ok(raw) = std::env::var("CRAB_TIER_OPTIMIZE_XORBS_OUTPUT_CLASS") {
             let trimmed = raw.trim().to_ascii_lowercase();
             if !trimmed.is_empty() {
-                self.restripe_output_class = trimmed;
+                self.optimize_xorbs_output_class = trimmed;
             }
         }
     }
@@ -351,10 +351,10 @@ impl CostConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Restripe configuration
+// Optimize configuration
 // ---------------------------------------------------------------------------
 
-/// A single restripe profile override from `[restripe.profiles.<name>]`.
+/// A single xorb profile override from `[optimize.xorbs.profiles.<name>]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverride {
@@ -368,11 +368,18 @@ pub struct ProfileOverride {
     pub compression: Option<String>,
 }
 
-/// Restripe configuration from the `[restripe]` TOML section.
+/// Xorb optimization configuration from the `[optimize.xorbs]` TOML section.
 #[derive(Debug, Clone, Default)]
-pub struct RestripeConfig {
+pub struct OptimizeXorbsConfig {
     /// Named profile overrides keyed by profile name.
     pub profiles: std::collections::HashMap<String, ProfileOverride>,
+}
+
+/// Optimization configuration from the `[optimize]` TOML section.
+#[derive(Debug, Clone, Default)]
+pub struct OptimizeConfig {
+    /// Xorb optimization settings.
+    pub xorbs: OptimizeXorbsConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,9 +1080,9 @@ pub struct Config {
     /// Cost optimizer configuration from the `[cost]` section.
     pub cost: CostConfig,
 
-    // -- Restripe settings --
-    /// Restripe profile configuration from the `[restripe]` section.
-    pub restripe: RestripeConfig,
+    // -- Optimize settings --
+    /// Optimization configuration from the `[optimize]` section.
+    pub optimize: OptimizeConfig,
 
     // -- GC settings (structured) --
     /// GC class-aware configuration from the `[gc]` section.
@@ -1275,7 +1282,7 @@ impl Default for Config {
             hydrate: HydrateConfig::default(),
             tier: TierConfig::default(),
             cost: CostConfig::default(),
-            restripe: RestripeConfig::default(),
+            optimize: OptimizeConfig::default(),
             gc: GcConfig::default(),
             metadb: MetaDbTomlConfig::default(),
             staging: StagingConfig::default(),
@@ -1440,7 +1447,7 @@ pub struct ConfigOverlay {
     pub hydra: Option<HydraOverlay>,
     pub tier: Option<TierOverlay>,
     pub cost: Option<CostOverlay>,
-    pub restripe: Option<RestripeOverlay>,
+    pub optimize: Option<OptimizeOverlay>,
     pub gc: Option<GcOverlay>,
     pub metadb: Option<MetaDbTomlConfig>,
 }
@@ -1515,7 +1522,7 @@ pub struct TierOverlay {
     pub restore_duration_days: Option<u32>,
     pub restore_max_concurrency: Option<u32>,
     pub restore_timeout_secs: Option<u64>,
-    pub restripe_output_class: Option<String>,
+    pub optimize_xorbs_output_class: Option<String>,
 }
 
 /// Partial cost configuration overlay.
@@ -1532,10 +1539,17 @@ pub struct CostOverlay {
     pub report_max_staleness_hours: Option<u32>,
 }
 
-/// Partial restripe configuration overlay.
+/// Partial optimization configuration overlay.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RestripeOverlay {
+pub struct OptimizeOverlay {
+    pub xorbs: Option<OptimizeXorbsOverlay>,
+}
+
+/// Partial xorb optimization configuration overlay.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimizeXorbsOverlay {
     pub profiles: Option<std::collections::HashMap<String, ProfileOverride>>,
 }
 
@@ -2134,8 +2148,8 @@ impl Config {
         if let Some(cost) = overlay.cost {
             self.apply_cost_overlay(cost);
         }
-        if let Some(restripe) = overlay.restripe {
-            self.apply_restripe_overlay(restripe);
+        if let Some(optimize) = overlay.optimize {
+            self.apply_optimize_overlay(optimize);
         }
         if let Some(gc) = overlay.gc {
             self.apply_gc_overlay(gc);
@@ -2562,8 +2576,8 @@ impl Config {
         if let Some(v) = overlay.restore_timeout_secs {
             self.tier.restore_timeout_secs = v;
         }
-        if let Some(v) = overlay.restripe_output_class {
-            self.tier.restripe_output_class = v;
+        if let Some(v) = overlay.optimize_xorbs_output_class {
+            self.tier.optimize_xorbs_output_class = v;
         }
     }
 
@@ -2594,9 +2608,15 @@ impl Config {
         }
     }
 
-    fn apply_restripe_overlay(&mut self, overlay: RestripeOverlay) {
+    fn apply_optimize_overlay(&mut self, overlay: OptimizeOverlay) {
+        if let Some(xorbs) = overlay.xorbs {
+            self.apply_optimize_xorbs_overlay(xorbs);
+        }
+    }
+
+    fn apply_optimize_xorbs_overlay(&mut self, overlay: OptimizeXorbsOverlay) {
         if let Some(profiles) = overlay.profiles {
-            self.restripe.profiles = profiles;
+            self.optimize.xorbs.profiles = profiles;
         }
     }
 
@@ -4192,7 +4212,7 @@ session_duration_secs = 7200
         assert_eq!(cfg.restore_duration_days, 7);
         assert_eq!(cfg.restore_max_concurrency, 16);
         assert_eq!(cfg.restore_timeout_secs, 21600);
-        assert_eq!(cfg.restripe_output_class, "standard");
+        assert_eq!(cfg.optimize_xorbs_output_class, "standard");
     }
 
     #[test]
@@ -4218,7 +4238,7 @@ restore_tier = "expedited"
 restore_duration_days = 14
 restore_max_concurrency = 32
 restore_timeout_secs = 43200
-restripe_output_class = "standard-ia"
+optimize_xorbs_output_class = "standard-ia"
 "#,
         )
         .unwrap();
@@ -4233,7 +4253,7 @@ restripe_output_class = "standard-ia"
         assert_eq!(cfg.tier.restore_duration_days, 14);
         assert_eq!(cfg.tier.restore_max_concurrency, 32);
         assert_eq!(cfg.tier.restore_timeout_secs, 43200);
-        assert_eq!(cfg.tier.restripe_output_class, "standard-ia");
+        assert_eq!(cfg.tier.optimize_xorbs_output_class, "standard-ia");
     }
 
     #[test]
@@ -4323,51 +4343,71 @@ report_max_staleness_hours = 24
         assert!((cfg.cost.sample_ratio - 1.0).abs() < f64::EPSILON);
     }
 
-    // --- Restripe config ---
+    // --- Optimize xorb config ---
 
     #[test]
-    fn restripe_config_defaults() {
-        let cfg = RestripeConfig::default();
+    fn optimize_xorbs_config_defaults() {
+        let cfg = OptimizeXorbsConfig::default();
         assert!(cfg.profiles.is_empty());
     }
 
     #[test]
-    fn config_default_embeds_restripe_defaults() {
+    fn config_default_embeds_optimize_xorbs_defaults() {
         let cfg = Config::default();
-        assert!(cfg.restripe.profiles.is_empty());
+        assert!(cfg.optimize.xorbs.profiles.is_empty());
     }
 
     #[test]
-    fn overlay_restripe_section_parses_profiles() {
+    fn overlay_optimize_xorbs_section_parses_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
         std::fs::write(
             &p,
-            r#"[restripe.profiles.ml]
+            r#"[optimize.xorbs.profiles.ml]
 target_xorb_bytes = 268435456
 max_xorbs_per_file = 4
 group_by = "file"
 compression = "zstd:3"
 
-[restripe.profiles.code]
+[optimize.xorbs.profiles.code]
 target_xorb_bytes = 16777216
 "#,
         )
         .unwrap();
 
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
-            .expect("should parse restripe profiles");
-        assert_eq!(cfg.restripe.profiles.len(), 2);
+            .expect("should parse optimize_xorbs profiles");
+        assert_eq!(cfg.optimize.xorbs.profiles.len(), 2);
 
-        let ml = cfg.restripe.profiles.get("ml").expect("ml profile");
+        let ml = cfg.optimize.xorbs.profiles.get("ml").expect("ml profile");
         assert_eq!(ml.target_xorb_bytes, Some(268_435_456));
         assert_eq!(ml.max_xorbs_per_file, Some(4));
         assert_eq!(ml.group_by.as_deref(), Some("file"));
         assert_eq!(ml.compression.as_deref(), Some("zstd:3"));
 
-        let code = cfg.restripe.profiles.get("code").expect("code profile");
+        let code = cfg
+            .optimize
+            .xorbs
+            .profiles
+            .get("code")
+            .expect("code profile");
         assert_eq!(code.target_xorb_bytes, Some(16_777_216));
         assert!(code.max_xorbs_per_file.is_none());
+    }
+
+    #[test]
+    fn legacy_xorb_profile_section_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[restripe.profiles.custom]\ntarget_xorb_bytes = 134217728\n",
+        )
+        .unwrap();
+
+        let error = Config::resolve_local_from(Some(path), PathBuf::from("/nonexistent"))
+            .expect_err("legacy xorb profile section must be rejected");
+        assert!(error.to_string().contains("restripe"));
     }
 
     // --- GC config ---
@@ -4469,7 +4509,7 @@ target_xorb_bytes = 16777216
         "CRAB_TIER_RESTORE_DURATION_DAYS",
         "CRAB_TIER_RESTORE_MAX_CONCURRENCY",
         "CRAB_TIER_RESTORE_TIMEOUT_SECS",
-        "CRAB_TIER_RESTRIPE_OUTPUT_CLASS",
+        "CRAB_TIER_OPTIMIZE_XORBS_OUTPUT_CLASS",
         "CRAB_COST_INVENTORY_SOURCE",
         "CRAB_COST_LIST_CONCURRENCY",
         "CRAB_COST_SAMPLE_RATIO",
@@ -4509,7 +4549,7 @@ target_xorb_bytes = 16777216
             std::env::set_var("CRAB_TIER_RESTORE_DURATION_DAYS", "14");
             std::env::set_var("CRAB_TIER_RESTORE_MAX_CONCURRENCY", "32");
             std::env::set_var("CRAB_TIER_RESTORE_TIMEOUT_SECS", "43200");
-            std::env::set_var("CRAB_TIER_RESTRIPE_OUTPUT_CLASS", "standard-ia");
+            std::env::set_var("CRAB_TIER_OPTIMIZE_XORBS_OUTPUT_CLASS", "standard-ia");
         }
 
         let mut cfg = TierConfig::default();
@@ -4523,7 +4563,7 @@ target_xorb_bytes = 16777216
         assert_eq!(cfg.restore_duration_days, 14);
         assert_eq!(cfg.restore_max_concurrency, 32);
         assert_eq!(cfg.restore_timeout_secs, 43200);
-        assert_eq!(cfg.restripe_output_class, "standard-ia");
+        assert_eq!(cfg.optimize_xorbs_output_class, "standard-ia");
 
         clear_storage_economy_env();
     }
