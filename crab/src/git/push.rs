@@ -30149,7 +30149,8 @@ mod tests {
         // The visibility proof is built from the shared test repository's
         // object database, so the candidate tip must be a real reachable
         // commit rather than a placeholder object ID.
-        let new_sha = TEST_GIT_REPO.commit_sha.as_str();
+        let git_dir = crate::test::git_repo::TEST_GIT_REPO.git_dir.clone();
+        let new_sha = crate::test::git_repo::TEST_GIT_REPO.commit_sha.as_str();
 
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs.insert("refs/heads/main".into(), old_sha.into());
@@ -30159,6 +30160,7 @@ mod tests {
         let config = PushConfig {
             active_active_replication: Some(active_active_replication()),
             active_active_coordinator: Some(ActiveActiveWriteCoordinator::new(coordinator)),
+            git_dir: Some(git_dir),
             ..PushConfig::default()
         };
         let spec = PushSpec {
