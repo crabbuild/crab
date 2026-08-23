@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import { MailIcon } from "lucide-react"
 
 import { MarketingLayout } from "@/components/marketing-layout"
@@ -7,17 +6,14 @@ import { Reveal } from "@/components/marketing/reveal"
 import { CTASection } from "@/components/marketing/cta-section"
 import { IntegrationGrid } from "@/components/integrations/integration-grid"
 import { integrations } from "@/lib/integrations"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
-  title: "Integrations — Crab",
+export const metadata = createPageMetadata({
+  title: "Integrations",
   description:
     "Explore tools and platforms that integrate with Crab — cloud providers, CI/CD, ML frameworks, and more.",
-  openGraph: {
-    title: "Integrations — Crab",
-    description:
-      "Explore tools and platforms that integrate with Crab — cloud providers, CI/CD, ML frameworks, and more.",
-  },
-}
+  path: "/integrations",
+})
 
 export default function IntegrationsPage() {
   return (

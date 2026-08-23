@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import Link from "next/link"
 import { Suspense } from "react"
 import {
@@ -30,17 +29,14 @@ import {
 } from "@/lib/blog"
 import { getBlogPosts } from "@/lib/blog-posts"
 import { cn } from "@/lib/utils"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
-  title: "Blog — Crab",
+export const metadata = createPageMetadata({
+  title: "Blog",
   description:
     "Technical guides, diagrams, and architecture walkthroughs for learning Crab progressively.",
-  openGraph: {
-    title: "Blog — Crab",
-    description:
-      "Technical guides, diagrams, and architecture walkthroughs for learning Crab progressively.",
-  },
-}
+  path: "/blog",
+})
 
 const CATEGORIES: BlogPostMeta["category"][] = [
   "Product",

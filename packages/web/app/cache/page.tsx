@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   HardDrive,
   Database,
@@ -35,17 +34,14 @@ import { TypingCode } from "@/components/marketing/typing-code"
 import { Counter } from "@/components/marketing/counter"
 import { CacheHierarchySvg } from "@/app/diagrams/cache-hierarchy-svg"
 import { CacheServiceArchitectureSvg } from "@/app/diagrams/cache-service-architecture-svg"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Crab Cache — Cut Cloud Storage Bills",
   description:
     "Reduce object storage egress costs by serving repeated fetches from a shared cache. One clone populates the cache — every subsequent clone, fetch, and hydrate avoids hitting S3/GCS/Azure.",
-  openGraph: {
-    title: "Crab Cache — Cut Cloud Storage Bills",
-    description:
-      "Reduce object storage egress costs by serving repeated fetches from a shared cache. One clone populates the cache — every subsequent clone, fetch, and hydrate avoids hitting S3/GCS/Azure.",
-  },
-}
+  path: "/cache",
+})
 
 const cacheFeatures = [
   {

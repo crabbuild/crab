@@ -30,6 +30,7 @@ import {
 } from "@/lib/blog"
 import { blogSource } from "@/lib/blog-source"
 import { getBlogPost, getBlogPosts } from "@/lib/blog-posts"
+import { createPageMetadata } from "@/lib/metadata"
 import { cn } from "@/lib/utils"
 import { getMDXComponents } from "@/mdx-components"
 
@@ -64,15 +65,21 @@ export async function generateMetadata({
   if (!page) return {}
 
   const { title, description } = page.data
+  const post = getBlogPost(slug)
 
-  return {
+  return createPageMetadata({
     title: title ? `${title} — Crab Blog` : "Crab Blog",
-    description,
-    openGraph: {
-      title: title ?? undefined,
-      description: description ?? undefined,
-    },
-  }
+    description: description ?? "Technical guides from the Crab team.",
+    path: `/blog/${slug}`,
+    absoluteTitle: true,
+    article: post
+      ? {
+          publishedTime: new Date(post.date).toISOString(),
+          authors: [post.author.name],
+          tags: post.tags,
+        }
+      : undefined,
+  })
 }
 
 export default async function BlogPostPage({

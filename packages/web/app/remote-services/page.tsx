@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import {
   Cloud,
   Globe,
@@ -22,17 +21,14 @@ import { StepFlow } from "@/components/marketing/step-flow"
 import { CTASection } from "@/components/marketing/cta-section"
 import { Reveal } from "@/components/marketing/reveal"
 import { RemoteHelperFlowSvg } from "@/app/diagrams/remote-helper-flow-svg"
+import { createPageMetadata } from "@/lib/metadata"
 
-export const metadata: Metadata = {
+export const metadata = createPageMetadata({
   title: "Remote Services",
   description:
     "Crab's remote helper protocol connects Git to cloud object storage. Push and pull repositories to S3, GCS, or Azure with zero infrastructure.",
-  openGraph: {
-    title: "Remote Services — Crab",
-    description:
-      "Crab's remote helper protocol connects Git to cloud object storage. Push and pull repositories to S3, GCS, or Azure with zero infrastructure.",
-  },
-}
+  path: "/remote-services",
+})
 
 const providerFeatures = [
   {

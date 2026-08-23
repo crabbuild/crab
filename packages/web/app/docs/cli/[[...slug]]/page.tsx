@@ -3,6 +3,7 @@ import { DocsPage, DocsBody } from 'fumadocs-ui/page';
 import { getMDXComponents } from '@/mdx-components';
 import { notFound, permanentRedirect } from 'next/navigation';
 import type { Metadata } from 'next';
+import { createPageMetadata } from '@/lib/metadata';
 
 export default async function CliDocPage({
   params,
@@ -42,8 +43,9 @@ export async function generateMetadata({
   const page = cliSource.getPage(slug);
   if (!page) return {};
 
-  return {
-    title: page.data.title,
-    description: page.data.description,
-  };
+  return createPageMetadata({
+    title: page.data.title ?? 'Crab CLI Documentation',
+    description: page.data.description ?? 'Crab CLI documentation.',
+    path: `/docs/cli/${page.slugs.join('/')}`,
+  });
 }
