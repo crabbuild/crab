@@ -107,7 +107,7 @@ Clean completes before Git writes the pointer into the index. At that moment, Cr
 
 The recipe records every chunk identity and its logical order. New chunk bytes remain in staging until a push flushes them into immutable xorbs. Known chunks can reference existing durable locations after canonical proof.
 
-This separation allows offline staging. A contributor can add and commit managed files without immediate object-store access when the required local state is available. Push becomes the network and durability boundary.
+Because staging owns the bytes before push, a contributor can add and commit managed files without immediate object-store access when the required local state is available. Push becomes the network and durability boundary.
 
 Offline preparation also creates responsibility. Deleting staging before first publication can remove the only recipe or new bytes behind a committed pointer. The committed Git blob remains, but the client can no longer prove its Crab closure.
 
@@ -206,7 +206,7 @@ The helper downloads the required pack data and imports it through Git's object 
 
 Remote-tracking refs update only after Git receives the requested object closure. Managed files remain pointer blobs at this stage. Fetch therefore proves history transport, while later smudge or hydration proves large-file reconstruction.
 
-This distinction explains a valid partial workflow: a code-review job can fetch and inspect a mixed commit without obtaining any xorb ranges. The repository history is present even though managed working-tree bytes remain deferred.
+A code-review job can therefore fetch and inspect a mixed commit without obtaining any xorb ranges. The repository history is present even though managed working-tree bytes remain deferred.
 
 ## Fetch and push cross both storage paths
 

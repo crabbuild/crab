@@ -17,6 +17,10 @@ import {
 import { GitArchitecturePlayer } from '@/components/blog/git-architecture-player';
 import { BlogProcessPlayer } from '@/components/blog/blog-process-player';
 import {
+  ChunkReuseDiagram,
+  GarbageCollectionReachabilityDiagram,
+} from '@/components/blog/blog-detail-diagrams';
+import {
   CacheHierarchyDiagram,
   CrabMentalModelDiagram,
   DedupPipelineDiagram,
@@ -113,6 +117,8 @@ export function getMDXComponents(components?: MDXComponents) {
     TakeawayBox,
     GitArchitecturePlayer,
     BlogProcessPlayer,
+    ChunkReuseDiagram,
+    GarbageCollectionReachabilityDiagram,
     CacheHierarchyDiagram,
     CrabMentalModelDiagram,
     DedupPipelineDiagram,

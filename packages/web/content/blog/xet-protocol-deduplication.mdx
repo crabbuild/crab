@@ -29,13 +29,9 @@ Fixed-size chunking divides a file every _n_ bytes. Insert one byte near the beg
 
 Content-defined chunking chooses boundaries from the byte stream itself. A local edit disturbs nearby boundaries, but stable regions later in the file tend to produce the same chunks as before.
 
-```text
-version A: [header][weights 1][weights 2][optimizer][footer]
-version B: [header][weights 1][new weights][optimizer][footer]
-reused:     header    weights 1               optimizer  footer
-```
+<ChunkReuseDiagram />
 
-This behavior matters for model checkpoints, database snapshots, archives, and media containers where a new version may share large regions with an earlier one.
+Boundary recovery creates reuse in model checkpoints, database snapshots, archives, and media containers that preserve large byte regions between versions.
 
 ## Boundary stability is local, not absolute
 
@@ -51,7 +47,7 @@ Smaller target chunks can isolate local edits and increase potential reuse. They
 
 Content-defined chunking therefore uses bounded sizes around a target rather than accepting an arbitrary boundary at every matching byte pattern. Minimum and maximum limits prevent pathological tiny chunks or unbounded regions.
 
-The right target is a repository-level engineering choice because file producers and access patterns differ. A checkpoint workload and a media archive may preserve byte regions at different scales.
+Choose the target size from the repository's file producers and access patterns. A checkpoint workload and a media archive may preserve byte regions at different scales.
 
 Crab's file identity does not depend on the chosen storage packing. Changing chunking policy for new files can affect reuse with earlier chunks, so policy changes need measurement and a migration rationale.
 
@@ -69,7 +65,7 @@ Hash identity is independent of compression. Crab can compress chunks inside xor
 
 A chunk hash answers whether two byte sequences are equal. It does not answer where the bytes are stored. Shard and chunk-index metadata connect the identity to an xorb and byte range.
 
-This distinction allows storage layout to change without changing file identity. A repack operation can place a chunk in a better xorb while the file recipe continues to name the same content hash.
+Separating identity from location lets storage layout change without changing file identity. A repack operation can place a chunk in a better xorb while the file recipe continues to name the same content hash.
 
 It also protects deletion. Garbage collection cannot treat an unknown location as proof that a chunk is unused. The collector must walk retained recipes and shard terms before classifying an object as unreachable.
 
@@ -91,7 +87,7 @@ The cheapest useful evidence should answer first, but each layer has a different
 
 A local hit can remove repeated CPU or disk work. It cannot authorize publication when canonical storage has no corresponding location. Push resolves that distinction before it omits a chunk upload.
 
-Negative lookup results also deserve care. A stale local metadata view may not know about a chunk published by another writer. Crab can refresh canonical state before classifying the chunk as new, which trades a lookup for an avoided duplicate upload.
+Treat a negative lookup as provisional. A stale local metadata view may not know about a chunk published by another writer. Crab can refresh canonical state before classifying the chunk as new, which trades one lookup for an avoided duplicate upload.
 
 ## Estimate the byte outcome before compression
 
@@ -115,7 +111,7 @@ Crab uses bounded xorb targets and can optimize layout later. The file contract 
 
 Packing happens after chunk classification. Reused chunks keep their proven locations, while new chunks accumulate into one or more xorb builders. Each completed xorb receives an immutable content identity before upload.
 
-The xorb boundary is an operational unit, not a file boundary. One xorb can contain chunks from several files, and one file can reference chunks across several xorbs created at different times. This arrangement improves reuse but means object deletion must follow reachability metadata rather than path naming.
+The xorb boundary is an operational unit, not a file boundary. One xorb can contain chunks from several files, and one file can reference chunks across several xorbs created at different times. Cross-file packing improves reuse, so object deletion must follow reachability metadata rather than path naming.
 
 Compression and packing also affect retry size. A bounded xorb limits how much work a failed upload repeats. The target must remain large enough to avoid turning every chunk into its own object-store request.
 
@@ -143,7 +139,7 @@ Recipes also preserve zero-length and boundary conditions explicitly through the
 
 Because content determines identity, reuse is not limited to adjacent commits. It can occur across renamed paths, copied assets, branches, and file versions, provided the repository metadata can prove that the chunk is already stored.
 
-The practical savings depend on the data. Encrypted or recompressed files may change most bytes even when their logical content changes little. Append-heavy snapshots and iterative checkpoints can preserve physical overlap across versions.
+Savings follow the encoded bytes, not the logical edit. Encrypted or recompressed files may change most bytes even when their logical content changes little. Append-heavy snapshots and iterative checkpoints can preserve physical overlap across versions.
 
 Consider three representative overlap patterns:
 
