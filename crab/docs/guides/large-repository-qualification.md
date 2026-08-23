@@ -103,6 +103,12 @@ fields.
 Remote-operation telemetry is emitted once per bounded operation. It records
 only numeric counts and durations; per-object debug logging is disabled because
 its volume would distort both timing and storage evidence on large histories.
+Cold visibility repair downloads each unique committed pack once into the
+run-scoped temporary directory, verifies its manifest identity, and performs
+the reachability walk against that local ODB. The owner telemetry therefore
+reports pack-count storage requests and compressed pack bytes; the run volume
+must have room for the committed pack set plus one transient pack copy while
+Git builds its local index.
 
 The GitHub workflow runs only the report contract tests on ordinary pull
 requests. The Kubernetes download-free full job is restricted to a dedicated

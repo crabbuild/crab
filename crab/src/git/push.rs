@@ -6149,19 +6149,18 @@ async fn repair_git_visibility_if_current_with_options(
     if manifest.refs.is_empty() {
         return Ok(Some(GitVisibilityPublication::Published));
     }
+    let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
     if let Some(capacity) = git_visibility_capacity_exceeded_at_limit(
-        read_bulk_pack_list(store, router, &manifest.pack_index_hash)
-            .await?
-            .iter(),
+        packs.iter(),
         manifest.refs.len(),
         maximum_logical_objects,
     )? {
         return Ok(Some(GitVisibilityPublication::CompletePackOnly(capacity)));
     }
 
-    // Visibility traversal depends on exact locator ranges but owns a separate
-    // manifest-generation lock. Finish locator repair before taking that lock
-    // so no cross-resource lock order can deadlock another publisher.
+    // The generation owner publishes locator coverage before taking the
+    // visibility lock. Keep that ordering even though cold visibility repair
+    // now walks bulk-materialized packs instead of issuing per-object reads.
     if repair_locator {
         let _ = repair_git_object_locator_if_current(
             store,
@@ -6193,50 +6192,14 @@ async fn repair_git_visibility_if_current_with_options(
         let storage = store.as_storage().clone();
         let storage_router =
             crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-        let bucket = storage.bucket_identity();
-        let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
-        let identity =
-            crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
-                .map_err(remote_git_visibility_error)?;
-        let operation_limits = crab_remote_git::OperationLimits {
-            max_logical_objects: maximum_logical_objects,
-            max_storage_requests: maximum_logical_objects.saturating_mul(10),
-            max_fetched_bytes: 2 * 1024 * 1024 * 1024,
-            max_inflated_bytes: 2 * 1024 * 1024 * 1024,
-            ..crab_remote_git::OperationLimits::default()
-        };
-        let options = crab_remote_git::RepositoryOptions::new(
-            crab_remote_git::ObjectLimits::default(),
-            operation_limits,
-        )
-        .map_err(remote_git_visibility_error)?;
-        let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
-        let repository = crab_remote_git::RemoteGitRepository::open(
-            storage.clone(),
-            storage_router.clone(),
-            identity,
-            runtime,
-            options,
+        let index = build_git_visibility_index_from_remote_packs(
+            &storage,
+            &storage_router,
+            &current,
+            &packs,
             cancel,
         )
-        .await
-        .map_err(remote_git_visibility_error)?;
-        let index = match repository.rebuild_visibility_index(cancel).await {
-            Ok(index) => index,
-            Err(crab_remote_git::Error::LimitExceeded {
-                limit: "visibility proof objects",
-                actual,
-                maximum,
-            }) => {
-                return Ok(Some(GitVisibilityPublication::CompletePackOnly(
-                    GitVisibilityCapacity {
-                        observed: actual,
-                        maximum,
-                    },
-                )));
-            }
-            Err(error) => return Err(remote_git_visibility_error(error)),
-        };
+        .await?;
         let (before_upload, _) = read_manifest(store, router).await?;
         if before_upload.generation != required_generation
             || before_upload.pack_index_hash != current.pack_index_hash
@@ -6375,24 +6338,6 @@ async fn git_visibility_index_exists_for_manifest(
         }
         Ok(None) => Ok(false),
         Err(error) => Err(CrabError::from(error)),
-    }
-}
-
-fn remote_git_visibility_error(error: crab_remote_git::Error) -> CrabError {
-    match error {
-        crab_remote_git::Error::Storage(source) => CrabError::from(source),
-        crab_remote_git::Error::Metadata(source)
-        | crab_remote_git::Error::Manifest { source }
-        | crab_remote_git::Error::Inventory { source } => CrabError::from(source),
-        crab_remote_git::Error::Cancelled => CrabError::Cancelled,
-        crab_remote_git::Error::RepositoryIndexing { .. } => CrabError::CasConflict {
-            path: "Git visibility source generation".to_owned(),
-            expected_etag: None,
-        },
-        error => CrabError::CorruptObject {
-            path: "Git visibility source generation".to_owned(),
-            reason: error.to_string(),
-        },
     }
 }
 
@@ -16047,6 +15992,116 @@ pub(crate) async fn publish_git_visibility_index_from_storage_git_dir(
         .map_err(CrabError::from)
 }
 
+async fn build_git_visibility_index_from_remote_packs(
+    store: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+    manifest: &Manifest,
+    packs: &[PackManifestEntry],
+    cancel: &CancellationToken,
+) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+    let started = Instant::now();
+    let git_dir = tempfile::tempdir()?;
+    let pack_dir = git_dir.path().join("objects/pack");
+    tokio::fs::create_dir_all(&pack_dir).await?;
+    let mut materialized = HashSet::new();
+    let mut fetched_bytes = 0u64;
+
+    for pack in packs {
+        check_cancelled(cancel)?;
+        if !materialized.insert(pack.pack_id.clone()) {
+            continue;
+        }
+        let download = tempfile::Builder::new()
+            .prefix(".crab-visibility-pack-")
+            .suffix(".pack")
+            .tempfile_in(git_dir.path())?
+            .into_temp_path();
+        let downloaded = store
+            .download_to_path(&router.pack_path(&pack.pack_id), download.as_ref())
+            .await?;
+        if downloaded != pack.size {
+            return Err(CrabError::CorruptObject {
+                path: router.pack_path(&pack.pack_id).to_string(),
+                reason: format!(
+                    "visibility repair downloaded {downloaded} bytes, expected {}",
+                    pack.size
+                ),
+            });
+        }
+        fetched_bytes = fetched_bytes.saturating_add(downloaded);
+
+        let download_for_hash = download.to_path_buf();
+        let (actual_hash, actual_size) =
+            tokio::task::spawn_blocking(move || hash_file_blake3(&download_for_hash))
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("visibility pack hash join failed: {error}"))
+                })??;
+        if actual_size != pack.size
+            || blake3::Hash::from(actual_hash).to_hex().as_str() != pack.pack_id
+        {
+            return Err(CrabError::CorruptObject {
+                path: router.pack_path(&pack.pack_id).to_string(),
+                reason: "visibility repair pack content hash does not match the manifest"
+                    .to_owned(),
+            });
+        }
+
+        let installed = crate::git::pack::install_pack_file_locally(
+            &pack_dir,
+            download.as_ref(),
+            &pack.pack_id,
+            pack.size,
+            false,
+        )
+        .await?;
+        check_cancelled(cancel)?;
+        let index = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            pack.size,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        if index.object_count() != pack.object_count {
+            return Err(CrabError::CorruptObject {
+                path: installed.idx_path.display().to_string(),
+                reason: format!(
+                    "visibility repair index contains {} objects, expected {}",
+                    index.object_count(),
+                    pack.object_count
+                ),
+            });
+        }
+        if index.pack_checksum().to_string() != installed.git_sha1 {
+            return Err(CrabError::CorruptObject {
+                path: installed.idx_path.display().to_string(),
+                reason: "visibility repair index checksum disagrees with the pack trailer"
+                    .to_owned(),
+            });
+        }
+    }
+
+    check_cancelled(cancel)?;
+    let index = build_git_visibility_index_from_storage_git_dir(git_dir.path(), manifest).await?;
+    let logical_objects = index.refs.values().fold(0u64, |total, objects| {
+        total.saturating_add(objects.len() as u64)
+    });
+    info!(
+        target: "crab::git::visibility",
+        telemetry_event = "operation_summary",
+        operation = "visibility",
+        outcome = "Success",
+        duration_ms = started.elapsed().as_millis() as u64,
+        logical_objects,
+        storage_requests = materialized.len() as u64,
+        fetched_bytes,
+        inflated_bytes = 0u64,
+        response_bytes = 0u64,
+        "remote Git operation summary"
+    );
+    Ok(index)
+}
+
 /// Build the generation-bound Git visibility proof from a local ODB.
 pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     git_dir: &Path,
@@ -20260,7 +20315,7 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await,
-            "upload-pack admission should rebuild current visibility from locator-backed objects"
+            "upload-pack admission should rebuild current visibility from bulk-materialized packs"
         );
         let repaired = crab_metadata::git_visibility::read(
             store.as_storage(),

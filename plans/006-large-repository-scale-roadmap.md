@@ -147,6 +147,12 @@ advances locator coverage and repairs visibility at
 `crab/src/cmd/metadb.rs:620`. This is the correct owner boundary for additional
 repository maintenance; do not create a second daemon or scheduler.
 
+Cold visibility repair bulk-materializes each unique immutable pack into a
+temporary local ODB and uses the same bounded reachability walk as push,
+recovery, and repack. This avoids object-store request amplification during a
+full rebuild. Incremental pushes continue to publish visibility edits instead
+of repeating the cold path.
+
 ## Common commands
 
 Use a unique target directory for this roadmap's checkout. Never fall back to
