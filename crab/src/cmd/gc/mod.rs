@@ -117,6 +117,10 @@ pub struct ObjectMeta {
     pub size: u64,
     /// Last-modified timestamp from the object store.
     pub last_modified: SystemTime,
+    /// Provider ETag observed while planning the candidate.
+    pub e_tag: Option<String>,
+    /// Provider object version observed while planning the candidate.
+    pub version: Option<String>,
     /// Provider-native storage class, if known.
     ///
     /// Populated when `gc.class_aware = true`; `None` otherwise.
@@ -443,6 +447,19 @@ pub trait ObjectDeleter: Send + Sync {
         key: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
 
+    /// Revalidates a durable candidate before deleting it.
+    fn delete_candidate<'a>(
+        &'a self,
+        object: &'a ObjectMeta,
+        _policy: DeletePolicy,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CandidateDelete>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.delete(&object.key).await?;
+            Ok(CandidateDelete::Deleted)
+        })
+    }
+
     /// Perform manifest CAS to remove deleted entries.
     ///
     /// Called once after all deletes complete when [`Self::reconciliation_required`]
@@ -461,6 +478,19 @@ pub trait ObjectDeleter: Send + Sync {
     fn reconciliation_required(&self) -> bool {
         true
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DeletePolicy {
+    snapshot_at: SystemTime,
+    grace_period: Duration,
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateDelete {
+    Deleted,
+    Retained,
 }
 
 /// A no-op deleter for dry-run mode and tests.
@@ -518,6 +548,49 @@ impl ObjectDeleter for StoreObjectDeleter {
     fn reconciliation_required(&self) -> bool {
         false
     }
+
+    fn delete_candidate<'a>(
+        &'a self,
+        object: &'a ObjectMeta,
+        policy: DeletePolicy,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CandidateDelete>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let path = ObjectPath::from(object.key.clone());
+            let current = match self.store.head(&path).await {
+                Ok(current) => current,
+                Err(CrabError::NotFound { .. }) => return Ok(CandidateDelete::Deleted),
+                Err(error) => return Err(error),
+            };
+            let has_identity = object.e_tag.is_some() || object.version.is_some();
+            if !has_identity {
+                return Err(CrabError::Configuration {
+                    key: "gc.object_identity".to_owned(),
+                    origin: format!(
+                        "provider returned no stable ETag or version for {}",
+                        object.key
+                    ),
+                });
+            }
+            let identity_matches = object
+                .e_tag
+                .as_ref()
+                .is_none_or(|e_tag| current.e_tag.as_ref() == Some(e_tag))
+                && object
+                    .version
+                    .as_ref()
+                    .is_none_or(|version| current.version.as_ref() == Some(version));
+            let cutoff = policy.snapshot_at - policy.grace_period.max(MIN_GRACE_PERIOD);
+            if !identity_matches
+                || current.size != object.size
+                || (!policy.force && SystemTime::from(current.last_modified) >= cutoff)
+            {
+                return Ok(CandidateDelete::Retained);
+            }
+            self.store.delete(&path).await?;
+            Ok(CandidateDelete::Deleted)
+        })
+    }
 }
 
 /// List repo-local immutable objects that repo-scope remote GC may delete.
@@ -558,6 +631,8 @@ async fn list_repo_gc_candidates_with_concurrency(
             key: meta.location.to_string(),
             size: meta.size,
             last_modified: meta.last_modified.into(),
+            e_tag: meta.e_tag,
+            version: meta.version,
             storage_class: None,
             transitioned_at: None,
         })
@@ -604,6 +679,8 @@ async fn plan_repo_gc_candidates_streaming(
                 key: meta.location.to_string(),
                 size: meta.size,
                 last_modified: meta.last_modified.into(),
+                e_tag: meta.e_tag,
+                version: meta.version,
                 storage_class: None,
                 transitioned_at: None,
             };
@@ -722,6 +799,36 @@ async fn finish_repo_gc_from_marks(
         &mut journal,
     )
     .await?;
+    if sweep_lease.is_none() {
+        let seal = crate::maintenance::GcSweepLease::acquire_for_run(
+            store,
+            router.repo_prefix(),
+            &journal.state().run_id,
+            cancel,
+        )
+        .await?;
+        let roots = stream_repo_reachability(
+            store,
+            router,
+            args.list_concurrency,
+            coordinator_protected_keys,
+            cancel,
+            None,
+        )
+        .await;
+        let sealed = match roots {
+            Ok(roots) => {
+                journal.ensure_root_identity(&roots.root_identity)?;
+                journal.seal_fence_epoch(seal.epoch()).await
+            }
+            Err(error) => Err(error),
+        };
+        let release = seal.release().await;
+        match (sealed, release) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), _) | (Ok(()), Err(error)) => return Err(error),
+        }
+    }
     let mut outcome = GcOutcome {
         list_requests: list_outcome.requests,
         list_parallelism: list_outcome.parallelism,
@@ -730,6 +837,17 @@ async fn finish_repo_gc_from_marks(
         partial_enumeration: !list_outcome.failed_prefixes.is_empty(),
         ..GcOutcome::default()
     };
+    for key in journal.deleted_keys().await? {
+        match categorize_key(&key) {
+            ObjectCategory::Pack => outcome.packs_deleted = outcome.packs_deleted.saturating_add(1),
+            ObjectCategory::Xorb => outcome.xorbs_deleted = outcome.xorbs_deleted.saturating_add(1),
+            ObjectCategory::Shard => {
+                outcome.shards_deleted = outcome.shards_deleted.saturating_add(1)
+            }
+            ObjectCategory::Other => {}
+        }
+    }
+    outcome.bytes_reclaimed = journal.deleted_bytes_reclaimed().await?;
     check_cancelled(cancel)?;
     let delete_outcome = execute_journaled_deletes(
         &mut journal,
@@ -1021,6 +1139,7 @@ async fn run_gc_impl(
             deleter,
             &mut outcome,
             jsonl_stream,
+            None,
         )
         .await
     };
@@ -1108,10 +1227,32 @@ async fn execute_journaled_deletes(
         first_error: None,
     };
     loop {
+        let objects = match journal.next_batch().await {
+            Ok(Some(objects)) => objects,
+            Ok(None) => break,
+            Err(error) => {
+                aggregate.first_error = Some(error);
+                break;
+            }
+        };
         let lease = match sweep {
             Some((store, domain)) => {
-                match crate::maintenance::GcSweepLease::acquire(store, domain, cancel).await {
-                    Ok(lease) => Some(lease),
+                match crate::maintenance::GcSweepLease::acquire_for_run(
+                    store,
+                    domain,
+                    &journal.state().run_id,
+                    cancel,
+                )
+                .await
+                {
+                    Ok(lease) => {
+                        if let Err(error) = journal.ensure_next_fence_epoch(lease.epoch()) {
+                            let _ = lease.release().await;
+                            aggregate.first_error = Some(error);
+                            break;
+                        }
+                        Some(lease)
+                    }
                     Err(error) => {
                         aggregate.first_error = Some(error);
                         break;
@@ -1120,24 +1261,6 @@ async fn execute_journaled_deletes(
             }
             None => None,
         };
-        let objects = match journal.next_batch().await {
-            Ok(Some(objects)) => objects,
-            Ok(None) => {
-                if let Some(lease) = lease
-                    && let Err(error) = lease.release().await
-                {
-                    aggregate.first_error = Some(error);
-                }
-                break;
-            }
-            Err(error) => {
-                if let Some(lease) = lease {
-                    let _ = lease.release().await;
-                }
-                aggregate.first_error = Some(error);
-                break;
-            }
-        };
         let batch = execute_deletes(
             &objects,
             cancel,
@@ -1145,6 +1268,20 @@ async fn execute_journaled_deletes(
             deleter,
             outcome,
             jsonl_stream,
+            Some(DeletePolicy {
+                snapshot_at: match journal.snapshot_at() {
+                    Ok(snapshot_at) => snapshot_at,
+                    Err(error) => {
+                        aggregate.first_error = Some(error);
+                        if let Some(lease) = lease {
+                            let _ = lease.release().await;
+                        }
+                        break;
+                    }
+                },
+                grace_period: Duration::from_secs(journal.state().grace_secs),
+                force: journal.state().force,
+            }),
         )
         .await;
         aggregate.deleted_keys.extend(
@@ -1177,13 +1314,18 @@ async fn execute_journaled_deletes(
             }
             break;
         }
+        journal::crash_at("after-provider-delete");
         let bytes = batch
             .deleted_keys
             .iter()
             .filter_map(|key| objects.iter().find(|object| object.key == *key))
             .try_fold(0u64, |total, object| total.checked_add(object.size))
             .unwrap_or(u64::MAX);
-        if let Err(error) = journal.complete_batch(&batch.deleted_keys, bytes).await {
+        let fence_epoch = lease.as_ref().map(crate::maintenance::GcSweepLease::epoch);
+        if let Err(error) = journal
+            .complete_batch(&batch.deleted_keys, bytes, fence_epoch)
+            .await
+        {
             aggregate.first_error = Some(error);
             if let Some(lease) = lease {
                 let _ = lease.release().await;
@@ -1295,6 +1437,7 @@ async fn execute_deletes(
     deleter: &dyn ObjectDeleter,
     outcome: &mut GcOutcome,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    policy: Option<DeletePolicy>,
 ) -> DeleteOutcome {
     let mut deleted_keys = Vec::new();
     let mut deleted_count = 0u64;
@@ -1312,13 +1455,18 @@ async fn execute_deletes(
         let mut tasks: Vec<_> = Vec::with_capacity(chunk.len());
         for obj in chunk {
             let permit = Arc::clone(&semaphore).acquire_owned().await;
-            let key = obj.key.clone();
-            let size = obj.size;
+            let object = obj.clone();
             tasks.push(async move {
                 let _permit = permit;
                 let t_start = Instant::now();
-                let result = deleter.delete(&key).await;
-                (key, size, result, t_start.elapsed())
+                let result = match policy {
+                    Some(policy) => deleter.delete_candidate(&object, policy).await,
+                    None => deleter
+                        .delete(&object.key)
+                        .await
+                        .map(|()| CandidateDelete::Deleted),
+                };
+                (object.key, object.size, result, t_start.elapsed())
             });
         }
 
@@ -1327,7 +1475,7 @@ async fn execute_deletes(
         let results = futures_util::future::join_all(tasks).await;
         for (key, size, result, _elapsed) in results {
             match result {
-                Ok(()) => {
+                Ok(CandidateDelete::Deleted) => {
                     tally(categorize_key(&key), outcome, size);
                     deleted_keys.push(key.clone());
                     deleted_count = deleted_count.saturating_add(1);
@@ -1343,6 +1491,9 @@ async fn execute_deletes(
                             status: "ok".to_owned(),
                         });
                     }
+                }
+                Ok(CandidateDelete::Retained) => {
+                    debug!(key = %key, "retained after delete-time revalidation");
                 }
                 Err(CrabError::NotFound { .. }) => {
                     // Deletes are idempotent across crash/retry boundaries.
@@ -2346,23 +2497,7 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    if args.dry_run {
-        return run_repo_remote_gc_under_maintenance(
-            args,
-            store,
-            router,
-            coordinator_protected_keys,
-            cancel,
-            grace_period,
-            jsonl_stream,
-            None,
-        )
-        .await;
-    }
-
-    let sweep =
-        crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?;
-    let operation = run_repo_remote_gc_under_maintenance(
+    run_repo_remote_gc_under_maintenance(
         args,
         store,
         router,
@@ -2370,14 +2505,9 @@ pub async fn run_repo_remote_gc(
         cancel,
         grace_period,
         jsonl_stream,
-        Some(&sweep),
+        None,
     )
-    .await;
-    let release = sweep.release().await;
-    match (operation, release) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
+    .await
 }
 
 async fn run_repo_remote_gc_under_maintenance(
@@ -2691,6 +2821,8 @@ mod tests {
             key: key.to_string(),
             size,
             last_modified: SystemTime::now() - age,
+            e_tag: None,
+            version: None,
             storage_class: None,
             transitioned_at: None,
         }
@@ -2701,6 +2833,8 @@ mod tests {
             key: key.to_string(),
             size,
             last_modified: time,
+            e_tag: None,
+            version: None,
             storage_class: None,
             transitioned_at: None,
         }
@@ -3654,6 +3788,75 @@ mod tests {
         .unwrap();
         assert!(preview.dry_run);
         writer.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumed_delete_retains_recreated_object_inside_grace_period() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+
+        use crate::storage::store::Store;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let key = "repo/packs/recreated.pack";
+        let path = ObjectPath::from(key);
+        store.put(&path, Bytes::from_static(b"old")).await.unwrap();
+        let original = store.head(&path).await.unwrap();
+
+        let snapshot_at = SystemTime::now();
+        let mut journal = journal::GcRunJournal::start(
+            store.clone(),
+            "repo",
+            "repo",
+            "repo",
+            snapshot_at,
+            Duration::from_secs(3600),
+            false,
+        )
+        .await
+        .unwrap();
+        journal.set_root_identity("root").await.unwrap();
+        journal
+            .plan(&[ObjectMeta {
+                key: key.to_owned(),
+                size: original.size,
+                last_modified: snapshot_at - Duration::from_secs(7200),
+                e_tag: original.e_tag,
+                version: original.version,
+                storage_class: None,
+                transitioned_at: None,
+            }])
+            .await
+            .unwrap();
+
+        // Model a crash after the provider accepted DELETE but before the
+        // journal outcome advanced. A writer may then recreate the same key.
+        store.delete(&path).await.unwrap();
+        store.put(&path, Bytes::from_static(b"new")).await.unwrap();
+
+        let mut outcome = GcOutcome::default();
+        let deleter = StoreObjectDeleter::new(store.clone());
+        let seal =
+            crate::maintenance::GcSweepLease::acquire(&store, "repo", &CancellationToken::new())
+                .await
+                .unwrap();
+        journal.seal_fence_epoch(seal.epoch()).await.unwrap();
+        seal.release().await.unwrap();
+        let delete_outcome = execute_journaled_deletes(
+            &mut journal,
+            &CancellationToken::new(),
+            1,
+            &deleter,
+            &mut outcome,
+            None,
+            Some((&store, "repo")),
+        )
+        .await;
+
+        assert!(delete_outcome.first_error.is_none());
+        assert!(store.head(&path).await.is_ok());
     }
 
     // --- GC compaction (Task 8.5) ---

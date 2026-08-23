@@ -67,6 +67,8 @@ enum GcFenceModeWire {
 struct GcFenceState {
     schema_version: u32,
     epoch: u64,
+    #[serde(default)]
+    writer_epoch: u64,
     writers: Vec<GcFenceHolder>,
     sweep: Option<GcFenceHolder>,
     quarantine: Vec<GcFenceQuarantine>,
@@ -85,6 +87,7 @@ impl GcFenceState {
         Self {
             schema_version: GC_FENCE_SCHEMA_VERSION,
             epoch: 0,
+            writer_epoch: 0,
             writers: Vec::new(),
             sweep: None,
             quarantine: Vec::new(),
@@ -304,6 +307,7 @@ struct LeaseInner {
     mode: GcFenceMode,
     ttl: Duration,
     epoch: u64,
+    writer_epoch: u64,
     etag: Mutex<Option<UpdateVersion>>,
     released: AtomicBool,
 }
@@ -340,15 +344,57 @@ impl GcFenceLease {
         Self::acquire(store, domain, GcFenceMode::Sweep, ttl).await
     }
 
+    /// Reacquires an expired GC-run sweep after removing only its own quarantine.
+    ///
+    /// A live incarnation still blocks. The stable holder must be persisted by
+    /// the GC journal and is valid only for exclusive sweep leases.
+    pub async fn acquire_resumable_sweep(
+        store: &Arc<dyn ObjectStore>,
+        domain: &str,
+        holder: &str,
+        ttl: Duration,
+    ) -> Result<Self> {
+        if !holder.starts_with("gc-run-")
+            || holder.len() > 128
+            || !holder
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(CoordinationError::GcFenceMalformed {
+                path: gc_fence_path(domain)?,
+                reason: "resumable sweep holder is not canonical".to_owned(),
+            });
+        }
+        Self::acquire_with_holder(
+            store,
+            domain,
+            GcFenceMode::Sweep,
+            ttl,
+            holder.to_owned(),
+            true,
+        )
+        .await
+    }
+
     async fn acquire(
         store: &Arc<dyn ObjectStore>,
         domain: &str,
         mode: GcFenceMode,
         ttl: Duration,
     ) -> Result<Self> {
+        Self::acquire_with_holder(store, domain, mode, ttl, generate_holder_id(), false).await
+    }
+
+    async fn acquire_with_holder(
+        store: &Arc<dyn ObjectStore>,
+        domain: &str,
+        mode: GcFenceMode,
+        ttl: Duration,
+        holder: String,
+        recover_expired_sweep: bool,
+    ) -> Result<Self> {
         validate_ttl(ttl)?;
         let path = gc_fence_path(domain)?;
-        let holder = generate_holder_id();
 
         for _ in 0..GC_FENCE_MAX_CAS_ATTEMPTS {
             let now = backend_unix_time(store, &Path::from(path.as_str())).await?;
@@ -369,14 +415,7 @@ impl GcFenceLease {
                 match create_strict(store, &Path::from(path.as_str()), body).await {
                     Ok(new_etag) => {
                         return Ok(Self::new_inner(
-                            store,
-                            path,
-                            domain,
-                            holder,
-                            mode,
-                            ttl,
-                            state.epoch,
-                            new_etag,
+                            store, path, domain, holder, mode, ttl, &state, new_etag,
                         ));
                     }
                     Err(object_store::Error::AlreadyExists { .. })
@@ -386,6 +425,15 @@ impl GcFenceLease {
             };
 
             state.prune_expired(now);
+            if recover_expired_sweep {
+                let before = state.quarantine.len();
+                state
+                    .quarantine
+                    .retain(|entry| entry.holder != holder || entry.mode != GcFenceModeWire::Sweep);
+                if state.quarantine.len() != before {
+                    state.epoch = state.epoch.saturating_add(1);
+                }
+            }
             if let Some(blocker) = blocking_holder(&state, mode, now) {
                 return Err(CoordinationError::GcFenceHeld {
                     domain: domain.to_owned(),
@@ -423,14 +471,7 @@ impl GcFenceLease {
             match update(store, &Path::from(path.as_str()), body, etag).await {
                 Ok(new_etag) => {
                     return Ok(Self::new_inner(
-                        store,
-                        path,
-                        domain,
-                        holder,
-                        mode,
-                        ttl,
-                        state.epoch,
-                        new_etag,
+                        store, path, domain, holder, mode, ttl, &state, new_etag,
                     ));
                 }
                 Err(object_store::Error::AlreadyExists { .. })
@@ -452,7 +493,7 @@ impl GcFenceLease {
         holder: String,
         mode: GcFenceMode,
         ttl: Duration,
-        epoch: u64,
+        state: &GcFenceState,
         etag: UpdateVersion,
     ) -> Self {
         Self {
@@ -463,7 +504,8 @@ impl GcFenceLease {
                 holder,
                 mode,
                 ttl,
-                epoch,
+                epoch: state.epoch,
+                writer_epoch: state.writer_epoch,
                 etag: Mutex::new(Some(etag)),
                 released: AtomicBool::new(false),
             }),
@@ -493,6 +535,12 @@ impl GcFenceLease {
                 .map_err(|source| store_error(&self.inner.path, source))?;
         let mut state = deserialize_state(&self.inner.path, &body)?;
         state.validate(&self.inner.path)?;
+        if self.inner.mode == GcFenceMode::Sweep && state.epoch != self.inner.epoch {
+            return Err(CoordinationError::GcFenceLost {
+                domain: self.inner.domain.clone(),
+                holder: self.inner.holder.clone(),
+            });
+        }
         if !replace_holder_expiry(
             &mut state,
             &self.inner.holder,
@@ -539,6 +587,7 @@ impl GcFenceLease {
             &self.inner.path,
             &self.inner.holder,
             self.inner.mode,
+            self.inner.epoch,
         )
         .await;
         if result.is_ok() {
@@ -557,6 +606,12 @@ impl GcFenceLease {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch
+    }
+
+    /// Returns the writer-only epoch observed at acquisition.
+    #[must_use]
+    pub fn writer_epoch(&self) -> u64 {
+        self.inner.writer_epoch
     }
 
     /// Returns the holder identity.
@@ -581,9 +636,10 @@ impl Drop for GcFenceLease {
         let path = self.inner.path.clone();
         let holder = self.inner.holder.clone();
         let mode = self.inner.mode;
+        let epoch = self.inner.epoch;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = release_holder(&store, &path, &holder, mode).await {
+                if let Err(error) = release_holder(&store, &path, &holder, mode, epoch).await {
                     warn!(domain = %path, %error, "failed to release GC fence on drop");
                 }
             });
@@ -700,6 +756,7 @@ fn insert_holder(
     state.epoch = state.epoch.saturating_add(1);
     match mode {
         GcFenceMode::Writer => {
+            state.writer_epoch = state.writer_epoch.saturating_add(1);
             if state.writers.len() >= GC_FENCE_MAX_WRITERS {
                 return Err(CoordinationError::GcFenceMalformed {
                     path: "gc-fence".to_owned(),
@@ -828,6 +885,7 @@ async fn release_holder(
     path: &str,
     holder: &str,
     mode: GcFenceMode,
+    expected_epoch: u64,
 ) -> Result<()> {
     for _ in 0..GC_FENCE_MAX_CAS_ATTEMPTS {
         let (body, etag) = match get_with_version(store, &Path::from(path)).await {
@@ -837,6 +895,12 @@ async fn release_holder(
         };
         let mut state = deserialize_state(path, &body)?;
         state.validate(path)?;
+        if mode == GcFenceMode::Sweep && state.epoch != expected_epoch {
+            return Err(CoordinationError::GcFenceLost {
+                domain: path.to_owned(),
+                holder: holder.to_owned(),
+            });
+        }
         let removed = match mode {
             GcFenceMode::Writer => {
                 let old = state.writers.len();
@@ -854,6 +918,9 @@ async fn release_holder(
             return Ok(());
         }
         state.epoch = state.epoch.saturating_add(1);
+        if mode == GcFenceMode::Writer {
+            state.writer_epoch = state.writer_epoch.saturating_add(1);
+        }
         match update(
             store,
             &Path::from(path),
@@ -877,6 +944,7 @@ async fn release_holder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
     fn memory_store() -> Arc<dyn ObjectStore> {
@@ -942,6 +1010,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writer_epoch_ignores_sweeps_and_detects_writer_crossings() {
+        let store = memory_store();
+        let first = GcFenceLease::acquire_sweep(&store, "org/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let initial = first.writer_epoch();
+        first.release().await.unwrap();
+        let second = GcFenceLease::acquire_sweep(&store, "org/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(second.writer_epoch(), initial);
+        second.release().await.unwrap();
+
+        let writer = GcFenceLease::acquire_writer(&store, "org/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        writer.release().await.unwrap();
+        let final_sweep = GcFenceLease::acquire_sweep(&store, "org/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(final_sweep.writer_epoch(), initial + 2);
+        final_sweep.release().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn renewal_and_release_are_holder_checked() {
         let store = memory_store();
         let lease = GcFenceLease::acquire_writer(&store, "org/repo", Duration::from_secs(30))
@@ -956,6 +1049,45 @@ mod tests {
             .await
             .unwrap();
         next.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_run_reclaims_only_its_expired_sweep_incarnation() {
+        let store = memory_store();
+        let domain = "org/repo";
+        let holder = "gc-run-019c1234-abcd-7000-8000-123456789abc";
+        let old =
+            GcFenceLease::acquire_resumable_sweep(&store, domain, holder, Duration::from_secs(30))
+                .await
+                .unwrap();
+        let writer_epoch = old.writer_epoch();
+        let path = Path::from(gc_fence_path(domain).unwrap());
+        let body = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let mut state = deserialize_state(path.as_ref(), &body).unwrap();
+        state.sweep.as_mut().unwrap().expires_at_backend = 1;
+        store
+            .put(
+                &path,
+                serialize_state(path.as_ref(), &state).unwrap().into(),
+            )
+            .await
+            .unwrap();
+
+        let recovered =
+            GcFenceLease::acquire_resumable_sweep(&store, domain, holder, Duration::from_secs(30))
+                .await
+                .unwrap();
+
+        assert_eq!(recovered.writer_epoch(), writer_epoch);
+        assert!(matches!(
+            old.renew().await,
+            Err(CoordinationError::GcFenceLost { .. })
+        ));
+        assert!(matches!(
+            old.release().await,
+            Err(CoordinationError::GcFenceLost { .. })
+        ));
+        recovered.release().await.unwrap();
     }
 
     #[test]

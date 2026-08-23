@@ -11,6 +11,7 @@ use crate::storage::store::Store;
 
 const MAINTENANCE_LOCK_TTL: Duration = Duration::from_mins(5);
 const GC_FENCE_TTL: Duration = crab_coordination::DEFAULT_GC_FENCE_TTL;
+const GC_RUN_FENCE_TTL: Duration = Duration::from_secs(60);
 
 /// Renewable exclusive fence for one repo or bucket GC domain.
 pub(crate) struct GcSweepLease {
@@ -135,10 +136,31 @@ impl GcSweepLease {
         Ok(Self { fence, heartbeat })
     }
 
+    /// Acquire a sweep that can reclaim only this GC run's expired incarnation.
+    pub(crate) async fn acquire_for_run(
+        store: &Store,
+        domain: &str,
+        run_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancel)?;
+        let holder = format!("gc-run-{run_id}");
+        let fence =
+            GcFenceLease::acquire_resumable_sweep(store.inner(), domain, &holder, GC_RUN_FENCE_TTL)
+                .await
+                .map_err(CrabError::from)?;
+        let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_RUN_FENCE_TTL / 3);
+        Ok(Self { fence, heartbeat })
+    }
+
     /// Stop renewal and release the exclusive fence.
     pub(crate) async fn release(self) -> Result<()> {
         self.heartbeat.stop().await;
         self.fence.release().await.map_err(CrabError::from)
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.fence.writer_epoch()
     }
 }
 

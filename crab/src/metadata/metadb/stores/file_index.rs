@@ -227,18 +227,6 @@ impl FileIndexStore {
         }
     }
 
-    /// Remove generation-pinned rows whose file hash is outside the retained
-    /// shard closure. The caller must hold the repository maintenance lease.
-    pub(crate) async fn gc_unreferenced_committed(
-        &self,
-        referenced: &HashSet<MerkleHash>,
-        dry_run: bool,
-        batch_size: usize,
-    ) -> Result<u64> {
-        self.gc_unreferenced_committed_prefix(&[PREFIX_COMMITTED], referenced, dry_run, batch_size)
-            .await
-    }
-
     /// Remove unreferenced rows from one first-byte hash partition.
     pub(crate) async fn gc_unreferenced_committed_prefix(
         &self,
@@ -503,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_index_gc_tombstones_only_unreferenced_committed_rows() {
+    async fn file_index_gc_prefix_tombstones_only_unreferenced_committed_rows() {
         let db = open_store().await;
         let store = FileIndexStore::new(Arc::clone(&db));
         let retained = hash_from_seed(10);
@@ -543,7 +531,12 @@ mod tests {
         db.write(batch).await.expect("seed committed rows");
 
         let removed = store
-            .gc_unreferenced_committed(&HashSet::from([retained]), false, 1)
+            .gc_unreferenced_committed_prefix(
+                &[PREFIX_COMMITTED],
+                &HashSet::from([retained]),
+                false,
+                1,
+            )
             .await
             .expect("sweep stale rows");
 

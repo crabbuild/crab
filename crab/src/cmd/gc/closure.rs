@@ -11,8 +11,10 @@ use crate::storage::store::Store;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::ShardReader;
 
-pub const CLOSURE_SCHEMA_VERSION: u32 = 1;
-pub const MAX_CLOSURE_BYTES: usize = 128 * 1024 * 1024;
+pub const CLOSURE_SCHEMA_VERSION: u32 = 2;
+pub const MAX_CLOSURE_BYTES: usize = 8 * 1024 * 1024;
+pub const CLOSURE_HASHES_PER_SEGMENT: usize = 4096;
+const MAX_CLOSURE_SEGMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,9 +29,56 @@ pub struct ShardClosure {
     pub file_hashes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureManifest {
+    pub schema_version: u32,
+    pub shard_hash: String,
+    pub content_hash: String,
+    pub content_size: u64,
+    pub xorb_count: u64,
+    pub file_count: u64,
+    pub segments: Vec<ClosureSegmentRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureSegmentRef {
+    pub index: u64,
+    pub digest: String,
+    pub xorb_count: u64,
+    pub file_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosureSegment {
+    schema_version: u32,
+    shard_hash: String,
+    index: u64,
+    xorb_hashes: Vec<String>,
+    file_hashes: Vec<String>,
+}
+
+impl ClosureSegment {
+    pub fn xorb_hashes(&self) -> &[String] {
+        &self.xorb_hashes
+    }
+
+    pub fn file_hashes(&self) -> &[String] {
+        &self.file_hashes
+    }
+}
+
 #[must_use]
 pub fn path(global_prefix: &str, shard_hash: &str) -> Path {
     Path::from(format!("{global_prefix}/gc/closures/{shard_hash}.json"))
+}
+
+pub(crate) fn segment_path(global_prefix: &str, shard_hash: &str, index: u64) -> Path {
+    Path::from(format!(
+        "{global_prefix}/gc/closure-segments/{shard_hash}/{index:020}.json"
+    ))
 }
 
 pub fn build(shard_hash: &MerkleHash, body: Bytes, object_path: &str) -> Result<ShardClosure> {
@@ -148,11 +197,125 @@ pub async fn publish(
 ) -> Result<()> {
     let closure = build(shard_hash, body, object_path)?;
     let closure_path = path(global_prefix, &shard_hash.hex());
-    let encoded = serde_json::to_vec(&closure).map_err(|error| CrabError::CorruptObject {
-        path: closure_path.to_string(),
-        reason: format!("failed to encode shard closure: {error}"),
+    let segment_count = closure
+        .xorb_hashes
+        .len()
+        .max(closure.file_hashes.len())
+        .div_ceil(CLOSURE_HASHES_PER_SEGMENT);
+    let mut segments = Vec::with_capacity(segment_count);
+    for index in 0..segment_count {
+        let start = index * CLOSURE_HASHES_PER_SEGMENT;
+        let xorb_end = (start + CLOSURE_HASHES_PER_SEGMENT).min(closure.xorb_hashes.len());
+        let file_end = (start + CLOSURE_HASHES_PER_SEGMENT).min(closure.file_hashes.len());
+        let segment = ClosureSegment {
+            schema_version: CLOSURE_SCHEMA_VERSION,
+            shard_hash: closure.shard_hash.clone(),
+            index: index as u64,
+            xorb_hashes: closure
+                .xorb_hashes
+                .get(start..xorb_end)
+                .unwrap_or_default()
+                .to_vec(),
+            file_hashes: closure
+                .file_hashes
+                .get(start..file_end)
+                .unwrap_or_default()
+                .to_vec(),
+        };
+        let segment_path = segment_path(global_prefix, &closure.shard_hash, segment.index);
+        let encoded = encode_bounded(&segment, &segment_path, MAX_CLOSURE_SEGMENT_BYTES)?;
+        let digest = blake3::hash(&encoded).to_hex().to_string();
+        publish_encoded(store, &segment_path, encoded).await?;
+        segments.push(ClosureSegmentRef {
+            index: segment.index,
+            digest,
+            xorb_count: segment.xorb_hashes.len() as u64,
+            file_count: segment.file_hashes.len() as u64,
+        });
+    }
+    let manifest = ClosureManifest {
+        schema_version: CLOSURE_SCHEMA_VERSION,
+        shard_hash: closure.shard_hash,
+        content_hash: closure.content_hash,
+        content_size: closure.content_size,
+        xorb_count: closure.xorb_count,
+        file_count: closure.file_count,
+        segments,
+    };
+    let encoded = encode_bounded(&manifest, &closure_path, MAX_CLOSURE_BYTES)?;
+    publish_encoded(store, &closure_path, encoded).await
+}
+
+pub async fn read_manifest(
+    store: &Store,
+    global_prefix: &str,
+    shard_hash: &MerkleHash,
+) -> Result<ClosureManifest> {
+    let manifest_path = path(global_prefix, &shard_hash.hex());
+    let (body, _) = store.get_with_etag(&manifest_path).await?;
+    if body.len() > MAX_CLOSURE_BYTES {
+        return Err(closure_budget_error(
+            &manifest_path,
+            body.len(),
+            MAX_CLOSURE_BYTES,
+        ));
+    }
+    let manifest: ClosureManifest = serde_json::from_slice(&body).map_err(|error| {
+        corrupt(
+            &manifest_path.to_string(),
+            format!("invalid closure manifest JSON: {error}"),
+        )
     })?;
-    publish_encoded(store, &closure_path, Bytes::from(encoded)).await
+    validate_manifest(&manifest, &manifest_path, shard_hash)?;
+    Ok(manifest)
+}
+
+pub async fn read_segment(
+    store: &Store,
+    global_prefix: &str,
+    manifest: &ClosureManifest,
+    segment_ref: &ClosureSegmentRef,
+) -> Result<ClosureSegment> {
+    let path = segment_path(global_prefix, &manifest.shard_hash, segment_ref.index);
+    let (body, _) = store.get_with_etag(&path).await?;
+    if body.len() > MAX_CLOSURE_SEGMENT_BYTES {
+        return Err(closure_budget_error(
+            &path,
+            body.len(),
+            MAX_CLOSURE_SEGMENT_BYTES,
+        ));
+    }
+    if blake3::hash(&body).to_hex().as_str() != segment_ref.digest {
+        return Err(corrupt(
+            path.as_ref(),
+            "closure segment digest mismatch".to_owned(),
+        ));
+    }
+    let segment: ClosureSegment = serde_json::from_slice(&body).map_err(|error| {
+        corrupt(
+            path.as_ref(),
+            format!("invalid closure segment JSON: {error}"),
+        )
+    })?;
+    if segment.schema_version != CLOSURE_SCHEMA_VERSION
+        || segment.shard_hash != manifest.shard_hash
+        || segment.index != segment_ref.index
+        || segment.xorb_hashes.len() as u64 != segment_ref.xorb_count
+        || segment.file_hashes.len() as u64 != segment_ref.file_count
+        || !is_sorted_unique(&segment.xorb_hashes)
+        || !is_sorted_unique(&segment.file_hashes)
+        || segment
+            .xorb_hashes
+            .iter()
+            .chain(&segment.file_hashes)
+            .any(|hash| MerkleHash::from_hex(hash).is_err())
+    {
+        return Err(corrupt(
+            path.as_ref(),
+            "invalid closure segment identity".to_owned(),
+        ));
+    }
+    Ok(segment)
 }
 
 pub(crate) async fn publish_encoded(
@@ -179,6 +342,63 @@ pub(crate) async fn publish_encoded(
                 .to_owned(),
         }),
         Err(error) => Err(error),
+    }
+}
+
+fn encode_bounded<T: Serialize>(value: &T, path: &Path, limit: usize) -> Result<Bytes> {
+    let encoded = serde_json::to_vec(value).map_err(|error| CrabError::CorruptObject {
+        path: path.to_string(),
+        reason: format!("failed to encode shard closure: {error}"),
+    })?;
+    if encoded.len() > limit {
+        return Err(closure_budget_error(path, encoded.len(), limit));
+    }
+    Ok(Bytes::from(encoded))
+}
+
+fn validate_manifest(
+    manifest: &ClosureManifest,
+    path: &Path,
+    expected_hash: &MerkleHash,
+) -> Result<()> {
+    let xorb_count = manifest
+        .segments
+        .iter()
+        .try_fold(0u64, |count, segment| count.checked_add(segment.xorb_count));
+    let file_count = manifest
+        .segments
+        .iter()
+        .try_fold(0u64, |count, segment| count.checked_add(segment.file_count));
+    let valid_segments = manifest
+        .segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| {
+            segment.index == index as u64
+                && segment.digest.len() == 64
+                && segment.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && segment.xorb_count <= CLOSURE_HASHES_PER_SEGMENT as u64
+                && segment.file_count <= CLOSURE_HASHES_PER_SEGMENT as u64
+        });
+    if manifest.schema_version != CLOSURE_SCHEMA_VERSION
+        || manifest.shard_hash != expected_hash.hex()
+        || manifest.content_hash != expected_hash.hex()
+        || xorb_count != Some(manifest.xorb_count)
+        || file_count != Some(manifest.file_count)
+        || !valid_segments
+    {
+        return Err(corrupt(
+            path.as_ref(),
+            "shard closure manifest identity or coverage is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn closure_budget_error(path: &Path, size: usize, limit: usize) -> CrabError {
+    CrabError::Configuration {
+        key: "gc.closure.memory_budget".to_owned(),
+        origin: format!("closure {path} is {size} bytes, above the {limit}-byte budget"),
     }
 }
 
@@ -246,5 +466,23 @@ mod tests {
             .await
             .expect_err("conflicting sidecar must fail closed");
         assert!(matches!(error, CrabError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn published_closure_uses_a_bounded_manifest() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let (body, hash) = ShardWriter::new()
+            .finalize()
+            .expect("empty shard serializes");
+
+        publish(&store, ".crab", &hash, Bytes::from(body), "shard")
+            .await
+            .unwrap();
+        let manifest = read_manifest(&store, ".crab", &hash).await.unwrap();
+
+        assert_eq!(manifest.schema_version, CLOSURE_SCHEMA_VERSION);
+        assert!(manifest.segments.is_empty());
+        assert_eq!(manifest.xorb_count, 0);
+        assert_eq!(manifest.file_count, 0);
     }
 }

@@ -11,13 +11,14 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::cmd::gc::ObjectMeta;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +41,8 @@ pub struct GcRunState {
     pub file_index_complete: bool,
     #[serde(default)]
     pub root_identity: String,
+    #[serde(default)]
+    pub fence_epoch: Option<u64>,
     pub phase: GcRunPhase,
 }
 
@@ -76,6 +79,10 @@ struct JournalObject {
     key: String,
     size: u64,
     last_modified_unix_ms: i64,
+    #[serde(default)]
+    e_tag: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 pub struct GcRunJournal {
@@ -84,6 +91,16 @@ pub struct GcRunJournal {
     state: GcRunState,
     etag: crab_storage::ETag,
 }
+
+#[cfg(feature = "crash-injection")]
+pub(crate) fn crash_at(point: &str) {
+    if std::env::var("CRAB_GC_CRASH_AT").ok().as_deref() == Some(point) {
+        std::process::exit(86);
+    }
+}
+
+#[cfg(not(feature = "crash-injection"))]
+pub(crate) fn crash_at(_point: &str) {}
 
 impl GcRunJournal {
     /// Starts a new run under an immutable object-store run namespace.
@@ -112,11 +129,13 @@ impl GcRunJournal {
             next_batch: 0,
             file_index_complete: false,
             root_identity: String::new(),
+            fence_epoch: None,
             phase: GcRunPhase::Planning,
         };
         let path = state_path(&root);
         store.create_strict(&path, encode(&state, &path)?).await?;
         let (_, etag) = store.get_with_etag(&path).await?;
+        info!(run_id = %state.run_id, scope, domain, "started durable GC run");
         Ok(Self {
             store,
             root,
@@ -169,6 +188,36 @@ impl GcRunJournal {
     /// Returns a run-owned prefix for auxiliary durable mark sets.
     pub(crate) fn marks_prefix(&self) -> String {
         format!("{}/marks", self.root)
+    }
+
+    pub(crate) async fn planned_batch(&self, batch: u64) -> Result<Vec<ObjectMeta>> {
+        if batch >= self.state.planned_batches {
+            return Err(CrabError::Configuration {
+                key: "gc.preview.batch".to_owned(),
+                origin: format!("preview batch {batch} is outside the durable plan"),
+            });
+        }
+        self.read_batch(batch)
+            .await?
+            .objects
+            .into_iter()
+            .map(ObjectMeta::try_from)
+            .collect()
+    }
+
+    pub(crate) async fn discard_preview(self) -> Result<()> {
+        if self.state.scope != "bucket-preview" || self.state.phase != GcRunPhase::Planning {
+            return Err(CrabError::Configuration {
+                key: "gc.preview".to_owned(),
+                origin: "only a non-executable bucket preview plan may be discarded".to_owned(),
+            });
+        }
+        self.retire_artifacts().await?;
+        let path = state_path(&self.root);
+        match self.store.delete(&path).await {
+            Ok(()) | Err(CrabError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Returns the immutable snapshot time used to apply the grace policy.
@@ -278,6 +327,45 @@ impl GcRunJournal {
         Ok(())
     }
 
+    /// Pins the exclusive-fence epoch that sealed the current root snapshot.
+    pub async fn seal_fence_epoch(&mut self, epoch: u64) -> Result<()> {
+        if self.state.fence_epoch.is_some() {
+            return Err(CrabError::Configuration {
+                key: "gc.journal.fence_epoch".to_owned(),
+                origin: "GC run already has a sealed fence epoch".to_owned(),
+            });
+        }
+        self.state.fence_epoch = Some(epoch);
+        self.persist_state().await
+    }
+
+    /// Refuses a delete batch when any writer crossed the fence since the
+    /// root snapshot or previous committed batch.
+    pub fn ensure_next_fence_epoch(&self, observed: u64) -> Result<()> {
+        let expected = self
+            .state
+            .fence_epoch
+            .ok_or_else(|| CrabError::Configuration {
+                key: "gc.resume.fence_epoch".to_owned(),
+                origin: "GC run has no valid sealed fence epoch".to_owned(),
+            })?;
+        if observed != expected {
+            return Err(CrabError::Configuration {
+                key: "gc.resume.fence_epoch".to_owned(),
+                origin: "GC roots may have changed since planning; start a new sweep".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Commits a successful bounded fenced phase that did not advance an
+    /// object candidate batch.
+    pub async fn advance_fence_epoch(&mut self, observed: u64) -> Result<()> {
+        self.ensure_next_fence_epoch(observed)?;
+        self.state.fence_epoch = Some(observed);
+        self.persist_state().await
+    }
+
     #[must_use]
     pub fn file_index_complete(&self) -> bool {
         self.state.file_index_complete
@@ -354,10 +442,13 @@ impl GcRunJournal {
             .await
         {
             Ok(()) => {}
-            Err(CrabError::Storage(
-                object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. },
-            )) => {
+            Err(
+                CrabError::CasConflict { .. }
+                | CrabError::Storage(
+                    object_store::Error::AlreadyExists { .. }
+                    | object_store::Error::Precondition { .. },
+                ),
+            ) => {
                 let (body, _) = self.store.get_with_etag(&path).await?;
                 let existing: CandidateBatch = decode(&body, &path)?;
                 if existing.schema_version != SCHEMA_VERSION
@@ -372,6 +463,8 @@ impl GcRunJournal {
                             left.key != right.key
                                 || left.size != right.size
                                 || left.last_modified_unix_ms != right.last_modified_unix_ms
+                                || left.e_tag != right.e_tag
+                                || left.version != right.version
                         })
                 {
                     return Err(CrabError::CorruptObject {
@@ -395,6 +488,12 @@ impl GcRunJournal {
             return Err(CrabError::Configuration {
                 key: "gc.journal".to_owned(),
                 origin: "candidate plan was already persisted".to_owned(),
+            });
+        }
+        if self.state.root_identity.is_empty() {
+            return Err(CrabError::Configuration {
+                key: "gc.journal.root_identity".to_owned(),
+                origin: "candidate plan cannot be sealed before its root identity".to_owned(),
             });
         }
         self.state.phase = GcRunPhase::Deleting;
@@ -423,7 +522,12 @@ impl GcRunJournal {
     }
 
     /// Records a fully successful batch before advancing the durable cursor.
-    pub async fn complete_batch(&mut self, deleted_keys: &[String], bytes: u64) -> Result<()> {
+    pub async fn complete_batch(
+        &mut self,
+        deleted_keys: &[String],
+        bytes: u64,
+        fence_epoch: Option<u64>,
+    ) -> Result<()> {
         let batch = self.state.next_batch;
         let candidates = self.read_batch(batch).await?;
         let candidate_keys = candidates
@@ -462,10 +566,13 @@ impl GcRunJournal {
             .await
         {
             Ok(()) => {}
-            Err(CrabError::Storage(
-                object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. },
-            )) => {
+            Err(
+                CrabError::CasConflict { .. }
+                | CrabError::Storage(
+                    object_store::Error::AlreadyExists { .. }
+                    | object_store::Error::Precondition { .. },
+                ),
+            ) => {
                 let (body, _) = self.store.get_with_etag(&path).await?;
                 let existing: BatchOutcome = decode(&body, &path)?;
                 validate_outcome(&existing, &self.state.run_id, batch)?;
@@ -482,11 +589,15 @@ impl GcRunJournal {
             }
             Err(error) => return Err(error),
         }
+        crash_at("after-journal-outcome");
         self.state.next_batch = self
             .state
             .next_batch
             .checked_add(1)
             .ok_or_else(|| CrabError::Internal("GC next batch cursor overflow".to_owned()))?;
+        if let Some(fence_epoch) = fence_epoch {
+            self.state.fence_epoch = Some(fence_epoch);
+        }
         self.persist_state().await
     }
 
@@ -526,6 +637,24 @@ impl GcRunJournal {
         Ok(count)
     }
 
+    /// Sums bytes from durable successful outcomes without replaying deletes.
+    pub async fn deleted_bytes_reclaimed(&self) -> Result<u64> {
+        let mut bytes = 0u64;
+        for batch in 0..self.state.next_batch {
+            let path = outcome_path(&self.root, batch);
+            let (body, _) = self.store.get_with_etag(&path).await?;
+            let outcome: BatchOutcome = decode(&body, &path)?;
+            validate_outcome(&outcome, &self.state.run_id, batch)?;
+            bytes = bytes.checked_add(outcome.bytes_reclaimed).ok_or_else(|| {
+                CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "GC reclaimed-byte count overflows".to_owned(),
+                }
+            })?;
+        }
+        Ok(bytes)
+    }
+
     /// Marks reconciliation complete only after all batch outcomes are durable.
     pub async fn complete(&mut self) -> Result<()> {
         if self.state.next_batch != self.state.planned_batches {
@@ -534,8 +663,35 @@ impl GcRunJournal {
                 origin: "cannot complete GC before every candidate batch succeeds".to_owned(),
             });
         }
+        // Retire first while the run is still resumable. A crash during this
+        // idempotent cleanup leaves a Deleting run at the terminal cursor, so
+        // the next invocation can finish cleanup instead of leaking artifacts.
+        self.retire_artifacts().await?;
         self.state.phase = GcRunPhase::Complete;
         self.persist_state().await
+    }
+
+    async fn retire_artifacts(&self) -> Result<()> {
+        for batch in 0..self.state.planned_batches {
+            for path in [
+                batch_path(&self.root, batch),
+                outcome_path(&self.root, batch),
+            ] {
+                match self.store.delete(&path).await {
+                    Ok(()) | Err(CrabError::NotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let marks_prefix = Path::from(format!("{}/marks/", self.root));
+        let mut marks = self.store.inner().list(Some(&marks_prefix));
+        while let Some(meta) = marks.try_next().await.map_err(CrabError::Storage)? {
+            match self.store.delete(&meta.location).await {
+                Ok(()) | Err(CrabError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn read_batch(&self, batch: u64) -> Result<CandidateBatch> {
@@ -573,6 +729,8 @@ impl From<&ObjectMeta> for JournalObject {
             key: object.key.clone(),
             size: object.size,
             last_modified_unix_ms: unix_ms(object.last_modified),
+            e_tag: object.e_tag.clone(),
+            version: object.version.clone(),
         }
     }
 }
@@ -595,6 +753,8 @@ impl TryFrom<JournalObject> for ObjectMeta {
                     path: "gc candidate".to_owned(),
                     reason: "GC candidate modification time overflows".to_owned(),
                 })?,
+            e_tag: object.e_tag,
+            version: object.version,
             storage_class: None,
             transitioned_at: None,
         })
@@ -666,9 +826,14 @@ fn validate_candidate_key(state: &GcRunState, key: &str) -> Result<()> {
                             .any(|prefix| relative.starts_with(prefix))
                     })
         }
-        "bucket" => [".crab/shards/", ".crab/xorbs/", ".crab/gc/closures/"]
-            .iter()
-            .any(|prefix| key.starts_with(prefix)),
+        "bucket" | "bucket-preview" => [
+            ".crab/shards/",
+            ".crab/xorbs/",
+            ".crab/gc/closures/",
+            ".crab/gc/closure-segments/",
+        ]
+        .iter()
+        .any(|prefix| key.starts_with(prefix)),
         _ => false,
     };
     let safe_segments = !key.is_empty()
@@ -721,6 +886,8 @@ mod tests {
             key: format!("repo/packs/{index}"),
             size: index as u64,
             last_modified: UNIX_EPOCH + Duration::from_secs(1),
+            e_tag: Some(format!("etag-{index}")),
+            version: None,
             storage_class: None,
             transitioned_at: None,
         }
@@ -749,7 +916,7 @@ mod tests {
             DEFAULT_BATCH_SIZE
         );
         journal
-            .complete_batch(&[objects[0].key.clone()], objects[0].size)
+            .complete_batch(&[objects[0].key.clone()], objects[0].size, None)
             .await
             .unwrap();
 
@@ -824,6 +991,8 @@ mod tests {
                 key: "other/xorbs/not-in-repo".to_owned(),
                 size: 1,
                 last_modified: UNIX_EPOCH,
+                e_tag: Some("etag".to_owned()),
+                version: None,
                 storage_class: None,
                 transitioned_at: None,
             }])
@@ -946,6 +1115,8 @@ mod tests {
                 key: ".crab/xorbs/aa/hash".to_owned(),
                 size: 1,
                 last_modified: UNIX_EPOCH,
+                e_tag: Some("etag".to_owned()),
+                version: None,
                 storage_class: None,
                 transitioned_at: None,
             }])
@@ -959,5 +1130,95 @@ mod tests {
                 .await
                 .unwrap();
         assert!(resumed.file_index_complete());
+    }
+
+    #[tokio::test]
+    async fn completed_run_retires_batches_outcomes_and_marks() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let mut journal = GcRunJournal::start(
+            store.clone(),
+            "repo",
+            "repo",
+            "repo",
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            false,
+        )
+        .await
+        .unwrap();
+        journal.set_root_identity("root").await.unwrap();
+        journal.plan(&[object(1)]).await.unwrap();
+        let batch = batch_path(&journal.root, 0);
+        let outcome = outcome_path(&journal.root, 0);
+        let mark = Path::from(format!("{}/marks/live/0000/mark.json", journal.root));
+        store.put(&mark, Bytes::from_static(b"mark")).await.unwrap();
+        journal
+            .complete_batch(&["repo/packs/1".to_owned()], 1, None)
+            .await
+            .unwrap();
+
+        let state = state_path(&journal.root);
+        journal.complete().await.unwrap();
+
+        for path in [batch, outcome, mark] {
+            assert!(matches!(
+                store.head(&path).await,
+                Err(CrabError::NotFound { .. })
+            ));
+        }
+        let (body, _) = store.get_with_etag(&state).await.unwrap();
+        let persisted: GcRunState = decode(&body, &state).unwrap();
+        assert_eq!(persisted.phase, GcRunPhase::Complete);
+    }
+
+    #[tokio::test]
+    async fn retry_after_outcome_commit_accepts_the_identical_batch() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let mut journal = GcRunJournal::start(
+            store,
+            "repo",
+            "repo",
+            "repo",
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            false,
+        )
+        .await
+        .unwrap();
+        journal.set_root_identity("root").await.unwrap();
+        journal.plan(&[object(1)]).await.unwrap();
+        let deleted = ["repo/packs/1".to_owned()];
+        journal.complete_batch(&deleted, 1, None).await.unwrap();
+
+        // Model a process exit after the immutable outcome was published but
+        // before the mutable state cursor reached the provider.
+        journal.state.next_batch = 0;
+        journal.persist_state().await.unwrap();
+        journal.complete_batch(&deleted, 1, None).await.unwrap();
+
+        assert_eq!(journal.state.next_batch, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_batch_rejects_a_writer_epoch_crossing() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let mut journal = GcRunJournal::start(
+            store,
+            "repo",
+            "repo",
+            "repo",
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            false,
+        )
+        .await
+        .unwrap();
+        journal.seal_fence_epoch(10).await.unwrap();
+
+        journal.ensure_next_fence_epoch(10).unwrap();
+        assert!(matches!(
+            journal.ensure_next_fence_epoch(12),
+            Err(CrabError::Configuration { .. })
+        ));
     }
 }

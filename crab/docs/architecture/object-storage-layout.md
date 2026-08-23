@@ -73,7 +73,12 @@ Paths are relative to `global_prefix`.
 | `xorbs/{first-two-hex}/{blake3}` | `crab-xet`: encoded chunk aggregates shared in the scope | Immutable, idempotent create |
 | `shards/{first-two-hex}/{blake3}` | `crab-xet`: reconstruction metadata shared in the scope | Immutable, idempotent create |
 | `chunk_index_db/` | `crab-metadata`: scope-wide chunk-to-xorb SlateDB | Opaque; SlateDB owns children |
-| `ref-registry` | `crab-metadata`: repository reachability and GC roots | Mutable JSON, CAS |
+| `ref-registry/records/{repo-blake3-first-two}/{repo-blake3}.json` | `crab-metadata`: small per-repository coordination record | Mutable JSON, CAS |
+| `ref-registry/shard-roots/{repo-blake3}/{root-blake3-first-four}.json` | `crab-metadata`: bounded shard-root partition for one repository | Mutable JSON, CAS |
+| `ref-registry/coverage.json` | `crab-metadata`: proof that registry repair covered the bucket | Mutable JSON, exclusive repair |
+| `gc/closures/{shard-blake3}.json` | `crab`: bounded shard-closure manifest | Immutable, idempotent create |
+| `gc/closure-segments/{shard-blake3}/{index20}.json` | `crab`: bounded shard-closure segment | Immutable, idempotent create |
+| `gc/runs/{run-id}/` | `crab`: resumable GC state, candidates, outcomes, and marks | Ephemeral; state summary retained |
 
 Xorbs and shards use the first two lowercase hash characters as one fan-out
 segment and have no filename extension. This gives GC 256 independent,
@@ -93,7 +98,14 @@ s3://{bucket}/
 │   ├── xorbs/{first-two-hex}/{blake3}
 │   ├── shards/{first-two-hex}/{blake3}
 │   ├── chunk_index_db/...
-│   └── ref-registry
+│   ├── ref-registry/
+│   │   ├── records/{repo-prefix-hash-first-two}/{repo-prefix-hash}.json
+│   │   ├── shard-roots/{repo-prefix-hash}/{root-hash-first-four}.json
+│   │   └── coverage.json
+│   └── gc/
+│       ├── closures/{shard-hash}.json
+│       ├── closure-segments/{shard-hash}/{index20}.json
+│       └── runs/{run-id}/...
 ├── {repo-a}/...
 └── {repo-b}/...
 ```
@@ -105,6 +117,13 @@ Flat V1 keys such as `.crab/xorbs/{hash}` and `.crab/shards/{hash}` are not
 read, rewritten, or collected. Operators must stop V1 writers and re-upload
 repositories with a V2 client; there is no dual-read or in-place migration
 path.
+
+The partitioned ref registry is also a hard cutover. Operators MUST stop
+writers that use the aggregate `.crab/ref-registry` object, upgrade every
+writer, and run `crab gc --repair-registry --bucket <bucket>` before enabling
+destructive bucket GC. New readers intentionally do not merge the aggregate
+object because doing so would restore its contention bottleneck and make root
+removal ambiguous.
 
 ## Repository-local core
 

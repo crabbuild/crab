@@ -20,7 +20,7 @@ pub use summary::{
 const EVIDENCE_MANIFEST_SCHEMA: &str = "crab-cache-service.evidence-manifest.v1";
 const DEFAULT_PSK: &str = "cache-smoke-psk";
 const DEFAULT_PSK_BLAKE3: &str = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e";
-const EXPECTED_ROUTE_SCHEMA: &str = "crab-cache-service.routes.v2";
+const EXPECTED_ROUTE_SCHEMA: &str = "crab-cache-service.routes.v3";
 const EXPECTED_IMMUTABLE_ROUTE_PATTERNS: &[&str] = &[
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
@@ -43,7 +43,7 @@ const EXPECTED_MUTABLE_ROUTE_PATTERNS: &[&str] = &[
     "{repo}/manifests/*",
     "{repo}/pack-list",
     "{repo}/shard-list",
-    ".crab/ref-registry",
+    ".crab/ref-registry/*",
     "{repo}/file_index_db/manifest/current",
     ".crab/chunk_index_db/manifest/current",
 ];
@@ -1866,7 +1866,7 @@ fn mutable_route_pattern_id(pattern: &str) -> &'static str {
         "{repo}/manifests/*" => "repo-manifests",
         "{repo}/pack-list" => "repo-pack-list",
         "{repo}/shard-list" => "repo-shard-list",
-        ".crab/ref-registry" => "global-ref-registry",
+        ".crab/ref-registry/*" => "global-ref-registry",
         "{repo}/file_index_db/manifest/current" => "repo-file-index-current",
         ".crab/chunk_index_db/manifest/current" => "global-chunk-index-current",
         _ => "unknown-route",
