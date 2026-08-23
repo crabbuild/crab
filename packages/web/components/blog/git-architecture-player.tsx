@@ -8,6 +8,7 @@ import {
   RotateCcw,
 } from "lucide-react"
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
   useRef,
@@ -300,8 +301,10 @@ function NodeGlyph({ kind, color }: { kind: NodeKind; color: string }) {
 export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }) {
   const story = stories[storyName]
   const figureRef = useRef<HTMLElement>(null)
+  const stageScrollerRef = useRef<HTMLDivElement>(null)
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
   const [activeIndex, setActiveIndex] = useState(0)
-  const [paused, setPaused] = useState(false)
+  const [paused, setPaused] = useState(true)
   const [inView, setInView] = useState(false)
   const [hasInteracted, setHasInteracted] = useState(false)
   const reducedMotion = usePrefersReducedMotion()
@@ -309,7 +312,8 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   const tone = step.tone ?? "info"
   const activeColor = TONE_COLORS[tone]
   const controlsPaused = paused || reducedMotion
-  const animationPaused = controlsPaused || !inView
+  const playbackPaused = controlsPaused || !inView
+  const panelId = `${storyName}-stage-panel`
 
   useEffect(() => {
     const figure = figureRef.current
@@ -324,12 +328,12 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
   }, [])
 
   useEffect(() => {
-    if (animationPaused) return
+    if (playbackPaused) return
     const timer = window.setTimeout(() => {
       setActiveIndex((current) => (current + 1) % story.steps.length)
     }, AUTO_ADVANCE_MS)
     return () => window.clearTimeout(timer)
-  }, [activeIndex, animationPaused, story.steps.length])
+  }, [activeIndex, playbackPaused, story.steps.length])
 
   const goTo = useCallback(
     (index: number) => {
@@ -339,6 +343,34 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
     [story.steps.length],
   )
 
+  useEffect(() => {
+    const scroller = stageScrollerRef.current
+    const tab = tabRefs.current[activeIndex]
+    if (!scroller || !tab) return
+
+    const tabStart = tab.offsetLeft
+    const tabEnd = tabStart + tab.offsetWidth
+    const visibleStart = scroller.scrollLeft
+    const visibleEnd = visibleStart + scroller.clientWidth
+
+    if (tabStart < visibleStart) scroller.scrollLeft = tabStart
+    if (tabEnd > visibleEnd) scroller.scrollLeft = tabEnd - scroller.clientWidth
+  }, [activeIndex])
+
+  const moveTabFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    let nextIndex: number | undefined
+    if (event.key === "ArrowRight") nextIndex = activeIndex + 1
+    if (event.key === "ArrowLeft") nextIndex = activeIndex - 1
+    if (event.key === "Home") nextIndex = 0
+    if (event.key === "End") nextIndex = story.steps.length - 1
+    if (nextIndex === undefined) return
+
+    event.preventDefault()
+    const normalizedIndex = (nextIndex + story.steps.length) % story.steps.length
+    goTo(normalizedIndex)
+    tabRefs.current[normalizedIndex]?.focus()
+  }
+
   return (
     <figure ref={figureRef} className="my-10 overflow-hidden rounded-xl border border-slate-800 bg-[#070b12] shadow-[0_24px_80px_rgba(2,6,23,0.24)]">
       <div className="border-b border-slate-800/90 bg-[#0b111a] px-4 py-4 sm:px-5">
@@ -347,26 +379,36 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
             <p className="m-0 font-mono text-[10px] font-semibold tracking-[0.22em] text-sky-400">{story.eyebrow}</p>
             <h3 className="m-0 mt-1 text-base font-semibold tracking-tight text-slate-100 sm:text-lg">{story.title}</h3>
           </div>
-          <div className="flex items-center gap-1.5 font-mono text-[10px] tracking-wide text-slate-500" aria-hidden="true">
-            <span className="size-1.5 rounded-full bg-emerald-400" />
-            LIVE MODEL
+          <div className="font-mono text-[10px] tracking-[0.12em] text-slate-600" aria-hidden="true">
+            INTERACTIVE TRACE
           </div>
         </div>
 
-        <div className="-mx-1 mt-4 overflow-x-auto px-1 pb-1">
-          <div className="flex min-w-max items-center gap-1" role="tablist" aria-label={`${story.title} stages`}>
+        <div ref={stageScrollerRef} className="-mx-1 mt-4 overflow-x-auto px-1 pb-1">
+          <div
+            className="flex min-w-max items-center gap-1.5"
+            role="tablist"
+            aria-label={`${story.title} stages`}
+            onKeyDown={moveTabFocus}
+          >
             {story.steps.map((candidate, index) => {
               const isActive = index === activeIndex
               const isComplete = index < activeIndex
               return (
                 <button
                   key={candidate.label}
+                  ref={(element) => {
+                    tabRefs.current[index] = element
+                  }}
                   type="button"
                   role="tab"
+                  id={`${storyName}-stage-${index}`}
+                  aria-controls={panelId}
                   aria-selected={isActive}
+                  tabIndex={isActive ? 0 : -1}
                   onClick={() => goTo(index)}
                   className={cn(
-                    "group flex min-h-9 items-center gap-2 rounded-md border px-3 font-mono text-[10px] font-semibold tracking-[0.08em] transition-colors duration-150",
+                    "group flex min-h-11 items-center gap-2 rounded-md border px-3 font-mono text-xs font-semibold tracking-[0.08em] transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none",
                     isActive
                       ? "border-sky-400/60 bg-sky-400/10 text-sky-300"
                       : isComplete
@@ -376,7 +418,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                 >
                   <span
                     className={cn(
-                      "flex size-4 items-center justify-center rounded-full border text-[8px]",
+                      "flex size-5 items-center justify-center rounded-full border text-[9px]",
                       isActive ? "border-sky-400/70" : isComplete ? "border-emerald-400/40" : "border-slate-700",
                     )}
                   >
@@ -392,30 +434,37 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
 
       <div className="overflow-x-auto" aria-hidden="true">
         <svg
-          className="block min-w-[760px]"
+          className="block w-full min-w-[700px]"
           viewBox="0 0 960 430"
           focusable="false"
         >
           <defs>
-            <pattern id={`grid-${storyName}`} width="24" height="24" patternUnits="userSpaceOnUse">
-              <path d="M24 0H0V24" fill="none" stroke="#1e293b" strokeOpacity="0.34" strokeWidth="1" />
-            </pattern>
-            <marker id={`arrow-${storyName}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 0l10 5-10 5z" fill="context-stroke" />
-            </marker>
-            <linearGradient id={`scan-${storyName}`} x1="0" x2="1">
-              <stop offset="0" stopColor={activeColor} stopOpacity="0" />
-              <stop offset="0.5" stopColor={activeColor} stopOpacity="0.6" />
-              <stop offset="1" stopColor={activeColor} stopOpacity="0" />
-            </linearGradient>
+            {[
+              { id: "active", color: activeColor, opacity: 0.9 },
+              { id: "complete", color: "#64748b", opacity: 0.55 },
+              { id: "future", color: "#334155", opacity: 0.42 },
+            ].map((marker) => (
+              <marker
+                key={marker.id}
+                id={`arrow-${storyName}-${marker.id}`}
+                viewBox="0 0 9 9"
+                refX="9"
+                refY="4.5"
+                markerWidth="9"
+                markerHeight="9"
+                markerUnits="userSpaceOnUse"
+                orient="auto"
+              >
+                <path d="M0 0 9 4.5 0 9Z" fill={marker.color} fillOpacity={marker.opacity} />
+              </marker>
+            ))}
           </defs>
           <rect width="960" height="430" fill="#070b12" />
-          <rect width="960" height="430" fill={`url(#grid-${storyName})`} />
-          <text x="28" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="10" letterSpacing="1.4">
+          <text x="28" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="11.5" letterSpacing="1.4">
             IMMUTABLE DATA
           </text>
           <line x1="132" y1="28" x2="410" y2="28" stroke="#1e293b" />
-          <text x="756" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="10" letterSpacing="1.4">
+          <text x="756" y="32" fill="#475569" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="11.5" letterSpacing="1.4">
             VISIBLE STATE
           </text>
           <line x1="850" y1="28" x2="932" y2="28" stroke="#1e293b" />
@@ -424,7 +473,8 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
             const active = edge.step === activeIndex
             const complete = edge.step < activeIndex
             const visible = edge.step <= activeIndex
-            const stroke = active ? activeColor : complete ? "#34d399" : "#334155"
+            const stroke = active ? activeColor : complete ? "#64748b" : "#334155"
+            const arrowState = active ? "active" : complete ? "complete" : "future"
             return (
               <g key={edge.id} opacity={visible ? 1 : 0.28} style={{ transition: reducedMotion ? "none" : "opacity 350ms ease" }}>
                 <path
@@ -434,7 +484,9 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   strokeOpacity={active ? 0.9 : complete ? 0.55 : 0.42}
                   strokeWidth={active ? 2 : 1.25}
                   strokeDasharray={active ? "5 6" : undefined}
-                  markerEnd={`url(#arrow-${storyName})`}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  markerEnd={`url(#arrow-${storyName}-${arrowState})`}
                   vectorEffect="non-scaling-stroke"
                 />
                 {edge.label && (
@@ -443,16 +495,11 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                     y={edge.labelY}
                     fill={active ? activeColor : "#64748b"}
                     fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                    fontSize="9"
+                    fontSize="10.5"
                     textAnchor="middle"
                   >
                     {edge.label.toUpperCase()}
                   </text>
-                )}
-                {active && !animationPaused && (
-                  <circle r="3.5" fill={activeColor}>
-                    <animateMotion dur="1.5s" repeatCount="indefinite" path={edge.path} />
-                  </circle>
                 )}
               </g>
             )
@@ -462,7 +509,7 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
             const state = nodeState(node, step, activeIndex)
             const active = state === "active"
             const complete = state === "complete"
-            const color = active ? activeColor : complete ? "#34d399" : STORY_COLORS[node.kind]
+            const color = active ? activeColor : complete ? "#64748b" : STORY_COLORS[node.kind]
             return (
               <g
                 key={node.id}
@@ -480,23 +527,16 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
                   strokeWidth={active ? 1.75 : 1}
                   vectorEffect="non-scaling-stroke"
                 />
-                {active && (
-                  <rect x="1" y="1" width={node.width - 2} height="2" rx="1" fill={`url(#scan-${storyName})`}>
-                    {!animationPaused && <animate attributeName="x" values={`-${node.width};${node.width}`} dur="2.1s" repeatCount="indefinite" />}
-                  </rect>
-                )}
                 <g transform="translate(22 29)">
                   <NodeGlyph kind={node.kind} color={color} />
                 </g>
-                <text x="42" y="27" fill={active ? "#f8fafc" : "#cbd5e1"} fontFamily="Inter, ui-sans-serif, system-ui" fontSize="13" fontWeight="600">
+                <text x="42" y="27" fill={active ? "#f8fafc" : "#cbd5e1"} fontFamily="Inter, ui-sans-serif, system-ui" fontSize="14" fontWeight="600">
                   {node.title}
                 </text>
-                <text x="42" y="46" fill={active ? "#94a3b8" : "#64748b"} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="9.5">
+                <text x="42" y="46" fill={active ? "#94a3b8" : "#64748b"} fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="10">
                   {node.detail}
                 </text>
-                <circle cx={node.width - 14} cy="14" r="3" fill={color} opacity={active ? 1 : 0.55}>
-                  {active && !animationPaused && <animate attributeName="opacity" values="1;.25;1" dur="1.4s" repeatCount="indefinite" />}
-                </circle>
+                <circle cx={node.width - 14} cy="14" r="3" fill={color} opacity={active ? 1 : 0.55} />
               </g>
             )
           })}
@@ -504,7 +544,14 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
       </div>
 
       <div className="grid border-t border-slate-800/90 bg-[#0b111a] md:grid-cols-[1fr_auto]">
-        <div className="min-h-40 px-4 py-5 sm:px-5" aria-live={hasInteracted ? "polite" : "off"}>
+        <div
+          id={panelId}
+          role="tabpanel"
+          aria-labelledby={`${storyName}-stage-${activeIndex}`}
+          className="min-h-40 min-w-0 px-4 py-5 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400/70 focus-visible:outline-none sm:px-5"
+          aria-live={hasInteracted ? "polite" : "off"}
+          tabIndex={0}
+        >
           <div className="flex items-center gap-2">
             <span className="font-mono text-[10px] text-slate-500">{String(activeIndex + 1).padStart(2, "0")}</span>
             <span className="h-px w-5 bg-slate-700" />
@@ -512,14 +559,14 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
           </div>
           <p className="m-0 mt-2 text-sm font-semibold text-slate-100">{step.title}</p>
           <p className="m-0 mt-1 max-w-2xl text-sm leading-6 text-slate-400">{step.description}</p>
-          <div className="mt-3 flex items-start gap-2 font-mono text-[10px] leading-5 text-slate-400">
+          <div className="mt-3 flex items-start gap-2 font-mono text-sm leading-5 text-slate-400">
             <span className="mt-1.5 size-1.5 shrink-0 rounded-full" style={{ backgroundColor: activeColor }} />
             <span>{step.invariant}</span>
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-4 py-4 md:min-w-56 md:justify-end md:border-t-0 md:border-l">
-          <button type="button" onClick={() => goTo(activeIndex - 1)} className="flex size-9 items-center justify-center rounded-md border border-slate-700 text-slate-400 transition-colors duration-150 hover:border-slate-600 hover:text-slate-100" aria-label="Previous stage">
+        <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-4 py-4 md:min-w-64 md:justify-end md:border-t-0 md:border-l">
+          <button type="button" onClick={() => goTo(activeIndex - 1)} className="flex size-11 items-center justify-center rounded-md border border-slate-700 text-slate-400 transition-colors duration-150 hover:border-slate-600 hover:text-slate-100 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none" aria-label="Previous stage">
             <ChevronLeft size={16} />
           </button>
           <button
@@ -529,16 +576,16 @@ export function GitArchitecturePlayer({ story: storyName }: { story: StoryName }
               setPaused((current) => !current)
             }}
             disabled={reducedMotion}
-            className="flex h-9 min-w-24 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-3 font-mono text-[10px] font-semibold tracking-wide text-sky-300 transition-colors duration-150 hover:bg-sky-400/15 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-500"
+            className="flex h-11 min-w-24 items-center justify-center gap-2 rounded-md border border-sky-400/40 bg-sky-400/10 px-3 font-mono text-xs font-semibold tracking-wide text-sky-300 transition-colors duration-150 hover:bg-sky-400/15 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-500"
             aria-label={controlsPaused ? "Play automatic stage progression" : "Pause automatic stage progression"}
           >
             {controlsPaused ? <Play size={13} /> : <Pause size={13} />}
             {reducedMotion ? "MANUAL" : controlsPaused ? "PLAY" : "PAUSE"}
           </button>
-          <button type="button" onClick={() => goTo(activeIndex + 1)} className="flex size-9 items-center justify-center rounded-md border border-slate-700 text-slate-400 transition-colors duration-150 hover:border-slate-600 hover:text-slate-100" aria-label="Next stage">
+          <button type="button" onClick={() => goTo(activeIndex + 1)} className="flex size-11 items-center justify-center rounded-md border border-slate-700 text-slate-400 transition-colors duration-150 hover:border-slate-600 hover:text-slate-100 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none" aria-label="Next stage">
             <ChevronRight size={16} />
           </button>
-          <button type="button" onClick={() => goTo(0)} className="flex size-9 items-center justify-center rounded-md border border-slate-800 text-slate-500 transition-colors duration-150 hover:border-slate-700 hover:text-slate-300" aria-label="Restart trace">
+          <button type="button" onClick={() => goTo(0)} className="flex size-11 items-center justify-center rounded-md border border-slate-800 text-slate-500 transition-colors duration-150 hover:border-slate-700 hover:text-slate-300 focus-visible:ring-2 focus-visible:ring-sky-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b111a] focus-visible:outline-none" aria-label="Restart trace">
             <RotateCcw size={14} />
           </button>
         </div>
