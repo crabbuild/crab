@@ -325,39 +325,25 @@ async fn read_current_visibility(
     }
     let storage_router =
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    match crab_metadata::git_visibility::read_with_format(
+    match crab_metadata::git_visibility::read_for_manifest(
         store.as_storage(),
         &storage_router,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        &manifest.git_validation_digest,
+        manifest,
     )
     .await
     {
-        Ok(read) => {
-            if read.index.matches_manifest(manifest) {
-                if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
-                    crab_metadata::git_visibility::upload_if_absent(
-                        store.as_storage(),
-                        &storage_router,
-                        &read.index,
-                    )
-                    .await?;
-                }
-                Ok(Some(read.index))
-            } else {
-                Err(CrabError::CorruptObject {
-                    path: storage_router
-                        .git_visibility_path(&manifest.git_validation_digest)
-                        .as_ref()
-                        .to_owned(),
-                    reason: "Git visibility proof does not match manifest refs".to_owned(),
-                })
+        Ok(Some(read)) => {
+            if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
+                crab_metadata::git_visibility::upload_if_absent(
+                    store.as_storage(),
+                    &storage_router,
+                    &read.index,
+                )
+                .await?;
             }
+            Ok(Some(read.index))
         }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => Ok(None),
+        Ok(None) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }

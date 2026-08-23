@@ -1,19 +1,35 @@
 use std::collections::HashSet;
 
 use crab_auth::{PushFinalizeResponse, PushRefUpdate};
+use serde::{Deserialize, Serialize};
 
 use super::GitVisibilityPublication;
+use super::git_workspace::verify_source_push;
 use super::{
-    PreparedViewScope, ReceiveContext, ReceiveManifestCommit, build_service_candidate_manifest,
-    commit_receive_manifest, commit_service_git_locators, commit_service_metadata,
-    compute_changed_paths, conflict, invalid, materialize_source_push,
+    MaterializedSourcePush, PreparedViewScope, ReceiveContext, ReceiveManifestCommit,
+    build_service_candidate_manifest, commit_receive_manifest,
+    commit_service_git_locators_from_verified_indexes, commit_service_metadata, conflict, invalid,
     parse_active_active_receive_config, promote_staged_objects,
     publish_materialized_git_visibility, source_ref_updates_from_prepare,
     validate_candidate_manifest_shape, validate_candidate_metadata,
     validate_protected_dependency_receipt, validate_protected_shard_set_receipt,
-    validate_push_plan_shape, write_service_generation_index_receipt,
+    validate_push_plan_shape, validate_staged_object_shapes,
+    write_service_generation_index_receipt,
 };
 use crate::error::Result;
+
+const VERIFIED_RECEIVE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedReceiveEvidence {
+    schema_version: u32,
+    repo_prefix: String,
+    push_id: String,
+    source_plan_digest: String,
+    prepare_digest: String,
+    materialized: MaterializedSourcePush,
+}
 
 /// Prepared protected-push receive state returned to the helper.
 pub struct PreparedReceive {
@@ -26,6 +42,66 @@ pub struct VerifiedReceive {
     pub verified_changed_paths: Vec<String>,
     pub plan_digest: String,
     pub verified_staged_bytes: u64,
+}
+
+fn prepare_digest(prepare: &super::PushPrepareRecord) -> Result<String> {
+    let bytes = serde_json::to_vec(prepare)
+        .map_err(|error| invalid(format!("prepare record serialize failed: {error}")))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+async fn write_verified_receive_evidence(
+    ctx: &ReceiveContext,
+    source_plan_digest: String,
+    prepare: &super::PushPrepareRecord,
+    materialized: MaterializedSourcePush,
+) -> Result<String> {
+    let evidence = VerifiedReceiveEvidence {
+        schema_version: VERIFIED_RECEIVE_SCHEMA_VERSION,
+        repo_prefix: ctx.repo_prefix().to_owned(),
+        push_id: ctx.push_id().to_owned(),
+        source_plan_digest,
+        prepare_digest: prepare_digest(prepare)?,
+        materialized,
+    };
+    let body = serde_json::to_vec(&evidence)
+        .map_err(|error| invalid(format!("verified receive serialize failed: {error}")))?;
+    let digest = blake3::hash(&body).to_hex().to_string();
+    ctx.write_verified_receive(bytes::Bytes::from(body)).await?;
+    Ok(digest)
+}
+
+async fn read_verified_receive_evidence(
+    ctx: &ReceiveContext,
+    expected_digest: &str,
+    source_plan_digest: &str,
+    prepare: &super::PushPrepareRecord,
+) -> Result<MaterializedSourcePush> {
+    super::validate_hash_component(expected_digest, "verified receive digest")?;
+    let body = ctx.read_verified_receive().await?;
+    if blake3::hash(&body).to_hex().as_str() != expected_digest {
+        return Err(conflict(
+            "verified receive evidence changed after authorization",
+        ));
+    }
+    let evidence: VerifiedReceiveEvidence = serde_json::from_slice(&body)
+        .map_err(|error| invalid(format!("invalid verified receive evidence: {error}")))?;
+    if evidence.schema_version != VERIFIED_RECEIVE_SCHEMA_VERSION
+        || evidence.repo_prefix != ctx.repo_prefix()
+        || evidence.push_id != ctx.push_id()
+    {
+        return Err(conflict(
+            "verified receive evidence belongs to another session",
+        ));
+    }
+    if evidence.source_plan_digest != source_plan_digest
+        || evidence.prepare_digest != prepare_digest(prepare)?
+    {
+        return Err(conflict(
+            "source state changed after protected verification",
+        ));
+    }
+    Ok(evidence.materialized)
 }
 
 /// Prepares a protected-push receive session after view authorization.
@@ -46,9 +122,9 @@ pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
-    let digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
+    let source_plan_digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
     let prepare = ctx.read_prepare_record().await?;
-    let _source_ref_updates = source_ref_updates_from_prepare(
+    let source_ref_updates = source_ref_updates_from_prepare(
         &prepare,
         base.as_ref().map(|state| state.manifest()),
         &plan.ref_updates,
@@ -56,20 +132,25 @@ pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
     validate_candidate_manifest_shape(&plan, ctx.repo_prefix())?;
     ctx.validate_staged_objects(&plan).await?;
     validate_candidate_metadata(ctx.store(), ctx.router(), &plan).await?;
-    let paths = compute_changed_paths(
+    let (paths, materialized) = verify_source_push(
         ctx.store(),
         ctx.router(),
         ctx.repo_prefix(),
+        base.as_ref().map(|state| state.manifest()),
         &plan,
-        &plan.ref_updates,
-        Some(&prepare),
+        &source_ref_updates,
+        &prepare,
     )
     .await?;
     let verified_staged_bytes = plan
         .staged_objects
         .iter()
-        .try_fold(0u64, |total, object| total.checked_add(object.size))
+        .map(|object| object.size)
+        .chain(materialized.packs.iter().map(|pack| pack.size))
+        .try_fold(0u64, |total, size| total.checked_add(size))
         .ok_or_else(|| invalid("verified staged object bytes exceed the supported range"))?;
+    let digest =
+        write_verified_receive_evidence(ctx, source_plan_digest, &prepare, materialized).await?;
     Ok(VerifiedReceive {
         ref_updates: plan.ref_updates,
         verified_changed_paths: paths,
@@ -90,31 +171,26 @@ pub async fn commit_receive(
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
-    let digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
-    if digest != plan_digest {
+    let source_plan_digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
+    if super::validate_hash_component(plan_digest, "verified receive digest").is_err() {
         return Err(conflict("source manifest changed after verification"));
     }
     let prepare = ctx.read_prepare_record().await?;
-    let ref_updates = source_ref_updates_from_prepare(
+    source_ref_updates_from_prepare(
         &prepare,
         base.as_ref().map(|state| state.manifest()),
         &plan.ref_updates,
     )?;
     validate_candidate_manifest_shape(&plan, ctx.repo_prefix())?;
-    ctx.validate_staged_objects(&plan).await?;
+    // Promotion re-reads and hashes every staged body immediately before its
+    // canonical write. Validate paths here, but do not download all candidate
+    // packs once more before that integrity boundary.
+    validate_staged_object_shapes(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_candidate_metadata(ctx.store(), ctx.router(), &plan).await?;
+    let materialized =
+        read_verified_receive_evidence(ctx, plan_digest, &source_plan_digest, &prepare).await?;
     promote_staged_objects(ctx.store(), &plan).await?;
     validate_protected_shard_set_receipt(ctx.store(), ctx.router(), &plan).await?;
-    let materialized = materialize_source_push(
-        ctx.store(),
-        ctx.router(),
-        ctx.repo_prefix(),
-        base.as_ref().map(|state| state.manifest()),
-        &plan,
-        &ref_updates,
-        &prepare,
-    )
-    .await?;
     for pack in &materialized.packs {
         crab_metadata::pack_origin::verify_pack_origin(
             ctx.store(),
@@ -226,7 +302,13 @@ pub async fn commit_receive(
             .into_iter()
             .filter(|pack| !base_pack_ids.contains(&pack.pack_id))
             .collect::<Vec<_>>();
-        commit_service_git_locators(ctx.store(), ctx.router(), &manifest, &new_packs).await
+        commit_service_git_locators_from_verified_indexes(
+            ctx.store(),
+            ctx.router(),
+            &manifest,
+            &new_packs,
+        )
+        .await
     }
     .await
     {
@@ -270,6 +352,7 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use bytes::Bytes;
     use crab_metadata::{
@@ -687,6 +770,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_receive_evidence_rejects_replacement() -> Result<()> {
+        let ctx = context();
+        let prepare = ctx.write_prepare_record(vec![ref_update()], None).await?;
+        let materialized = MaterializedSourcePush {
+            ref_updates: vec![ref_update()],
+            packs: Vec::new(),
+            peeled_refs: BTreeMap::new(),
+            git_visibility: super::super::MaterializedGitVisibility::Exact(BTreeMap::new()),
+        };
+        let source_plan_digest = blake3_hex(b"source plan");
+        let digest = write_verified_receive_evidence(
+            &ctx,
+            source_plan_digest.clone(),
+            &prepare,
+            materialized,
+        )
+        .await?;
+        ctx.store()
+            .put_overwrite(
+                &ObjectPath::from(format!(
+                    "{}/protected-push-sessions/{PUSH_ID}.verified.json",
+                    ctx.repo_prefix()
+                )),
+                Bytes::from_static(b"replaced"),
+            )
+            .await?;
+
+        let error = read_verified_receive_evidence(&ctx, &digest, &source_plan_digest, &prepare)
+            .await
+            .expect_err("replacement evidence must not authorize commit");
+
+        assert!(matches!(error, AuthServerError::CasConflict { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_unreferenced_staged_object_before_body_download() -> Result<()> {
+        let ctx = context();
+        let mut plan = push_plan();
+        plan.candidate_manifest.seal_git_validation();
+        let missing_body = b"candidate pack body";
+        let pack_id = blake3_hex(missing_body);
+        plan.staged_objects = vec![staged_object(
+            format!("org/repo/packs/pack-{pack_id}.pack"),
+            missing_body,
+        )];
+        write_plan(&ctx, &plan).await?;
+        prepare_receive(&ctx, plan.ref_updates.clone(), None).await?;
+        let digest = ctx.verified_plan_digest(&plan, None)?;
+
+        let error = commit_receive(&ctx, "crab://bucket/org/repo", &digest, None)
+            .await
+            .expect_err("unreferenced staged object must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("staged object is not referenced by candidate metadata"),
+            "finalization downloaded the missing body before rejecting its metadata: {error}",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn git_object_locator_filtered_view_push_preserves_hidden_paths() -> Result<()> {
         let ctx = context();
         let temp = tempfile::tempdir()?;
@@ -716,6 +863,7 @@ mod tests {
             &source_repo,
             format!("{source_old}\n").as_bytes(),
         )?;
+        let source_pack_id = blake3_hex(&source_pack_bytes);
         let source_object_count = git_object_count(&source_repo, &format!("{source_old}\n"))?;
         let source_pack_index = put_canonical_pack(
             &ctx,
@@ -803,6 +951,8 @@ mod tests {
             verified.verified_changed_paths,
             vec!["src/app.txt".to_owned()]
         );
+        let retried = verify_receive(&ctx).await?;
+        assert_eq!(retried.plan_digest, verified.plan_digest);
 
         let response =
             commit_receive(&ctx, "crab://bucket/org/repo", &verified.plan_digest, None).await?;
@@ -851,6 +1001,44 @@ mod tests {
             ctx.store()
                 .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
                 .await?;
+        }
+        for pack in committed_packs
+            .iter()
+            .filter(|pack| pack.pack_id != source_pack_id)
+        {
+            let idx_size = ctx
+                .store()
+                .head(&ctx.router().pack_index_path(&pack.pack_id))
+                .await?
+                .size;
+            let rev_size = ctx
+                .store()
+                .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
+                .await?
+                .size;
+            let read_bytes = Arc::new(AtomicU64::new(0));
+            let observer = Arc::clone(&read_bytes);
+            let observed_store = Store::new(Arc::clone(ctx.store().inner()))
+                .with_read_byte_observer(Arc::new(move |bytes| {
+                    observer.fetch_add(bytes, Ordering::Relaxed);
+                }));
+            let observed_router = crab_storage::StoreLayout::new(
+                observed_store.clone(),
+                ctx.repo_prefix().to_owned(),
+            );
+
+            super::super::download_verified_service_locator_evidence(
+                &observed_store,
+                &observed_router,
+                pack,
+            )
+            .await?;
+
+            assert_eq!(
+                read_bytes.load(Ordering::Relaxed),
+                20 + idx_size + rev_size,
+                "verified locator publication must not stream the pack body",
+            );
         }
         let committed_pack_inventory = committed_packs
             .iter()

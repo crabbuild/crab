@@ -85,7 +85,9 @@ proof suppresses v2 advertisement; it never triggers a silent complete
 filtered fetch. Crab 1.0.15 proofs keyed only by generation and pack-index hash
 remain an explicit read migration: write and repair owners backfill the
 digest-bound key, and GC retains both roots while that tagged-data migration is
-supported.
+supported. If a valid legacy key contains a different ref closure from the
+current manifest, migration treats it as an abandoned candidate and rebuilds
+the digest-bound proof; malformed bodies still fail closed as corruption.
 
 Each direct ref update uploads content-addressed visibility evidence before its
 journal marker becomes visible. Fast-forward and ordinary updates encode only

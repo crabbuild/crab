@@ -54,6 +54,20 @@ pub(super) async fn materialize_source_push(
         .await
 }
 
+pub(super) async fn verify_source_push(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+    base: Option<&Manifest>,
+    plan: &ProtectedPushPlan,
+    source_updates: &[PushRefUpdate],
+    prepare: &PushPrepareRecord,
+) -> Result<(Vec<String>, MaterializedSourcePush)> {
+    GitReceiveWorkspace::new(store, router, repo_prefix)
+        .verify_source_push(base, plan, source_updates, prepare)
+        .await
+}
+
 pub(super) async fn install_base_packs(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -72,6 +86,12 @@ struct CommitIdentity {
     committer_email: String,
     committer_date: String,
     message: Vec<u8>,
+}
+
+struct InstalledPackLocatorEvidence {
+    pack_id: String,
+    idx_path: std::path::PathBuf,
+    rev_path: std::path::PathBuf,
 }
 
 struct GitReceiveWorkspace<'a> {
@@ -103,22 +123,80 @@ impl<'a> GitReceiveWorkspace<'a> {
         self.install_prepared_view_packs(prepare, &git_dir).await?;
         self.install_staged_packs(plan, &git_dir).await?;
         let view_old_refs = self.prepared_view_old_refs(prepare).await?;
+        self.materialize_source_push_in(
+            &git_dir,
+            temp.path(),
+            base,
+            plan,
+            source_updates,
+            &view_old_refs,
+        )
+        .await
+    }
 
+    async fn verify_source_push(
+        &self,
+        base: Option<&Manifest>,
+        plan: &ProtectedPushPlan,
+        source_updates: &[PushRefUpdate],
+        prepare: &PushPrepareRecord,
+    ) -> Result<(Vec<String>, MaterializedSourcePush)> {
+        if plan.ref_updates.len() != source_updates.len() {
+            return Err(invalid("source ref updates do not match push plan"));
+        }
+        let temp = tempfile::tempdir()?;
+        let git_dir = temp.path().join("source.git");
+        run_git(["init", "--bare", path_str(&git_dir)?], None)?;
+        self.install_base_packs(&git_dir).await?;
+        self.install_prepared_view_packs(prepare, &git_dir).await?;
+        let staged_locator_evidence = self.install_staged_packs(plan, &git_dir).await?;
+        let view_old_refs = self.prepared_view_old_refs(prepare).await?;
+        let paths = self.compute_changed_paths_in(
+            &git_dir,
+            &plan.ref_updates,
+            &view_old_refs,
+            !view_old_refs.is_empty(),
+        )?;
+        let materialized = self
+            .materialize_source_push_in(
+                &git_dir,
+                temp.path(),
+                base,
+                plan,
+                source_updates,
+                &view_old_refs,
+            )
+            .await?;
+        for evidence in &staged_locator_evidence {
+            self.publish_pack_locator_evidence(evidence).await?;
+        }
+        Ok((paths, materialized))
+    }
+
+    async fn materialize_source_push_in(
+        &self,
+        git_dir: &Path,
+        temp_root: &Path,
+        base: Option<&Manifest>,
+        plan: &ProtectedPushPlan,
+        source_updates: &[PushRefUpdate],
+        view_old_refs: &BTreeMap<String, String>,
+    ) -> Result<MaterializedSourcePush> {
         let mut final_updates = Vec::with_capacity(plan.ref_updates.len());
         let mut synthesized_tips = Vec::new();
         for (view_update, source_update) in plan.ref_updates.iter().zip(source_updates) {
             let source_old = source_update.old_oid.as_deref();
-            let view_old = self.effective_view_old_oid(view_update, &view_old_refs);
+            let view_old = self.effective_view_old_oid(view_update, view_old_refs);
             if source_old == view_old.as_deref()
-                && self.is_fast_forward(&git_dir, source_old, &view_update.new_oid)?
+                && self.is_fast_forward(git_dir, source_old, &view_update.new_oid)?
             {
                 final_updates.push(source_update.clone());
                 continue;
             }
 
             let source_new = self.synthesize_source_commit(
-                &git_dir,
-                temp.path(),
+                git_dir,
+                temp_root,
                 source_old,
                 view_old.as_deref(),
                 &view_update.new_oid,
@@ -135,11 +213,11 @@ impl<'a> GitReceiveWorkspace<'a> {
             Vec::new()
         } else {
             vec![
-                self.upload_synthesized_pack(&git_dir, temp.path(), &synthesized_tips)
+                self.upload_synthesized_pack(git_dir, temp_root, &synthesized_tips)
                     .await?,
             ]
         };
-        validate_git_publication(&git_dir, &final_updates)?;
+        validate_git_publication(git_dir, &final_updates)?;
         if let Some(base) = base {
             for update in &final_updates {
                 if update.old_oid.as_deref() != base.refs.get(&update.ref_name).map(String::as_str)
@@ -160,9 +238,9 @@ impl<'a> GitReceiveWorkspace<'a> {
             }
         }
         let final_refs = final_refs.into_iter().collect::<Vec<_>>();
-        let peeled_refs = derive_peeled_refs(&git_dir, &final_refs)?;
+        let peeled_refs = derive_peeled_refs(git_dir, &final_refs)?;
         let git_visibility =
-            build_git_visibility_from_git_dir(&git_dir, &final_refs, &peeled_refs).await?;
+            build_git_visibility_from_git_dir(git_dir, &final_refs, &peeled_refs).await?;
         Ok(MaterializedSourcePush {
             ref_updates: final_updates,
             packs,
@@ -333,15 +411,28 @@ impl<'a> GitReceiveWorkspace<'a> {
             input.as_bytes(),
         )?;
         let pack_id = blake3_hex(&pack_bytes);
+        let object_count = rev_list_object_count(git_dir, tips)?;
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_bytes.len() as u64,
+            content_hash: pack_id.clone(),
+            ref_tips: tips.iter().map(|(tip, _)| tip.clone()).collect(),
+            object_count,
+        };
+        let verify_path = temp_root.join(format!("pack-{pack_id}.pack"));
+        fs::write(&verify_path, &pack_bytes)?;
+        run_git(
+            ["index-pack", "--strict", path_str(&verify_path)?],
+            Some(git_dir),
+        )?;
+
         let pack_path = self.router.pack_path(&pack_id);
         self.store
-            .put_exact(&pack_path, bytes::Bytes::from(pack_bytes.clone()))
+            .put_exact(&pack_path, bytes::Bytes::from(pack_bytes))
             .await?;
-
-        let object_count = rev_list_object_count(git_dir, tips)?;
         let metadata = PackMetadata {
             pack_id: pack_id.clone(),
-            ref_tips: tips.iter().map(|(tip, _)| tip.clone()).collect(),
+            ref_tips: pack.ref_tips.clone(),
             object_count,
         };
         let metadata_path = self.router.pack_metadata_path(&pack_id);
@@ -350,20 +441,21 @@ impl<'a> GitReceiveWorkspace<'a> {
         self.store
             .put_exact(&metadata_path, bytes::Bytes::from(metadata_bytes))
             .await?;
-
-        let verify_path = temp_root.join(format!("pack-{pack_id}.pack"));
-        fs::write(&verify_path, &pack_bytes)?;
-        run_git(
-            ["index-pack", "--strict", path_str(&verify_path)?],
-            Some(git_dir),
-        )?;
-        Ok(PackManifestEntry {
+        crab_metadata::pack_origin::record_verified_pack_origin(
+            self.store,
+            self.router.repo_prefix(),
+            &pack,
+        )
+        .await?;
+        let idx_path = verify_path.with_extension("idx");
+        let rev_path = verify_path.with_extension("rev");
+        self.publish_pack_locator_evidence(&InstalledPackLocatorEvidence {
             pack_id: pack_id.clone(),
-            size: pack_bytes.len() as u64,
-            content_hash: pack_id,
-            ref_tips: tips.iter().map(|(tip, _)| tip.clone()).collect(),
-            object_count,
+            idx_path,
+            rev_path,
         })
+        .await?;
+        Ok(pack)
     }
 
     async fn compute_changed_paths(
@@ -384,17 +476,32 @@ impl<'a> GitReceiveWorkspace<'a> {
             Some(prepare) => self.prepared_view_old_refs(prepare).await?,
             None => BTreeMap::new(),
         };
+        self.compute_changed_paths_in(
+            &git_dir,
+            ref_updates,
+            &view_old_refs,
+            !view_old_refs.is_empty(),
+        )
+    }
+
+    fn compute_changed_paths_in(
+        &self,
+        git_dir: &Path,
+        ref_updates: &[PushRefUpdate],
+        view_old_refs: &BTreeMap<String, String>,
+        allow_equivalent_old_tree: bool,
+    ) -> Result<Vec<String>> {
         for update in ref_updates {
-            let update = self.effective_view_ref_update(update, &view_old_refs);
-            self.validate_ref_graph(&git_dir, &update, !view_old_refs.is_empty())?;
+            let update = self.effective_view_ref_update(update, view_old_refs);
+            self.validate_ref_graph(git_dir, &update, allow_equivalent_old_tree)?;
         }
-        validate_git_publication(&git_dir, ref_updates)?;
+        validate_git_publication(git_dir, ref_updates)?;
         let mut paths = BTreeSet::new();
         for update in ref_updates {
-            let update = self.effective_view_ref_update(update, &view_old_refs);
-            paths.extend(self.ref_tree_changed_paths(&git_dir, &update)?);
-            for commit in self.introduced_commits(&git_dir, &update)? {
-                paths.extend(self.commit_changed_paths(&git_dir, &commit)?);
+            let update = self.effective_view_ref_update(update, view_old_refs);
+            paths.extend(self.ref_tree_changed_paths(git_dir, &update)?);
+            for commit in self.introduced_commits(git_dir, &update)? {
+                paths.extend(self.commit_changed_paths(git_dir, &commit)?);
             }
         }
         Ok(paths.into_iter().collect())
@@ -637,7 +744,12 @@ impl<'a> GitReceiveWorkspace<'a> {
         Ok(())
     }
 
-    async fn install_staged_packs(&self, plan: &ProtectedPushPlan, git_dir: &Path) -> Result<()> {
+    async fn install_staged_packs(
+        &self,
+        plan: &ProtectedPushPlan,
+        git_dir: &Path,
+    ) -> Result<Vec<InstalledPackLocatorEvidence>> {
+        let mut evidence = Vec::new();
         for object in &plan.staged_objects {
             if object
                 .canonical_key
@@ -645,13 +757,31 @@ impl<'a> GitReceiveWorkspace<'a> {
                 && object.canonical_key.ends_with(".pack")
             {
                 let path = ObjectPath::from(object.staged_key.clone());
-                self.install_pack_from_object(&path, git_dir).await?;
+                let pack_path = self.install_pack_from_object(&path, git_dir).await?;
+                let file_name = pack_path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or_else(|| invalid("installed pack path has no UTF-8 filename"))?;
+                let pack_id = canonical_pack_id_from_object_filename(file_name)
+                    .ok_or_else(|| invalid("installed pack filename is invalid"))?
+                    .to_owned();
+                let idx_path = pack_path.with_extension("idx");
+                let rev_path = pack_path.with_extension("rev");
+                evidence.push(InstalledPackLocatorEvidence {
+                    pack_id,
+                    idx_path,
+                    rev_path,
+                });
             }
         }
-        Ok(())
+        Ok(evidence)
     }
 
-    async fn install_pack_from_object(&self, path: &ObjectPath, git_dir: &Path) -> Result<()> {
+    async fn install_pack_from_object(
+        &self,
+        path: &ObjectPath,
+        git_dir: &Path,
+    ) -> Result<std::path::PathBuf> {
         let file_name = path
             .as_ref()
             .rsplit('/')
@@ -661,8 +791,59 @@ impl<'a> GitReceiveWorkspace<'a> {
         let pack_path = git_dir.join("objects").join("pack").join(file_name);
         self.store.download_to_path(path, &pack_path).await?;
         run_git(["index-pack", path_str(&pack_path)?], Some(git_dir))?;
+        Ok(pack_path)
+    }
+
+    async fn publish_pack_locator_evidence(
+        &self,
+        evidence: &InstalledPackLocatorEvidence,
+    ) -> Result<()> {
+        let idx_path = evidence.idx_path.clone();
+        let rev_path = evidence.rev_path.clone();
+        let (idx_size, idx_hash, rev_size, rev_hash) = tokio::task::spawn_blocking(move || {
+            crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+                .map_err(crab_git::pack::PackError::from)?;
+            let (idx_size, idx_hash) = hash_file(&idx_path)?;
+            let (rev_size, rev_hash) = hash_file(&rev_path)?;
+            Ok::<_, AuthServerError>((idx_size, idx_hash, rev_size, rev_hash))
+        })
+        .await
+        .map_err(|error| {
+            AuthServerError::Internal(format!("pack locator hashing worker failed: {error}"))
+        })??;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.store
+            .put_multipart_file_retry(
+                &self.router.pack_index_path(&evidence.pack_id),
+                &evidence.idx_path,
+                idx_size,
+                idx_hash,
+                8 * 1024 * 1024,
+                &cancel,
+                None,
+            )
+            .await?;
+        self.store
+            .put_multipart_file_retry(
+                &self.router.pack_reverse_index_path(&evidence.pack_id),
+                &evidence.rev_path,
+                rev_size,
+                rev_hash,
+                8 * 1024 * 1024,
+                &cancel,
+                None,
+            )
+            .await?;
         Ok(())
     }
+}
+
+fn hash_file(path: &Path) -> Result<(u64, [u8; 32])> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok((size, *hasher.finalize().as_bytes()))
 }
 
 fn validate_git_publication(git_dir: &Path, updates: &[PushRefUpdate]) -> Result<()> {

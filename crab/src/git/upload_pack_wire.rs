@@ -84,17 +84,23 @@ pub async fn snapshot_available(
     };
     match repository.visibility_index(cancellation).await {
         Ok(_) => true,
-        Err(error) if visibility_index_is_missing(&error) => {
+        Err(error) if visibility_index_needs_repair(&error) => {
             let repair_store = crate::storage::Store::from_storage(store.clone());
             let repair_layout =
                 crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-            match super::push::repair_git_visibility_if_current(
+            if matches!(
+                super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+                Ok(true)
+            ) {
+                return false;
+            }
+            match Box::pin(super::push::repair_git_visibility_if_current(
                 &repair_store,
                 &repair_layout,
                 repository.generation(),
                 LOCATOR_READ_REPAIR_LOCK_TTL,
                 cancellation,
-            )
+            ))
             .await
             {
                 Ok(Some(super::push::GitVisibilityPublication::Published)) => {
@@ -118,12 +124,14 @@ pub async fn snapshot_available(
     }
 }
 
-fn visibility_index_is_missing(error: &RemoteGitError) -> bool {
+fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
     matches!(
         error,
         RemoteGitError::Metadata(crab_metadata::error::MetadataError::Storage {
             source: crab_storage::StorageError::NotFound { .. },
-        })
+        }) | RemoteGitError::RepositoryState {
+            reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
+        }
     )
 }
 
@@ -318,6 +326,15 @@ pub(crate) async fn open_repository(
     // an active ref-journal transaction, which must remain unavailable.
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+    if matches!(
+        super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+        Ok(true)
+    ) {
+        return Err(remote_error(RemoteGitError::RepositoryIndexing {
+            observed: observed_generation,
+            required: required_generation,
+        }));
+    }
     let repaired = super::push::repair_git_object_locator_if_current(
         &repair_store,
         &repair_layout,
@@ -1090,6 +1107,15 @@ mod tests {
         assert!(parse_oid(&"a".repeat(40)).is_ok());
         assert!(parse_oid(&"a".repeat(39)).is_err());
         assert!(parse_oid(&format!("{}z", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn visibility_mismatch_enters_the_bounded_repair_path() {
+        let error = RemoteGitError::RepositoryState {
+            reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
+        };
+
+        assert!(visibility_index_needs_repair(&error));
     }
 
     #[test]

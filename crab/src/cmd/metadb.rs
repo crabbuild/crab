@@ -19,6 +19,8 @@
 //!   compaction in the background and the current public crate does
 //!   not expose an imperative trigger, so this subcommand logs a
 //!   warning and exits successfully.
+//! - `owner` — hold repository-scoped derived-index ownership and publish
+//!   locator checkpoints plus visibility proofs independently of push clients.
 //! - `cache {stats | clear}` — inspect or wipe the local
 //!   `PersistentChunkIndex` SQLite cache.
 //!
@@ -36,6 +38,7 @@ use futures_util::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::core::config::Config;
@@ -102,6 +105,18 @@ pub enum MetadbCommand {
         /// Structured JSON output.
         #[arg(long)]
         json: bool,
+    },
+    /// Own and repair derived Git indexes independently of push clients.
+    Owner {
+        /// Repair the current generation once and exit.
+        #[arg(long)]
+        once: bool,
+        /// Idle polling interval in seconds.
+        #[arg(long, default_value_t = 30, value_name = "SECONDS")]
+        interval: u64,
+        /// Emit one JSON object per repair sample.
+        #[arg(long)]
+        jsonl: bool,
     },
     /// Request immediate compaction of one or both databases.
     Compact {
@@ -229,7 +244,11 @@ pub struct CacheStatsPayload {
 }
 
 /// Dispatch for `crab metadb <sub>`.
-pub async fn run_metadb(cmd: MetadbCommand, mode: OutputMode) -> Result<()> {
+pub async fn run_metadb(
+    cmd: MetadbCommand,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<()> {
     match cmd {
         MetadbCommand::Diagnose { db, json, deep } => {
             let mode = if json { OutputMode::Json } else { mode };
@@ -239,6 +258,11 @@ pub async fn run_metadb(cmd: MetadbCommand, mode: OutputMode) -> Result<()> {
             let mode = if json { OutputMode::Json } else { mode };
             run_rebuild(db, mode).await
         }
+        MetadbCommand::Owner {
+            once,
+            interval,
+            jsonl,
+        } => Box::pin(run_generation_owner(once, interval, jsonl, cancel)).await,
         MetadbCommand::Compact { db } => run_compact(db).await,
         MetadbCommand::Cache(sub) => match sub {
             CacheCommand::Stats => run_cache_stats(mode),
@@ -323,6 +347,383 @@ fn build_metadb(
     }
 
     MetaDb::new(store, repo_prefix, metadb_config)
+}
+
+#[derive(Debug, Serialize)]
+struct GenerationOwnerSample {
+    generation: u64,
+    locator_advanced: bool,
+    visibility: &'static str,
+    superseded: bool,
+    elapsed_ms: u64,
+}
+
+const GENERATION_OWNER_REVALIDATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_mins(10);
+
+#[derive(Debug, Default)]
+struct GenerationOwnerCache {
+    generation: u64,
+    pack_index_hash: String,
+    git_validation_digest: String,
+    visibility: Option<&'static str>,
+    verified_at: Option<std::time::Instant>,
+}
+
+impl GenerationOwnerCache {
+    fn current_visibility(
+        &self,
+        manifest: &crab_metadata::manifests::Manifest,
+    ) -> Option<&'static str> {
+        if self.generation != manifest.generation
+            || self.pack_index_hash != manifest.pack_index_hash
+            || self.git_validation_digest != manifest.git_validation_digest
+            || self
+                .verified_at
+                .is_none_or(|verified| verified.elapsed() >= GENERATION_OWNER_REVALIDATION_INTERVAL)
+        {
+            return None;
+        }
+        self.visibility
+    }
+
+    fn record(&mut self, manifest: &crab_metadata::manifests::Manifest, visibility: &'static str) {
+        self.generation = manifest.generation;
+        self.pack_index_hash.clone_from(&manifest.pack_index_hash);
+        self.git_validation_digest
+            .clone_from(&manifest.git_validation_digest);
+        self.visibility = Some(visibility);
+        self.verified_at = Some(std::time::Instant::now());
+    }
+}
+
+async fn run_generation_owner(
+    once: bool,
+    interval_secs: u64,
+    jsonl: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if interval_secs == 0 {
+        return Err(CrabError::Configuration {
+            key: "metadb.owner.interval".to_owned(),
+            origin: "Git generation-owner interval must be at least one second".to_owned(),
+        });
+    }
+    let (inner, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
+    let store = crate::storage::store::Store::new(inner).with_bucket_identity(bucket_identity);
+    let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix.clone());
+    let lock_ttl = std::time::Duration::from_secs(config.push_lock_ttl_secs);
+    let owner_cancel = cancel.child_token();
+    let mut owner = crab_coordination::PushLock::acquire_internal(
+        store.inner(),
+        &repo_prefix,
+        crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
+        lock_ttl,
+    )
+    .await?;
+    info!(%repo_prefix, once, interval_secs, "Git generation owner acquired");
+    let operation = Box::pin(
+        crate::git::push::while_renewing_internal_lock_with_cancellation(
+            &mut owner,
+            &owner_cancel,
+            run_generation_owner_locator_session(
+                &store,
+                &router,
+                once,
+                interval_secs,
+                jsonl,
+                lock_ttl,
+                &owner_cancel,
+            ),
+        ),
+    )
+    .await;
+    if let Err(error) = owner.release().await {
+        if operation.is_ok() {
+            return Err(error.into());
+        }
+        warn!(%error, "Git generation owner lock release also failed");
+    }
+    operation
+}
+
+async fn run_generation_owner_locator_session(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    once: bool,
+    interval_secs: u64,
+    jsonl: bool,
+    lock_ttl: std::time::Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let mut locator_lock =
+        acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
+    let operation = Box::pin(
+        crate::git::push::while_renewing_internal_lock_with_cancellation(
+            &mut locator_lock,
+            cancel,
+            generation_owner_writer_sessions(
+                store,
+                router,
+                once,
+                interval_secs,
+                jsonl,
+                lock_ttl,
+                cancel,
+            ),
+        ),
+    )
+    .await;
+    let release = locator_lock.release().await.map_err(CrabError::from);
+    match (operation, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            warn!(error = %release_error, "Git locator owner lock release also failed");
+            Err(error)
+        }
+    }
+}
+
+async fn generation_owner_writer_sessions(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    once: bool,
+    interval_secs: u64,
+    jsonl: bool,
+    lock_ttl: std::time::Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        let mut writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await?;
+        let operation = Box::pin(generation_owner_loop(
+            store,
+            router,
+            &mut writer,
+            once,
+            interval_secs,
+            jsonl,
+            lock_ttl,
+            cancel,
+        ))
+        .await;
+        let close = writer.close().await.map_err(CrabError::from);
+        match (operation, close) {
+            (Ok(GenerationOwnerLoopExit::Stop), Ok(_)) => return Ok(()),
+            (Ok(GenerationOwnerLoopExit::Rotate), Ok(_)) => {}
+            (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
+            (Err(error), Err(close_error)) => {
+                warn!(error = %close_error, "Git locator writer close also failed");
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn acquire_generation_owner_locator_lock(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    lock_ttl: std::time::Duration,
+    cancel: &CancellationToken,
+) -> Result<crab_coordination::PushLock> {
+    let mut context = crab_coordination::PushLockAcquireContext::new(Arc::clone(store.inner()));
+    let mut attempt = 0_u32;
+    loop {
+        match context
+            .acquire_internal(
+                router.repo_prefix(),
+                crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+                lock_ttl,
+            )
+            .await
+            .map_err(CrabError::from)
+        {
+            Ok(lock) => return Ok(lock),
+            Err(CrabError::PushLockHeld { .. }) => {
+                let delay = std::time::Duration::from_millis(
+                    100_u64
+                        .saturating_mul(1_u64.checked_shl(attempt.min(6)).unwrap_or(u64::MAX))
+                        .min(5_000),
+                );
+                attempt = attempt.saturating_add(1);
+                tokio::select! {
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                    () = tokio::time::sleep(delay) => {}
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationOwnerLoopExit {
+    Stop,
+    Rotate,
+}
+
+async fn generation_owner_loop(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    once: bool,
+    interval_secs: u64,
+    jsonl: bool,
+    lock_ttl: std::time::Duration,
+    cancel: &CancellationToken,
+) -> Result<GenerationOwnerLoopExit> {
+    let mut consecutive_errors = 0_u32;
+    let mut cache = GenerationOwnerCache::default();
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(GenerationOwnerLoopExit::Stop);
+        }
+        match Box::pin(generation_owner_sample(
+            store, router, writer, &mut cache, lock_ttl, cancel,
+        ))
+        .await
+        {
+            Ok(sample) => {
+                consecutive_errors = 0;
+                render_generation_owner_sample(&sample, jsonl)?;
+                if once {
+                    return Ok(GenerationOwnerLoopExit::Stop);
+                }
+                if writer.maintenance_due() {
+                    return Ok(GenerationOwnerLoopExit::Rotate);
+                }
+                if sample.superseded {
+                    continue;
+                }
+            }
+            Err(CrabError::Cancelled) if cancel.is_cancelled() => {
+                return Ok(GenerationOwnerLoopExit::Stop);
+            }
+            Err(error) if once => return Err(error),
+            Err(error) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                warn!(%error, consecutive_errors, "Git generation owner sample failed");
+            }
+        }
+        let delay = generation_owner_retry_delay(interval_secs, consecutive_errors);
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(GenerationOwnerLoopExit::Stop),
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn generation_owner_sample(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    cache: &mut GenerationOwnerCache,
+    lock_ttl: std::time::Duration,
+    cancel: &CancellationToken,
+) -> Result<GenerationOwnerSample> {
+    let started = std::time::Instant::now();
+    let (manifest, _) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let generation = manifest.generation;
+    let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
+    let locator_current = anchor.is_none_or(|anchor| {
+        writer.coverage()
+            == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
+                generation: anchor.generation,
+                pack_index_hash: anchor.pack_index_hash,
+            })
+    });
+    if locator_current && let Some(visibility) = cache.current_visibility(&manifest) {
+        return Ok(GenerationOwnerSample {
+            generation,
+            locator_advanced: false,
+            visibility,
+            superseded: false,
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+    }
+    let locator_advanced = if locator_current {
+        false
+    } else if let Some(anchor) = anchor {
+        let packs = crate::metadata::manifest::read_bulk_pack_list(
+            store,
+            router,
+            &manifest.pack_index_hash,
+        )
+        .await?;
+        crate::git::push::publish_pack_locator_inventory_for_owner(
+            writer, store, router, anchor, &packs,
+        )
+        .await?
+    } else {
+        false
+    };
+    let visibility = Box::pin(
+        crate::git::push::repair_git_visibility_after_locator_if_current_with_limit(
+            store,
+            router,
+            generation,
+            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+            lock_ttl,
+            cancel,
+        ),
+    )
+    .await?;
+    let (after, _) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let superseded = after.generation != generation
+        || after.pack_index_hash != manifest.pack_index_hash
+        || after.git_validation_digest != manifest.git_validation_digest;
+    let visibility = match visibility {
+        Some(crate::git::push::GitVisibilityPublication::Published) => "published",
+        Some(crate::git::push::GitVisibilityPublication::CompletePackOnly(_)) => {
+            "complete_pack_only"
+        }
+        None => "superseded",
+    };
+    if !superseded {
+        cache.record(&manifest, visibility);
+    }
+    Ok(GenerationOwnerSample {
+        generation,
+        locator_advanced,
+        visibility,
+        superseded,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -> Result<()> {
+    if jsonl {
+        println!(
+            "{}",
+            serde_json::to_string(sample).map_err(|error| CrabError::Internal(format!(
+                "Git generation owner sample serialize: {error}"
+            )))?
+        );
+    } else {
+        info!(
+            generation = sample.generation,
+            locator_advanced = sample.locator_advanced,
+            visibility = sample.visibility,
+            superseded = sample.superseded,
+            elapsed_ms = sample.elapsed_ms,
+            "Git generation owner sample completed"
+        );
+    }
+    Ok(())
+}
+
+fn generation_owner_retry_delay(
+    interval_secs: u64,
+    consecutive_errors: u32,
+) -> std::time::Duration {
+    let multiplier = 1_u64
+        .checked_shl(consecutive_errors.min(6))
+        .unwrap_or(u64::MAX);
+    std::time::Duration::from_secs(interval_secs.saturating_mul(multiplier).min(300))
 }
 
 // --- diagnose -------------------------------------------------------
@@ -2146,29 +2547,19 @@ async fn diagnose_acceleration_health(
         );
         (false, None, None, false)
     } else {
-        match crab_metadata::git_visibility::read(
-            &storage,
-            &router,
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-        )
-        .await
-        {
-            Ok(index) => {
-                let covers_manifest = index.matches_manifest(&manifest);
-                if !covers_manifest {
-                    notes.push(
-                        "Git visibility proof does not cover the current manifest refs; run `crab metadb rebuild`"
-                            .to_owned(),
-                    );
-                }
+        match crab_metadata::git_visibility::read_for_manifest(&storage, &router, &manifest).await {
+            Ok(Some(read)) => {
+                let index = read.index;
                 (
                     true,
                     Some(index.generation),
                     Some(index.pack_index_hash),
-                    covers_manifest,
+                    true,
                 )
+            }
+            Ok(None) => {
+                notes.push("Git visibility proof is missing; run `crab metadb rebuild`".to_owned());
+                (false, None, None, false)
             }
             Err(error) => {
                 notes.push(format!(
@@ -2488,6 +2879,77 @@ mod tests {
             MetaDb::new(store, String::from("org/test-repo"), cfg),
             cache_dir,
         )
+    }
+
+    #[test]
+    fn generation_owner_backoff_is_bounded() {
+        assert_eq!(
+            generation_owner_retry_delay(5, 0),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            generation_owner_retry_delay(5, 1),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            generation_owner_retry_delay(5, 6),
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn generation_owner_cache_revalidates_immutable_proof() {
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 7;
+        manifest.pack_index_hash = "pack-index".to_owned();
+        manifest.git_validation_digest = "validation".to_owned();
+        let mut cache = GenerationOwnerCache::default();
+        cache.record(&manifest, "published");
+
+        assert_eq!(cache.current_visibility(&manifest), Some("published"));
+        cache.verified_at = Some(
+            std::time::Instant::now()
+                .checked_sub(GENERATION_OWNER_REVALIDATION_INTERVAL)
+                .expect("revalidation interval fits monotonic time"),
+        );
+        assert_eq!(cache.current_visibility(&manifest), None);
+    }
+
+    #[tokio::test]
+    async fn generation_owner_accepts_an_empty_current_generation() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::metadata::manifest::create_manifest_with_etag(
+            &store,
+            &router,
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create manifest");
+        let mut writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open locator writer");
+
+        let sample = generation_owner_sample(
+            &store,
+            &router,
+            &mut writer,
+            &mut GenerationOwnerCache::default(),
+            std::time::Duration::from_secs(60),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sample empty generation");
+
+        assert_eq!(sample.generation, 0);
+        assert!(!sample.locator_advanced);
+        assert_eq!(sample.visibility, "published");
+        assert!(!sample.superseded);
+        writer.close().await.expect("close locator writer");
     }
 
     #[test]

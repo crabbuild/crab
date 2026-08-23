@@ -849,6 +849,42 @@ mod storage {
         .map(|read| read.index)
     }
 
+    /// Read the proof applicable to one manifest, including v1 migration.
+    ///
+    /// A valid shipped v1 object can share its generation-and-pack key with an
+    /// abandoned ref-only candidate. Such an object is not damage to the
+    /// current manifest: it is simply inapplicable, so callers may publish the
+    /// digest-bound proof without being blocked by the legacy collision.
+    pub async fn read_for_manifest(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<Option<GitVisibilityRead>> {
+        match read_with_format(
+            store,
+            router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )
+        .await
+        {
+            Ok(read) if read.index.matches_manifest(manifest) => Ok(Some(read)),
+            Ok(read) if read.format == GitVisibilityFormat::V1 => Ok(None),
+            Ok(_) => Err(crate::error::MetadataError::CorruptObject {
+                path: router
+                    .git_visibility_path(&manifest.git_validation_digest)
+                    .as_ref()
+                    .to_owned(),
+                reason: "digest-bound visibility proof does not match its manifest".to_owned(),
+            }),
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Upload a visibility proof once and verify an existing immutable value.
     pub async fn upload_if_absent(
         store: &Store,
@@ -1001,36 +1037,15 @@ mod storage {
         let mut refs = if base.refs.is_empty() {
             BTreeMap::new()
         } else {
-            match read_with_format(
-                store,
-                router,
-                base.generation,
-                &base.pack_index_hash,
-                &base.git_validation_digest,
-            )
-            .await
-            {
-                Ok(read) => {
+            match read_for_manifest(store, router, base).await? {
+                Some(read) => {
                     let index = read.index;
-                    if !index.matches_manifest(base) {
-                        return Err(crate::error::MetadataError::CorruptObject {
-                            path: router
-                                .git_visibility_path(&base.git_validation_digest)
-                                .as_ref()
-                                .to_owned(),
-                            reason: "base visibility proof does not match its manifest refs"
-                                .to_owned(),
-                        });
-                    }
                     if read.format == GitVisibilityFormat::V1 {
                         upload_if_absent(store, router, &index).await?;
                     }
                     index.refs
                 }
-                Err(crate::error::MetadataError::Storage {
-                    source: StorageError::NotFound { .. },
-                }) => return Ok(None),
-                Err(error) => return Err(error),
+                None => return Ok(None),
             }
         };
 
@@ -1089,7 +1104,7 @@ mod storage {
 #[cfg(feature = "storage")]
 pub use storage::{
     GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, read, read_edit,
-    read_with_format, upload_edit, upload_if_absent,
+    read_for_manifest, read_with_format, upload_edit, upload_if_absent,
 };
 
 #[cfg(test)]
@@ -1254,6 +1269,62 @@ mod tests {
             .unwrap();
         assert_eq!(current.format, GitVisibilityFormat::V3);
         assert_eq!(current.index, migrated.index);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn orphaned_v1_candidate_does_not_block_digest_bound_proof() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let generation = 7;
+        let pack_hash = "a".repeat(64);
+        let legacy = serde_json::json!({
+            "version": 1,
+            "generation": generation,
+            "pack_index_hash": pack_hash.clone(),
+            "refs": {"refs/heads/main": ["1".repeat(40)]},
+        });
+        store
+            .put(
+                &router.git_visibility_v1_path(generation, &pack_hash),
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = generation;
+        manifest.pack_index_hash.clone_from(&pack_hash);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "2".repeat(40));
+        manifest.seal_git_validation();
+
+        assert!(
+            read_for_manifest(&store, &router, &manifest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let current = GitVisibilityIndex::new(
+            generation,
+            &pack_hash,
+            &manifest.git_validation_digest,
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
+        );
+        upload_if_absent(&store, &router, &current).await.unwrap();
+        let read = read_for_manifest(&store, &router, &manifest)
+            .await
+            .unwrap()
+            .expect("digest-bound proof should supersede the orphaned v1 candidate");
+        assert_eq!(read.format, GitVisibilityFormat::V3);
+        assert_eq!(read.index, current);
     }
 
     #[cfg(feature = "storage")]

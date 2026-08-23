@@ -152,6 +152,19 @@ Push uses a receive-pack-style flow. The CLI first asks for a staging prefix,
 uploads immutable push data under that prefix, then asks crab-auth to finalize.
 The service verifies changed paths server-side and commits `{repo}/manifest`
 with service-owned cloud credentials.
+Verification hashes every staged object. Finalization validates the staged
+layout again, then re-hashes each body at its canonical promotion boundary;
+it does not perform a separate full-candidate download immediately beforehand.
+Verification also materializes source refs and Git visibility once, stores the
+result under the service-owned protected-push session prefix, and returns its
+content hash as the authorization token. Finalization requires that exact
+plan-, source-generation-, and prepare-bound evidence instead of rebuilding a
+second temporary Git object database. Session evidence is removed after a
+successful commit or by the staging TTL cleanup.
+The same verified workspace publishes immutable pack indexes. Post-commit
+locator publication reads those indexes and the 20-byte pack trailer, not the
+new pack body again; older repositories retain their documented reverse-index
+repair path when historical `.rev` evidence is absent.
 Path-scoped push rules require at least one server-verified changed path; use a
 non-path-scoped push rule for intentional ref-only or metadata-only updates.
 Protected push accepts branch ref updates only. The receive helper rejects
@@ -184,6 +197,13 @@ A successful response includes `push_id`, `upload_prefix`, and credentials with
 staging-only immutable write permissions. These credentials must not read or
 write original repo packs, metadata, shards, xorbs, LFS objects, refs, locks,
 or `{repo}/manifest`.
+
+This endpoint is the shipped Crab Auth compatibility protocol. Its prepare
+shape predates byte/object admission plans, so the client cannot safely emulate
+team-wide slots with the returned session-private staging credentials. Keep it
+for existing self-hosted deployments and their protected-push authorization
+contract; choose the managed service protocol for authenticated organization
+identity and plan-based team quota admission.
 
 ### Finalize
 

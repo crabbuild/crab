@@ -14,6 +14,7 @@ use super::{
 use crate::error::{AuthServerError, Result};
 
 const DEFAULT_MAX_PUSH_PLAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_VERIFIED_RECEIVE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Server-owned context for one protected-push receive session.
 pub struct ReceiveContext {
@@ -180,10 +181,35 @@ impl ReceiveContext {
     }
 
     pub async fn cleanup_prepare_record(&self) -> Result<()> {
-        match self.store.delete(&self.prepare_record_path()).await {
-            Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
-            Err(e) => Err(e.into()),
+        for path in [self.prepare_record_path(), self.verified_receive_path()] {
+            match self.store.delete(&path).await {
+                Ok(()) | Err(StorageError::NotFound { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
         }
+        Ok(())
+    }
+
+    pub(crate) async fn write_verified_receive(&self, body: bytes::Bytes) -> Result<()> {
+        if body.is_empty() || body.len() as u64 > MAX_VERIFIED_RECEIVE_BYTES {
+            return Err(invalid(
+                "verified receive evidence exceeds the supported size",
+            ));
+        }
+        self.store
+            .put_exact(&self.verified_receive_path(), body)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn read_verified_receive(&self) -> Result<bytes::Bytes> {
+        let path = self.verified_receive_path();
+        let meta = self.store.head(&path).await?;
+        if meta.size == 0 || meta.size > MAX_VERIFIED_RECEIVE_BYTES {
+            return Err(invalid("verified receive evidence has an invalid size"));
+        }
+        let (body, _) = self.store.get_with_etag(&path).await?;
+        Ok(body)
     }
 
     pub async fn validate_staged_objects(&self, plan: &ProtectedPushPlan) -> Result<()> {
@@ -234,12 +260,34 @@ impl ReceiveContext {
                 Err(e) => return Err(e.into()),
             }
         }
+        let session_prefix =
+            ObjectPath::from(format!("{}/protected-push-sessions/", self.repo_prefix));
+        let active_sessions = [self.prepare_record_path(), self.verified_receive_path()];
+        for object in self.store.list_prefix(&session_prefix).await? {
+            if active_sessions.contains(&object.location)
+                || object.last_modified.timestamp() >= cutoff
+            {
+                continue;
+            }
+            match self.store.delete(&object.location).await {
+                Ok(()) => deleted += 1,
+                Err(StorageError::NotFound { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(deleted)
     }
 
     fn prepare_record_path(&self) -> ObjectPath {
         ObjectPath::from(format!(
             "{}/protected-push-sessions/{}.json",
+            self.repo_prefix, self.push_id
+        ))
+    }
+
+    fn verified_receive_path(&self) -> ObjectPath {
+        ObjectPath::from(format!(
+            "{}/protected-push-sessions/{}.verified.json",
             self.repo_prefix, self.push_id
         ))
     }
@@ -391,6 +439,21 @@ mod tests {
             err.to_string().contains("push-plan.json is too large"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepare_cleanup_removes_verified_receive_evidence() -> Result<()> {
+        let ctx = context();
+        ctx.write_verified_receive(Bytes::from_static(b"verified"))
+            .await?;
+
+        ctx.cleanup_prepare_record().await?;
+
+        assert!(matches!(
+            ctx.read_verified_receive().await,
+            Err(AuthServerError::NotFound { .. })
+        ));
         Ok(())
     }
 

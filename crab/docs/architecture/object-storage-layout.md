@@ -127,6 +127,7 @@ Paths are relative to `repo_prefix`.
 | `lfs/objects/{aa}/{bb}/{sha256}` | Git LFS bodies | Immutable |
 | `lfs/locks/{blake3(path)}` | Git LFS protocol locks | Mutable |
 | `staging/{push-id}/` | protected-push temporary writes | Ephemeral, service-owned |
+| `protected-push-sessions/{push-id}.{json,verified.json}` | protected-push prepare state and verified source materialization | Ephemeral, service-owned |
 
 The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`,
 `shard-list`, or `commit-graph-summary` objects are compatibility or
