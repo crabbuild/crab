@@ -117,6 +117,11 @@ const FLOCK_BLOCKING_DEFAULT_BUDGET: std::time::Duration = std::time::Duration::
 /// Chunk payloads read per staging verification batch.
 const VERIFY_BATCH_CHUNKS: usize = 128;
 
+/// Prepared-xorb files materialized concurrently during push reads.
+/// Each holds up to the 256 MiB max xorb in memory; four keeps the
+/// pipeline full without letting RSS scale with add size.
+const PREPARED_XORB_READ_CONCURRENCY: usize = 4;
+
 /// Attempt-unique owner of staged path leases.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StagingBatchId(String);
@@ -1249,13 +1254,24 @@ async fn read_prepared_staged_chunks_batch(
     }
 
     let mut tasks = Vec::with_capacity(by_xorb.len());
+    // Each in-flight task materializes a whole prepared xorb (up to the
+    // 256 MiB max) in memory, so unbounded fan-out across a large add
+    // would spike RSS by files×xorb-size. Cap concurrent reads; the join
+    // loop below preserves input order regardless of completion order.
+    let read_permits = Arc::new(tokio::sync::Semaphore::new(PREPARED_XORB_READ_CONCURRENCY));
     for ((file_hash, xorb_hash, payload_hash, expected_bytes), wanted) in by_xorb {
         let path = push_plan::prepared_xorb_path(
             root,
             &MerkleHash::from(file_hash),
             &MerkleHash::from(xorb_hash),
         );
+        let permit = read_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| StagingError::Internal(format!("read semaphore: {error}")))?;
         tasks.push(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let payload = Bytes::from(std::fs::read(&path)?);
             let actual_payload_hash = blake3::hash(&payload);
             let size_matches = u64::try_from(payload.len()) == Ok(expected_bytes);
