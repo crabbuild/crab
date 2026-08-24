@@ -323,8 +323,17 @@ pub(crate) async fn open_repository(
     let mut last_indexing = None;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
         let open = open_repository_snapshot(store, prefix, cancellation).await;
+        let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
-            Ok(repository) => return Ok(repository),
+            Ok(repository) => match repository.visibility_index(cancellation).await {
+                Ok(_) => return Ok(repository),
+                Err(error) if visibility_index_needs_repair(&error) => {
+                    let generation = repository.generation();
+                    visibility_error = Some(error);
+                    (Some(generation), generation)
+                }
+                Err(error) => return Err(remote_error(error)),
+            },
             Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
             Err(error) => return Err(remote_error(error)),
         };
@@ -357,7 +366,31 @@ pub(crate) async fn open_repository(
                 required_generation,
                 "repaired current Git locator before upload-pack admission"
             );
-            continue;
+        }
+        if repaired || visibility_error.is_some() {
+            let publication =
+                super::push::repair_git_visibility_after_locator_if_current_with_limit(
+                    &repair_store,
+                    &repair_layout,
+                    required_generation,
+                    crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+                    LOCATOR_READ_REPAIR_LOCK_TTL,
+                    cancellation,
+                )
+                .await?;
+            if matches!(
+                publication,
+                Some(super::push::GitVisibilityPublication::Published)
+            ) {
+                tracing::info!(
+                    required_generation,
+                    "repaired current catalog-bound Git visibility before upload-pack admission"
+                );
+                continue;
+            }
+            if let Some(error) = visibility_error {
+                return Err(remote_error(error));
+            }
         }
         if attempt == LOCATOR_READ_RETRY_LIMIT {
             break;

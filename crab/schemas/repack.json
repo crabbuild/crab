@@ -14,6 +14,20 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "bytes_read": {
+      "default": 0,
+      "description": "Pack body bytes read from object storage.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "bytes_written": {
+      "default": 0,
+      "description": "New pack body bytes written to object storage.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "elapsed_ms": {
       "description": "Wall-clock duration in milliseconds.",
       "format": "uint64",

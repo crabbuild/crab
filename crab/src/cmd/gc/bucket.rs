@@ -114,6 +114,10 @@ impl BucketGcOutcome {
             partial_enumeration: false,
             delete_failures: 0,
             reconciliation_failed: false,
+            active_pack_bytes: 0,
+            retained_history_pack_bytes: 0,
+            grace_period_pack_bytes: 0,
+            collectible_pack_bytes: 0,
         }
     }
 }

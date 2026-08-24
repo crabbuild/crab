@@ -1,174 +1,41 @@
 //! Shallow boundary computation and `.git/shallow` file management.
 //!
-//! Provides BFS-based boundary computation over a [`CommitGraphSummary`],
+//! Provides boundary computation over a [`CommitGraphTraversal`],
 //! pack filtering by depth, and helpers for writing/removing the
 //! `.git/shallow` sentinel file.
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use tokio::fs;
 use tracing::{Instrument, debug};
 
 use crate::core::error::{CrabError, Result};
-use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::commit_graph::CommitGraphTraversal;
 use crab_metadata::manifests::PackList;
 
 /// Compute the shallow boundary for a given depth and ref set.
 ///
-/// Walks the [`CommitGraphSummary`] from each ref tip via BFS, stopping
+/// Walks the commit graph from each ref tip, stopping
 /// at depth `depth`. Commits at exactly depth N form the boundary.
-///
-/// Returns borrowed references into the summary's OID strings to avoid
-/// per-boundary-commit allocation.
 ///
 /// Special cases:
 /// - `depth == 0`: the boundary equals the ref tips themselves (no commits
 ///   are fetched).
 /// - `depth` exceeds the graph height: the boundary is empty (full clone).
 /// - Empty graph or no matching tips: the boundary is empty.
-pub fn compute_shallow_boundary<'a>(
-    summary: &'a CommitGraphSummary,
+pub fn compute_shallow_boundary(
+    graph: &dyn CommitGraphTraversal,
     ref_tips: &[String],
     depth: u32,
-) -> Vec<Cow<'a, str>> {
-    if ref_tips.is_empty() || summary.commits.is_empty() {
-        return Vec::new();
-    }
-
-    // depth=0 means "no commits fetched" — the tips themselves are the boundary.
-    if depth == 0 {
-        // Only return tips that actually exist in the graph.
-        let known: HashMap<&str, &str> = summary
-            .commits
-            .iter()
-            .map(|c| (c.oid.as_str(), c.oid.as_str()))
-            .collect();
-        return ref_tips
-            .iter()
-            .filter_map(|t| known.get(t.as_str()).map(|&oid| Cow::Borrowed(oid)))
-            .collect();
-    }
-
-    // Build OID → CommitEntry lookup.
-    let by_oid: HashMap<&str, &crab_metadata::commit_graph::CommitEntry> = summary
-        .commits
-        .iter()
-        .map(|c| (c.oid.as_str(), c))
-        .collect();
-
-    // BFS from each ref tip, tracking depth per commit.
-    let mut visited: HashMap<&str, u32> = HashMap::new();
-    let mut queue: VecDeque<(&str, u32)> = VecDeque::new();
-
-    for tip in ref_tips {
-        if by_oid.contains_key(tip.as_str()) && !visited.contains_key(tip.as_str()) {
-            visited.insert(tip.as_str(), 1);
-            queue.push_back((tip.as_str(), 1));
-        }
-    }
-
-    let mut boundary: Vec<Cow<'a, str>> = Vec::new();
-
-    while let Some((oid, current_depth)) = queue.pop_front() {
-        if current_depth == depth {
-            // Borrow the OID from the summary's CommitEntry to avoid allocation.
-            if let Some(entry) = by_oid.get(oid) {
-                boundary.push(Cow::Borrowed(entry.oid.as_str()));
-            }
-            continue;
-        }
-
-        if let Some(entry) = by_oid.get(oid) {
-            if !entry.parents.is_empty()
-                && entry
-                    .parents
-                    .iter()
-                    .any(|parent| !by_oid.contains_key(parent.as_str()))
-            {
-                // A retained commit whose parent is absent marks compaction's
-                // edge. Keep it shallow instead of treating an incomplete
-                // summary as proof that the repository root was reached.
-                boundary.push(Cow::Borrowed(entry.oid.as_str()));
-                continue;
-            }
-            for parent_oid in &entry.parents {
-                if let Some(&prev_depth) = visited.get(parent_oid.as_str())
-                    && prev_depth <= current_depth + 1
-                {
-                    continue;
-                }
-                if by_oid.contains_key(parent_oid.as_str()) {
-                    visited.insert(parent_oid.as_str(), current_depth + 1);
-                    queue.push_back((parent_oid.as_str(), current_depth + 1));
-                }
-            }
-        }
-    }
-
-    boundary.sort();
-    boundary.dedup();
-
+) -> Vec<String> {
+    let boundary = graph.shallow_boundary(ref_tips, depth).unwrap_or_default();
     debug!(
         boundary_len = boundary.len(),
         depth,
         tips = ref_tips.len(),
         "computed shallow boundary"
     );
-
     boundary
-}
-
-/// Compute the set of commit OIDs reachable from `ref_tips` via BFS,
-/// stopping at commits in the `boundary` set.
-///
-/// The boundary commits themselves are included in the reachable set —
-/// they mark the edge of the shallow clone but are still needed for
-/// pack filtering.
-fn compute_reachable_set(
-    summary: &CommitGraphSummary,
-    ref_tips: &[String],
-    boundary: &[impl AsRef<str>],
-) -> HashSet<String> {
-    let by_oid: HashMap<&str, &crab_metadata::commit_graph::CommitEntry> = summary
-        .commits
-        .iter()
-        .map(|c| (c.oid.as_str(), c))
-        .collect();
-
-    let boundary_set: HashSet<&str> = boundary.iter().map(std::convert::AsRef::as_ref).collect();
-
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<&str> = VecDeque::new();
-
-    for tip in ref_tips {
-        if by_oid.contains_key(tip.as_str()) && !visited.contains(tip.as_str()) {
-            visited.insert(tip.clone());
-            queue.push_back(tip.as_str());
-        }
-    }
-
-    while let Some(oid) = queue.pop_front() {
-        // Don't expand past the boundary — the commit is reachable but
-        // its parents are outside the shallow window.
-        if boundary_set.contains(oid) {
-            continue;
-        }
-
-        if let Some(entry) = by_oid.get(oid) {
-            for parent_oid in &entry.parents {
-                if by_oid.contains_key(parent_oid.as_str())
-                    && !visited.contains(parent_oid.as_str())
-                {
-                    visited.insert(parent_oid.clone());
-                    queue.push_back(parent_oid.as_str());
-                }
-            }
-        }
-    }
-
-    visited
 }
 
 /// Filter packs to only those containing objects within the shallow boundary.
@@ -179,11 +46,17 @@ fn compute_reachable_set(
 /// are always included to preserve the superset guarantee.
 pub fn filter_packs_by_depth(
     pack_list: &PackList,
-    summary: &CommitGraphSummary,
-    boundary: &[impl AsRef<str>],
+    graph: &dyn CommitGraphTraversal,
+    boundary: &[String],
     ref_tips: &[String],
 ) -> Vec<String> {
-    let reachable = compute_reachable_set(summary, ref_tips, boundary);
+    let Some(reachable) = graph.reachable_to_boundary(ref_tips, boundary) else {
+        return pack_list
+            .entries
+            .iter()
+            .map(|entry| entry.pack_id.clone())
+            .collect();
+    };
 
     let mut result = Vec::new();
     for entry in &pack_list.entries {
@@ -353,6 +226,8 @@ pub async fn read_shallow_file(git_dir: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crab_metadata::commit_graph::{CommitEntry, CommitGraphSummary};
     use crab_metadata::manifests::{PackEntry, PackList};
@@ -407,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn depth_zero_filters_unknown_tips() {
+    fn unknown_tip_disables_shallow_boundary() {
         let (summary, _tip) = linear_chain(3);
         let boundary = compute_shallow_boundary(&summary, &["c2".into(), "unknown".into()], 0);
-        assert_eq!(boundary, vec!["c2".to_string()]);
+        assert!(boundary.is_empty());
     }
 
     #[test]
@@ -676,8 +551,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_packs_no_matching_ref_tips_excludes_metadata_packs() {
-        // When no ref_tips match the graph, only legacy packs survive.
+    fn filter_packs_without_complete_tip_proof_returns_full_superset() {
+        // Missing graph coverage must not exclude a pack needed by the unknown tip.
         let (summary, _) = linear_chain(3);
         let ref_tips = vec!["unknown_tip".to_string()];
         let boundary: Vec<String> = vec![];
@@ -691,7 +566,10 @@ mod tests {
         };
 
         let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
-        assert_eq!(ids, vec!["legacy_pack".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["metadata_pack".to_string(), "legacy_pack".to_string()]
+        );
     }
 
     // --- write_shallow_file / remove_shallow_file ---

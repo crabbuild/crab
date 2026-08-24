@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
-use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::commit_graph::CommitGraphTraversal;
 use crab_metadata::manifests::{Manifest, manifest_reachable_objects};
 
 use crate::hidden_refs;
@@ -60,7 +60,7 @@ pub enum FetchAdmissionReject {
 pub fn validate_fetch_wants_with_manifest(
     wants: &[FetchWant],
     manifest: &Manifest,
-    summary: Option<&CommitGraphSummary>,
+    graph: Option<&dyn CommitGraphTraversal>,
     policy: &FetchAdmissionPolicy,
 ) -> Vec<(FetchWant, std::result::Result<(), FetchAdmissionReject>)> {
     let hidden_refs = hidden_refs::compile(&policy.transfer_hide_refs);
@@ -91,7 +91,7 @@ pub fn validate_fetch_wants_with_manifest(
 
             if policy.allow_reachable_sha_in_want {
                 let set = reachable_set
-                    .get_or_insert_with(|| manifest_reachable_objects(&visible_manifest, summary));
+                    .get_or_insert_with(|| manifest_reachable_objects(&visible_manifest, graph));
                 if set.contains(&want.sha) {
                     return (want.clone(), Ok(()));
                 }

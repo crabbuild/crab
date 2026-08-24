@@ -479,6 +479,10 @@ fn validate_gc() {
             partial_enumeration: false,
             delete_failures: 0,
             reconciliation_failed: false,
+            active_pack_bytes: 30_000,
+            retained_history_pack_bytes: 10_000,
+            grace_period_pack_bytes: 5_000,
+            collectible_pack_bytes: 5_000,
         },
     );
 }
@@ -651,6 +655,8 @@ fn validate_repack() {
             packs_after: 2,
             bytes_before: 100000,
             bytes_after: 80000,
+            bytes_read: 20_000,
+            bytes_written: 18_000,
             elapsed_ms: 600,
         },
     );

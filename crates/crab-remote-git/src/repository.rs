@@ -116,7 +116,8 @@ impl Default for ObjectLimits {
             max_inflated_entry_bytes: 64 * 1024 * 1024,
             max_object_bytes: 64 * 1024 * 1024,
             max_pack_index_bytes: 128 * 1024 * 1024,
-            max_commit_graph_bytes: 16 * 1024 * 1024,
+            max_commit_graph_bytes:
+                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
             max_delta_depth: 128,
             max_tag_depth: 32,
         }
@@ -410,6 +411,14 @@ impl RemoteGitRepository {
                     &store,
                     &layout,
                     manifest.commit_graph_hash.as_deref(),
+                    manifest.generation,
+                    &manifest.pack_index_hash,
+                    &manifest.git_validation_digest,
+                    &refs
+                        .entries
+                        .iter()
+                        .map(|entry| entry.peeled.unwrap_or(entry.target))
+                        .collect::<Vec<_>>(),
                     options.object_limits().max_commit_graph_bytes,
                     cancellation,
                     &runtime_cancellation,
@@ -524,7 +533,7 @@ impl RemoteGitRepository {
         check_cancelled(&runtime_cancellation)?;
         let index = if let Some(coverage) = self.state.coverage {
             let pack_index_hash = coverage.pack_index_hash.to_string();
-            let read = crab_metadata::git_visibility::read(
+            let read = crab_metadata::git_visibility::read_with_format(
                 &self.state.store,
                 &self.state.layout,
                 self.state.generation,
@@ -535,7 +544,15 @@ impl RemoteGitRepository {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                result = read => result.map_err(Error::Metadata)?,
+                result = read => {
+                    let read = result.map_err(Error::Metadata)?;
+                    if read.format != crab_metadata::git_visibility::GitVisibilityFormat::V5 {
+                        return Err(Error::RepositoryState {
+                            reason: RepositoryStateError::VisibilityProofMismatch,
+                        });
+                    }
+                    read.index
+                },
             }
         } else if self.state.refs.is_empty() {
             // An empty repository has no pack index or locator coverage to

@@ -4479,8 +4479,8 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-advisory-commit-graph-bounded",
-            sum(key.endswith("/commit-graph-summary") for key in record.origin_get_key_delta) <= 1,
+            "cli-dedup-push-retired-commit-graph-summary-unused",
+            not any(key.endswith("/commit-graph-summary") for key in record.origin_get_key_delta),
             {"key_delta": record.origin_get_key_delta},
         )
         self.check(

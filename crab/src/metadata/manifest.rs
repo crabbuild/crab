@@ -375,7 +375,7 @@ pub fn validate_manifest_payload(manifest: &Manifest) -> Result<()> {
 #[must_use]
 pub fn manifest_reachable_objects(
     manifest: &Manifest,
-    summary: Option<&crab_metadata::commit_graph::CommitGraphSummary>,
+    graph: Option<&dyn crab_metadata::commit_graph::CommitGraphTraversal>,
 ) -> std::collections::HashSet<String> {
-    crab_metadata::manifests::manifest_reachable_objects(manifest, summary)
+    crab_metadata::manifests::manifest_reachable_objects(manifest, graph)
 }

@@ -143,15 +143,18 @@ Paths are relative to `repo_prefix`.
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
 | `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
 | `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
+| `manifests/commit-graph-{blake3}` | complete split commit-graph descriptor pinned by `manifest` | Immutable |
+| `metadata/commit-graph/layers/{blake3}.bin` | positional commit records and parent ordinals | Immutable |
 | `locks/` | coordination namespaces described below | Mutable |
 | `lfs/objects/{aa}/{bb}/{sha256}` | Git LFS bodies | Immutable |
 | `lfs/locks/{blake3(path)}` | Git LFS protocol locks | Mutable |
 | `staging/{push-id}/` | protected-push temporary writes | Ephemeral, service-owned |
 | `protected-push-sessions/{push-id}.{json,verified.json}` | protected-push prepare state and verified source materialization | Ephemeral, service-owned |
 
-The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`,
-`shard-list`, or `commit-graph-summary` objects are compatibility or
-feature-owned surfaces, not an alternate source of truth.
+The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`, or
+`shard-list` objects are compatibility or feature-owned surfaces, not an
+alternate source of truth. Commit-graph layers are trusted only through the
+descriptor hash pinned by that manifest.
 
 An optional feature that adds a repository-local namespace must document its
 owner, relative grammar, mutability, reachability, and cleanup policy. The

@@ -92,7 +92,7 @@ pub enum RevisionError {
 #[non_exhaustive]
 pub enum CorruptionStage {
     /// Immutable commit-graph acceleration metadata.
-    #[error("commit graph summary")]
+    #[error("split commit graph")]
     CommitGraph,
     /// Exact object-locator metadata.
     #[error("object locator")]
@@ -293,13 +293,6 @@ pub enum Error {
         oid: gix_hash::ObjectId,
         #[source]
         source: gix_object::decode::Error,
-    },
-
-    /// Commit-graph summary parsing failed.
-    #[error("failed to parse commit graph summary")]
-    CommitGraphParse {
-        #[source]
-        source: serde_json::Error,
     },
 
     /// Tree payload parsing failed.
@@ -519,7 +512,6 @@ impl Error {
             Self::RepositoryState { .. }
             | Self::ObjectKind { .. }
             | Self::CommitParse { .. }
-            | Self::CommitGraphParse { .. }
             | Self::TreeParse { .. }
             | Self::TagParse { .. }
             | Self::Corrupt { .. }

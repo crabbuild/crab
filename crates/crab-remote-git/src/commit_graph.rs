@@ -1,29 +1,29 @@
-use std::collections::HashMap;
-
-use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
 use crab_storage::{Store, StoreLayout};
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
 
 use crate::{CorruptionStage, Error, Result};
 
-#[derive(Debug)]
-struct CommitGraphEntry {
-    generation: u64,
-    parents: Vec<ObjectId>,
-}
-
-/// Validated, disposable acceleration data for raw commit traversal.
+/// Validated, generation-bound acceleration data for raw commit traversal.
 #[derive(Debug)]
 pub(crate) struct CommitGraphIndex {
-    entries: HashMap<ObjectId, CommitGraphEntry>,
+    graph: SplitCommitGraph,
 }
 
 impl CommitGraphIndex {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "graph loading validates manifest identity and two cancellation scopes"
+    )]
     pub(crate) async fn load(
         store: &Store,
         layout: &StoreLayout<Store>,
         content_hash: Option<&str>,
+        expected_generation: u64,
+        expected_pack_index_hash: &str,
+        expected_validation_digest: &str,
+        expected_roots: &[ObjectId],
         max_bytes: u64,
         cancellation: &CancellationToken,
         runtime_cancellation: &CancellationToken,
@@ -31,171 +31,135 @@ impl CommitGraphIndex {
         let Some(content_hash) = content_hash else {
             return Ok(None);
         };
-        let path = layout.bulk_manifest_path("commit-graph", content_hash);
-        let expected_hash = blake3::Hash::from_hex(content_hash)
-            .map_err(|_| Error::Corrupt {
+        let graph = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = load_split_commit_graph(store, layout, content_hash, max_bytes) => result?,
+        };
+        if graph.descriptor.generation != expected_generation
+            || graph.descriptor.pack_index_hash != expected_pack_index_hash
+            || graph.descriptor.git_validation_digest != expected_validation_digest
+            || expected_roots
+                .iter()
+                .any(|root| sha1_bytes(*root).is_none_or(|root| !graph.contains(&root)))
+        {
+            return Err(Error::Corrupt {
                 stage: CorruptionStage::CommitGraph,
-            })?
-            .as_bytes()
-            .to_owned();
-        let metadata = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-            result = store.head(&path) => result?,
-        };
-        if metadata.size > max_bytes {
-            return Err(Error::LimitExceeded {
-                limit: "commit graph bytes",
-                actual: metadata.size,
-                maximum: max_bytes,
             });
         }
-        let bytes = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-            result = store.verify(&path, &expected_hash) => result?,
-        };
-        if bytes.len() as u64 > max_bytes {
-            return Err(Error::LimitExceeded {
-                limit: "commit graph bytes",
-                actual: bytes.len() as u64,
-                maximum: max_bytes,
-            });
-        }
-        let summary =
-            serde_json::from_slice(&bytes).map_err(|source| Error::CommitGraphParse { source })?;
-        Self::from_summary(summary).map(Some)
-    }
-
-    fn from_summary(summary: CommitGraphSummary) -> Result<Self> {
-        if summary.commits.len() > CommitGraphSummary::DEFAULT_MAX_COMMITS {
-            return Err(Error::LimitExceeded {
-                limit: "commit graph entries",
-                actual: summary.commits.len() as u64,
-                maximum: CommitGraphSummary::DEFAULT_MAX_COMMITS as u64,
-            });
-        }
-        let mut entries = HashMap::new();
-        entries
-            .try_reserve(summary.commits.len())
-            .map_err(|source| Error::Allocation {
-                requested: summary
-                    .commits
-                    .len()
-                    .saturating_mul(std::mem::size_of::<CommitGraphEntry>()),
-                source,
-            })?;
-        for entry in summary.commits {
-            let oid = parse_oid(&entry.oid)?;
-            let mut parents = Vec::new();
-            parents
-                .try_reserve_exact(entry.parents.len())
-                .map_err(|source| Error::Allocation {
-                    requested: entry
-                        .parents
-                        .len()
-                        .saturating_mul(std::mem::size_of::<ObjectId>()),
-                    source,
-                })?;
-            for parent in entry.parents {
-                let parent = parse_oid(&parent)?;
-                if parent == oid {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::CommitGraph,
-                    });
-                }
-                parents.push(parent);
-            }
-            if entries
-                .insert(
-                    oid,
-                    CommitGraphEntry {
-                        generation: entry.gen_number,
-                        parents,
-                    },
-                )
-                .is_some()
-            {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::CommitGraph,
-                });
-            }
-        }
-        for entry in entries.values() {
-            if entry.parents.iter().any(|parent| {
-                entries
-                    .get(parent)
-                    .is_some_and(|parent| parent.generation >= entry.generation)
-            }) {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::CommitGraph,
-                });
-            }
-        }
-        Ok(Self { entries })
+        Ok(Some(Self { graph }))
     }
 
     pub(crate) fn parents_match(&self, oid: ObjectId, raw_parents: &[ObjectId]) -> bool {
-        self.entries
-            .get(&oid)
-            .is_some_and(|entry| entry.parents == raw_parents)
+        let Some(ordinal) = sha1_bytes(oid).and_then(|oid| self.graph.ordinal(&oid)) else {
+            return false;
+        };
+        let Some(record) = self.graph.record(ordinal) else {
+            return false;
+        };
+        record.parents.len() == raw_parents.len()
+            && record.parents.iter().zip(raw_parents).all(|(parent, raw)| {
+                self.graph
+                    .record(*parent)
+                    .is_some_and(|record| ObjectId::Sha1(record.oid) == *raw)
+            })
     }
 
     pub(crate) fn generation(&self, oid: &ObjectId) -> Option<u64> {
-        self.entries.get(oid).map(|entry| entry.generation)
+        let ordinal = self.graph.ordinal(&sha1_bytes(*oid)?)?;
+        self.graph
+            .record(ordinal)
+            .map(|entry| entry.corrected_generation)
     }
 }
 
-fn parse_oid(value: &str) -> Result<ObjectId> {
-    ObjectId::from_hex(value.as_bytes()).map_err(|_| Error::Corrupt {
-        stage: CorruptionStage::CommitGraph,
-    })
+fn sha1_bytes(oid: ObjectId) -> Option<[u8; 20]> {
+    match oid {
+        ObjectId::Sha1(bytes) => Some(bytes),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crab_metadata::commit_graph::CommitEntry;
+    use crab_metadata::split_commit_graph::{
+        CommitGraphDescriptor, CommitGraphLayer, CommitGraphLayerRef, CommitGraphRecord,
+        SplitCommitGraph, commit_graph_layer_path,
+    };
 
     use super::*;
 
-    fn entry(oid: char, generation: u64, parents: &[char]) -> CommitEntry {
-        CommitEntry {
-            oid: oid.to_string().repeat(40),
-            gen_number: generation,
-            parents: parents
+    fn oid(value: u8) -> [u8; 20] {
+        [value; 20]
+    }
+
+    fn hash(value: u8) -> String {
+        format!("{value:02x}").repeat(32)
+    }
+
+    fn graph(records: Vec<CommitGraphRecord>) -> SplitCommitGraph {
+        let bytes = 24
+            + records
                 .iter()
-                .map(|parent| parent.to_string().repeat(40))
-                .collect(),
-        }
+                .map(|record| 60 + record.parents.len() * 4)
+                .sum::<usize>();
+        let layer = CommitGraphLayer {
+            base_ordinal: 0,
+            records,
+        };
+        let descriptor = CommitGraphDescriptor {
+            version: 1,
+            generation: 7,
+            pack_index_hash: hash(1),
+            git_validation_digest: hash(2),
+            commit_count: layer.records.len() as u32,
+            layers: vec![CommitGraphLayerRef {
+                hash: hash(3),
+                path: commit_graph_layer_path(&hash(3)),
+                base_ordinal: 0,
+                commit_count: layer.records.len() as u32,
+                bytes: bytes as u64,
+            }],
+        };
+        SplitCommitGraph::new(descriptor, vec![layer]).unwrap()
     }
 
     #[test]
-    fn rejects_duplicate_commits() {
-        let summary = CommitGraphSummary {
-            generation: 1,
-            commits: vec![entry('1', 0, &[]), entry('1', 0, &[])],
+    fn positional_parents_match_raw_commit_order() {
+        let index = CommitGraphIndex {
+            graph: graph(vec![
+                CommitGraphRecord {
+                    oid: oid(1),
+                    tree_oid: oid(101),
+                    commit_time: 10,
+                    corrected_generation: 10,
+                    parents: vec![],
+                },
+                CommitGraphRecord {
+                    oid: oid(2),
+                    tree_oid: oid(102),
+                    commit_time: 20,
+                    corrected_generation: 20,
+                    parents: vec![0],
+                },
+            ]),
         };
-        assert!(matches!(
-            CommitGraphIndex::from_summary(summary),
-            Err(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph
-            })
-        ));
+        assert!(index.parents_match(ObjectId::Sha1(oid(2)), &[ObjectId::Sha1(oid(1))]));
+        assert_eq!(index.generation(&ObjectId::Sha1(oid(2))), Some(20));
     }
 
     #[test]
-    fn rejects_non_topological_generations() {
-        let summary = CommitGraphSummary {
-            generation: 1,
-            commits: vec![entry('1', 1, &['2']), entry('2', 1, &[])],
+    fn missing_commit_cannot_validate_raw_parents() {
+        let index = CommitGraphIndex {
+            graph: graph(vec![CommitGraphRecord {
+                oid: oid(1),
+                tree_oid: oid(101),
+                commit_time: 10,
+                corrected_generation: 10,
+                parents: vec![],
+            }]),
         };
-        assert!(matches!(
-            CommitGraphIndex::from_summary(summary),
-            Err(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph
-            })
-        ));
+        assert!(!index.parents_match(ObjectId::Sha1(oid(2)), &[]));
     }
 }

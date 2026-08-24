@@ -87,12 +87,13 @@ IDs. History, diff, blame, archive, storage, inflation, and response work have
 independent aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
-manifest names an immutable `CommitGraphSummary`, open bounds it to 16 MiB,
-verifies its Blake3 identity, validates its OIDs, parent lists, and topological
-generations, and retains it only after manifest/inventory/locator coverage has
-matched. A snapshot uses it only while each summary parent list exactly matches
-the corresponding raw commit; missing summary entries fall back to raw parent
-order and can never hide a reachable commit.
+manifest names an immutable split commit graph, open bounds the complete graph
+to 128 MiB, verifies every descriptor and layer Blake3 identity, validates
+stable ordinals, parent closure, corrected generations, and the exact manifest
+generation/pack/digest tuple. A snapshot uses it only while each positional
+parent list exactly matches the corresponding raw commit; missing or corrupt
+acceleration falls back to raw parent order and can never hide a reachable
+commit.
 
 Each operation emits one structured span with only its bounded operation kind,
 process-local correlation ID, outcome, and safe error category. Raw OIDs,

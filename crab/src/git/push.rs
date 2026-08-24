@@ -55,6 +55,10 @@ use crab_coordination::{PushLock, PushLockAcquireContext};
 use crab_metadata::chunk_index::ChunkIndex;
 use crab_metadata::commit_graph::CommitEntry;
 use crab_metadata::pack_metadata::PackMetadata;
+use crab_metadata::split_commit_graph::{
+    CommitGraphInput, DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES, append_split_commit_graph,
+    load_split_commit_graph, upload_split_commit_graph,
+};
 use crab_staging::StagingAreaReadOnly;
 use crab_staging::push_plan::{self, FilePushPlan, PlannedXorb};
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
@@ -2517,7 +2521,7 @@ fn compute_ff_probe(old_sha: Option<&str>, new_sha: &str) -> FfOutcome {
 
 /// Precompute whether a ref update is a fast-forward, using
 /// [`check_merge_base`] as the primary probe and an optional
-/// commit-graph-summary ancestry walk as the fallback for clients
+/// committed split-graph ancestry walk as the fallback for clients
 /// that don't have the old SHA locally.
 ///
 /// - `None` / empty `old_sha` or `old == new` → [`FfOutcome::Ancestor`]
@@ -2791,7 +2795,7 @@ pub struct PushConfig {
     /// line at construction time. Mirrors git's
     /// `receive.denyCurrentBranch`.
     pub receive_deny_current_branch: String,
-    /// Upper bound on commits walked by the commit-graph-summary
+    /// Upper bound on commits walked by the commit-graph
     /// ancestry fallback used by the FF precomputation when
     /// `git merge-base --is-ancestor` can't resolve the question
     /// (shallow/sparse clients, missing local objects). `0` disables
@@ -3072,7 +3076,7 @@ pub struct ReceiveConfig {
     /// [`PushConfig`] at pack-generation time; pipeline-level consumers
     /// should prefer the `ReceiveConfig` view.
     pub max_input_size: u64,
-    /// Upper bound on commits walked by the commit-graph-summary
+    /// Upper bound on commits walked by the commit-graph
     /// ancestry fallback (see [`PushConfig::receive_ff_summary_window_commits`]).
     /// `0` disables the fallback and conservatively rejects the
     /// push as non-fast-forward when the FF shell-out can't answer.
@@ -4044,14 +4048,15 @@ pub struct PushPipeline {
     /// current state. `None` when the store is unavailable (tests) or
     /// the manifest does not exist yet (first push after init).
     base_manifest: tokio::sync::Mutex<Option<Manifest>>,
-    /// Base commit-graph summary loaded on demand as the fast-forward
+    /// Base split commit graph loaded on demand as the fast-forward
     /// fallback when `git merge-base --is-ancestor` can't answer
     /// (shallow / sparse client missing the old tip locally). `None`
     /// when the store is unavailable, the summary does not exist yet,
     /// or the read failed — in which case the FF check conservatively
     /// rejects unverifiable updates as non-FF.
-    base_commit_graph: tokio::sync::Mutex<Option<crab_metadata::commit_graph::CommitGraphSummary>>,
-    /// Whether we already attempted the optional commit-graph summary
+    base_commit_graph:
+        tokio::sync::Mutex<Option<crab_metadata::split_commit_graph::SplitCommitGraph>>,
+    /// Whether we already attempted the optional split commit-graph
     /// load. Avoids repeated origin reads when a batch has multiple
     /// shallow update refs and the summary is absent or unreadable.
     base_commit_graph_loaded: tokio::sync::Mutex<bool>,
@@ -6319,7 +6324,7 @@ async fn acquire_current_git_manifest_lock(
     }
 }
 
-async fn git_visibility_index_exists_for_manifest(
+pub(crate) async fn git_visibility_index_exists_for_manifest(
     store: &Store,
     router: &StoreLayout,
     manifest: &Manifest,
@@ -6699,74 +6704,69 @@ impl PushPipeline {
         Ok(())
     }
 
-    async fn load_base_commit_graph_summary(
+    async fn load_base_split_commit_graph(
         &self,
-    ) -> Option<crab_metadata::commit_graph::CommitGraphSummary> {
+    ) -> Result<Option<crab_metadata::split_commit_graph::SplitCommitGraph>> {
         {
             let summary = self.base_commit_graph.lock().await;
             if summary.is_some() {
-                return summary.clone();
+                return Ok(summary.clone());
             }
         }
         {
             let loaded = self.base_commit_graph_loaded.lock().await;
             if *loaded {
-                return None;
+                return Ok(None);
             }
         }
 
         let Some(store) = &self.store else {
             *self.base_commit_graph_loaded.lock().await = true;
-            return None;
+            return Ok(None);
         };
-
-        // Best-effort summary load for the FF fallback. We intentionally
-        // swallow every error class: a missing summary (legacy repo),
-        // a corrupted body (out-of-tree push raced with compaction),
-        // or a transient I/O error all degrade to "no fallback" so the
-        // FF check conservatively rejects unverifiable updates rather
-        // than crashing the push.
-        let summary_path = self.router.repo_path("commit-graph-summary");
-        let loaded_summary = match store.get_with_etag(&summary_path).await {
-            Ok((bytes, _etag)) => {
-                match serde_json::from_slice::<crab_metadata::commit_graph::CommitGraphSummary>(
-                    &bytes,
-                ) {
-                    Ok(summary) => {
-                        debug!(
-                            generation = summary.generation,
-                            commits = summary.commits.len(),
-                            "loaded base commit-graph summary"
-                        );
-                        Some(summary)
-                    }
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            "base commit-graph summary unreadable; FF fallback disabled"
-                        );
-                        None
-                    }
-                }
-            }
-            Err(CrabError::NotFound { .. }) => {
-                debug!("no commit-graph summary; FF fallback disabled");
-                None
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "commit-graph summary read failed; FF fallback disabled"
-                );
-                None
-            }
+        let base = self.base_manifest.lock().await.clone();
+        let Some((base, hash)) = base
+            .as_ref()
+            .and_then(|base| base.commit_graph_hash.as_ref().map(|hash| (base, hash)))
+        else {
+            *self.base_commit_graph_loaded.lock().await = true;
+            return Ok(None);
         };
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+        );
+        let graph = load_split_commit_graph(
+            store.as_storage(),
+            &storage_router,
+            hash,
+            DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await?;
+        let identity_matches = graph.descriptor.generation == base.generation
+            && graph.descriptor.pack_index_hash == base.pack_index_hash
+            && graph.descriptor.git_validation_digest == base.git_validation_digest;
+        let roots_complete = base
+            .refs
+            .iter()
+            .map(|(name, oid)| base.peeled_refs.get(name).unwrap_or(oid))
+            .map(|oid| parse_sha1_array(oid, "base commit graph root"))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .all(|root| graph.contains(root));
+        if !identity_matches || !roots_complete {
+            return Err(CrabError::CorruptObject {
+                path: storage_router
+                    .bulk_manifest_path("commit-graph", hash)
+                    .to_string(),
+                reason: "base commit graph does not match the complete committed Git state"
+                    .to_owned(),
+            });
+        }
 
         *self.base_commit_graph_loaded.lock().await = true;
-        if let Some(summary) = &loaded_summary {
-            *self.base_commit_graph.lock().await = Some(summary.clone());
-        }
-        loaded_summary
+        *self.base_commit_graph.lock().await = Some(graph.clone());
+        Ok(Some(graph))
     }
 
     /// Return the HEAD symref target recorded in the base manifest, or
@@ -6908,14 +6908,19 @@ impl PushPipeline {
                         let probe = compute_ff_probe(current_sha.as_deref(), new_sha.as_str());
                         let ff_outcome =
                             if matches!(probe, FfOutcome::NeedsSummaryFallback) && window > 0 {
-                                let summary = self.load_base_commit_graph_summary().await;
-                                resolve_ff_outcome(
-                                    probe,
-                                    current_sha.as_deref().unwrap_or_default(),
-                                    new_sha.as_str(),
-                                    summary.as_ref(),
-                                    window,
-                                )
+                                let graph = self.load_base_split_commit_graph().await?;
+                                match graph.as_ref().and_then(|graph| {
+                                    let old = parse_sha1_array(
+                                        current_sha.as_deref().unwrap_or_default(),
+                                        "fast-forward base",
+                                    )
+                                    .ok()?;
+                                    let new = parse_sha1_array(new_sha, "fast-forward tip").ok()?;
+                                    graph.is_ancestor_with_limit(&old, &new, window)
+                                }) {
+                                    Some(true) => FfOutcome::Ancestor,
+                                    Some(false) | None => FfOutcome::NotAncestor,
+                                }
                             } else {
                                 resolve_ff_outcome(
                                     probe,
@@ -7238,6 +7243,20 @@ impl PushPipeline {
         // The pack/body and ref-connectivity owners run before this builder.
         // Seal only the final candidate so CAS retries cannot reuse stale proof.
         new_manifest.seal_git_validation();
+        new_manifest.commit_graph_hash = if self
+            .config
+            .active_active_replication
+            .as_ref()
+            .is_some_and(ReplicationConfig::is_active_active)
+            && self.config.protected_push.is_none()
+        {
+            self.at_stage(
+                PushFailureStage::CommitGraph,
+                self.publish_split_commit_graph(&new_manifest).await,
+            )?
+        } else {
+            None
+        };
 
         info!(
             generation = new_manifest.generation,
@@ -8284,10 +8303,22 @@ impl PushPipeline {
                 return Ok(decisions);
             }
         };
-        let compacted = while_renewing_internal_lock(
-            &mut manifest_lock,
-            compact_ref_journal_until_idle(store, &self.router, manifest.pusher.clone()),
-        )
+        let compacted = while_renewing_internal_lock(&mut manifest_lock, async {
+            let mut compacted =
+                compact_ref_journal_until_idle(store, &self.router, manifest.pusher.clone())
+                    .await?;
+            if let Some(compaction) = &mut compacted {
+                match self.attach_split_commit_graph(&compaction.manifest).await {
+                    Ok(manifest) => compaction.manifest = manifest,
+                    Err(error) => warn!(
+                        error = %error,
+                        generation = compaction.manifest.generation,
+                        "ref journal committed; split commit graph requires repair"
+                    ),
+                }
+            }
+            Ok::<_, CrabError>(compacted)
+        })
         .await;
         let successor_claimed = if let Ok(Some(compaction)) = &compacted {
             match ref_successor_is_claimed(
@@ -8512,32 +8543,117 @@ impl PushPipeline {
         Ok(published)
     }
 
-    async fn publish_commit_graph_summary(&self) -> Result<()> {
+    async fn publish_split_commit_graph(&self, manifest: &Manifest) -> Result<Option<String>> {
         let Some(store) = self.store.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
-        let entries = self.commit_entries.lock().await.clone();
-        if entries.is_empty() {
-            return Ok(());
+        // Protected clients cannot publish service-owned repository metadata.
+        // The receive service/owner repairs the graph from its verified ODB.
+        if self.config.protected_push.is_some() {
+            return Ok(None);
         }
-
-        let path = self.router.repo_path("commit-graph-summary");
-        let summary = crate::coordination::cas::cas_update_default::<
-            crab_metadata::commit_graph::CommitGraphSummary,
-            _,
-        >(store, path.as_ref(), |summary| {
-            summary.append_commits_with_limit(
-                &entries,
-                crab_metadata::commit_graph::CommitGraphSummary::DEFAULT_MAX_COMMITS,
-            );
+        let entries = self.commit_entries.lock().await.clone();
+        let git_dir = self.common_git_dir()?;
+        let inputs = tokio::task::spawn_blocking(move || {
+            collect_split_commit_graph_inputs(&git_dir, &entries)
         })
-        .await?;
-        info!(
-            generation = summary.generation,
-            commits = summary.commits.len(),
-            "published commit graph summary"
+        .await
+        .map_err(|error| CrabError::Internal(format!("commit graph collection join: {error}")))??;
+        let base_manifest = self.base_manifest.lock().await.clone();
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
         );
-        Ok(())
+        let base = if let Some((base_manifest, hash)) = base_manifest
+            .as_ref()
+            .and_then(|base| base.commit_graph_hash.as_ref().map(|hash| (base, hash)))
+        {
+            let graph = load_split_commit_graph(
+                store.as_storage(),
+                &storage_router,
+                hash,
+                DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            )
+            .await?;
+            if graph.descriptor.generation != base_manifest.generation
+                || graph.descriptor.pack_index_hash != base_manifest.pack_index_hash
+                || graph.descriptor.git_validation_digest != base_manifest.git_validation_digest
+            {
+                return Err(CrabError::CorruptObject {
+                    path: self
+                        .router
+                        .bulk_manifest_path("commit-graph", hash)
+                        .to_string(),
+                    reason: "commit graph identity does not match its base manifest".to_owned(),
+                });
+            }
+            Some(graph)
+        } else {
+            None
+        };
+        let roots = manifest
+            .refs
+            .iter()
+            .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+            .map(|oid| parse_sha1_array(oid, "commit graph root"))
+            .collect::<Result<Vec<_>>>()?;
+        let Some(write) = append_split_commit_graph(
+            base,
+            manifest.generation,
+            manifest.pack_index_hash.clone(),
+            manifest.git_validation_digest.clone(),
+            &roots,
+            inputs,
+        )?
+        else {
+            warn!(
+                generation = manifest.generation,
+                "complete commit graph unavailable; run `crab metadb owner --once` from a complete repository"
+            );
+            return Ok(None);
+        };
+        upload_split_commit_graph(store.as_storage(), &storage_router, &write).await?;
+        info!(
+            generation = manifest.generation,
+            changed_layers = write.layers.len(),
+            descriptor_hash = %write.descriptor_hash,
+            "published complete split commit graph"
+        );
+        Ok(Some(write.descriptor_hash))
+    }
+
+    async fn attach_split_commit_graph(&self, manifest: &Manifest) -> Result<Manifest> {
+        let Some(hash) = self.publish_split_commit_graph(manifest).await? else {
+            return Ok(manifest.clone());
+        };
+        let store = self.store.as_ref().ok_or_else(|| {
+            CrabError::Internal("commit graph attachment requires a store".to_owned())
+        })?;
+        for _ in 0..self.config.max_cas_retries.max(1) {
+            let (mut current, etag) = read_manifest(store, &self.router).await?;
+            if current.generation != manifest.generation
+                || current.pack_index_hash != manifest.pack_index_hash
+                || current.git_validation_digest != manifest.git_validation_digest
+            {
+                return Err(CrabError::CasConflict {
+                    path: self.router.manifest_path().to_string(),
+                    expected_etag: Some(etag),
+                });
+            }
+            if current.commit_graph_hash.as_deref() == Some(hash.as_str()) {
+                return Ok(current);
+            }
+            current.commit_graph_hash = Some(hash.clone());
+            match write_manifest_cas(store, &self.router, &current, &etag).await {
+                Ok(_) => return Ok(current),
+                Err(CrabError::CasConflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CrabError::CasConflict {
+            path: self.router.manifest_path().to_string(),
+            expected_etag: None,
+        })
     }
 
     async fn manifest_etag_or_read_current(&self, store: &Store, etag: String) -> String {
@@ -15452,14 +15568,6 @@ impl PushPipeline {
         // Cancellation check: after connectivity, before manifest CAS.
         check_cancelled(&self.cancel)?;
 
-        // Publish the shallow-fetch graph before exposing refs. Extra entries
-        // are harmless if the later manifest CAS loses a race because fetch
-        // traversal is rooted only at the committed ref tips.
-        self.at_stage(
-            PushFailureStage::CommitGraph,
-            self.publish_commit_graph_summary().await,
-        )?;
-
         // Steps 11-12: Build manifest and CAS-write the pointer.
         // When no store is available (tests without S3), skip the manifest
         // steps entirely — the old manifest_cas and ref_cas also skipped.
@@ -15937,6 +16045,127 @@ pub(crate) async fn publish_git_visibility_index_from_storage_git_dir(
         .map_err(CrabError::from)
 }
 
+/// Build and upload a complete split commit graph from a fully materialized ODB.
+pub(crate) async fn rebuild_split_commit_graph_from_storage_git_dir(
+    git_dir: &Path,
+    manifest: &Manifest,
+    store: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<String> {
+    let refs = manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| {
+            (
+                name.clone(),
+                manifest.peeled_refs.get(name).unwrap_or(oid).clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let git_dir = git_dir.to_owned();
+    let git_dir_display = git_dir.display().to_string();
+    let (entries, inputs) = tokio::task::spawn_blocking(move || {
+        let entries = collect_commit_entries(&git_dir, &refs)?;
+        let inputs = collect_split_commit_graph_inputs(&git_dir, &entries)?;
+        Ok::<_, CrabError>((entries, inputs))
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("commit graph rebuild join: {error}")))??;
+    let roots = manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+        .map(|oid| parse_sha1_array(oid, "commit graph rebuild root"))
+        .collect::<Result<Vec<_>>>()?;
+    let write = append_split_commit_graph(
+        None,
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        &roots,
+        inputs,
+    )?
+    .ok_or_else(|| CrabError::CorruptObject {
+        path: git_dir_display,
+        reason: "materialized Git ODB does not contain every manifest ref commit".to_owned(),
+    })?;
+    upload_split_commit_graph(store, router, &write).await?;
+    info!(
+        generation = manifest.generation,
+        commits = entries.len(),
+        layers = write.layers.len(),
+        descriptor_hash = %write.descriptor_hash,
+        "rebuilt complete split commit graph"
+    );
+    Ok(write.descriptor_hash)
+}
+
+/// Rebuild and attach a missing split graph from one pinned remote pack set.
+pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<String>> {
+    let (manifest, _) = read_manifest(store, router).await?;
+    if manifest.generation != required_generation || manifest.refs.is_empty() {
+        return Ok(None);
+    }
+    if let Some(hash) = manifest.commit_graph_hash.as_ref() {
+        return Ok(Some(hash.clone()));
+    }
+    let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
+    let storage = store.as_storage().clone();
+    let storage_router =
+        crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+    let materialized = materialize_remote_git_packs(
+        &storage,
+        &storage_router,
+        &packs,
+        maximum_bytes,
+        4_096,
+        cancel,
+    )
+    .await?;
+    let (before_build, _) = read_manifest(store, router).await?;
+    if before_build.generation != manifest.generation
+        || before_build.pack_index_hash != manifest.pack_index_hash
+        || before_build.git_validation_digest != manifest.git_validation_digest
+    {
+        return Ok(None);
+    }
+    let hash = rebuild_split_commit_graph_from_storage_git_dir(
+        materialized.git_dir.path(),
+        &manifest,
+        &storage,
+        &storage_router,
+    )
+    .await?;
+    for _ in 0..3 {
+        let (mut current, etag) = read_manifest(store, router).await?;
+        if current.generation != manifest.generation
+            || current.pack_index_hash != manifest.pack_index_hash
+            || current.git_validation_digest != manifest.git_validation_digest
+        {
+            return Ok(None);
+        }
+        if let Some(existing) = current.commit_graph_hash.as_ref() {
+            return Ok(Some(existing.clone()));
+        }
+        current.commit_graph_hash = Some(hash.clone());
+        match write_manifest_cas(store, router, &current, &etag).await {
+            Ok(_) => return Ok(Some(hash)),
+            Err(CrabError::CasConflict { .. }) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(CrabError::CasConflict {
+        path: router.manifest_path().to_string(),
+        expected_etag: None,
+    })
+}
+
 async fn build_git_visibility_index_from_remote_packs(
     store: &crab_storage::Store,
     router: &crab_storage::StoreLayout<crab_storage::Store>,
@@ -15945,11 +16174,67 @@ async fn build_git_visibility_index_from_remote_packs(
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
     let started = Instant::now();
+    let materialized =
+        materialize_remote_git_packs(store, router, packs, u64::MAX, usize::MAX, cancel).await?;
+    let index =
+        build_git_visibility_index_from_storage_git_dir(materialized.git_dir.path(), manifest)
+            .await?;
+    let logical_objects = index.membership_count();
+    info!(
+        target: "crab::git::visibility",
+        telemetry_event = "operation_summary",
+        operation = "visibility",
+        outcome = "Success",
+        duration_ms = started.elapsed().as_millis() as u64,
+        logical_objects,
+        storage_requests = materialized.pack_count,
+        fetched_bytes = materialized.fetched_bytes,
+        inflated_bytes = 0u64,
+        response_bytes = 0u64,
+        "remote Git operation summary"
+    );
+    Ok(index)
+}
+
+struct MaterializedRemoteGitPacks {
+    git_dir: tempfile::TempDir,
+    pack_count: u64,
+    fetched_bytes: u64,
+}
+
+async fn materialize_remote_git_packs(
+    store: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+    packs: &[PackManifestEntry],
+    maximum_bytes: u64,
+    maximum_requests: usize,
+    cancel: &CancellationToken,
+) -> Result<MaterializedRemoteGitPacks> {
+    let unique_pack_count = packs
+        .iter()
+        .map(|pack| pack.pack_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    if unique_pack_count > maximum_requests {
+        return Err(CrabError::Internal(format!(
+            "remote Git pack materialization requires {unique_pack_count} requests, budget is {maximum_requests}"
+        )));
+    }
+    let planned_bytes = packs.iter().try_fold(0_u64, |total, pack| {
+        total.checked_add(pack.size).ok_or_else(|| {
+            CrabError::Internal("remote Git pack materialization byte count overflow".to_owned())
+        })
+    })?;
+    if planned_bytes > maximum_bytes {
+        return Err(CrabError::Internal(format!(
+            "remote Git pack materialization requires {planned_bytes} bytes, budget is {maximum_bytes}"
+        )));
+    }
     let git_dir = tempfile::tempdir()?;
     let pack_dir = git_dir.path().join("objects/pack");
     tokio::fs::create_dir_all(&pack_dir).await?;
     let mut materialized = HashSet::new();
-    let mut fetched_bytes = 0u64;
+    let mut fetched_bytes = 0_u64;
 
     for pack in packs {
         check_cancelled(cancel)?;
@@ -16027,22 +16312,11 @@ async fn build_git_visibility_index_from_remote_packs(
     }
 
     check_cancelled(cancel)?;
-    let index = build_git_visibility_index_from_storage_git_dir(git_dir.path(), manifest).await?;
-    let logical_objects = index.membership_count();
-    info!(
-        target: "crab::git::visibility",
-        telemetry_event = "operation_summary",
-        operation = "visibility",
-        outcome = "Success",
-        duration_ms = started.elapsed().as_millis() as u64,
-        logical_objects,
-        storage_requests = materialized.len() as u64,
+    Ok(MaterializedRemoteGitPacks {
+        git_dir,
+        pack_count: u64::try_from(materialized.len()).unwrap_or(u64::MAX),
         fetched_bytes,
-        inflated_bytes = 0u64,
-        response_bytes = 0u64,
-        "remote Git operation summary"
-    );
-    Ok(index)
+    })
 }
 
 /// Build the generation-bound Git visibility proof from a local ODB.
@@ -16249,10 +16523,8 @@ fn sha1_hex(oid: &[u8; 20]) -> String {
 }
 ///
 /// Walks commits reachable from the tips using `gix-traverse`, recording each
-/// commit's OID, parent OIDs, and a topological generation number (distance
-/// from root). The generation number is approximate: it counts the walk depth
-/// from the tips, which is correct for linear histories and a reasonable
-/// upper bound for DAGs.
+/// commit's OID and parent OIDs. The split-graph builder derives corrected
+/// commit dates after it topologically orders the complete parent closure.
 fn collect_commit_entries(
     git_dir: &std::path::Path,
     refs: &[(String, String)],
@@ -16315,6 +16587,73 @@ fn collect_commit_entries(
     crab_metadata::commit_graph::fill_generation_numbers(&mut entries);
 
     Ok(entries)
+}
+
+fn collect_split_commit_graph_inputs(
+    git_dir: &Path,
+    entries: &[CommitEntry],
+) -> Result<Vec<CommitGraphInput>> {
+    use gix_hash::ObjectId;
+    use gix_object::FindExt as _;
+
+    let objects_dir = crate::git::discover::resolve_common_dir(git_dir).join("objects");
+    let odb = gix_odb::at(&objects_dir).map_err(|error| {
+        CrabError::Internal(format!(
+            "failed to open Git ODB at {} for commit graph: {error}",
+            objects_dir.display()
+        ))
+    })?;
+    let mut inputs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let oid = ObjectId::from_hex(entry.oid.as_bytes()).map_err(|error| {
+            CrabError::Internal(format!("invalid commit graph OID {}: {error}", entry.oid))
+        })?;
+        let mut tree_buffer = Vec::new();
+        let mut tree_iter = odb
+            .find_commit_iter(&oid, &mut tree_buffer)
+            .map_err(|error| {
+                CrabError::Internal(format!("failed to read commit {oid} for graph: {error}"))
+            })?;
+        let tree_oid = tree_iter.tree_id().map_err(|error| {
+            CrabError::Internal(format!("failed to read tree for commit {oid}: {error}"))
+        })?;
+        let mut signature_buffer = Vec::new();
+        let commit_time = odb
+            .find_commit_iter(&oid, &mut signature_buffer)
+            .map_err(|error| {
+                CrabError::Internal(format!("failed to read commit {oid} for graph: {error}"))
+            })?
+            .committer()
+            .map_err(|error| {
+                CrabError::Internal(format!("failed to read committer for {oid}: {error}"))
+            })?
+            .time()
+            .map(|time| time.seconds)
+            .unwrap_or(0);
+        inputs.push(CommitGraphInput {
+            oid: commit_graph_oid_bytes(&oid),
+            tree_oid: commit_graph_oid_bytes(&tree_oid),
+            commit_time,
+            parents: entry
+                .parents
+                .iter()
+                .map(|parent| parse_sha1_array(parent, "commit graph parent"))
+                .collect::<Result<Vec<_>>>()?,
+        });
+    }
+    Ok(inputs)
+}
+
+fn parse_sha1_array(value: &str, context: &str) -> Result<[u8; 20]> {
+    let oid = gix_hash::ObjectId::from_hex(value.as_bytes())
+        .map_err(|error| CrabError::Internal(format!("invalid {context} {value}: {error}")))?;
+    Ok(commit_graph_oid_bytes(&oid))
+}
+
+fn commit_graph_oid_bytes(oid: &gix_hash::oid) -> [u8; 20] {
+    let mut bytes = [0; 20];
+    bytes.copy_from_slice(oid.as_bytes());
+    bytes
 }
 
 /// Repaint the inline "Uploading xorbs:" progress bar in place.
@@ -18498,7 +18837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_v1_visibility_is_backfilled_by_writer() {
+    async fn matching_v1_visibility_is_backfilled_but_not_authoritative_without_catalog() {
         let (store, router) = test_store_router("visibility-v1-backfill");
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest.generation = 3;
@@ -18526,7 +18865,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            git_visibility_index_exists_for_manifest(&store, &router, &manifest)
+            !git_visibility_index_exists_for_manifest(&store, &router, &manifest)
                 .await
                 .unwrap()
         );
@@ -20390,19 +20729,7 @@ mod tests {
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read pushed manifest");
-        assert!(
-            repair_git_object_locator_if_current(
-                &store,
-                &router,
-                manifest.generation,
-                Duration::from_secs(60),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect("repair deferred initial locator"),
-            "the explicit repair path should publish the deferred initial locator"
-        );
-        let visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
+        let visibility_path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
             .await
@@ -21051,13 +21378,25 @@ mod tests {
             Some(&RefPushOutcome::Ok)
         );
         assert!(result.all_ok());
-        let (summary_bytes, _) = store
-            .get_with_etag(&router.repo_path("commit-graph-summary"))
-            .await
-            .expect("successful push must publish shallow-fetch graph");
-        let summary: crab_metadata::commit_graph::CommitGraphSummary =
-            serde_json::from_slice(&summary_bytes).expect("parse commit graph summary");
-        assert!(!summary.commits.is_empty());
+        let (manifest, _) = read_manifest(&store, &router).await.unwrap();
+        let hash = manifest
+            .commit_graph_hash
+            .as_deref()
+            .expect("successful push must pin its complete commit graph");
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let graph = load_split_commit_graph(
+            store.as_storage(),
+            &storage_router,
+            hash,
+            DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(graph.descriptor.generation, manifest.generation);
+        assert!(!graph.layers.is_empty());
     }
 
     #[tokio::test]
@@ -21758,106 +22097,6 @@ mod tests {
         )
         .await;
         assert!(result.all_ok());
-    }
-
-    // --- Step 11: commit-graph-summary CAS ---
-
-    #[tokio::test]
-    async fn commit_graph_summary_cas_creates_new_summary() {
-        use crate::coordination::cas::cas_update_default;
-        use crab_metadata::commit_graph::{CommitEntry, CommitGraphSummary};
-        use object_store::memory::InMemory;
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let store = crate::storage::store::Store::new(inner);
-
-        let entries = vec![
-            CommitEntry {
-                oid: "aaa111".to_string(),
-                gen_number: 0,
-                parents: vec![],
-            },
-            CommitEntry {
-                oid: "bbb222".to_string(),
-                gen_number: 1,
-                parents: vec!["aaa111".to_string()],
-            },
-        ];
-
-        let result = cas_update_default::<CommitGraphSummary, _>(
-            &store,
-            "repo/commit-graph-summary",
-            |summary| {
-                summary.append_commits(&entries);
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.generation, 1);
-        assert_eq!(result.commits.len(), 2);
-        assert_eq!(result.commits[0].oid, "aaa111");
-        assert_eq!(result.commits[1].oid, "bbb222");
-    }
-
-    #[tokio::test]
-    async fn commit_graph_summary_cas_appends_to_existing() {
-        use crate::coordination::cas::cas_update_default;
-        use crab_metadata::commit_graph::{CommitEntry, CommitGraphSummary};
-        use object_store::memory::InMemory;
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let store = crate::storage::store::Store::new(inner);
-
-        // First push: create summary with one commit.
-        let first_entries = vec![CommitEntry {
-            oid: "aaa111".to_string(),
-            gen_number: 0,
-            parents: vec![],
-        }];
-
-        let _ = cas_update_default::<CommitGraphSummary, _>(
-            &store,
-            "repo/commit-graph-summary",
-            |summary| {
-                summary.append_commits(&first_entries);
-            },
-        )
-        .await
-        .unwrap();
-
-        // Second push: append a new commit, duplicate is skipped.
-        let second_entries = vec![
-            CommitEntry {
-                oid: "aaa111".to_string(),
-                gen_number: 0,
-                parents: vec![],
-            },
-            CommitEntry {
-                oid: "bbb222".to_string(),
-                gen_number: 1,
-                parents: vec!["aaa111".to_string()],
-            },
-        ];
-
-        let result = cas_update_default::<CommitGraphSummary, _>(
-            &store,
-            "repo/commit-graph-summary",
-            |summary| {
-                summary.append_commits(&second_entries);
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.generation, 2);
-        assert_eq!(
-            result.commits.len(),
-            2,
-            "duplicate aaa111 should be skipped"
-        );
-        assert_eq!(result.commits[0].oid, "aaa111");
-        assert_eq!(result.commits[1].oid, "bbb222");
     }
 
     // --- Step 10: PackMetadata generation ---
@@ -30061,9 +30300,8 @@ mod tests {
     // --- build_manifest tests ---
 
     #[tokio::test]
-    async fn read_base_manifest_defers_commit_graph_summary_read() {
+    async fn read_base_manifest_defers_split_commit_graph_read() {
         use crate::metadata::manifest::{Manifest, create_manifest};
-        use crab_metadata::commit_graph::CommitGraphSummary;
 
         let inner = Arc::new(object_store::memory::InMemory::new());
         let reads = Arc::new(Mutex::new(Vec::new()));
@@ -30076,14 +30314,6 @@ mod tests {
 
         let init_manifest = Manifest::default_for_repo("refs/heads/main");
         create_manifest(&store, &router, &init_manifest)
-            .await
-            .unwrap();
-        let summary_bytes = serde_json::to_vec(&CommitGraphSummary::default()).unwrap();
-        store
-            .put(
-                &router.repo_path("commit-graph-summary"),
-                Bytes::from(summary_bytes),
-            )
             .await
             .unwrap();
         reads
@@ -30116,8 +30346,8 @@ mod tests {
         assert!(
             recorded
                 .iter()
-                .all(|path| path != "org/repo/commit-graph-summary"),
-            "commit-graph summary should be loaded only when FF fallback is needed"
+                .all(|path| !path.contains("metadata/commit-graph/")),
+            "split commit graph should be loaded only when FF fallback is needed"
         );
         assert!(pipeline.base_commit_graph.lock().await.is_none());
         assert!(!*pipeline.base_commit_graph_loaded.lock().await);

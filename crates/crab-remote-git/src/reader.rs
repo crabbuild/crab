@@ -1837,6 +1837,7 @@ mod tests {
                 entry_len,
                 crc32: 0,
             },
+            metadata: crab_metadata::git_object_locator::GitObjectMetadata::default(),
         };
         let ranges = coalesce_ranges(vec![
             (oid, locator(first_pack, 100, 20)),

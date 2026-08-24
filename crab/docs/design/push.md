@@ -404,7 +404,7 @@ gix-traverse commit walk (from tips)
         │       └── blob > 256 bytes → skip (not a pointer)
         │
         └── collect CommitEntry(oid, parents, gen_number)
-            for commit-graph-summary update in step 11
+            for the manifest-pinned split commit graph
 ```
 
 **Data produced:**
@@ -936,7 +936,7 @@ non-current-branch pushes are not rewritten.
  │                                                                   │
  │  ┌──────────────────┐                                             │
  │  │ Step 11          │                                             │
- │  │ CAS manifests    │─────────────────────────────────────────────┼──► commit-graph-summary
+ │  │ publish graph    │─────────────────────────────────────────────┼──► split graph layers
  │  └──────────────────┘                                             │     (pack-list, shard-list)
  │                                                                   │
  │  ┌──────────────────┐                                             │
@@ -1063,7 +1063,7 @@ Step 12 ◄── specs[] (from remote helper batch)
                     │          COMMIT PHASE                │
                     │                                      │
                     │ 11. CAS manifests:                   │
-                    │     commit-graph-summary             │──► CAS
+                    │     split commit graph               │──► immutable + manifest CAS
                     │     (pack-list, shard-list: stubs)   │
                     │                                      │
                     │ 12. Ref CAS:                         │
@@ -1225,7 +1225,7 @@ Every interval:
 
 ### CAS (Compare-and-Swap) for Manifests
 
-Mutable manifests (pack-list, shard-list, commit-graph-summary) are
+Mutable compatibility manifests (pack-list and shard-list) are
 updated via a CAS loop:
 
 ```
@@ -1282,7 +1282,9 @@ s3://{bucket}/{prefix}/
 ├── manifests/
 │   └── pack-list                   ← JSON { entries: [{ pack_id, ref_tips }] }
 │
-├── commit-graph-summary            ← JSON { generation, commits: [...] }
+├── manifests/commit-graph-{hash}   ← immutable split-graph descriptor
+├── metadata/commit-graph/layers/
+│   └── {hash}.bin                  ← immutable positional commit records
 │
 ├── shard-list                      ← JSON { entries: [{ shard_hash }] }
 │
@@ -1711,23 +1713,15 @@ Result: Retry uploads only the missing 50 xorbs.
         after the grace period.
 ```
 
-### Scenario 5: Manifest CAS Conflict
+### Scenario 5: Ref-Journal CAS Conflict
 
 ```
 Pusher A                              Pusher B
 ────────                              ────────
-Step 11: GET commit-graph-summary
-         (generation=5, etag=E1)
-                                      Step 11: GET commit-graph-summary
-                                               (generation=5, etag=E1)
-         mutate → generation=6
-         PUT with If-Match: E1 ✓
-         (etag now E2)
-                                               mutate → generation=6
-                                               PUT with If-Match: E1 ✗
-                                               (412 Precondition Failed)
-                                               backoff 73ms
-                                               GET → (generation=6, etag=E2)
+commit ref-journal head with CAS ✓    observe updated journal head
+compact committed transactions       re-evaluate against current refs
+append split graph layer              commit only non-conflicting edits
+CAS graph hash onto exact manifest    append/compact from that generation
                                                mutate → generation=7
                                                PUT with If-Match: E2 ✓
 
@@ -1867,17 +1861,14 @@ PUT packs/pack-0xP1.idx                  ~50ms
 PUT packs/pack-0xP1.meta (JSON)          ~50ms
 ```
 
-### Step 11–12: Build Manifest + Unified Manifest CAS
+### Step 11–12: Commit Refs + Attach Acceleration
 
 ```
-CAS commit-graph-summary:
-  GET → { generation: 5, commits: [...] }
-  append def456 → { generation: 6, commits: [..., def456] }
-  PUT (conditional) → 200 OK                              ~100ms
-
-Acquire lock: locks/refs/heads/main/lock                   ~50ms
-PUT refs/heads/main → "def456\n"                           ~50ms
-Release lock: CAS-write tombstone                          ~50ms
+Commit ref-journal transaction under the ref lock
+Compact transactions into one manifest generation
+Upload one binary graph delta layer and descriptor
+CAS the descriptor hash onto that exact manifest generation
+Release/hand off maintenance ownership
 ```
 
 ### Total Push Time

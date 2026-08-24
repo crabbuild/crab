@@ -71,6 +71,10 @@ pub struct RepackOutcome {
     pub bytes_before: u64,
     /// Total bytes across all packs after repack.
     pub bytes_after: u64,
+    /// Pack body bytes downloaded by this bounded roll-up.
+    pub bytes_read: u64,
+    /// New pack body bytes uploaded by this bounded roll-up.
+    pub bytes_written: u64,
     /// Wall-clock time for the operation.
     pub elapsed: Duration,
 }
@@ -83,6 +87,8 @@ impl RepackOutcome {
             packs_after: self.packs_after as u64,
             bytes_before: self.bytes_before,
             bytes_after: self.bytes_after,
+            bytes_read: self.bytes_read,
+            bytes_written: self.bytes_written,
             elapsed_ms: self.elapsed.as_millis() as u64,
         }
     }
@@ -99,6 +105,12 @@ pub struct RepackSummary {
     pub bytes_before: u64,
     /// Total bytes across all packs after repack.
     pub bytes_after: u64,
+    /// Pack body bytes read from object storage.
+    #[serde(default)]
+    pub bytes_read: u64,
+    /// New pack body bytes written to object storage.
+    #[serde(default)]
+    pub bytes_written: u64,
     /// Wall-clock duration in milliseconds.
     pub elapsed_ms: u64,
 }
@@ -195,7 +207,7 @@ async fn run_repack_locked(
     start: Instant,
 ) -> Result<RepackOutcome> {
     let (manifest, manifest_etag) = read_manifest(store, router).await?;
-    let packs = tokio::select! {
+    let mut packs = tokio::select! {
         result = crate::metadata::manifest::read_bulk_pack_list_with_limit(
             store,
             router,
@@ -211,28 +223,53 @@ async fn run_repack_locked(
             .checked_add(pack.size)
             .ok_or_else(|| CrabError::Internal("pack inventory byte total overflow".to_owned()))
     })?;
-    if packs_before <= 1 {
+    packs.sort_unstable_by(|left, right| {
+        right
+            .object_count
+            .cmp(&left.object_count)
+            .then_with(|| left.pack_id.cmp(&right.pack_id))
+    });
+    let selected_count = crab_git::repack::geometric_repack_cut(
+        &packs
+            .iter()
+            .map(|pack| pack.object_count)
+            .collect::<Vec<_>>(),
+        2,
+    );
+    if selected_count == 0 {
         return Ok(outcome(
             packs_before,
             packs_before,
             bytes_before,
             bytes_before,
+            0,
+            0,
             start,
         ));
     }
     if config.dry_run {
         return Ok(outcome(
             packs_before,
-            packs_before,
+            packs_before
+                .saturating_sub(selected_count)
+                .saturating_add(1),
             bytes_before,
             bytes_before,
+            0,
+            0,
             start,
         ));
     }
+    let selected_at = packs.len().saturating_sub(selected_count);
+    let (stable_packs, selected_packs) = packs.split_at(selected_at);
+    let stable_packs = stable_packs.to_vec();
+    let selected_packs = selected_packs.to_vec();
+    let bytes_read = selected_packs.iter().map(|pack| pack.size).sum();
     let visibility = read_current_visibility(store, router, &manifest).await?;
+    let commit_graph = read_current_commit_graph(store, router, &manifest).await?;
 
     std::fs::create_dir_all(&config.workspace_root).map_err(CrabError::Io)?;
-    let required_space = bytes_before
+    let required_space = bytes_read
         .checked_mul(2)
         .and_then(|bytes| bytes.checked_add(REPACK_DISK_RESERVE))
         .ok_or_else(|| CrabError::Internal("repack workspace size overflow".to_owned()))?;
@@ -259,7 +296,7 @@ async fn run_repack_locked(
     download_source_packs(
         store,
         router,
-        &packs,
+        &selected_packs,
         &download_dir,
         download_concurrency,
         cancel,
@@ -268,9 +305,8 @@ async fn run_repack_locked(
     check_cancelled(cancel)?;
 
     let refs = manifest.refs.values().cloned().collect::<BTreeSet<_>>();
-    let refs_for_pack = refs.clone();
     let download_dir_for_pack = download_dir.clone();
-    let source_packs = packs.clone();
+    let source_packs = selected_packs;
     let repacked_repository = tokio::task::spawn_blocking(move || {
         let sources = source_packs
             .iter()
@@ -281,32 +317,23 @@ async fn run_repack_locked(
                 object_count: pack.object_count,
             })
             .collect::<Vec<_>>();
-        crab_git::repack::repack_repository_geometric(&sources, &refs_for_pack)
-            .map_err(CrabError::from)
+        crab_git::repack::consolidate_pack_suffix(&sources).map_err(CrabError::from)
     })
     .await
     .map_err(|error| CrabError::Internal(format!("repack worker join failed: {error}")))??;
     check_cancelled(cancel)?;
 
-    let source_by_id = packs
-        .iter()
-        .cloned()
-        .map(|pack| (pack.pack_id.clone(), pack))
-        .collect::<HashMap<_, _>>();
     let repacked = repacked_repository
         .packs()
         .iter()
         .map(|generated| {
-            let entry = source_by_id
-                .get(&generated.pack_id)
-                .cloned()
-                .unwrap_or_else(|| PackManifestEntry {
-                    pack_id: generated.pack_id.clone(),
-                    size: generated.pack_size,
-                    content_hash: generated.pack_id.clone(),
-                    ref_tips: refs.iter().cloned().collect(),
-                    object_count: generated.object_count,
-                });
+            let entry = PackManifestEntry {
+                pack_id: generated.pack_id.clone(),
+                size: generated.pack_size,
+                content_hash: generated.pack_id.clone(),
+                ref_tips: refs.iter().cloned().collect(),
+                object_count: generated.object_count,
+            };
             RepackedPack { generated, entry }
         })
         .collect::<Vec<_>>();
@@ -333,9 +360,9 @@ async fn run_repack_locked(
         )
         .await?;
     }
-    let replacement_entries = repacked
-        .iter()
-        .map(|pack| pack.entry.clone())
+    let replacement_entries = stable_packs
+        .into_iter()
+        .chain(repacked.iter().map(|pack| pack.entry.clone()))
         .collect::<Vec<_>>();
     let new_generation = manifest.generation.checked_add(1).ok_or_else(|| {
         CrabError::Internal("manifest generation overflow during repack".to_owned())
@@ -353,7 +380,26 @@ async fn run_repack_locked(
     .await?;
     check_cancelled(cancel)?;
 
-    let committed = repack_manifest(manifest, new_generation, pack_index_hash);
+    let mut committed = repack_manifest(manifest, new_generation, pack_index_hash);
+    if let Some(graph) = commit_graph {
+        let write = crab_metadata::split_commit_graph::rebind_split_commit_graph(
+            &graph,
+            committed.generation,
+            committed.pack_index_hash.clone(),
+            committed.git_validation_digest.clone(),
+        )?;
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        crab_metadata::split_commit_graph::upload_split_commit_graph(
+            store.as_storage(),
+            &storage_router,
+            &write,
+        )
+        .await?;
+        committed.commit_graph_hash = Some(write.descriptor_hash);
+    }
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
     let visibility_expected = visibility.is_some();
     if let Some(visibility) = visibility {
@@ -445,6 +491,8 @@ async fn run_repack_locked(
         replacement_entries.len(),
         bytes_before,
         replacement_entries.iter().map(|pack| pack.size).sum(),
+        bytes_read,
+        repacked.iter().map(|pack| pack.entry.size).sum(),
         start,
     ))
 }
@@ -454,6 +502,8 @@ fn outcome(
     packs_after: usize,
     bytes_before: u64,
     bytes_after: u64,
+    bytes_read: u64,
+    bytes_written: u64,
     start: Instant,
 ) -> RepackOutcome {
     RepackOutcome {
@@ -461,6 +511,8 @@ fn outcome(
         packs_after,
         bytes_before,
         bytes_after,
+        bytes_read,
+        bytes_written,
         elapsed: start.elapsed(),
     }
 }
@@ -471,6 +523,7 @@ fn repack_manifest(mut manifest: Manifest, generation: u64, pack_index_hash: Str
     manifest.pusher = None;
     manifest.session_id = format!("repack-{generation}");
     manifest.pack_index_hash = pack_index_hash;
+    manifest.commit_graph_hash = None;
     // `run` validates every replacement pack against the complete temporary
     // ODB before this helper commits its compacted inventory.
     manifest.seal_git_validation();
@@ -508,6 +561,42 @@ async fn read_current_visibility(
         Ok(None) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+async fn read_current_commit_graph(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<Option<crab_metadata::split_commit_graph::SplitCommitGraph>> {
+    let Some(hash) = manifest.commit_graph_hash.as_deref() else {
+        return Ok(None);
+    };
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
+        store.as_storage(),
+        &storage_router,
+        hash,
+        crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+    )
+    .await?;
+    if graph.descriptor.generation != manifest.generation
+        || graph.descriptor.pack_index_hash != manifest.pack_index_hash
+        || graph.descriptor.git_validation_digest != manifest.git_validation_digest
+        || manifest
+            .refs
+            .iter()
+            .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+            .any(|root| !graph.contains_hex(root))
+    {
+        return Err(CrabError::CorruptObject {
+            path: storage_router
+                .bulk_manifest_path("commit-graph", hash)
+                .to_string(),
+            reason: "commit graph identity does not match the repack source manifest".to_owned(),
+        });
+    }
+    Ok(Some(graph))
 }
 
 fn rebind_visibility(
@@ -847,6 +936,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -857,7 +947,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repack_manifest_changes_only_generation_owned_fields() {
+    fn repack_manifest_invalidates_generation_bound_commit_graph() {
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest
             .refs
@@ -872,7 +962,7 @@ mod tests {
         assert_eq!(updated.pack_index_hash, "e".repeat(64));
         assert_eq!(updated.refs, manifest.refs);
         assert_eq!(updated.shard_index_hash, manifest.shard_index_hash);
-        assert_eq!(updated.commit_graph_hash, manifest.commit_graph_hash);
+        assert_eq!(updated.commit_graph_hash, None);
         assert_eq!(updated.ref_registry_hash, manifest.ref_registry_hash);
     }
 
@@ -939,6 +1029,9 @@ mod tests {
         std::fs::write(repository.join("second.txt"), b"second\n")?;
         commit_all(&repository, "second")?;
         let second = snapshot_repository_pack(&repository, source.path(), "second")?;
+        std::fs::write(repository.join("third.txt"), b"third\n")?;
+        commit_all(&repository, "third")?;
+        let third = snapshot_repository_pack(&repository, source.path(), "third")?;
         let tip = git_output(
             isolated_test_git_command()
                 .arg("-C")
@@ -951,6 +1044,7 @@ mod tests {
         let entries = vec![
             upload_test_pack(&store, &router, &first, &tip).await?,
             upload_test_pack(&store, &router, &second, &tip).await?,
+            upload_test_pack(&store, &router, &third, &tip).await?,
         ];
         let (shard_index_hash, _shard_index, shard_write) =
             crate::metadata::manifest::compact_shard_index(1, &[])?;
@@ -997,7 +1091,7 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(outcome.packs_before, 2);
+        assert_eq!(outcome.packs_before, 3);
         assert!((1..=outcome.packs_before).contains(&outcome.packs_after));
         let (committed, _) = read_manifest(&store, &router).await?;
         assert_eq!(committed.generation, 2);
@@ -1051,6 +1145,100 @@ mod tests {
                 .expect("main closure")
                 .binary_search(&tip)
                 .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn geometric_repack_does_not_read_or_replace_stable_prefix() -> Result<()> {
+        let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(backend);
+        let prefix = "org/repack-stable-prefix";
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        let source = tempfile::tempdir()?;
+
+        let mut packs = Vec::new();
+        for (name, file_count) in [("stable", 12), ("recent-a", 2), ("recent-b", 1)] {
+            let repository = source.path().join(name);
+            initialize_work_repository(&repository)?;
+            for index in 0..file_count {
+                std::fs::write(
+                    repository.join(format!("{name}-{index}.txt")),
+                    format!("{name}-{index}\n"),
+                )?;
+            }
+            commit_all(&repository, name)?;
+            let tip = git_output(
+                isolated_test_git_command()
+                    .arg("-C")
+                    .arg(&repository)
+                    .arg("rev-parse")
+                    .arg("HEAD"),
+                "resolve geometric fixture tip",
+            )?;
+            let pack = snapshot_repository_pack(&repository, source.path(), name)?;
+            packs.push(upload_test_pack(&store, &router, &pack, &tip).await?);
+        }
+        packs.sort_unstable_by(|left, right| right.object_count.cmp(&left.object_count));
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| pack.object_count)
+                .collect::<Vec<_>>(),
+            vec![14, 4, 3]
+        );
+        let stable_id = packs[0].pack_id.clone();
+        let selected_ids = packs[1..]
+            .iter()
+            .map(|pack| pack.pack_id.clone())
+            .collect::<HashSet<_>>();
+        let selected_bytes = packs[1..].iter().map(|pack| pack.size).sum::<u64>();
+
+        let (shard_index_hash, _shard_index, shard_write) =
+            crate::metadata::manifest::compact_shard_index(1, &[])?;
+        let (pack_index_hash, _pack_index, pack_write) = compact_pack_index(1, &packs)?;
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: shard_write,
+                pack_index: pack_write,
+            },
+        )
+        .await?;
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.created_at = now_iso8601();
+        manifest.session_id = "geometric-fixture".to_owned();
+        manifest.shard_index_hash = shard_index_hash;
+        manifest.pack_index_hash = pack_index_hash;
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest).await?;
+
+        let outcome = run_repack(
+            &store,
+            prefix,
+            &RepackConfig {
+                lock_ttl: Duration::from_secs(60),
+                dry_run: false,
+                download_concurrency: 2,
+                max_cas_retries: 4,
+            },
+            &CancellationToken::new(),
+        )
+        .await?;
+
+        assert_eq!(outcome.packs_before, 3);
+        assert_eq!(outcome.packs_after, 2);
+        assert_eq!(outcome.bytes_read, selected_bytes);
+        assert!(outcome.bytes_read < outcome.bytes_before);
+        let (committed, _) = read_manifest(&store, &router).await?;
+        let replacement = read_bulk_pack_list(&store, &router, &committed.pack_index_hash).await?;
+        assert!(replacement.iter().any(|pack| pack.pack_id == stable_id));
+        assert!(
+            replacement
+                .iter()
+                .all(|pack| !selected_ids.contains(&pack.pack_id))
         );
         Ok(())
     }

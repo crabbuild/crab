@@ -2841,7 +2841,7 @@ async fn history_pages_are_deterministic_and_bound_to_start_and_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn incomplete_commit_graph_prioritizes_but_cannot_hide_raw_history() {
+async fn incomplete_commit_graph_cannot_hide_raw_history() {
     let fixture = publish_with_summary(DeltaKind::Ref, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
     let operation = fixture
@@ -2868,8 +2868,8 @@ async fn incomplete_commit_graph_prioritizes_but_cannot_hide_raw_history() {
                 .collect::<Vec<_>>(),
             vec![
                 snapshot.commit_oid(),
-                fixture.side_commit,
-                fixture.root_commit
+                fixture.root_commit,
+                fixture.side_commit
             ]
         );
         assert!(page.next.is_none());

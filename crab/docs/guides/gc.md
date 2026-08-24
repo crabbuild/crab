@@ -115,6 +115,20 @@ GC tracks deletions across several categories:
 - Shards — metadata shards
 - Packs — Git objects in repo-scope GC
 
+Repo-scoped dry runs also report pack storage in four disjoint byte classes:
+
+- active: referenced by the current manifest or uncompacted ref journal;
+- retained history: referenced by immutable manifest history, workflows, or
+  coordinator recovery roots;
+- grace period: currently unreachable but still too recent to collect;
+- collectible: independently proven unreachable and outside the grace period.
+
+Manifest history is the canonical object-store-native stale-pack inventory: it
+records the generation and publication time at which each old pack was still
+reachable. Crab does not maintain a second mutable liveness database. Pruning
+history changes only the recovery-root set; GC still independently recomputes
+reachability and applies the grace period before deleting a pack.
+
 ## Examples
 
 ### Dry run to see what would be collected
@@ -202,7 +216,11 @@ Supports `--json` and `--jsonl`.
     "bytes_reclaimed": 1342177280,
     "dry_run": false,
     "cancelled": false,
-    "partial_enumeration": false
+    "partial_enumeration": false,
+    "active_pack_bytes": 2300000000,
+    "retained_history_pack_bytes": 900000000,
+    "grace_period_pack_bytes": 12000000,
+    "collectible_pack_bytes": 48000000
   }
 }
 ```
@@ -210,7 +228,7 @@ Supports `--json` and `--jsonl`.
 ### crab gc --jsonl
 
 ```
-{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false}}
+{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false,"active_pack_bytes":2300000000,"retained_history_pack_bytes":900000000,"grace_period_pack_bytes":12000000,"collectible_pack_bytes":48000000}}
 ```
 
 See [Structured Output](structured-output.md) for envelope details, event types,

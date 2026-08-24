@@ -26,7 +26,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -121,6 +123,7 @@ class LargeRepositoryQualification:
         self.remote_prefix = f"{REMOTE_ROOT}/{self.run_id}"
         self.remote_url = f"crab://{args.bucket}/{self.remote_prefix}"
         self.command_index = 0
+        self.report_lock = threading.RLock()
         self.env = self.build_env()
         self.report: dict[str, Any] = {
             "schema": SCHEMA,
@@ -204,23 +207,25 @@ class LargeRepositoryQualification:
         )
 
     def write_report(self) -> None:
-        self.artifacts.mkdir(parents=True, exist_ok=True)
-        report_path = self.artifacts / "report.json"
-        self.report["artifacts"]["report"] = str(report_path)
-        body = json.dumps(self.report, indent=2, sort_keys=True) + "\n"
-        temporary = report_path.with_suffix(".json.tmp")
-        temporary.write_text(body, encoding="utf-8")
-        temporary.replace(report_path)
+        with self.report_lock:
+            self.artifacts.mkdir(parents=True, exist_ok=True)
+            report_path = self.artifacts / "report.json"
+            self.report["artifacts"]["report"] = str(report_path)
+            body = json.dumps(self.report, indent=2, sort_keys=True) + "\n"
+            temporary = report_path.with_suffix(".json.tmp")
+            temporary.write_text(body, encoding="utf-8")
+            temporary.replace(report_path)
 
     def check(self, name: str, ok: bool, detail: dict[str, Any] | None = None) -> None:
-        self.report["checks"].append(
-            {
-                "name": name,
-                "ok": ok,
-                "detail": detail or {},
-                "checked_at": utc_now(),
-            }
-        )
+        with self.report_lock:
+            self.report["checks"].append(
+                {
+                    "name": name,
+                    "ok": ok,
+                    "detail": detail or {},
+                    "checked_at": utc_now(),
+                }
+            )
         self.write_report()
         if not ok:
             raise QualificationError(f"check failed: {name}")
@@ -375,8 +380,10 @@ class LargeRepositoryQualification:
         input_data: bytes | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        self.command_index += 1
-        base = f"{self.command_index:05d}-{slug(name)}"
+        with self.report_lock:
+            self.command_index += 1
+            command_index = self.command_index
+        base = f"{command_index:05d}-{slug(name)}"
         self.logs.mkdir(parents=True, exist_ok=True)
         stdout_path = self.logs / f"{base}.stdout.log"
         stderr_path = self.logs / f"{base}.stderr.log"
@@ -453,7 +460,8 @@ class LargeRepositoryQualification:
             "stdout_log": str(stdout_path),
             "stderr_log": str(stderr_path),
         }
-        self.report["commands"].append(record)
+        with self.report_lock:
+            self.report["commands"].append(record)
         self.write_report()
         if check and exit_code != 0:
             raise QualificationError(
@@ -750,13 +758,30 @@ class LargeRepositoryQualification:
         self.write_report()
 
     def acceleration_snapshot(self, stage: str) -> None:
-        owner = self.run_crab(
-            self.replay_repo,
-            ["metadb", "owner", "--once", "--jsonl"],
-            f"visibility owner {stage}",
-            timeout=self.args.clone_timeout,
-            extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
-        )
+        owner_runs: list[dict[str, Any]] = []
+        actions: list[str] = []
+        for attempt in range(1, 9):
+            owner = self.run_crab(
+                self.replay_repo,
+                ["metadb", "owner", "--once", "--jsonl"],
+                f"generation owner {stage} pass {attempt}",
+                timeout=self.args.clone_timeout,
+                extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+            )
+            owner_runs.append(owner)
+            lines = [line for line in self.stdout(owner).splitlines() if line.strip()]
+            if not lines:
+                raise QualificationError("generation owner emitted no JSONL snapshot")
+            payload = json.loads(lines[-1])
+            data = payload.get("data", payload)
+            action = str(data.get("action", ""))
+            actions.append(action)
+            if action == "none":
+                break
+        else:
+            raise QualificationError(
+                f"generation owner did not converge after 8 passes: {actions}"
+            )
         doctor = self.run_crab(
             self.replay_repo,
             ["doctor", "--metadb", "--json"],
@@ -769,9 +794,25 @@ class LargeRepositoryQualification:
         if not isinstance(acceleration, dict):
             raise QualificationError("doctor --metadb JSON is missing acceleration state")
         self.report["stages"][f"visibility_owner_{stage}"] = {
-            "duration_ms": owner["duration_ms"],
-            "resources": owner["resources"],
-            "telemetry": owner["telemetry"],
+            "duration_ms": sum(run["duration_ms"] for run in owner_runs),
+            "passes": len(owner_runs),
+            "actions": actions,
+            "resources": {
+                "user_cpu_ms": sum(
+                    run["resources"]["user_cpu_ms"] for run in owner_runs
+                ),
+                "system_cpu_ms": sum(
+                    run["resources"]["system_cpu_ms"] for run in owner_runs
+                ),
+                "children_max_rss": max(
+                    run["resources"]["children_max_rss"] for run in owner_runs
+                ),
+                "children_max_rss_unit": "bytes",
+            },
+            "telemetry": {
+                key: sum(run["telemetry"].get(key, 0) for run in owner_runs)
+                for key in owner_runs[0]["telemetry"]
+            },
         }
         self.report["stages"][f"acceleration_{stage}"] = {
             "duration_ms": doctor["duration_ms"],
@@ -797,6 +838,12 @@ class LargeRepositoryQualification:
             "visibility_current": acceleration.get(
                 "git_visibility_coverage_current"
             ),
+            "commit_graph_available": acceleration.get(
+                "git_commit_graph_available"
+            ),
+            "commit_graph_commits": acceleration.get("git_commit_graph_commits"),
+            "commit_graph_layers": acceleration.get("git_commit_graph_layers"),
+            "commit_graph_current": acceleration.get("git_commit_graph_current"),
             "repair_required": acceleration.get("repair_required"),
             "notes": acceleration.get("notes", []),
         }
@@ -811,7 +858,9 @@ class LargeRepositoryQualification:
             and state["visibility_generation"] == state["manifest_generation"]
             and state["locator_pack_index_hash"]
             == state["visibility_pack_index_hash"]
-            and state["visibility_current"] is True,
+            and state["visibility_current"] is True
+            and state["commit_graph_available"] is True
+            and state["commit_graph_current"] is True,
             state,
         )
         self.write_report()
@@ -882,6 +931,91 @@ class LargeRepositoryQualification:
         if remove_after:
             shutil.rmtree(target)
         return stage
+
+    def clone_fanout(self, name: str, count: int) -> None:
+        if count == 0:
+            return
+        barrier = threading.Barrier(count)
+
+        def worker(ordinal: int) -> dict[str, Any]:
+            target = self.clone_root / f"{name}-{ordinal:03d}"
+            barrier.wait(timeout=60)
+            clone = self.run_git(
+                self.run_root,
+                [
+                    "-c",
+                    "protocol.version=2",
+                    "clone",
+                    "--no-checkout",
+                    "--single-branch",
+                    "--branch",
+                    "main",
+                    self.remote_url,
+                    str(target),
+                ],
+                f"{name} clone {ordinal:03d}",
+                timeout=self.args.clone_timeout,
+                extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+            )
+            self.run_git(
+                target,
+                ["fsck", "--full"],
+                f"{name} fsck {ordinal:03d}",
+                timeout=2 * 60 * 60,
+            )
+            shutil.rmtree(target)
+            return clone
+
+        started = time.monotonic()
+        runs: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=count) as executor:
+            futures = [executor.submit(worker, ordinal) for ordinal in range(1, count + 1)]
+            for future in as_completed(futures):
+                runs.append(future.result())
+        durations = [int(run["duration_ms"]) for run in runs]
+        producers = sum(
+            1 for run in runs if int(run["telemetry"].get("pack_generation_ms", 0)) > 0
+        )
+        hits = sum(int(run["telemetry"].get("cache_hits", 0)) for run in runs)
+        misses = sum(int(run["telemetry"].get("cache_misses", 0)) for run in runs)
+        origin_requests = sum(
+            int(run["telemetry"].get("storage_requests", 0)) for run in runs
+        )
+        self.report["stages"][name] = {
+            "duration_ms": int((time.monotonic() - started) * 1_000),
+            "clients": count,
+            "successful_fsck": len(runs),
+            "generated_pack_producers": producers,
+            "cache_hits": hits,
+            "cache_misses": misses,
+            "cache_hit_rate": hits / max(1, hits + misses),
+            "origin_requests": origin_requests,
+            "median_client_ms": percentile(durations, 0.50),
+            "p95_client_ms": percentile(durations, 0.95),
+            "p99_client_ms": percentile(durations, 0.99),
+        }
+        self.check(f"{name}-all-fsck", len(runs) == count, {"clients": count})
+        if name == "cold_clone_fanout":
+            self.check(
+                "cold-clone-generated-pack-producers",
+                producers <= 2,
+                {"clients": count, "producers": producers},
+            )
+        if name == "warm_clone_fanout":
+            self.check(
+                "warm-clone-generated-pack-cache-hit-rate",
+                hits + misses >= count and hits / max(1, hits + misses) >= 0.90,
+                {"clients": count, "hits": hits, "misses": misses},
+            )
+            cold = self.report["stages"].get("cold_clone_fanout")
+            if isinstance(cold, dict):
+                cold_requests = int(cold.get("origin_requests", 0))
+                self.check(
+                    "warm-clone-origin-request-reduction",
+                    cold_requests > 0 and origin_requests <= cold_requests * 0.20,
+                    {"cold": cold_requests, "warm": origin_requests},
+                )
+        self.write_report()
 
     def incremental_fetch(self, checkpoint: int, expected: str) -> None:
         record = self.run_git(
@@ -972,6 +1106,8 @@ class LargeRepositoryQualification:
             fsck=False,
             remove_after=True,
         )
+        self.clone_fanout("cold_clone_fanout", self.args.cold_clone_fanout)
+        self.clone_fanout("warm_clone_fanout", self.args.warm_clone_fanout)
         self.run_git(
             self.incremental_clone,
             ["fsck", "--full"],
@@ -1252,6 +1388,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aws-bin", default="aws")
     parser.add_argument("--replay-count", type=int, default=DEFAULT_REPLAY_COUNT)
     parser.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
+    parser.add_argument("--cold-clone-fanout", type=int, default=0)
+    parser.add_argument("--warm-clone-fanout", type=int, default=0)
     parser.add_argument("--minimum-free-bytes", type=parse_size, default=20 * 1024**3)
     parser.add_argument("--timeout", type=int, default=30 * 60)
     parser.add_argument("--push-timeout", type=int, default=2 * 60 * 60)
@@ -1266,6 +1404,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--replay-count must be at least 1")
     if args.sample_size < 1:
         parser.error("--sample-size must be at least 1")
+    if not 0 <= args.cold_clone_fanout <= 50:
+        parser.error("--cold-clone-fanout must be between 0 and 50")
+    if not 0 <= args.warm_clone_fanout <= 100:
+        parser.error("--warm-clone-fanout must be between 0 and 100")
     if args.sample_interval <= 0:
         parser.error("--sample-interval must be positive")
     return args

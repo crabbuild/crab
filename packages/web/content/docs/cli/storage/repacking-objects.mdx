@@ -23,15 +23,20 @@ flowchart LR
 ## How Repacking Works
 
 1. Pins the canonical manifest and segmented pack inventory.
-2. Downloads packs and indexes with bounded concurrency after a free-space
-   preflight.
-3. Verifies every source pair and the complete pinned ref graph, then runs
-   Git's geometric repack.
-4. Validates every replacement pack with strict Git checks.
-5. Uploads immutable replacement objects and repairs missing metadata sidecars.
+2. Selects the smallest suffix whose replacement restores a factor-two
+   geometric progression.
+3. Downloads and verifies only that suffix with bounded concurrency after a
+   free-space preflight; stable large packs stay in object storage and are not
+   rewritten.
+4. Generates one pack from the exact selected OID union and verifies that no
+   object was added or lost.
+5. Uploads only newly generated pack, index, and reverse-index objects, and
+   repairs missing metadata sidecars.
 6. Atomically updates the manifest using compare-and-swap (CAS).
-7. Publishes the rebound visibility proof, exact locators, and generation
-   receipt before reporting success.
+7. Rebinds the existing Git visibility and complete commit-graph proofs to the
+   replacement generation, then publishes exact locators and a generation
+   receipt. Repairable post-CAS failures never invalidate the committed
+   manifest.
 
 Old pack files leave the active manifest after the update, but immutable
 recovery history continues to reference them. Repack therefore reduces the

@@ -121,6 +121,8 @@ jobs:
             --root "$QUALIFICATION_ROOT"
             --source /Volumes/Workspace/Github/kubernetes/kubernetes
             --object-store-version "$RUSTFS_IMAGE"
+            --cold-clone-fanout 50
+            --warm-clone-fanout 100
             --cleanup-remote
           )
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"

@@ -178,7 +178,6 @@ pub fn parse_mutable_repo_path(path: &str) -> Option<&str> {
     for suffix in [
         "/HEAD",
         "/manifest",
-        "/commit-graph-summary",
         "/pack-list",
         "/shard-list",
         "/ref-registry",
@@ -628,7 +627,6 @@ mod tests {
             (".crab/chunk_index_db/manifest/current", ".crab"),
             ("org/team/repo/HEAD", "org/team/repo"),
             ("org/team/repo/manifest", "org/team/repo"),
-            ("org/team/repo/commit-graph-summary", "org/team/repo"),
             ("org/team/repo/pack-list", "org/team/repo"),
             ("org/team/repo/shard-list", "org/team/repo"),
             (".crab/ref-registry", ".crab"),
