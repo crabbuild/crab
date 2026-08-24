@@ -947,7 +947,9 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 #[cfg(feature = "storage")]
 mod storage {
     use std::collections::BTreeMap;
+    #[cfg(feature = "remote-index")]
     use std::sync::Arc;
+    #[cfg(feature = "remote-index")]
     use std::time::Duration;
 
     use base64::Engine as _;
@@ -1027,6 +1029,7 @@ mod storage {
         transitions: BTreeMap<String, Vec<GitVisibilityTransitionV4>>,
     }
 
+    #[cfg(feature = "remote-index")]
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct GitVisibilityIndexV5 {
@@ -1337,6 +1340,7 @@ mod storage {
         }
     }
 
+    #[cfg(feature = "remote-index")]
     impl GitVisibilityIndexV5 {
         fn from_index(
             index: &GitVisibilityIndex,
@@ -1696,6 +1700,7 @@ mod storage {
         }
     }
 
+    #[cfg(feature = "remote-index")]
     async fn read_catalog_bound(
         store: &Store,
         router: &StoreLayout<Store>,
@@ -1805,7 +1810,23 @@ mod storage {
         git_validation_digest: &str,
     ) -> Result<GitVisibilityRead> {
         validate_hash(git_validation_digest, "Git validation digest")?;
+        #[cfg(feature = "remote-index")]
         match read_catalog_bound(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await
+        {
+            Ok((index, format)) => return Ok(GitVisibilityRead { index, format }),
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(error),
+        }
+        match read_digest_bound(
             store,
             router,
             generation,
@@ -1817,7 +1838,7 @@ mod storage {
             Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
             Err(crate::error::MetadataError::Storage {
                 source: StorageError::NotFound { .. },
-            }) => match read_digest_bound(
+            }) => read_v1(
                 store,
                 router,
                 generation,
@@ -1825,24 +1846,10 @@ mod storage {
                 git_validation_digest,
             )
             .await
-            {
-                Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
-                Err(crate::error::MetadataError::Storage {
-                    source: StorageError::NotFound { .. },
-                }) => read_v1(
-                    store,
-                    router,
-                    generation,
-                    pack_index_hash,
-                    git_validation_digest,
-                )
-                .await
-                .map(|index| GitVisibilityRead {
-                    index,
-                    format: GitVisibilityFormat::V1,
-                }),
-                Err(error) => Err(error),
-            },
+            .map(|index| GitVisibilityRead {
+                index,
+                format: GitVisibilityFormat::V1,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -1916,46 +1923,50 @@ mod storage {
         index: &GitVisibilityIndex,
     ) -> Result<()> {
         index.validate()?;
-        let session = crate::git_object_locator::GitObjectLocatorSession::open(
-            Arc::clone(store.inner()),
-            router.repo_prefix(),
-        )
-        .await?;
-        let identity = session.catalog_identity();
-        let catalog_matches = identity.is_some_and(|identity| {
-            identity.generation == index.generation
-                && identity.pack_index_hash.to_string() == index.pack_index_hash
-        });
-        let (path, body) = if catalog_matches {
-            let identity = identity.ok_or_else(|| {
-                crate::error::MetadataError::Internal(
-                    "matching Git object catalog identity disappeared".to_owned(),
-                )
-            })?;
-            let catalog = session.all_object_ids_and_close().await?;
-            let stored = GitVisibilityIndexV5::from_index(index, &catalog, identity)?;
-            let body = serde_json::to_vec(&stored).map_err(|error| {
-                crate::error::MetadataError::Internal(format!(
-                    "catalog visibility index serialize: {error}"
-                ))
-            })?;
-            (
-                router.git_visibility_catalog_path(&index.git_validation_digest),
-                body,
+        #[cfg(feature = "remote-index")]
+        {
+            let session = crate::git_object_locator::GitObjectLocatorSession::open(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
             )
-        } else {
+            .await?;
+            let identity = session.catalog_identity();
+            let catalog_matches = identity.is_some_and(|identity| {
+                identity.generation == index.generation
+                    && identity.pack_index_hash.to_string() == index.pack_index_hash
+            });
+            if catalog_matches {
+                let identity = identity.ok_or_else(|| {
+                    crate::error::MetadataError::Internal(
+                        "matching Git object catalog identity disappeared".to_owned(),
+                    )
+                })?;
+                let catalog = session.all_object_ids_and_close().await?;
+                let stored = GitVisibilityIndexV5::from_index(index, &catalog, identity)?;
+                let body = serde_json::to_vec(&stored).map_err(|error| {
+                    crate::error::MetadataError::Internal(format!(
+                        "catalog visibility index serialize: {error}"
+                    ))
+                })?;
+                let path = router.git_visibility_catalog_path(&index.git_validation_digest);
+                if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
+                    return Err(crate::error::MetadataError::CorruptObject {
+                        path: path.as_ref().to_owned(),
+                        reason: format!(
+                            "visibility index exceeds {} bytes",
+                            MAX_GIT_VISIBILITY_INDEX_BYTES
+                        ),
+                    });
+                }
+                return upload_visibility_body(store, &path, Bytes::from(body)).await;
+            }
             session.close().await?;
-            let stored = GitVisibilityIndexV4::from_index(index)?;
-            let body = serde_json::to_vec(&stored).map_err(|error| {
-                crate::error::MetadataError::Internal(format!(
-                    "visibility index serialize: {error}"
-                ))
-            })?;
-            (
-                router.git_visibility_path(&index.git_validation_digest),
-                body,
-            )
-        };
+        }
+        let stored = GitVisibilityIndexV4::from_index(index)?;
+        let body = serde_json::to_vec(&stored).map_err(|error| {
+            crate::error::MetadataError::Internal(format!("visibility index serialize: {error}"))
+        })?;
+        let path = router.git_visibility_path(&index.git_validation_digest);
         if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
@@ -2520,7 +2531,7 @@ mod tests {
         assert_eq!(right_read, right);
     }
 
-    #[cfg(feature = "storage")]
+    #[cfg(all(feature = "storage", feature = "remote-index"))]
     #[tokio::test]
     async fn legacy_dictionary_proof_migrates_to_exact_catalog_ordinals() {
         use std::sync::Arc;
