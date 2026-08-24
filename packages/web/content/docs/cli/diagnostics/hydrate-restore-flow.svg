@@ -67,7 +67,7 @@
     <line x1="480" y1="198" x2="480" y2="232" marker-end="url(#arrowhead)"/>
     <path d="M 340 296 H 225 V 396" marker-end="url(#arrowhead)"/>
     <line x1="225" y1="504" x2="225" y2="540" marker-end="url(#arrowhead)"/>
-    <path d="M 620 296 H 640 V 414 H 790 V 422" marker-end="url(#arrowhead)"/>
+    <path d="M 620 296 H 640 V 414 H 790 V 428" marker-end="url(#arrowhead)"/>
     <path d="M 680 480 H 620 V 565 H 480 V 582" marker-end="url(#arrowhead)"/>
     <line x1="790" y1="530" x2="790" y2="582" marker-end="url(#arrowhead)"/>
     <line x1="790" y1="680" x2="790" y2="722" marker-end="url(#arrowhead)"/>
