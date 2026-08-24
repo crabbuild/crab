@@ -15,7 +15,7 @@ full reconstruction and Git-connectivity check of current head.
 
 Think of it as `git fsck` extended to cover Crab's object store layer.
 
-![Integrity check — crab fsck verifies refs, packs, locks, uploads, and walks the full data chain from pointer to xorb.](./integrity-check-flow.svg)
+![Integrity check — crab fsck cross-checks Git objects, the data chain, pack and index manifests, push locks, multipart uploads, and shard lists before walking from a pointer through the file index and shard to the xorb.](./integrity-check-flow.svg)
 
 ## Running an Integrity Check
 
