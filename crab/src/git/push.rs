@@ -5722,11 +5722,6 @@ async fn publish_pack_locator_inventory(
         });
     }
     let bindings = writer.bind_packs(&pack_records).await?;
-    let covered = bindings
-        .iter()
-        .filter(|binding| writer.binding_has_covered_objects(**binding))
-        .map(|binding| binding.record.pack_id)
-        .collect::<HashSet<_>>();
     let retained_slots = bindings
         .iter()
         .map(|binding| binding.pack_slot)
@@ -5737,6 +5732,17 @@ async fn publish_pack_locator_inventory(
         pack_rows_deleted = sweep.pack_rows_deleted,
         "swept stale Git locator rows"
     );
+    // Object keys are OIDs, so an interrupted newer pack can replace a covered
+    // row. Deleting any stale-slot object invalidates every covered-pack shortcut.
+    let covered = if sweep.object_rows_deleted == 0 {
+        bindings
+            .iter()
+            .filter(|binding| writer.binding_has_covered_objects(**binding))
+            .map(|binding| binding.record.pack_id)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     let mut evidence = Vec::new();
     for pack in current_packs {
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
