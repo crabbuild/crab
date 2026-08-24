@@ -30,8 +30,15 @@ const LFS_FILTER_CONFIG_KEYS: &[&str] = &[
     "filter.lfs.required",
 ];
 
-/// Content of the pre-push hook installed by `crab lfs install`.
-const PRE_PUSH_HOOK: &str = "\
+/// LFS block placed first in Crab-managed pre-push hooks.
+const PRE_PUSH_HOOK_BLOCK: &str = "\
+# Crab LFS: publish objects before refs
+command -v crab >/dev/null 2>&1 || { echo >&2 \"crab not found\"; exit 2; }
+crab lfs pre-push \"$@\" || exit $?
+";
+
+/// Hook emitted by Crab releases before managed blocks had a marker.
+const LEGACY_PRE_PUSH_HOOK: &str = "\
 #!/bin/sh
 command -v crab >/dev/null 2>&1 || { echo >&2 \"crab not found\"; exit 0; }
 crab lfs pre-push \"$@\"
@@ -60,7 +67,7 @@ pub struct LfsUninstallOptions {
 ///
 /// Sets `lfs.customtransfer.crab.path`, `lfs.customtransfer.crab.args`,
 /// `lfs.standalonetransferagent`, and `filter.lfs.*` in git config,
-/// and writes a pre-push hook to `.git/hooks/pre-push`.
+/// and writes a pre-push hook to Git's configured hooks directory.
 ///
 /// When `local` is true, config is written to `.git/config` only.
 /// When `skip_smudge` is true, additionally sets `filter.lfs.smudge` to
@@ -144,9 +151,10 @@ fn print_manual_instructions(bin: &str, skip_smudge: bool) {
     }
     println!("  git config filter.lfs.required true");
     println!();
-    println!("To install the pre-push hook, write this to .git/hooks/pre-push:");
+    println!("Install the following as pre-push in the directory printed by:");
+    println!("  git rev-parse --git-path hooks");
     println!();
-    for line in PRE_PUSH_HOOK.lines() {
+    for line in pre_push_hook_content().lines() {
         println!("  {line}");
     }
 }
@@ -227,8 +235,9 @@ fn unset_git_config(root: &Path, flag: &str, key: &str) {
 
 /// Install the pre-push hook in `.git/hooks/pre-push`.
 ///
-/// Creates the hooks directory if it doesn't exist. Skips installation
-/// if a pre-push hook already exists (idempotent).
+/// Creates the hooks directory if it doesn't exist. Crab's mirror hook is
+/// composed automatically; an arbitrary existing hook requires a manual merge
+/// or `--force` so LFS publication cannot be silently bypassed.
 fn maybe_install_pre_push_hook(root: &Path, options: LfsInstallOptions) -> Result<()> {
     if options.skip_repo {
         return Ok(());
@@ -243,33 +252,49 @@ fn maybe_install_pre_push_hook(root: &Path, options: LfsInstallOptions) -> Resul
     }
 }
 
-fn install_pre_push_hook_at(hooks_dir: &Path, force: bool) -> Result<()> {
-    fs::create_dir_all(&hooks_dir).map_err(|e| CrabError::Configuration {
+pub(super) fn install_pre_push_hook_at(hooks_dir: &Path, force: bool) -> Result<()> {
+    fs::create_dir_all(hooks_dir).map_err(|e| CrabError::Configuration {
         key: format!("failed to create hooks directory: {e}"),
         origin: hooks_dir.display().to_string(),
     })?;
 
     let hook_path = hooks_dir.join("pre-push");
-    if hook_path.exists() && !force {
-        tracing::debug!(path = %hook_path.display(), "pre-push hook already exists, skipping");
-        return Ok(());
-    }
+    let content = if hook_path.exists() && !force {
+        let existing = fs::read_to_string(&hook_path).map_err(|e| CrabError::Configuration {
+            key: "pre-push hook".to_owned(),
+            origin: format!("failed to read {}: {e}", hook_path.display()),
+        })?;
 
-    fs::write(&hook_path, PRE_PUSH_HOOK).map_err(|e| CrabError::Configuration {
+        if managed_hook_remainder(&existing).is_some() {
+            make_pre_push_hook_executable(&hook_path)?;
+            tracing::debug!(path = %hook_path.display(), "LFS pre-push hook already installed");
+            return Ok(());
+        }
+        if let Some(remainder) = legacy_hook_remainder(&existing) {
+            let mut upgraded = pre_push_hook_content();
+            upgraded.push_str(remainder);
+            upgraded
+        } else if existing == crate::cmd::install::MIRROR_PRE_PUSH_HOOK {
+            compose_with_mirror_hook(&existing)
+        } else {
+            return Err(CrabError::Configuration {
+                key: "pre-push hook".to_owned(),
+                origin: format!(
+                    "{} is not managed by Crab; merge `crab lfs pre-push \"$@\" || exit $?` manually, or use --force to overwrite it",
+                    hook_path.display(),
+                ),
+            });
+        }
+    } else {
+        pre_push_hook_content()
+    };
+
+    fs::write(&hook_path, content).map_err(|e| CrabError::Configuration {
         key: format!("failed to write pre-push hook: {e}"),
         origin: hook_path.display().to_string(),
     })?;
 
-    // Make the hook executable on Unix.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&hook_path, perms).map_err(|e| CrabError::Configuration {
-            key: format!("failed to set hook permissions: {e}"),
-            origin: hook_path.display().to_string(),
-        })?;
-    }
+    make_pre_push_hook_executable(&hook_path)?;
 
     tracing::debug!(path = %hook_path.display(), "installed pre-push hook");
     Ok(())
@@ -298,16 +323,66 @@ fn uninstall_pre_push_hook_at(hooks_dir: &Path) -> Result<()> {
         return Ok(());
     };
 
-    if content == PRE_PUSH_HOOK {
-        fs::remove_file(&hook_path).map_err(|e| CrabError::Configuration {
-            key: format!("failed to remove pre-push hook: {e}"),
-            origin: hook_path.display().to_string(),
-        })?;
-        tracing::debug!(path = %hook_path.display(), "removed crab pre-push hook");
+    let managed_remainder =
+        managed_hook_remainder(&content).or_else(|| legacy_hook_remainder(&content));
+    if let Some(remainder) = managed_remainder {
+        if remainder.is_empty() {
+            fs::remove_file(&hook_path).map_err(|e| CrabError::Configuration {
+                key: format!("failed to remove pre-push hook: {e}"),
+                origin: hook_path.display().to_string(),
+            })?;
+        } else {
+            let remainder = remainder.strip_prefix('\n').unwrap_or(remainder);
+            let preserved = format!("#!/bin/sh\n{remainder}");
+            fs::write(&hook_path, preserved).map_err(|e| CrabError::Configuration {
+                key: format!("failed to update pre-push hook: {e}"),
+                origin: hook_path.display().to_string(),
+            })?;
+        }
+        tracing::debug!(path = %hook_path.display(), "removed LFS pre-push hook block");
     } else {
         tracing::debug!(path = %hook_path.display(), "pre-push hook is not crab-managed, leaving in place");
     }
 
+    Ok(())
+}
+
+pub(super) fn pre_push_hook_content() -> String {
+    let mut content = String::from("#!/bin/sh\n");
+    content.push_str(PRE_PUSH_HOOK_BLOCK);
+    content
+}
+
+fn managed_hook_remainder(content: &str) -> Option<&str> {
+    content
+        .strip_prefix("#!/bin/sh\n")?
+        .strip_prefix(PRE_PUSH_HOOK_BLOCK)
+}
+
+fn legacy_hook_remainder(content: &str) -> Option<&str> {
+    content.strip_prefix(LEGACY_PRE_PUSH_HOOK)
+}
+
+fn compose_with_mirror_hook(mirror: &str) -> String {
+    let mirror_body = mirror.strip_prefix("#!/bin/sh\n").unwrap_or(mirror);
+    let mut content = pre_push_hook_content();
+    content.push('\n');
+    content.push_str(mirror_body);
+    content
+}
+
+fn make_pre_push_hook_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(path, perms).map_err(|e| CrabError::Configuration {
+            key: format!("failed to set hook permissions: {e}"),
+            origin: path.display().to_string(),
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -512,6 +587,22 @@ mod tests {
     }
 
     #[test]
+    fn install_uses_configured_hooks_path() {
+        let dir = temp_git_repo();
+        let status = Command::new("git")
+            .args(["config", "core.hooksPath", ".custom-hooks"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        assert!(dir.path().join(".custom-hooks/pre-push").exists());
+        assert!(!dir.path().join(".git/hooks/pre-push").exists());
+    }
+
+    #[test]
     fn install_is_idempotent() {
         let dir = temp_git_repo();
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
@@ -677,6 +768,22 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn idempotent_install_repairs_pre_push_hook_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_git_repo();
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o644)).unwrap();
+
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        let perms = fs::metadata(&hook).unwrap().permissions();
+        assert_ne!(perms.mode() & 0o111, 0);
+    }
+
     #[test]
     fn install_skip_repo_leaves_hook_absent() {
         let dir = temp_git_repo();
@@ -710,5 +817,113 @@ mod tests {
 
         let content = fs::read_to_string(&hook).unwrap();
         assert!(content.contains("crab lfs pre-push"));
+    }
+
+    #[test]
+    fn install_upgrades_legacy_hook_to_fail_closed() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        fs::write(&hook, LEGACY_PRE_PUSH_HOOK).unwrap();
+
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        let content = fs::read_to_string(&hook).unwrap();
+        assert!(content.contains("exit 2"));
+        assert!(content.contains("|| exit $?"));
+    }
+
+    #[test]
+    fn install_upgrades_legacy_hook_composed_with_mirror() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        let mirror_body = crate::cmd::install::MIRROR_PRE_PUSH_HOOK
+            .strip_prefix("#!/bin/sh\n")
+            .unwrap();
+        let legacy_composed = format!("{LEGACY_PRE_PUSH_HOOK}\n{mirror_body}");
+        fs::write(&hook, legacy_composed).unwrap();
+
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        let content = fs::read_to_string(&hook).unwrap();
+        assert!(content.contains("|| exit $?"));
+        assert!(content.contains("# Crab mirror:"));
+        assert!(
+            content.find("crab lfs pre-push").unwrap() < content.find("# Crab mirror:").unwrap()
+        );
+    }
+
+    #[test]
+    fn install_rejects_unmanaged_pre_push_hook() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        let custom = "#!/bin/sh\necho custom\n";
+        fs::write(&hook, custom).unwrap();
+
+        let result = run_lfs_install_in(dir.path(), local_options(false));
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&hook).unwrap(), custom);
+    }
+
+    #[test]
+    fn install_composes_with_crab_mirror_pre_push_hook() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        let mirror = crate::cmd::install::MIRROR_PRE_PUSH_HOOK;
+        fs::write(&hook, mirror).unwrap();
+
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        let content = fs::read_to_string(&hook).unwrap();
+        let lfs = content.find("crab lfs pre-push").unwrap();
+        let mirror = content.find("# Crab mirror:").unwrap();
+        assert!(lfs < mirror, "LFS objects must publish before mirror refs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn composed_hook_propagates_lfs_failure_before_mirror_push() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        fs::write(&hook, crate::cmd::install::MIRROR_PRE_PUSH_HOOK).unwrap();
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        let bin_dir = tempfile::tempdir().unwrap();
+        let crab = bin_dir.path().join("crab");
+        fs::write(
+            &crab,
+            "#!/bin/sh\nif [ \"$1\" = lfs ]; then exit 23; fi\nexit 0\n",
+        )
+        .unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&crab, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = Command::new(&hook)
+            .env("PATH", bin_dir.path())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(23));
+    }
+
+    #[test]
+    fn uninstall_preserves_composed_mirror_hook() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git").join("hooks").join("pre-push");
+        fs::write(&hook, crate::cmd::install::MIRROR_PRE_PUSH_HOOK).unwrap();
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+
+        run_lfs_uninstall_in(
+            dir.path(),
+            LfsUninstallOptions {
+                local: true,
+                ..LfsUninstallOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&hook).unwrap(),
+            crate::cmd::install::MIRROR_PRE_PUSH_HOOK,
+        );
     }
 }

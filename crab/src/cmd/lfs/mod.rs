@@ -40,7 +40,7 @@ use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
 
 pub(super) fn hooks_dir_from(root: &Path) -> Result<PathBuf> {
-    Ok(crate::git::discover::discover_common_git_dir_from(root)?.join("hooks"))
+    crate::cmd::install::resolve_hooks_dir(root)
 }
 
 /// LFS subcommands dispatched from `crab lfs <cmd>`.

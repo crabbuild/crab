@@ -32,7 +32,10 @@ const LEGACY_VERSION_URLS: &[&str] = &[
     "https://hawser.github.com/spec/v1",
 ];
 
-/// Maximum byte length of a valid LFS pointer.
+/// Git LFS pointer size boundary.
+///
+/// Direct parsing accepts this many bytes, while blob classification follows
+/// Git LFS and rejects blobs at or above the boundary.
 pub const MAX_LFS_POINTER_SIZE: usize = 1024;
 
 /// SHA-256 of the empty string.
@@ -95,6 +98,9 @@ impl LfsPointer {
 
         let text = std::str::from_utf8(bytes)
             .map_err(|source| lfs_err(format!("pointer is not valid UTF-8: {source}")))?;
+        if text.contains('\r') {
+            return Err(lfs_err("pointer contains a carriage return"));
+        }
 
         let mut lines = text.lines();
         let version_line = lines.next().ok_or_else(|| lfs_err("pointer is empty"))?;
@@ -109,18 +115,20 @@ impl LfsPointer {
                 continue;
             }
 
-            if let Some(rest) = line.strip_prefix("oid ") {
-                if oid.is_some() {
-                    return Err(lfs_err("duplicate oid line"));
-                }
-                oid = Some(Self::parse_oid(rest)?);
-            } else if let Some(rest) = line.strip_prefix("size ") {
-                if size.is_some() {
-                    return Err(lfs_err("duplicate size line"));
-                }
-                size = Some(Self::parse_size(rest)?);
-            } else if line.starts_with("ext-") {
+            if line.starts_with("ext-") && size.is_none() {
                 extensions.push(Self::parse_extension_line(line)?);
+            } else if oid.is_none() {
+                let rest = line
+                    .strip_prefix("oid ")
+                    .ok_or_else(|| lfs_err(format!("expected oid line, got: {line:?}")))?;
+                oid = Some(Self::parse_oid(rest)?);
+            } else if size.is_none() {
+                let rest = line
+                    .strip_prefix("size ")
+                    .ok_or_else(|| lfs_err(format!("expected size line, got: {line:?}")))?;
+                size = Some(Self::parse_size(rest)?);
+            } else {
+                return Err(lfs_err(format!("unexpected line after size: {line:?}")));
             }
         }
 
@@ -222,7 +230,8 @@ impl LfsPointer {
             return Err(lfs_err(format!("size must be non-negative, got {value:?}")));
         }
         value
-            .parse::<u64>()
+            .parse::<i64>()
+            .map(|size| size as u64)
             .map_err(|source| lfs_err(format!("invalid size {value:?}: {source}")))
     }
 
@@ -237,18 +246,28 @@ impl LfsPointer {
             .split_once('-')
             .ok_or_else(|| lfs_err(format!("bad extension key: ext-{key}")))?;
 
-        let priority: u8 = priority_str.parse().map_err(|source| {
-            lfs_err(format!(
-                "invalid extension priority {priority_str:?}: {source}"
-            ))
-        })?;
-        if name.is_empty() {
-            return Err(lfs_err("extension name must not be empty"));
+        if priority_str.len() != 1 || !priority_str.as_bytes()[0].is_ascii_digit() {
+            return Err(lfs_err(format!(
+                "invalid extension priority {priority_str:?}: expected one digit"
+            )));
+        }
+        let priority = priority_str.as_bytes()[0] - b'0';
+        if !name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return Err(lfs_err(format!("invalid extension name: {name:?}")));
         }
 
         let (oid_type, hex) = value
             .split_once(':')
             .ok_or_else(|| lfs_err(format!("bad extension OID: {value:?}")))?;
+        if oid_type != "sha256" {
+            return Err(lfs_err(format!(
+                "unsupported extension OID type: {oid_type:?}"
+            )));
+        }
         let oid = parse_hex32(hex).map_err(|_| {
             lfs_err(format!(
                 "invalid extension OID: expected 64 hex chars, got {:?}",
@@ -312,7 +331,6 @@ fn hex_nibble(byte: u8) -> std::result::Result<u8, ()> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(()),
     }
 }
@@ -409,6 +427,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_unknown_or_out_of_order_required_lines() {
+        let oid = sample_oid_hex();
+        let cases = [
+            format!("version {LFS_VERSION_URL}\nmeta arbitrary\noid sha256:{oid}\nsize 1\n"),
+            format!("version {LFS_VERSION_URL}\nsize 1\noid sha256:{oid}\n"),
+            format!("version {LFS_VERSION_URL}\noid sha256:{oid}\nsize 1\nmeta arbitrary\n"),
+        ];
+
+        for raw in cases {
+            assert!(
+                LfsPointer::parse(raw.as_bytes()).is_err(),
+                "accepted {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_noncanonical_oid_and_extension_key_shapes() {
+        let uppercase_oid = sample_oid_hex().to_ascii_uppercase();
+        let ext_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cases = [
+            pointer_bytes(LFS_VERSION_URL, &uppercase_oid, "1"),
+            format!(
+                "version {LFS_VERSION_URL}\next-10-large sha256:{ext_oid}\noid sha256:{}\nsize 1\n",
+                sample_oid_hex(),
+            )
+            .into_bytes(),
+            format!(
+                "version {LFS_VERSION_URL}\next-1-large blake3:{ext_oid}\noid sha256:{}\nsize 1\n",
+                sample_oid_hex(),
+            )
+            .into_bytes(),
+            pointer_bytes(LFS_VERSION_URL, sample_oid_hex(), "9223372036854775808"),
+        ];
+
+        for raw in cases {
+            assert!(LfsPointer::parse(&raw).is_err());
+        }
+    }
+
+    #[test]
     fn parse_extensions_sorted_by_priority() {
         let ext_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let raw = format!(
@@ -426,6 +485,38 @@ mod tests {
         assert_eq!(pointer.extensions[0].priority, 1);
         assert_eq!(pointer.extensions[1].priority, 2);
         assert_eq!(pointer.extensions[2].priority, 3);
+    }
+
+    #[test]
+    fn parse_accepts_extension_between_oid_and_size() {
+        let ext_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let raw = format!(
+            "version {LFS_VERSION_URL}\n\
+             oid sha256:{}\n\
+             ext-1-alpha sha256:{ext_oid}\n\
+             size 100\n",
+            sample_oid_hex(),
+        );
+
+        let pointer = LfsPointer::parse(raw.as_bytes()).unwrap();
+
+        assert_eq!(pointer.extensions.len(), 1);
+    }
+
+    #[test]
+    fn parse_accepts_git_lfs_extension_name_suffixes() {
+        let ext_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let raw = format!(
+            "version {LFS_VERSION_URL}\n\
+             ext-1-alpha-beta sha256:{ext_oid}\n\
+             oid sha256:{}\n\
+             size 100\n",
+            sample_oid_hex(),
+        );
+
+        let pointer = LfsPointer::parse(raw.as_bytes()).unwrap();
+
+        assert_eq!(pointer.extensions[0].name, "alpha-beta");
     }
 
     #[test]

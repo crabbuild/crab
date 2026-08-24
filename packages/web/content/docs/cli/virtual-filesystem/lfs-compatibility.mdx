@@ -83,6 +83,10 @@ configuration, remote objects, and checkout behavior agree for another client.
 - Tracking rules live in `.gitattributes`; commit those changes.
 - Transfer-agent setup is Git config, so CI and collaborators may need
   `crab lfs install`.
+- `crab lfs install` and `crab lfs update` fail if an unmanaged `pre-push`
+  hook already exists. Merge `crab lfs pre-push "$@" || exit $?` into the hook
+  manually, or use `--force` only when replacing it is intentional. Crab's own
+  mirror hook is composed automatically.
 - A Crab push verifies and publishes every reachable LFS object before making
   its Git ref visible. Missing or corrupt local and remote objects stop the
   push rather than publishing an incomplete ref.

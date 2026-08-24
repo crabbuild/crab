@@ -50,6 +50,11 @@ crab lfs status
 
 For exact options, run `crab lfs <subcommand> --help`.
 
+`install` and `update` will not silently skip an existing unmanaged
+`pre-push` hook. They return an error so LFS publication cannot be bypassed;
+merge the printed LFS command manually or pass `--force` to replace the hook.
+Crab composes its LFS gate with its own mirror-mode hook automatically.
+
 ## Related Commands
 
 - [`crab mount`](/docs/cli/reference/crab-mount) - mount repositories for on-demand reads.
