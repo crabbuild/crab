@@ -877,7 +877,7 @@ environment dumps, or credentials.
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
 | 0 | PARTIAL | PR #75 | Local baseline only | `fa779130` | Harness, verifier, docs, and workflow implemented; fresh current-branch report and repeatability gate pending |
-| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `4c771baa`, `ac74dad1` | Bitmap runtime and bounded incremental visibility publication pass unit/integration proof; Kubernetes RSS/latency gate pending |
+| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `4c771baa`, `ac74dad1`, `acbe1da8` | Bitmap runtime and bounded incremental visibility publication pass unit/integration and Rust 1.98 strict-lint proof; Kubernetes RSS/latency gate pending |
 | 2 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d2a4c97d` through `0bddea98` | Canonical/delta reuse and immutable response cache pass strict pack tests; Kubernetes CPU/egress and origin-read gates pending |
 | 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d5090649` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
 | 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
@@ -889,7 +889,8 @@ environment dumps, or credentials.
 The following proof was run with
 `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap`:
 
-- `cargo test -p crab --lib --locked`: 3,693 passed, 2 ignored, 0 failed;
+- `cargo test -p crab --lib --locked -- --test-threads=1`: 3,695 passed,
+  2 ignored, 0 failed;
 - `cargo test -p crab-metadata --locked`: 232 passed, 1 ignored;
 - `cargo test -p crab-read --locked`: 55 passed;
 - `cargo test -p crab-remote-git --locked`: 138 passed;
@@ -900,8 +901,9 @@ The following proof was run with
   remote object (`0` read requests and `0` fetched bytes), and all canonical
   repository object counts and bytes remained unchanged across the filter
   matrix while generated cache artifacts increased;
-- production-library clippy for `crab-metadata`, `crab-git`,
-  `crab-remote-git`, and `crab-read` passed with warnings denied.
+- `RUSTUP_TOOLCHAIN=1.98.0 make split-crate-clippy-check` passed with warnings
+  denied across all 17 split packages; production-library clippy for
+  `crab-metadata`, `crab-git`, `crab-remote-git`, and `crab-read` also passed.
 
 The repository-wide `make clippy` gate is not recorded as passing: it reaches
 pre-existing warnings in untouched `crab-vfs` code. The full Kubernetes/RustFS
