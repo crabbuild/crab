@@ -350,7 +350,7 @@ Current recheck from the workspace root on 2026-06-23:
   Interface compile checks across default owner crates, explicit Xet/Auth/
   Cache/Coordination/Metadata/Auth-store/Cache-store feature seams, server
   packages, and SDK default plus credentialed-auth consumer builds.
-- `cd crab && make crate-behavior-check` passes. It runs 20 focused
+- `cd crab && make crate-behavior-check` passes. It runs 21 focused
   owner-crate behavior checks for shared type contracts, storage provider-store
   behavior, Xet chunker/upload-concurrency behavior, auth credential/provider
   behavior, auth-store refresh behavior, cache/local/remote/range-cache
@@ -702,7 +702,7 @@ remain separate when claiming all repo checks green.
     also runs `cd crab && make
     crate-interface-check`, compiling 26 owner-crate Interface slices across
     default, feature, server, and SDK consumer seams. Done: the workflow also
-    runs `cd crab && make crate-behavior-check`, proving 20 focused
+    runs `cd crab && make crate-behavior-check`, proving 21 focused
     owner-crate behavior slices. Done: the workflow also runs `cd crab && make
     split-crate-clippy-check`, proving strict clippy over the split crates
     independently from the legacy CLI crate backlog. Done: the workflow also

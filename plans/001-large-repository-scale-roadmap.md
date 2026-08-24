@@ -417,7 +417,7 @@ edits, and visible-ref subsets.
 
 ```bash
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap \
-  cargo test -p crab-metadata --features storage --locked git_visibility
+  cargo test -p crab-metadata --features storage,remote-index --locked git_visibility
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap \
   cargo test -p crab-read --locked upload_pack
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap \
@@ -587,7 +587,7 @@ Add storage/property tests under
 
 ```bash
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap \
-  cargo test -p crab-metadata --features storage --locked git_object
+  cargo test -p crab-metadata --features storage,remote-index --locked git_object
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap \
   cargo test -p crab --locked locator
 python3 crab/scripts/verify-large-repo-rustfs-report.py <phase-3-report.json>
