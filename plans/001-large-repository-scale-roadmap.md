@@ -103,7 +103,7 @@ Public technical references:
 - Git commit-graph contract:
   https://git-scm.com/docs/git-commit-graph
 - GitHub cruft-pack GC model:
-  https://github.blog/engineering/scaling-gits-garbage-collection/
+  https://github.blog/engineering/architecture-optimization/scaling-gits-garbage-collection/
 
 ## Repository rules and invariants
 
@@ -876,13 +876,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | Local baseline only | `fa779130` | Harness, verifier, docs, and workflow implemented; fresh current-branch report and repeatability gate pending |
-| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `4c771baa`, `ac74dad1`, `acbe1da8` | Bitmap runtime and bounded incremental visibility publication pass unit/integration and Rust 1.98 strict-lint proof; Kubernetes RSS/latency gate pending |
-| 2 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d2a4c97d` through `0bddea98` | Canonical/delta reuse and immutable response cache pass strict pack tests; Kubernetes CPU/egress and origin-read gates pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d5090649` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
-| 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
-| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
-| 6 | PARTIAL | PR #75 | Local protocol report at `b7749b2e` | `0a8b5c8f`, `b7749b2e` | 50-cold/100-warm clone fanout controls and bounded partial-clone LFS publication implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
+| 0 | PARTIAL | PR #75 | `local-k8s-multipack-fixed2-20260824` (interrupted) | `fa779130` | Current working-tree run proves seed/incremental/full-clone correctness and cleans its prefix; repeatability, 1,000 replay, and partial-clone gates remain pending |
+| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Bitmap runtime and bounded incremental visibility publication pass unit/integration and Rust 1.98 strict-lint proof; full filtered-planning RSS/latency gate pending |
+| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-multipack-fixed2-20260824` | `d2a4c97d` through `0bddea98` | Two-pack consolidation produced a verified 1.244 GB response; warm clone hit the cache; CPU/egress and filtered/shallow gates pending |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `d5090649` | Catalog advance was 6.176 s at seed and 802 ms after one incremental pack; 1,000-push layer/publication drift gate pending |
+| 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `9bb558a6` | Complete graph rebuilds covered 140,381/140,383 commits; 10,000-pair and shallow differential/performance gate pending |
+| 5 | IMPLEMENTED; OPEN DEPENDENCY BLOCKER | PR #75 | `local-k8s-multipack-fixed2-20260824` | `9bb558a6` | Owner sequencing works, but SlateDB 0.14.1 `sst_iter` cancellation panics recur during scans; interruption/10,000-push matrix pending |
+| 6 | PARTIAL | PR #75 | `local-k8s-multipack-fixed2-20260824` | `0a8b5c8f`, `b7749b2e` | Full cold/warm single-client clones pass; `blob:none` planning exceeds six minutes; concurrency, fault, cache-server, provider, and canary gates pending |
 
 ### Current branch verification evidence
 
@@ -909,6 +909,42 @@ The repository-wide `make clippy` gate is not recorded as passing: it reaches
 pre-existing warnings in untouched `crab-vfs` code. The full Kubernetes/RustFS
 qualification and Phase 6 rollout evidence are also not yet complete, so this
 table is an implementation checkpoint rather than phase acceptance.
+
+### Fresh Kubernetes/RustFS evidence from the current implementation
+
+Run profile: `local-k8s-multipack-fixed2-20260824`, source Kubernetes `b3bc2ac5`,
+isolated RustFS, one replay push, current working tree release binary. The run
+was intentionally stopped at the partial-clone probe after the probe spent
+more than six minutes in the current traversal planner without producing a
+response; its isolated remote prefix was cleaned successfully.
+
+- Seed import created a 1,643,202-object, 1,263,633,295-byte pack. The seed
+  generation owner advanced the catalog in 6,176 ms, published visibility in
+  143,481 ms, and rebuilt the 140,381-commit graph in 72,010 ms.
+- The first incremental push committed two commits and nine new objects in
+  2,950 ms in the report (2,511 ms in the structured push result); the
+  ref-journal phase was 237 ms and no catalog, visibility, graph, or pack
+  maintenance ran before acknowledgement.
+- The next owner cycle compacted the ref journal first; catalog advance for the
+  two-pack generation completed in 802 ms and graph rebuild completed in
+  109,410 ms for 140,383 commits. SlateDB 0.14.1 emitted repeated
+  `sst_iter.rs:453` `JoinError::Cancelled` panics during owner scans while the
+  command still exited zero. This is an open production blocker, not accepted
+  behavior.
+- The two-pack cold full clone selected
+  `complete_pack_consolidation`, verified 1,643,211 objects, produced a
+  1,244,177,064-byte response in 89,078 ms of pack generation, and passed
+  `git fsck --full`. The warm clone was a generated-pack cache hit, with
+  14,636 ms server-side response generation, and also passed `git fsck --full`.
+- The `blob:none --no-checkout` clone remains unaccepted: the current
+  filter-aware planner falls back to per-object commit/tree traversal, stayed
+  CPU-bound for more than six minutes without response bytes, and was
+  interrupted. A type-aware catalog or equivalent filtered-pack planning path
+  is required before partial-clone SLOs can pass.
+
+This evidence proves the push-acknowledgement boundary and complete multi-pack
+response path, but it does not satisfy the 1,000-push, shallow differential,
+partial-clone, owner-fault, fanout, provider, or canary gates.
 
 ## Final done criteria
 

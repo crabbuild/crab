@@ -1064,7 +1064,7 @@ mod storage {
         version: u32,
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum GitVisibilityClosureV3 {
         Sparse(Vec<u32>),
@@ -1342,6 +1342,106 @@ mod storage {
 
     #[cfg(feature = "remote-index")]
     impl GitVisibilityIndexV5 {
+        fn validate_binding(
+            &self,
+            generation: u64,
+            pack_index_hash: &str,
+            git_validation_digest: &str,
+        ) -> Result<crate::git_object_locator::GitObjectCatalogIdentity> {
+            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+                return Err(super::corrupt(
+                    "visibility index storage version is unsupported",
+                ));
+            }
+            validate_hash(&self.pack_index_hash, "pack index hash")?;
+            validate_hash(&self.git_validation_digest, "Git validation digest")?;
+            validate_hash(&self.catalog_digest, "Git object catalog digest")?;
+            if self.generation != generation
+                || self.pack_index_hash != pack_index_hash
+                || self.git_validation_digest != git_validation_digest
+            {
+                return Err(super::corrupt(
+                    "visibility index does not match its immutable identity",
+                ));
+            }
+            let object_count = usize::try_from(self.object_count)
+                .map_err(|_| super::corrupt("Git object catalog count cannot be represented"))?;
+            if self.object_count > MAX_GIT_VISIBILITY_OBJECTS
+                || self.object_count > u64::from(u32::MAX)
+            {
+                return Err(super::corrupt("Git object catalog is too large"));
+            }
+            if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
+                return Err(super::corrupt("visibility index contains too many refs"));
+            }
+            let decode_closure = |closure: &GitVisibilityClosureV3| {
+                let positions = closure.clone().into_positions(object_count)?;
+                let normalized =
+                    super::GitVisibilityClosure::from_positions(positions, object_count)?;
+                normalized.validate(object_count)?;
+                Ok::<_, crate::error::MetadataError>(normalized)
+            };
+            let refs = self
+                .refs
+                .iter()
+                .map(|(name, closure)| {
+                    super::validate_ref_name(name)?;
+                    Ok((name, decode_closure(closure)?))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            if self.transitions.len() > self.refs.len()
+                || self
+                    .transitions
+                    .keys()
+                    .any(|name| !self.refs.contains_key(name))
+            {
+                return Err(super::corrupt(
+                    "visibility transitions do not match their refs",
+                ));
+            }
+            for (name, transitions) in &self.transitions {
+                if transitions.len() > super::MAX_VISIBILITY_TRANSITIONS_PER_REF {
+                    return Err(super::corrupt(
+                        "visibility transitions exceed the per-ref limit",
+                    ));
+                }
+                let reference = refs
+                    .get(name)
+                    .ok_or_else(|| super::corrupt("visibility transition ref closure is absent"))?;
+                for transition in transitions {
+                    let from = transition.from_ordinal;
+                    let to = transition.to_ordinal;
+                    if u64::from(from) >= self.object_count
+                        || u64::from(to) >= self.object_count
+                        || !reference.contains(from)
+                        || !reference.contains(to)
+                    {
+                        return Err(super::corrupt(
+                            "visibility transition endpoint is outside its ref closure",
+                        ));
+                    }
+                    let objects = decode_closure(&transition.objects)?;
+                    if objects
+                        .positions()
+                        .into_iter()
+                        .any(|position| !reference.contains(position))
+                    {
+                        return Err(super::corrupt(
+                            "visibility transition objects are outside their ref closure",
+                        ));
+                    }
+                }
+            }
+            Ok(crate::git_object_locator::GitObjectCatalogIdentity {
+                generation: self.generation,
+                pack_index_hash: MerkleHash::from_hex(&self.pack_index_hash)
+                    .map_err(|_| super::corrupt("invalid pack index hash"))?,
+                object_count: self.object_count,
+                catalog_digest: MerkleHash::from_hex(&self.catalog_digest)
+                    .map_err(|_| super::corrupt("invalid catalog digest"))?,
+            })
+        }
+
         fn from_index(
             index: &GitVisibilityIndex,
             catalog: &[[u8; 20]],
@@ -1716,28 +1816,8 @@ mod storage {
                 reason: format!("invalid catalog visibility index JSON: {error}"),
             }
         })?;
-        if stored.version != GIT_VISIBILITY_INDEX_VERSION
-            || stored.generation != generation
-            || stored.pack_index_hash != pack_index_hash
-            || stored.git_validation_digest != git_validation_digest
-        {
-            return Err(super::corrupt(
-                "catalog visibility index does not match its immutable identity",
-            ));
-        }
-        validate_hash(&stored.catalog_digest, "Git object catalog digest")?;
-        let pack_index_hash = MerkleHash::from_hex(pack_index_hash).map_err(|_| {
-            super::corrupt("catalog visibility index has an invalid pack-index hash")
-        })?;
-        let catalog_digest = MerkleHash::from_hex(&stored.catalog_digest).map_err(|_| {
-            super::corrupt("catalog visibility index has an invalid catalog digest")
-        })?;
-        let identity = crate::git_object_locator::GitObjectCatalogIdentity {
-            generation,
-            pack_index_hash,
-            object_count: stored.object_count,
-            catalog_digest,
-        };
+        let identity =
+            catalog_identity(&stored, generation, pack_index_hash, git_validation_digest)?;
         let session = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
             Arc::clone(store.inner()),
             router.repo_prefix(),
@@ -1753,6 +1833,58 @@ mod storage {
             git_validation_digest,
         )?;
         Ok((index, GitVisibilityFormat::V5))
+    }
+
+    fn catalog_identity(
+        stored: &GitVisibilityIndexV5,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<crate::git_object_locator::GitObjectCatalogIdentity> {
+        stored.validate_binding(generation, pack_index_hash, git_validation_digest)
+    }
+
+    /// Check a catalog proof without materializing the complete ordinal list.
+    ///
+    /// Push and owner admission only need to know whether an immutable V5
+    /// proof is already bound to the published catalog. Full ordinal
+    /// materialization remains in `read_catalog_bound` for authorization and
+    /// compaction paths that actually need object IDs.
+    async fn catalog_bound_exists(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<bool> {
+        let path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
+        let body = match read_bounded(store, &path).await {
+            Ok(body) => body,
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid catalog visibility index JSON: {error}"),
+            }
+        })?;
+        let identity = catalog_identity(
+            &stored,
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )?;
+        let session = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+            identity,
+            Duration::from_secs(60 * 60),
+        )
+        .await?;
+        let matches = session.catalog_identity() == Some(identity);
+        session.close().await?;
+        Ok(matches)
     }
 
     async fn read_digest_bound(
@@ -1985,6 +2117,9 @@ mod storage {
         router: &StoreLayout<Store>,
         manifest: &Manifest,
     ) -> Result<bool> {
+        if catalog_bound_exists(store, router, manifest).await? {
+            return Ok(true);
+        }
         let Some(read) = read_for_manifest(store, router, manifest).await? else {
             return Ok(false);
         };

@@ -463,6 +463,13 @@ pub enum Error {
         source: crate::GeneratedPackLeaseError,
     },
 
+    /// A complete multi-pack response could not be consolidated.
+    #[error("failed to consolidate complete Git response pack")]
+    ResponsePackConsolidation {
+        #[source]
+        source: crab_git::repack::RepackError,
+    },
+
     /// Closing the locator also failed after the read had already failed.
     #[error("remote Git read failed and its locator could not be closed")]
     CloseAfterFailure {
@@ -535,6 +542,7 @@ impl Error {
             Self::Metadata(_) | Self::Manifest { .. } | Self::Inventory { .. } => "metadata",
             Self::Storage(_) => "storage",
             Self::GeneratedPackLease { .. } => "coordination",
+            Self::ResponsePackConsolidation { .. } => "integrity",
             Self::CloseAfterFailure { .. } => "close",
             Self::Revision {
                 reason: RevisionError::TagDepth,

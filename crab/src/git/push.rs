@@ -5409,33 +5409,48 @@ async fn compact_ref_journal_until_idle(
     Ok(latest)
 }
 
-async fn ref_successor_is_claimed(
+/// Compact committed ref-journal transactions under the generation owner.
+///
+/// A push only publishes the immutable transaction and its visibility
+/// evidence. The owner folds that bounded journal into the manifest after the
+/// ref lock is released, so repository-sized metadata work cannot delay the
+/// push acknowledgement.
+pub(crate) async fn compact_ref_journal_for_owner(
     store: &Store,
-    prefix: &str,
-    ref_names: &[String],
-    predecessor_holders: &BTreeMap<String, String>,
+    router: &StoreLayout,
+    lock_ttl: Duration,
+    pusher: Option<String>,
+    cancel: &CancellationToken,
 ) -> Result<bool> {
-    use futures_util::StreamExt;
-
-    let mut claims = futures_util::stream::iter(ref_names.iter().map(|ref_name| async move {
-        if let Some(holder) = predecessor_holders.get(ref_name)
-            && PushLock::ref_successor_was_announced(store.inner(), prefix, ref_name, holder)
-                .await
-                .map_err(CrabError::from)?
-        {
-            return Ok(true);
-        }
-        PushLock::ref_lease_is_claimed(store.inner(), prefix, ref_name)
-            .await
-            .map_err(CrabError::from)
-    }))
-    .buffer_unordered(DEFAULT_HEAD_CHECK_CONCURRENCY);
-    while let Some(claimed) = claims.next().await {
-        if claimed? {
-            return Ok(true);
+    let active =
+        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
+    let Some(transaction_id) = active.first() else {
+        return Ok(false);
+    };
+    let Some(mut lock) =
+        acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
+            .await?
+    else {
+        return Ok(false);
+    };
+    let operation = while_renewing_internal_lock_with_cancellation(
+        &mut lock,
+        cancel,
+        compact_ref_journal_until_idle(store, router, pusher),
+    )
+    .await;
+    let release = lock.release().await.map_err(CrabError::from);
+    match (operation, release) {
+        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            warn!(
+                error = %release_error,
+                "ref journal compaction lock release also failed after owner error"
+            );
+            Err(error)
         }
     }
-    Ok(false)
 }
 
 pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
@@ -8270,142 +8285,9 @@ impl PushPipeline {
         self.stop_heartbeat_and_release_lock().await;
         self.git_visibility_published
             .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        // Compaction is derived state. It runs after ref visibility and after
-        // scarce push admission is released, while one repository writer
-        // folds every transaction currently visible at its snapshot.
-        let mut manifest_lock = match acquire_ref_journal_compaction_lock(
-            store,
-            &self.router,
-            &committed.transaction_id,
-            self.config.lock_ttl,
-            &self.cancel,
-        )
-        .await
-        {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                debug!(
-                    transaction_id = %committed.transaction_id,
-                    "ref journal transaction was compacted by another writer"
-                );
-                if let Err(error) = self.record_current_git_visibility(store).await {
-                    warn!(%error, "compacted Git visibility proof could not be verified");
-                }
-                return Ok(decisions);
-            }
-            Err(error) => {
-                warn!(
-                    %error,
-                    transaction_id = %committed.transaction_id,
-                    "ref journal committed; compaction handoff requires repair"
-                );
-                return Ok(decisions);
-            }
-        };
-        let compacted = while_renewing_internal_lock(&mut manifest_lock, async {
-            let mut compacted =
-                compact_ref_journal_until_idle(store, &self.router, manifest.pusher.clone())
-                    .await?;
-            if let Some(compaction) = &mut compacted {
-                match self.attach_split_commit_graph(&compaction.manifest).await {
-                    Ok(manifest) => compaction.manifest = manifest,
-                    Err(error) => warn!(
-                        error = %error,
-                        generation = compaction.manifest.generation,
-                        "ref journal committed; split commit graph requires repair"
-                    ),
-                }
-            }
-            Ok::<_, CrabError>(compacted)
-        })
-        .await;
-        let successor_claimed = if let Ok(Some(compaction)) = &compacted {
-            match ref_successor_is_claimed(
-                store,
-                &self.prefix,
-                &compaction.edited_refs,
-                &compaction.edited_ref_lock_holders,
-            )
-            .await
-            {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    warn!(
-                        %error,
-                        "could not inspect ref-lock handoff; publishing this locator generation"
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        if let Err(error) = manifest_lock.release().await {
-            warn!(%error, "ref journal committed; compaction lock release requires repair");
-        }
-        match compacted {
-            Ok(Some(compaction)) => {
-                let compacted_manifest = compaction.manifest;
-                match committed_manifest_anchor(&compacted_manifest) {
-                    Ok(anchor) => {
-                        *self.committed_manifest_anchor.lock().await = anchor;
-                        if successor_claimed {
-                            self.locator_publication_deferred
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                            debug!(
-                                generation = compacted_manifest.generation,
-                                "same-ref successor will publish the next locator generation"
-                            );
-                        } else if anchor.is_some() {
-                            *self.committed_pack_inventory.lock().await = Some(compaction.packs);
-                        }
-                    }
-                    Err(error) => {
-                        warn!(%error, "ref journal committed; compacted anchor requires repair")
-                    }
-                }
-                let visibility_published = if compaction.git_visibility_published {
-                    // The metadata owner uploaded this immutable proof before
-                    // its manifest CAS; rereading it cannot strengthen that order.
-                    true
-                } else {
-                    match self
-                        .publish_git_visibility_index(&compacted_manifest, store)
-                        .await
-                    {
-                        Ok(GitVisibilityPublication::Published) => true,
-                        Ok(GitVisibilityPublication::CompletePackOnly(capacity)) => {
-                            warn!(
-                                generation = compacted_manifest.generation,
-                                proof_objects = capacity.observed,
-                                maximum = capacity.maximum,
-                                "compacted repository exceeds the synchronous Git visibility profile; complete-pack fetch remains available"
-                            );
-                            false
-                        }
-                        Err(error) => {
-                            warn!(
-                                error = %error,
-                                generation = compacted_manifest.generation,
-                                "ref journal committed; Git visibility proof requires repair"
-                            );
-                            false
-                        }
-                    }
-                };
-                self.git_visibility_published
-                    .store(visibility_published, std::sync::atomic::Ordering::Relaxed);
-            }
-            Ok(None) => {
-                if let Err(error) = self.record_current_git_visibility(store).await {
-                    warn!(%error, "compacted Git visibility proof could not be verified");
-                }
-            }
-            Err(error) => {
-                warn!(%error, "ref journal committed; manifest compaction requires repair")
-            }
-        }
+        // The active marker is the durable ref-update boundary. Manifest,
+        // locator, visibility, and commit-graph maintenance are owned by the
+        // generation owner after this function returns.
         Ok(decisions)
     }
 
@@ -8620,40 +8502,6 @@ impl PushPipeline {
             "published complete split commit graph"
         );
         Ok(Some(write.descriptor_hash))
-    }
-
-    async fn attach_split_commit_graph(&self, manifest: &Manifest) -> Result<Manifest> {
-        let Some(hash) = self.publish_split_commit_graph(manifest).await? else {
-            return Ok(manifest.clone());
-        };
-        let store = self.store.as_ref().ok_or_else(|| {
-            CrabError::Internal("commit graph attachment requires a store".to_owned())
-        })?;
-        for _ in 0..self.config.max_cas_retries.max(1) {
-            let (mut current, etag) = read_manifest(store, &self.router).await?;
-            if current.generation != manifest.generation
-                || current.pack_index_hash != manifest.pack_index_hash
-                || current.git_validation_digest != manifest.git_validation_digest
-            {
-                return Err(CrabError::CasConflict {
-                    path: self.router.manifest_path().to_string(),
-                    expected_etag: Some(etag),
-                });
-            }
-            if current.commit_graph_hash.as_deref() == Some(hash.as_str()) {
-                return Ok(current);
-            }
-            current.commit_graph_hash = Some(hash.clone());
-            match write_manifest_cas(store, &self.router, &current, &etag).await {
-                Ok(_) => return Ok(current),
-                Err(CrabError::CasConflict { .. }) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(CrabError::CasConflict {
-            path: self.router.manifest_path().to_string(),
-            expected_etag: None,
-        })
     }
 
     async fn manifest_etag_or_read_current(&self, store: &Store, etag: String) -> String {
@@ -19942,6 +19790,17 @@ mod tests {
             committed_decisions.get("refs/heads/dev"),
             Some(RefUpdateDecision::Proceed { .. })
         ));
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the unconflicted ref")
+        );
         let (committed, _) = read_manifest(&store, &router)
             .await
             .expect("read committed manifest");
@@ -20025,6 +19884,17 @@ mod tests {
             committed_decisions.get("refs/heads/dev"),
             Some(RefUpdateDecision::Proceed { .. })
         ));
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the unrelated-ref retry")
+        );
         let (committed, _) = read_manifest(&store, &router)
             .await
             .expect("read committed manifest");
@@ -20048,86 +19918,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn initial_push_publishes_manifest_without_ref_journal_state() {
-        let _guard = GitDirGuard::new();
-        let (store, router) = test_store_router("initial-manifest-fast-path");
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
-        let pipeline = PushPipeline::new(
-            PushConfig::default(),
-            vec![make_spec("refs/heads/main")],
-            Some(store.clone()),
-            None,
-            None,
-            router.repo_prefix().to_owned(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
-        );
-        pipeline.read_base_manifest().await.expect("read base");
-        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
-        let decisions = pipeline
-            .evaluate_decisions_with_sha_map(&sha_map)
-            .await
-            .expect("evaluate refs");
-        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
-        pipeline.prepare_git_pack().await.expect("prepare pack");
-        pipeline.upload_packs().await.expect("upload pack");
-        let (candidate, bulk) = pipeline
-            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
-            .await
-            .expect("build candidate");
-
-        let mut admission_commit = None;
-        pipeline
-            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
-            .await
-            .expect("publish initial manifest");
-        assert!(
-            pipeline
-                .locator_publication_deferred
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "generation-zero publication should defer repairable locator acceleration"
-        );
-
-        let (manifest, _) = read_manifest(&store, &router)
-            .await
-            .expect("read committed manifest");
-        assert_eq!(
-            manifest.refs.get("refs/heads/main"),
-            sha_map.get("refs/heads/main")
-        );
-        let head =
-            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
-                .await
-                .expect("read initial ref head");
-        assert!(head.etag.is_none());
-        let storage_router = crab_storage::StoreLayout::new(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-        );
-        assert!(
-            crab_metadata::ref_journal::list_active_transactions(
-                store.as_storage(),
-                &storage_router
-            )
-            .await
-            .expect("list active transactions")
-            .is_empty()
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn late_journal_writer_waits_for_compactor_handoff_after_commit() {
+    async fn push_returns_after_active_marker_while_owner_is_busy() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-busy-compactor");
-        let initial = non_initial_empty_manifest();
+        let initial = Manifest::default_for_repo("refs/heads/main");
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -20169,22 +19963,20 @@ mod tests {
             .get("refs/heads/main")
             .cloned()
             .expect("resolved main SHA");
-        let (committed_tx, mut committed_rx) = tokio::sync::oneshot::channel();
-        let mut admission_commit = Some(committed_tx);
-        let mut waiting = Box::pin(pipeline.commit_ref_journal(
-            candidate,
-            bulk,
-            &sha_map,
-            decisions,
-            &mut admission_commit,
-        ));
-        tokio::select! {
-            result = &mut waiting => {
-                result.expect("journal publication should succeed");
-                panic!("late writer returned without taking over compaction");
-            }
-            signal = &mut committed_rx => signal.expect("journal commit signal"),
-        }
+        let mut admission_commit = None;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.commit_ref_journal(
+                candidate,
+                bulk,
+                &sha_map,
+                decisions,
+                &mut admission_commit,
+            ),
+        )
+        .await
+        .expect("push acknowledgement must not wait for owner maintenance")
+        .expect("journal publication should succeed");
         let committed = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
             .expect("read journal state");
@@ -20194,10 +19986,17 @@ mod tests {
             "the ref transaction must be committed before waiting for derived compaction"
         );
         blocker.release().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), &mut waiting)
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
             .await
-            .expect("late writer should acquire compaction ownership")
-            .expect("journal publication should succeed");
+            .expect("owner should compact the committed journal")
+        );
 
         let compacted = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
@@ -20335,6 +20134,20 @@ mod tests {
 
         owner.release().await.expect("release generation owner");
         assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the handed-off journal")
+        );
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read compacted manifest");
+        assert!(
             repair_git_object_locator_if_current(
                 &store,
                 &router,
@@ -20387,6 +20200,17 @@ mod tests {
             result.outcomes.get("refs/heads/main"),
             Some(&RefPushOutcome::Ok),
             "post-commit cancellation must not invert a successful ref update"
+        );
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should finish the committed ref update")
         );
         let (committed, _) = read_manifest(&store, &router)
             .await
@@ -20521,6 +20345,31 @@ mod tests {
             restarted.outcomes.get("refs/heads/dev"),
             Some(&RefPushOutcome::Ok)
         );
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the restarted journal")
+        );
+        let (repaired_manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read owner manifest");
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                repaired_manifest.generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should publish exact locator coverage")
+        );
         let repaired = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
             .expect("read repaired repository state");
@@ -20567,6 +20416,17 @@ mod tests {
             pushed.outcomes.get("refs/heads/main"),
             Some(&RefPushOutcome::Ok)
         );
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the locator-repair push")
+        );
 
         let (mut manifest, etag) = read_manifest(&store, &router)
             .await
@@ -20581,8 +20441,7 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .expect("repair deferred initial locator"),
-            "the explicit repair path should publish the deferred initial locator"
+            .expect("owner should publish the initial locator coverage")
         );
         let storage_router =
             crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
@@ -20737,10 +20596,32 @@ mod tests {
             pushed.outcomes.get("refs/heads/main"),
             Some(&RefPushOutcome::Ok)
         );
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the visibility-repair push")
+        );
 
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read pushed manifest");
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                manifest.generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should publish locator coverage before visibility repair")
+        );
         let visibility_path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
@@ -21390,25 +21271,23 @@ mod tests {
             Some(&RefPushOutcome::Ok)
         );
         assert!(result.all_ok());
-        let (manifest, _) = read_manifest(&store, &router).await.unwrap();
-        let hash = manifest
-            .commit_graph_hash
-            .as_deref()
-            .expect("successful push must pin its complete commit graph");
-        let storage_router = crab_storage::StoreLayout::new(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the single-ref push")
         );
-        let graph = load_split_commit_graph(
-            store.as_storage(),
-            &storage_router,
-            hash,
-            DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
-        )
-        .await
-        .unwrap();
-        assert_eq!(graph.descriptor.generation, manifest.generation);
-        assert!(!graph.layers.is_empty());
+        let (manifest, _) = read_manifest(&store, &router).await.unwrap();
+        assert!(manifest.refs.contains_key("refs/heads/main"));
+        assert!(
+            manifest.commit_graph_hash.is_none(),
+            "commit-graph publication belongs to the generation owner"
+        );
     }
 
     #[tokio::test]
@@ -21492,6 +21371,17 @@ mod tests {
         assert_eq!(
             result.outcomes.get("refs/heads/dev"),
             Some(&RefPushOutcome::Ok)
+        );
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the non-atomic sibling")
         );
         let (manifest, _) = read_manifest(&store, &router)
             .await
@@ -22006,6 +21896,17 @@ mod tests {
         )
         .await;
         assert!(result.all_ok());
+        assert!(
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the successful push")
+        );
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read committed manifest");

@@ -26,6 +26,7 @@ const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(60);
 const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(20);
 const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(100);
+const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 
 /// Immutable key for one authorization- and generation-bound response pack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -326,8 +327,35 @@ impl RemoteGitRepository {
                 match try_reuse_single_pack(self, &operation, &unique, cancellation).await {
                     Ok(Some(pack)) => Ok(pack),
                     Ok(None) => {
-                        generate_pack_with_operation(&operation, &unique, thin_bases, cancellation)
+                        if thin_bases.is_empty() {
+                            match Self::try_consolidate_complete_pack(
+                                self,
+                                &operation,
+                                &unique,
+                                cancellation,
+                            )
+                            .await?
+                            {
+                                Some(pack) => Ok(pack),
+                                None => {
+                                    generate_pack_with_operation(
+                                        &operation,
+                                        &unique,
+                                        thin_bases,
+                                        cancellation,
+                                    )
+                                    .await
+                                }
+                            }
+                        } else {
+                            generate_pack_with_operation(
+                                &operation,
+                                &unique,
+                                thin_bases,
+                                cancellation,
+                            )
                             .await
+                        }
                     }
                     Err(error) => Err(error),
                 }
@@ -335,6 +363,151 @@ impl RemoteGitRepository {
             Err(error) => Err(error),
         };
         operation.finish(result).await
+    }
+
+    async fn try_consolidate_complete_pack(
+        repository: &RemoteGitRepository,
+        operation: &crate::OperationContext,
+        object_ids: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GeneratedPack>> {
+        let inventory = repository
+            .state
+            .inventory
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        let inventory_objects = inventory
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        let inventory_bytes = inventory
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+        if !Self::complete_pack_consolidation_candidate(
+            inventory.len(),
+            inventory_objects,
+            object_ids.len(),
+        ) {
+            return Ok(None);
+        }
+        if inventory_bytes > operation.max_fetched_bytes() {
+            return Ok(None);
+        }
+
+        let started = Instant::now();
+        let source_pack_count = inventory.len();
+        let workspace = tempfile::tempdir().map_err(io_error)?;
+        let download_dir = workspace.path().join("source-packs");
+        std::fs::create_dir_all(&download_dir).map_err(io_error)?;
+        let mut sources = Vec::with_capacity(inventory.len());
+        for pack in inventory {
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let path = download_dir.join(format!("pack-{}.pack", pack.pack_id));
+            std::fs::File::create(&path).map_err(io_error)?;
+            operation
+                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
+                .await?;
+            sources.push(crab_git::repack::RepackSource {
+                canonical_id: pack.pack_id.to_string(),
+                path,
+                size: pack.pack_size,
+                object_count: pack.object_count,
+            });
+        }
+
+        let repacked = tokio::task::spawn_blocking(move || {
+            crab_git::repack::consolidate_pack_suffix(&sources)
+        })
+        .await
+        .map_err(|source| Error::DecodeTask { source })?
+        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
+            invariant: "complete pack consolidation produced no pack",
+        })?;
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )
+        .map_err(|source| Error::ResponsePackConsolidation {
+            source: crab_git::repack::RepackError::from(source),
+        })?;
+        let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
+        while let Some(location) = locations.next() {
+            let location = location.map_err(|source| Error::ResponsePackConsolidation {
+                source: crab_git::repack::RepackError::from(source),
+            })?;
+            if !requested.remove(&location.oid) {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                });
+            }
+        }
+        if !requested.is_empty() {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            });
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+
+        let size = generated.pack_size;
+        operation
+            .charge(BudgetDimension::ResponseBytes, size)
+            .await?;
+        let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        })?;
+        let content_hash = generated.pack_hash;
+        let destination = NamedTempFile::new().map_err(io_error)?;
+        let destination_path = destination.path().to_owned();
+        let destination = destination.into_temp_path();
+        std::fs::remove_file(&destination_path).map_err(io_error)?;
+        std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
+        let file = std::fs::File::open(&destination_path).map_err(io_error)?;
+        let file = NamedTempFile::from_parts(file, destination);
+        drop(repacked);
+        drop(workspace);
+
+        let pack = GeneratedPack {
+            file: Arc::new(file),
+            size,
+            checksum,
+            content_hash,
+            object_count: u32::try_from(object_ids.len()).map_err(|_| Error::LimitExceeded {
+                limit: "pack object count",
+                actual: object_ids.len() as u64,
+                maximum: u32::MAX as u64,
+            })?,
+        };
+        pack.verify_checksum()?;
+        tracing::info!(
+            target: "crab_remote_git::telemetry",
+            telemetry_event = "pack_generation",
+            strategy = "complete_pack_consolidation",
+            source_pack_count,
+            object_count = pack.object_count,
+            response_bytes = size,
+            pack_generation_ms = started.elapsed().as_millis() as u64,
+            "remote Git response pack consolidated from complete pack inventory"
+        );
+        Ok(Some(pack))
+    }
+
+    fn complete_pack_consolidation_candidate(
+        pack_count: usize,
+        inventory_objects: u64,
+        selected_objects: usize,
+    ) -> bool {
+        pack_count > 1
+            && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
+            && inventory_objects == selected_objects as u64
     }
 
     /// Reuse or publish one immutable generation- and authorization-bound pack.
@@ -1396,6 +1569,30 @@ mod tests {
         let base = key(&identity, "validation-a");
         assert_ne!(base, key(&moved_identity, "validation-a"));
         assert_ne!(base, key(&identity, "validation-b"));
+    }
+
+    #[test]
+    fn complete_pack_consolidation_requires_the_full_large_multi_pack_inventory() {
+        assert!(RemoteGitRepository::complete_pack_consolidation_candidate(
+            2,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
+        ));
+        assert!(!RemoteGitRepository::complete_pack_consolidation_candidate(
+            1,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
+        ));
+        assert!(!RemoteGitRepository::complete_pack_consolidation_candidate(
+            2,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS - 1,
+        ));
+        assert!(!RemoteGitRepository::complete_pack_consolidation_candidate(
+            2,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64 + 1,
+            COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
+        ));
     }
 
     fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {

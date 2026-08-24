@@ -345,6 +345,12 @@ impl OperationContext {
         self.state.options.operation_limits().max_response_bytes
     }
 
+    /// Return the maximum source bytes this operation may fetch.
+    #[must_use]
+    pub fn max_fetched_bytes(&self) -> u64 {
+        self.state.options.operation_limits().max_fetched_bytes
+    }
+
     pub(crate) async fn single_pack_checksum_for_exact_objects(
         &self,
         pack_id: crab_xet::hash::MerkleHash,

@@ -8,6 +8,8 @@ pub use crab_metadata::ref_journal::{
     RefJournalCommitResult, RefJournalEdit, RefJournalHeadSnapshot, RefJournalTransaction,
 };
 
+use std::collections::BTreeSet;
+
 use crate::core::error::{CrabError, Result};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
@@ -87,6 +89,16 @@ pub async fn ref_journal_transaction_is_active(
 ) -> Result<bool> {
     let router = storage_layout(store, router);
     crab_metadata::ref_journal::transaction_is_active(store.as_storage(), &router, transaction_id)
+        .await
+        .map_err(CrabError::from)
+}
+
+pub async fn list_active_ref_journal_transactions(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<BTreeSet<String>> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::list_active_transactions(store.as_storage(), &router)
         .await
         .map_err(CrabError::from)
 }

@@ -541,6 +541,33 @@ async fn generation_owner_sample(
     let started = std::time::Instant::now();
     let (manifest, _) = crate::metadata::manifest::read_manifest(store, router).await?;
     let generation = manifest.generation;
+    if crate::git::push::compact_ref_journal_for_owner(
+        store,
+        router,
+        lock_ttl,
+        manifest.pusher.clone(),
+        cancel,
+    )
+    .await?
+    {
+        return Ok(GenerationOwnerSample {
+            generation,
+            action: "ref_journal_compaction",
+            locator_advanced: false,
+            visibility: "deferred",
+            active_packs: 0,
+            active_pack_bytes: 0,
+            geometric_repack_packs: 0,
+            catalog_layers: 0,
+            catalog_bytes: 0,
+            commit_graph_layers: 0,
+            commit_graph_bytes: 0,
+            maintenance_bytes_read: 0,
+            maintenance_bytes_written: 0,
+            superseded: true,
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+    }
     let packs = if manifest.pack_index_hash.is_empty() {
         Vec::new()
     } else {
@@ -3605,6 +3632,7 @@ fn render_doctor_metadb(payload: &DoctorMetadbPayload, mode: OutputMode) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use object_store::memory::InMemory;
@@ -3676,6 +3704,71 @@ mod tests {
         assert!(!sample.locator_advanced);
         assert_eq!(sample.visibility, "published");
         assert!(!sample.superseded);
+    }
+
+    #[tokio::test]
+    async fn generation_owner_compacts_active_ref_journal_before_derived_work() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::metadata::manifest::create_manifest_with_etag(
+            &store,
+            &router,
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create manifest");
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .expect("read ref head");
+        let transaction = crab_metadata::ref_journal::RefJournalTransaction::new(
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                head.visible_transaction.clone(),
+            )]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build ref transaction");
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .expect("publish active ref transaction");
+
+        let sample = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            &Config::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("owner should compact active journal");
+
+        assert_eq!(sample.action, "ref_journal_compaction");
+        assert!(sample.superseded);
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read compacted repository");
+        assert!(snapshot.journal.transactions.is_empty());
+        assert_eq!(
+            snapshot.manifest.refs.get("refs/heads/main"),
+            Some(&"a".repeat(40))
+        );
     }
 
     #[test]
