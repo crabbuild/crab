@@ -365,6 +365,15 @@ async fn do_upload<W: Write + Send>(
     output: &Arc<Mutex<W>>,
 ) -> Result<()> {
     let oid_bytes = parse_oid_hex(oid)?;
+    let actual_size = tokio::fs::metadata(path)
+        .await
+        .map_err(CrabError::Io)?
+        .len();
+    if actual_size != size {
+        return Err(CrabError::LfsObjectCorrupt {
+            oid: oid.to_owned(),
+        });
+    }
 
     // Emit a progress event at the start (0 bytes). Done before any
     // file I/O so the LFS client sees activity immediately even if
@@ -529,6 +538,14 @@ async fn do_download<W: Write + Send>(
     };
 
     let actual_size = content.len() as u64;
+    if let Err(error) = crate::lfs::cache::verify_bytes(&oid_bytes, size, &content) {
+        if use_resume {
+            let corrupt_partial = partial_path.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || std::fs::remove_file(corrupt_partial)).await;
+        }
+        return Err(error);
+    }
 
     // Write content to the final temp file.
     let content_for_write = content;

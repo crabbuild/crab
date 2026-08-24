@@ -1,7 +1,9 @@
 //! Git LFS extension configuration and filter execution.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -17,11 +19,8 @@ pub(crate) struct LfsExtension {
     pub(crate) priority: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CleanExtensionOutput {
-    pub(crate) content: Vec<u8>,
-    pub(crate) oid: [u8; 32],
-    pub(crate) size: u64,
+pub(crate) struct StagedCleanExtensionOutput {
+    pub(crate) staged: crate::lfs::cache::StagedObject,
     pub(crate) pointer_extensions: Vec<PointerExtension>,
 }
 
@@ -153,11 +152,6 @@ pub(crate) fn missing(name: &str) -> LfsExtension {
     }
 }
 
-pub(crate) fn clean_content(content: &[u8], file_name: &str) -> Result<CleanExtensionOutput> {
-    let extensions = configured_extensions_sorted()?;
-    clean_content_with_extensions(content, file_name, &extensions)
-}
-
 pub(crate) fn smudge_content(
     pointer: &LfsPointer,
     content: Vec<u8>,
@@ -174,45 +168,44 @@ pub(crate) fn smudge_content(
     Ok(response.content)
 }
 
-pub(crate) fn clean_content_with_extensions(
-    content: &[u8],
+/// Runs clean extensions as file-to-file transforms so clean never
+/// materializes a full LFS object in memory.
+pub(crate) fn clean_staged_with_extensions(
+    mut staged: crate::lfs::cache::StagedObject,
+    lfs_dir: &Path,
     file_name: &str,
     extensions: &[LfsExtension],
-) -> Result<CleanExtensionOutput> {
-    if extensions.is_empty() {
-        let oid = sha256(content);
-        return Ok(CleanExtensionOutput {
-            content: content.to_vec(),
-            oid,
-            size: content.len() as u64,
-            pointer_extensions: Vec::new(),
-        });
-    }
-
-    let response = pipe_extensions(ExtensionAction::Clean, content, file_name, extensions)?;
-    let oid = sha256(&response.content);
+) -> Result<StagedCleanExtensionOutput> {
     let mut pointer_extensions = Vec::new();
-    for result in response.results {
-        if result.oid_in == result.oid_out {
-            continue;
-        }
-        let priority =
-            u8::try_from(pointer_extensions.len()).map_err(|source| CrabError::Configuration {
-                key: "lfs.extension".to_owned(),
-                origin: format!("too many pointer extensions: {source}"),
+    for ext in extensions {
+        let oid_in = *staged.oid();
+        let output = run_extension_file(
+            ExtensionAction::Clean,
+            ext,
+            file_name,
+            staged.path(),
+            lfs_dir,
+        )?;
+        let next = crate::lfs::cache::StagedObject::from_temp(output)?;
+        if oid_in != *next.oid() {
+            let priority = u8::try_from(pointer_extensions.len()).map_err(|source| {
+                CrabError::Configuration {
+                    key: "lfs.extension".to_owned(),
+                    origin: format!("too many pointer extensions: {source}"),
+                }
             })?;
-        pointer_extensions.push(PointerExtension {
-            name: result.name,
-            priority,
-            oid: result.oid_in,
-            oid_type: "sha256".to_owned(),
-        });
+            pointer_extensions.push(PointerExtension {
+                name: ext.name.clone(),
+                priority,
+                oid: oid_in,
+                oid_type: "sha256".to_owned(),
+            });
+        }
+        staged = next;
     }
 
-    Ok(CleanExtensionOutput {
-        size: response.content.len() as u64,
-        content: response.content,
-        oid,
+    Ok(StagedCleanExtensionOutput {
+        staged,
         pointer_extensions,
     })
 }
@@ -368,6 +361,45 @@ fn run_extension_command(
     Ok(output.stdout)
 }
 
+fn run_extension_file(
+    action: ExtensionAction,
+    ext: &LfsExtension,
+    file_name: &str,
+    input: &Path,
+    lfs_dir: &Path,
+) -> Result<tempfile::NamedTempFile> {
+    let (program, args) = split_extension_command(action.command(ext), file_name)?;
+    let temp_dir = lfs_dir.join("tmp");
+    std::fs::create_dir_all(&temp_dir).map_err(CrabError::Io)?;
+    let output = tempfile::Builder::new()
+        .prefix("crab-lfs-ext-")
+        .tempfile_in(temp_dir)
+        .map_err(CrabError::Io)?;
+    let stdin = File::open(input).map_err(CrabError::Io)?;
+    let stdout = output.reopen().map_err(CrabError::Io)?;
+    let result = Command::new(&program)
+        .args(args)
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|source| CrabError::Configuration {
+            key: format!("lfs.extension.{}.{}", ext.name, action.as_str()),
+            origin: format!("failed to run {program}: {source}"),
+        })?;
+    if !result.status.success() {
+        return Err(CrabError::Configuration {
+            key: format!("lfs.extension.{}.{}", ext.name, action.as_str()),
+            origin: format!(
+                "extension '{}' failed with: {}",
+                ext.name,
+                String::from_utf8_lossy(&result.stderr).trim()
+            ),
+        });
+    }
+    Ok(output)
+}
+
 fn split_extension_command(command: &str, file_name: &str) -> Result<(String, Vec<String>)> {
     let mut pieces = command.split(' ');
     let program = pieces.next().unwrap_or_default().trim().to_owned();
@@ -499,11 +531,20 @@ mod tests {
         };
         let content = b"abc\ndef";
 
-        let cleaned = clean_content_with_extensions(content, "dir1/abc.dat", &[ext]).unwrap();
+        let lfs_dir = tempfile::tempdir().unwrap();
+        let mut writer = crate::lfs::cache::ObjectWriter::new(lfs_dir.path()).unwrap();
+        writer.write_all(content).unwrap();
+        let cleaned = clean_staged_with_extensions(
+            writer.finish().unwrap(),
+            lfs_dir.path(),
+            "dir1/abc.dat",
+            &[ext],
+        )
+        .unwrap();
 
-        assert_eq!(cleaned.content, b"ABC\nDEF");
-        assert_eq!(cleaned.oid, sha256(b"ABC\nDEF"));
-        assert_eq!(cleaned.size, 7);
+        assert_eq!(std::fs::read(cleaned.staged.path()).unwrap(), b"ABC\nDEF");
+        assert_eq!(*cleaned.staged.oid(), sha256(b"ABC\nDEF"));
+        assert_eq!(cleaned.staged.size(), 7);
         assert_eq!(
             cleaned.pointer_extensions,
             vec![PointerExtension {

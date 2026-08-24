@@ -30,14 +30,10 @@
 //! The [`crate::git::filter_attr_cache::FilterAttrCache`] resolves
 //! `.gitattributes` filter rules with git's "last match wins" semantics.
 //! When both `filter=lfs` and `filter=crab` match the same file, the
-//! later line wins. Users can override automatic routing via explicit
-//! `.gitattributes` entries.
-//!
-//! The [`crate::routing::engine`] provides an intelligent routing
-//! decision engine that chooses LFS vs XET based on file size, version
-//! count, and content entropy.
+//! later line wins. Explicit attributes are the canonical routing contract.
 
 pub mod batch;
+pub(crate) mod cache;
 pub mod config;
 pub mod extension;
 pub mod fetch_filter;
@@ -45,6 +41,7 @@ pub mod lifecycle;
 pub mod lock;
 pub mod migrate;
 pub mod prune;
+pub(crate) mod publication;
 pub(crate) mod recent;
 pub mod status;
 pub mod track;

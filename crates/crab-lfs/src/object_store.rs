@@ -2,18 +2,20 @@
 //!
 //! Stores and retrieves LFS objects keyed by their SHA-256 OID using a
 //! two-level fan-out directory layout (`{prefix}/lfs/objects/{aa}/{bb}/{oid}`).
-//! Verifies integrity on upload and supports idempotent puts.
+//! Verifies integrity on upload, accepts matching objects idempotently, and
+//! conditionally repairs corrupt objects.
 
 use std::path::Path as StdPath;
 
 use bytes::Bytes;
+use futures_util::StreamExt;
 use object_store::path::Path;
 use object_store::{MultipartUpload, ObjectStoreExt, PutPayload};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use crab_git::lfs_pointer::hex_encode;
-use crab_storage::{StorageError, Store};
+use crab_storage::{ETag, StorageError, Store};
 
 /// Result alias for LFS object storage operations.
 pub type Result<T> = std::result::Result<T, LfsError>;
@@ -62,6 +64,12 @@ const MAX_IN_FLIGHT_PARTS: usize = 4;
 /// accumulators. Sized to match the part size so a single read tops up
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = STREAM_PART_SIZE;
+
+enum ExistingObject {
+    Missing,
+    Valid,
+    Corrupt(ETag),
+}
 
 /// LFS object storage backed by a cloud [`Store`].
 ///
@@ -147,8 +155,8 @@ impl LfsObjectStore {
 
     /// Uploads an LFS object after verifying its SHA-256 matches the declared OID.
     ///
-    /// Idempotent: if an object with the same OID already exists, the upload
-    /// is skipped and the call succeeds.
+    /// A matching existing object is accepted without a write. A corrupt
+    /// object at the same path is replaced conditionally and reverified.
     ///
     /// # Errors
     ///
@@ -165,9 +173,12 @@ impl LfsObjectStore {
 
         let path = self.object_path(oid);
 
-        // Skip upload if the object already exists (idempotent put).
-        if self.exists_at_path(&path).await? {
-            return Ok(());
+        match self.inspect_existing(&path, oid).await? {
+            ExistingObject::Valid => return Ok(()),
+            ExistingObject::Corrupt(etag) => {
+                return self.replace_corrupt(&path, oid, bytes, etag).await;
+            }
+            ExistingObject::Missing => {}
         }
 
         // The underlying Store.put uses PutMode::Create with idempotent
@@ -194,8 +205,10 @@ impl LfsObjectStore {
     /// multipart upload before any part-complete PUT is issued, so no
     /// partial object lands on the remote.
     ///
-    /// Idempotent: if an object already exists at the target path the
-    /// upload short-circuits, just like [`Self::put`].
+    /// A matching existing object short-circuits. A corrupt object at the
+    /// target path is replaced conditionally and reverified. The exceptional
+    /// repair path materializes the local file because the provider-neutral
+    /// conditional-write contract accepts one complete replacement payload.
     ///
     /// # Errors
     ///
@@ -208,11 +221,22 @@ impl LfsObjectStore {
     pub async fn put_stream(&self, oid: &[u8; 32], file_path: &StdPath) -> Result<()> {
         let path = self.object_path(oid);
 
-        // Idempotent short-circuit — same HEAD check as `put`. Saves a
-        // full file read and multipart round-trip when the object is
-        // already present.
-        if self.exists_at_path(&path).await? {
-            return Ok(());
+        match self.inspect_existing(&path, oid).await? {
+            ExistingObject::Valid => return Ok(()),
+            ExistingObject::Corrupt(etag) => {
+                let bytes = tokio::fs::read(file_path)
+                    .await
+                    .map_err(|error| annotate_io_error(error, file_path))?;
+                if !object_matches(oid, &bytes) {
+                    return Err(LfsError::ObjectCorrupt {
+                        oid: hex_encode(oid),
+                    });
+                }
+                return self
+                    .replace_corrupt(&path, oid, Bytes::from(bytes), etag)
+                    .await;
+            }
+            ExistingObject::Missing => {}
         }
 
         let mut file = tokio::fs::File::open(file_path)
@@ -364,6 +388,89 @@ impl LfsObjectStore {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Replaces a corrupt same-key object only if the inspected version is
+    /// still current, then re-verifies the winning bytes.
+    async fn replace_corrupt(
+        &self,
+        path: &Path,
+        oid: &[u8; 32],
+        bytes: Bytes,
+        etag: ETag,
+    ) -> Result<()> {
+        if !object_matches(oid, &bytes) {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+
+        if let Err(update_error) = self.store.update(path, bytes, etag).await {
+            // A racing repair is successful only when its winning bytes are
+            // valid; otherwise preserve the conditional-write failure.
+            if self.verify_at_path(path, oid).await.is_ok() {
+                return Ok(());
+            }
+            return Err(update_error.into());
+        }
+
+        self.verify_at_path(path, oid).await
+    }
+
+    async fn verify_at_path(&self, path: &Path, oid: &[u8; 32]) -> Result<()> {
+        match self.inspect_existing(path, oid).await? {
+            ExistingObject::Valid => Ok(()),
+            ExistingObject::Missing => Err(LfsError::ObjectMissing {
+                oid: hex_encode(oid),
+            }),
+            ExistingObject::Corrupt(_) => Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            }),
+        }
+    }
+
+    async fn inspect_existing(&self, path: &Path, oid: &[u8; 32]) -> Result<ExistingObject> {
+        let (meta, range, mut stream) = match self.store.get_stream(path, None).await {
+            Ok(result) => result,
+            Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
+            Err(error) => return Err(error.into()),
+        };
+        let etag = ETag {
+            e_tag: meta.e_tag.clone(),
+            version: meta.version.clone(),
+        };
+        let mut hasher = Sha256::new();
+        let mut actual_size = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            hasher.update(&chunk);
+            actual_size = actual_size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "object size overflow while verifying LFS content".to_owned(),
+                }
+            })?;
+        }
+        let expected_size = range.end.saturating_sub(range.start);
+        if range.start != 0 || expected_size != meta.size || actual_size != expected_size {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "incomplete LFS object body: expected {} bytes, read {actual_size}",
+                    meta.size
+                ),
+            }
+            .into());
+        }
+        if hasher.finalize().as_slice() == oid {
+            Ok(ExistingObject::Valid)
+        } else {
+            Ok(ExistingObject::Corrupt(etag))
+        }
+    }
+}
+
+fn object_matches(oid: &[u8; 32], bytes: &[u8]) -> bool {
+    Sha256::digest(bytes).as_slice() == oid
 }
 
 /// Read `file` in [`FILE_READ_BUF`]-sized chunks, accumulate into
@@ -638,6 +745,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_conditionally_repairs_corrupt_existing_object() {
+        let store = test_store();
+        let data = Bytes::from_static(b"correct object");
+        let oid = sha256_oid(&data);
+        let path = store.object_path_for(&oid);
+        store
+            .store()
+            .inner()
+            .put(&path, Bytes::from_static(b"corrupt").into())
+            .await
+            .unwrap();
+
+        store.put(&oid, data.clone()).await.unwrap();
+
+        assert_eq!(store.verify(&oid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
     async fn get_missing_returns_lfs_object_missing() {
         let store = test_store();
         let oid = [0x42u8; 32];
@@ -827,8 +952,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_stream_is_idempotent_on_existing_object() {
-        // put followed by put_stream on the same OID: the stream path
-        // must short-circuit via the HEAD check and not re-upload.
+        // put followed by put_stream on the same OID: verifying the existing
+        // bytes must accept them without replacing the object.
         let store = test_store();
         let data = b"idempotent streaming";
         let oid = sha256_oid(data);
@@ -853,6 +978,27 @@ mod tests {
         // And the content is still what we originally wrote.
         let got = store.get(&oid).await.unwrap();
         assert_eq!(got.as_ref(), data);
+    }
+
+    #[tokio::test]
+    async fn put_stream_conditionally_repairs_corrupt_existing_object() {
+        let store = test_store();
+        let data = b"correct streamed object";
+        let oid = sha256_oid(data);
+        let path = store.object_path_for(&oid);
+        store
+            .store()
+            .inner()
+            .put(&path, Bytes::from_static(b"corrupt").into())
+            .await
+            .unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, data).unwrap();
+        tmp.flush().unwrap();
+
+        store.put_stream(&oid, tmp.path()).await.unwrap();
+
+        assert_eq!(store.verify(&oid).await.unwrap().as_ref(), data);
     }
 
     #[tokio::test]

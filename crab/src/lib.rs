@@ -45,7 +45,6 @@ pub mod optimize;
 pub mod read;
 pub mod release;
 pub mod replication;
-pub mod routing;
 pub mod storage;
 pub mod tier;
 pub use crab_vfs as vfs;

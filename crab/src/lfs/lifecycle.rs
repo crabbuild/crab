@@ -87,8 +87,10 @@ pub async fn run_fsck(store: &LfsObjectStore, repair: bool) -> Result<FsckReport
             Err(LfsError::ObjectCorrupt { .. }) => {
                 if repair {
                     // Attempt repair from local cache.
-                    if let Ok(bytes) = try_local_repair(&obj.oid_hex) {
-                        let _ = store.put(&oid, bytes).await;
+                    if let Ok(bytes) = try_local_repair(&obj.oid_hex)
+                        && store.put(&oid, bytes).await.is_ok()
+                        && store.verify(&oid).await.is_ok()
+                    {
                         repaired.push(obj.oid_hex.clone());
                         continue;
                     }

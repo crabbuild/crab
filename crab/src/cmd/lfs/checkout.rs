@@ -46,8 +46,14 @@ pub fn run_lfs_checkout(options: LfsCheckoutOptions) -> Result<()> {
     }
 
     match (options.paths.as_slice(), options.to.as_deref()) {
-        (paths @ [_, ..], None) => checkout_paths(&repo_root, paths).map(|_| ()),
-        ([], None) => checkout_all(&repo_root),
+        (paths @ [_, ..], None) => {
+            checkout_paths(&repo_root, paths)?;
+            refresh_index(&repo_root)
+        }
+        ([], None) => {
+            checkout_all(&repo_root)?;
+            refresh_index(&repo_root)
+        }
         (_, Some(_)) => Err(CrabError::Configuration {
             key: "checkout".to_owned(),
             origin: "--to and exactly one of --theirs, --ours, and --base must be used together"
@@ -102,14 +108,14 @@ fn checkout_stage(options: &LfsCheckoutOptions) -> Result<Option<ConflictStage>>
 }
 
 /// Resolve LFS content for a given pointer from the local cache.
-fn resolve_lfs_content(repo_root: &Path, oid: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-    let oid_hex = hex_encode(oid);
-    try_local_cache(repo_root, &oid_hex)
+fn resolve_lfs_content(repo_root: &Path, pointer: &LfsPointer) -> Result<Option<Vec<u8>>> {
+    let git_dir = crate::git::discover::discover_common_git_dir_from(repo_root)?;
+    crate::lfs::cache::read_pointer(&git_dir.join("lfs"), pointer)
 }
 
-fn require_lfs_content(repo_root: &Path, oid: &[u8; 32]) -> Result<Vec<u8>> {
-    let oid_hex = hex_encode(oid);
-    resolve_lfs_content(repo_root, oid)?.ok_or(CrabError::Configuration {
+fn require_lfs_content(repo_root: &Path, pointer: &LfsPointer) -> Result<Vec<u8>> {
+    let oid_hex = hex_encode(&pointer.oid);
+    resolve_lfs_content(repo_root, pointer)?.ok_or(CrabError::Configuration {
         key: oid_hex,
         origin: "LFS object is not available in the local cache; run `crab lfs fetch` or `crab lfs pull` first".to_owned(),
     })
@@ -120,23 +126,6 @@ fn skip_missing_lfs_content(file_path: &Path) {
         "Skipped checkout for \"{}\", content not local. Use fetch to download.",
         file_path.display()
     );
-}
-
-/// Try to read an LFS object from the local `.git/lfs/objects` cache.
-fn try_local_cache(repo_root: &Path, oid_hex: &str) -> Result<Option<Vec<u8>>> {
-    let git_dir = crate::git::discover::discover_common_git_dir_from(repo_root)?;
-    let local_path = git_dir
-        .join("lfs")
-        .join("objects")
-        .join(&oid_hex[..2])
-        .join(&oid_hex[2..4])
-        .join(oid_hex);
-
-    if local_path.is_file() {
-        let content = fs::read(&local_path).map_err(CrabError::Io)?;
-        return Ok(Some(content));
-    }
-    Ok(None)
 }
 
 fn checkout_paths(repo_root: &Path, paths: &[String]) -> Result<u64> {
@@ -200,7 +189,7 @@ fn checkout_file(repo_root: &Path, file_path: &Path) -> Result<bool> {
     };
 
     if !full_path.exists() {
-        let Some(resolved) = resolve_lfs_content(repo_root, &pointer.oid)? else {
+        let Some(resolved) = resolve_lfs_content(repo_root, &pointer)? else {
             skip_missing_lfs_content(file_path);
             return Ok(false);
         };
@@ -227,7 +216,7 @@ fn checkout_file(repo_root: &Path, file_path: &Path) -> Result<bool> {
 
     match classify(&content) {
         PointerKind::Lfs(worktree_pointer) if worktree_pointer.oid == pointer.oid => {
-            let Some(resolved) = resolve_lfs_content(repo_root, &worktree_pointer.oid)? else {
+            let Some(resolved) = resolve_lfs_content(repo_root, &worktree_pointer)? else {
                 skip_missing_lfs_content(file_path);
                 return Ok(false);
             };
@@ -264,7 +253,7 @@ fn checkout_conflict(
     }
 
     if let PointerKind::Lfs(pointer) = classify(&content) {
-        let resolved = require_lfs_content(repo_root, &pointer.oid)?;
+        let resolved = require_lfs_content(repo_root, &pointer)?;
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(CrabError::Io)?;
         }
@@ -435,6 +424,27 @@ fn checkout_all(repo_root: &Path) -> Result<()> {
     }
 
     eprintln!("checkout: replaced {count} LFS pointer(s) with content");
+    Ok(())
+}
+
+/// Refresh Git's stat cache after replacing pointer files with content.
+/// Git may report unrelated dirty paths with a non-zero status even though
+/// it performed the refresh, so only process-launch failures are fatal.
+fn refresh_index(repo_root: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["update-index", "-q", "--refresh"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| CrabError::Configuration {
+            key: "git update-index".to_owned(),
+            origin: format!("failed to refresh the index after LFS checkout: {error}"),
+        })?;
+    if !output.status.success() {
+        tracing::debug!(
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "git update-index reported paths needing refresh"
+        );
+    }
     Ok(())
 }
 
@@ -671,6 +681,27 @@ mod tests {
         let checked_out = checkout_file(repo.path(), Path::new("asset.bin")).unwrap();
 
         assert!(!checked_out);
+        assert_eq!(
+            fs::read(repo.path().join("asset.bin")).unwrap(),
+            pointer.bytes
+        );
+    }
+
+    #[test]
+    fn checkout_file_rejects_corrupt_local_content() {
+        let repo = temp_git_repo();
+        let pointer = write_lfs_pointer_blob(repo.path(), b"content\n");
+        write_index_entry(repo.path(), "asset.bin", &pointer.blob_oid);
+        fs::write(
+            local_lfs_object_path(repo.path(), &pointer.oid_hex),
+            b"corrupt\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("asset.bin"), &pointer.bytes).unwrap();
+
+        let error = checkout_file(repo.path(), Path::new("asset.bin")).unwrap_err();
+
+        assert!(matches!(error, CrabError::LfsObjectCorrupt { .. }));
         assert_eq!(
             fs::read(repo.path().join("asset.bin")).unwrap(),
             pointer.bytes
