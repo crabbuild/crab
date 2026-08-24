@@ -2,23 +2,11 @@
 
   <defs>
     <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+      <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
     </marker>
     <marker id="arrowhead-dashed" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
       <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
     </marker>
-    <linearGradient id="localGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#64748B"/>
-      <stop offset="100%" stop-color="#475569"/>
-    </linearGradient>
-    <linearGradient id="remoteGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#38BDF8"/>
-      <stop offset="100%" stop-color="#0EA5E9"/>
-    </linearGradient>
-    <linearGradient id="resultGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#1E293B"/>
-      <stop offset="100%" stop-color="#0F172A"/>
-    </linearGradient>
   </defs>
 
   <g id="background">
@@ -27,54 +15,54 @@
 
   <g id="containers">
     <!-- Local Disk container -->
-    <rect x="30" y="40" width="280" height="300" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <rect x="30" y="40" width="280" height="300" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
     <!-- Cloud Storage container -->
-    <rect x="30" y="40" width="280" height="300" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <rect x="30" y="40" width="280" height="300" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
     <rect x="430" y="40" width="280" height="120" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1.5"/>
   </g>
 
   <g id="nodes">
     <!-- Local items -->
-    <rect x="55" y="85" width="230" height="56" rx="8" fill="url(#localGrad)" stroke="#334155" stroke-width="1.5"/>
-    <rect x="55" y="165" width="230" height="56" rx="8" fill="url(#localGrad)" stroke="#334155" stroke-width="1.5"/>
-    <rect x="55" y="245" width="230" height="56" rx="8" fill="url(#localGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="55" y="85" width="230" height="56" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <rect x="55" y="165" width="230" height="56" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <rect x="55" y="245" width="230" height="56" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
 
     <!-- Remote item -->
-    <rect x="455" y="85" width="230" height="56" rx="8" fill="url(#remoteGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="455" y="85" width="230" height="56" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
 
     <!-- Result boxes -->
-    <rect x="455" y="220" width="180" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
-    <rect x="455" y="300" width="180" height="50" rx="8" fill="url(#resultGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="455" y="220" width="180" height="50" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
+    <rect x="455" y="300" width="180" height="50" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
   </g>
 
   <g id="labels">
     <!-- Container titles -->
-    <text x="50" y="65" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#64748B" letter-spacing="0.5">LOCAL DISK</text>
-    <text x="450" y="65" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#0284C7" letter-spacing="0.5">CLOUD STORAGE</text>
+    <text x="50" y="65" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#64748B" letter-spacing="0.5">LOCAL DISK</text>
+    <text x="450" y="65" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0284C7" letter-spacing="0.5">CLOUD STORAGE</text>
 
     <!-- Local items -->
-    <text x="170" y="108" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Working Tree</text>
-    <text x="170" y="126" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(hydrated files)</text>
+    <text x="170" y="108" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Working Tree</text>
+    <text x="170" y="126" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(hydrated files)</text>
 
-    <text x="170" y="188" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Staging Area</text>
-    <text x="170" y="206" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(.crab/staging/)</text>
+    <text x="170" y="188" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Staging Area</text>
+    <text x="170" y="206" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(.crab/staging/)</text>
 
-    <text x="170" y="268" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Local Cache</text>
-    <text x="170" y="286" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(~/.cache/crab/)</text>
+    <text x="170" y="268" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Local Cache</text>
+    <text x="170" y="286" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(~/.cache/crab/)</text>
 
     <!-- Remote item -->
-    <text x="570" y="108" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#FFFFFF">Xorbs + Shards</text>
-    <text x="570" y="126" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#E0F2FE">(permanent)</text>
+    <text x="570" y="108" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Xorbs + Shards</text>
+    <text x="570" y="126" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(permanent)</text>
 
     <!-- Result labels -->
-    <text x="545" y="250" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">Free space</text>
-    <text x="545" y="330" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="bold" fill="#F1F5F9">Reduce cloud costs</text>
+    <text x="545" y="250" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Free space</text>
+    <text x="545" y="330" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Reduce cloud costs</text>
 
     <!-- Arrow labels -->
-    <text x="370" y="100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#475569">crab dehydrate</text>
-    <text x="370" y="185" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#475569">crab staging clean</text>
-    <text x="370" y="265" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#475569">crab prune</text>
-    <text x="570" y="168" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#475569">crab gc</text>
+    <text x="370" y="100" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">crab dehydrate</text>
+    <text x="370" y="185" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">crab staging clean</text>
+    <text x="370" y="265" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">crab prune</text>
+    <text x="570" y="168" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">crab gc</text>
   </g>
 
   <g id="connections">

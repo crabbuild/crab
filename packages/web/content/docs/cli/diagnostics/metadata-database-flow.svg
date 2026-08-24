@@ -2,23 +2,11 @@
 
   <defs>
     <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+      <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
     </marker>
     <marker id="arrowhead-dashed" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
       <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
     </marker>
-    <linearGradient id="cmdGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#38BDF8"/>
-      <stop offset="100%" stop-color="#0EA5E9"/>
-    </linearGradient>
-    <linearGradient id="dbGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#64748B"/>
-      <stop offset="100%" stop-color="#475569"/>
-    </linearGradient>
-    <linearGradient id="storeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#1E293B"/>
-      <stop offset="100%" stop-color="#0F172A"/>
-    </linearGradient>
   </defs>
 
   <g id="background">
@@ -27,63 +15,63 @@
 
   <g id="containers">
     <!-- Local Cache container -->
-    <rect x="380" y="300" width="280" height="170" rx="12" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <rect x="380" y="300" width="280" height="170" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
   </g>
 
   <g id="nodes">
     <!-- Commands -->
-    <rect x="40" y="40" width="150" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
-    <rect x="40" y="140" width="150" height="50" rx="8" fill="url(#cmdGrad)" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="40" y="40" width="150" height="50" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <rect x="40" y="140" width="150" height="50" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
 
     <!-- Databases -->
-    <rect x="260" y="40" width="220" height="56" rx="8" fill="url(#dbGrad)" stroke="#334155" stroke-width="1.5"/>
-    <rect x="260" y="140" width="220" height="56" rx="8" fill="url(#dbGrad)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="260" y="40" width="220" height="56" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <rect x="260" y="140" width="220" height="56" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
 
     <!-- Storage -->
-    <rect x="540" y="40" width="130" height="56" rx="8" fill="url(#storeGrad)" stroke="#0F172A" stroke-width="1.5"/>
-    <rect x="540" y="140" width="130" height="56" rx="8" fill="url(#storeGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="540" y="40" width="130" height="56" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="540" y="140" width="130" height="56" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
 
     <!-- Local Cache items -->
-    <rect x="405" y="335" width="180" height="44" rx="8" fill="url(#dbGrad)" stroke="#334155" stroke-width="1.5"/>
-    <rect x="405" y="410" width="180" height="44" rx="8" fill="url(#storeGrad)" stroke="#0F172A" stroke-width="1.5"/>
+    <rect x="405" y="335" width="180" height="44" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <rect x="405" y="410" width="180" height="44" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
   </g>
 
   <g id="labels">
     <!-- Commands -->
-    <text x="115" y="70" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab push</text>
-    <text x="115" y="170" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="#FFFFFF">crab hydrate</text>
+    <text x="115" y="70" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="bold" fill="#0F172A">crab push</text>
+    <text x="115" y="170" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="bold" fill="#0F172A">crab hydrate</text>
 
     <!-- Databases -->
-    <text x="370" y="62" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">File Index DB</text>
-    <text x="370" y="80" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(file_hash → shard_hash)</text>
+    <text x="370" y="62" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">File Index DB</text>
+    <text x="370" y="80" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(file_hash → shard_hash)</text>
 
-    <text x="370" y="162" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">Chunk Index DB</text>
-    <text x="370" y="180" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#CBD5E1">(chunk_hash → xorb_ref)</text>
+    <text x="370" y="162" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Chunk Index DB</text>
+    <text x="370" y="180" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">(chunk_hash → xorb_ref)</text>
 
     <!-- Storage -->
-    <text x="605" y="62" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#F1F5F9">Shards</text>
-    <text x="605" y="78" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#94A3B8">.crab/shards/</text>
+    <text x="605" y="62" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#0F172A">Shards</text>
+    <text x="605" y="78" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">.crab/shards/</text>
 
-    <text x="605" y="162" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#F1F5F9">Xorbs</text>
-    <text x="605" y="178" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#94A3B8">.crab/xorbs/</text>
+    <text x="605" y="162" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#0F172A">Xorbs</text>
+    <text x="605" y="178" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">.crab/xorbs/</text>
 
     <!-- Local Cache -->
-    <text x="400" y="318" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="bold" fill="#64748B" letter-spacing="0.5">LOCAL CACHE</text>
-    <text x="495" y="362" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#FFFFFF">In-memory LRU</text>
-    <text x="495" y="437" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="bold" fill="#F1F5F9">SQLite file</text>
+    <text x="400" y="318" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#64748B" letter-spacing="0.5">LOCAL CACHE</text>
+    <text x="495" y="362" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">In-memory LRU</text>
+    <text x="495" y="437" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">SQLite file</text>
   </g>
 
   <g id="connections">
     <!-- crab push → File Index -->
-    <line x1="190" y1="55" x2="260" y2="60" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="190" y1="55" x2="260" y2="60" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
     <!-- crab push → Chunk Index -->
-    <path d="M 190 75 L 225 75 L 225 165 L 260 165" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <path d="M 190 75 L 225 75 L 225 165 L 260 165" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
     <!-- crab hydrate → File Index -->
-    <path d="M 190 155 L 225 155 L 225 75 L 260 75" fill="none" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <path d="M 190 155 L 225 155 L 225 75 L 260 75" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
     <!-- File Index → Shards -->
-    <line x1="480" y1="68" x2="540" y2="68" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="480" y1="68" x2="540" y2="68" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
     <!-- Chunk Index → Xorbs -->
-    <line x1="480" y1="168" x2="540" y2="168" stroke="#334155" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+    <line x1="480" y1="168" x2="540" y2="168" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
     <!-- Chunk Index → Memory (dashed) -->
     <path d="M 370 196 L 370 250 L 495 250 L 495 330" fill="none" stroke="#64748B" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowhead-dashed)"/>
     <!-- Memory → SQLite (dashed) -->
