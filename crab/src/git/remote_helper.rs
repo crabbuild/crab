@@ -2266,19 +2266,33 @@ async fn fetch_packs(
     }
 
     let git_dir = super::discover::discover_git_dir()?;
-    let mut fetch_config = FetchConfig::from_config(config);
-    fetch_config.git_dir = git_dir.clone();
-
-    let installed = run_fetch_batch(
-        entries,
+    let exact_shallow_install = try_fetch_exact_shallow_closure(
+        store,
+        router,
         &manifest,
-        &fetch_config,
-        fetch_store.clone(),
-        Some(fetch_store.as_ref()),
+        entries,
         fetch_options,
+        &git_dir,
         cancel,
     )
     .await?;
+    let mut fetch_config = FetchConfig::from_config(config);
+    fetch_config.git_dir = git_dir.clone();
+
+    let installed = if let Some(installed) = exact_shallow_install {
+        installed
+    } else {
+        run_fetch_batch(
+            entries,
+            &manifest,
+            &fetch_config,
+            fetch_store.clone(),
+            Some(fetch_store.as_ref()),
+            fetch_options,
+            cancel,
+        )
+        .await?
+    };
 
     if let Some(pack_list) = fetch_store.cached_pack_list().await {
         cache.pack_list = Some(pack_list);
@@ -2377,6 +2391,121 @@ async fn fetch_packs(
         &manifest.git_validation_digest,
     )
     .await
+}
+
+async fn try_fetch_exact_shallow_closure(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    entries: &[FetchEntry],
+    fetch_options: &FetchOptions,
+    git_dir: &std::path::Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<Vec<std::path::PathBuf>>> {
+    let Some(depth) = fetch_options.depth.filter(|depth| *depth > 0) else {
+        return Ok(None);
+    };
+    if fetch_options.deepen_relative
+        || fetch_options.filter.is_some()
+        || entries.len() != 1
+        || git_dir.join("shallow").exists()
+    {
+        return Ok(None);
+    }
+    let entry = entries.first().ok_or_else(|| {
+        CrabError::Internal("exact shallow fetch has no advertised ref entry".to_owned())
+    })?;
+    let tip = gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|error| {
+        CrabError::Protocol(format!(
+            "invalid shallow fetch ref tip {}: {error}",
+            entry.sha
+        ))
+    })?;
+    let repository = crate::git::upload_pack_wire::open_repository(
+        store.as_storage(),
+        router.repo_prefix(),
+        cancel,
+    )
+    .await?;
+    if repository.generation() != manifest.generation {
+        return Ok(None);
+    }
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::UploadPack, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("shallow fetch operation rejected: {error}"))
+        })?;
+    let selection = operation.shallow_object_closure(tip, depth).await;
+    let selection = operation
+        .finish(selection)
+        .await
+        .map_err(|error| CrabError::Protocol(format!("shallow closure lookup failed: {error}")))?;
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let visibility = repository.visibility_index(cancel).await.map_err(|error| {
+        CrabError::Protocol(format!("shallow fetch visibility proof failed: {error}"))
+    })?;
+    let authorization_digest = visibility.authorization_digest_for_refs([entry.ref_name.as_str()]);
+    let request_digest = shallow_fetch_request_digest(tip, depth, &selection.shallow);
+    let cache_key = repository.generated_pack_cache_key(
+        authorization_digest,
+        request_digest,
+        &selection.object_ids,
+        false,
+    );
+    let pack = repository
+        .generate_pack_cached(&selection.object_ids, cache_key, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("shallow fetch pack generation failed: {error}"))
+        })?;
+    let pack_dir = git_dir.join("objects").join("pack");
+    tokio::fs::create_dir_all(&pack_dir).await?;
+    let canonical_name = format!("shallow-{}", pack.checksum_hex());
+    let installed = crate::git::pack::install_pack_file_locally_with_timeout(
+        &pack_dir,
+        pack.path(),
+        &canonical_name,
+        0,
+        false,
+    )
+    .await?;
+    crate::git::pack::validate_fetched_ref_tips(git_dir, &[entry.sha.clone()]).await?;
+    let boundary = selection
+        .shallow
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if boundary.is_empty() {
+        crate::git::shallow::remove_shallow_file(git_dir).await?;
+    } else {
+        crate::git::shallow::write_shallow_file(git_dir, &boundary).await?;
+    }
+    tracing::info!(
+        depth,
+        planned_objects = selection.object_ids.len(),
+        shallow_boundaries = boundary.len(),
+        pack_bytes = pack.size(),
+        "remote-helper fetch used generation-bound shallow closure"
+    );
+    Ok(Some(vec![installed.pack_path]))
+}
+
+fn shallow_fetch_request_digest(
+    tip: gix_hash::ObjectId,
+    depth: u32,
+    shallow: &[gix_hash::ObjectId],
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.remote-helper.shallow-fetch.v1\0");
+    hash.update(tip.as_bytes());
+    hash.update(&depth.to_be_bytes());
+    for oid in shallow {
+        hash.update(oid.as_bytes());
+    }
+    *hash.finalize().as_bytes()
 }
 
 async fn fetch_promisor_objects(

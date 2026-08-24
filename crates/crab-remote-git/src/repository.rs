@@ -358,6 +358,7 @@ impl RemoteGitRepository {
                     refs,
                     reader: None,
                     commit_graph: None,
+                    shallow_closure: None,
                 };
                 return Ok(Self {
                     state: Arc::new(state),
@@ -440,6 +441,32 @@ impl RemoteGitRepository {
                         None
                     }
                 };
+                let shallow_closure = match tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+                    result = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
+                        &store,
+                        &layout,
+                        &manifest.git_validation_digest,
+                        manifest.generation,
+                        &manifest.pack_index_hash,
+                        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
+                    ) => result.map_err(Error::Metadata),
+                } {
+                    Ok(index) => index.map(Arc::new),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "shallow closure index unavailable; using bounded traversal");
+                        runtime.metrics().record(crate::MetricObservation {
+                            kind: crate::MetricKind::Metadata,
+                            value: 1,
+                            duration: None,
+                            outcome: Some(crate::MetricOutcome::Error),
+                            cache: None,
+                        });
+                        None
+                    }
+                };
                 let state = RepositoryState {
                     store,
                     layout,
@@ -454,6 +481,7 @@ impl RemoteGitRepository {
                     refs,
                     reader: Some(Arc::new(reader)),
                     commit_graph,
+                    shallow_closure,
                 };
                 return Ok(Self {
                     state: Arc::new(state),

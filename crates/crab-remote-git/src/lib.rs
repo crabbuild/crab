@@ -34,7 +34,7 @@ pub use objects::{
     AnnotatedTag, Blob, BlobMetadata, Commit, ContentClassification, EntryKind, EntryMode,
     Signature, SignatureHeader, TreeEntry,
 };
-pub use operation::{OperationContext, OperationKind};
+pub use operation::{OperationContext, OperationKind, ShallowClosureSelection};
 pub use pack::{
     GeneratedPack, GeneratedPackCacheKey, GeneratedPackLease, GeneratedPackLeaseAttempt,
     GeneratedPackLeaseError, GeneratedPackLeaseProvider,

@@ -568,7 +568,23 @@ async fn apply_verified_history(
         },
         |()| true,
     );
-    let acceleration_rebuilt = locator_rebuilt && visibility_rebuilt;
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    let shallow_closure_rebuilt = crate::git::push::rebuild_shallow_closure_index_from_storage_git_dir(
+        &repository,
+        &restored,
+        store.as_storage(),
+        &storage_router,
+    )
+    .await
+    .map_or_else(
+        |error| {
+            warn!(%error, generation = restored.generation, "history restored; shallow closure acceleration requires repair");
+            false
+        },
+        |rebuilt| rebuilt,
+    );
+    let acceleration_rebuilt = locator_rebuilt && visibility_rebuilt && shallow_closure_rebuilt;
     Ok((restored, acceleration_rebuilt))
 }
 
@@ -718,6 +734,51 @@ async fn verify_history(
             let expected = parse_blake3(&path, hash)?;
             let bytes = store.verify(&path, &expected).await?;
             record_object(&mut objects, path.as_ref().to_owned(), bytes.len() as u64)?;
+        }
+    }
+
+    if !entry.manifest.refs.is_empty() && !entry.manifest.pack_index_hash.is_empty() {
+        let descriptor_path = router.shallow_closure_path(&entry.manifest.git_validation_digest);
+        match store.get_with_etag(&descriptor_path).await {
+            Ok((bytes, _)) => {
+                record_object(
+                    &mut objects,
+                    descriptor_path.as_ref().to_owned(),
+                    bytes.len() as u64,
+                )?;
+                let descriptor = crab_metadata::shallow_closure::decode_shallow_closure_descriptor(
+                    &bytes,
+                    descriptor_path.as_ref(),
+                )?;
+                if descriptor.generation != entry.manifest.generation
+                    || descriptor.pack_index_hash != entry.manifest.pack_index_hash
+                    || descriptor.git_validation_digest != entry.manifest.git_validation_digest
+                {
+                    return Err(CrabError::CorruptObject {
+                        path: descriptor_path.as_ref().to_owned(),
+                        reason: "shallow closure descriptor does not match historical manifest"
+                            .to_owned(),
+                    });
+                }
+                let storage_router = crab_storage::StoreLayout::new(
+                    store.as_storage().clone(),
+                    router.repo_prefix().to_owned(),
+                );
+                for reference in &descriptor.entries {
+                    let path = router.repo_path(&reference.path);
+                    crab_metadata::shallow_closure::load_shallow_closure_entry(
+                        store.as_storage(),
+                        &storage_router,
+                        reference,
+                        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
+                    )
+                    .await
+                    .map_err(CrabError::from)?;
+                    record_object(&mut objects, path.as_ref().to_owned(), reference.bytes)?;
+                }
+            }
+            Err(CrabError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
         }
     }
 

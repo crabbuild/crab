@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crab_metadata::git_object_locator::{GitLocatorCoverage, GitPackInventoryEntry};
+use crab_metadata::shallow_closure::ShallowClosureDescriptor;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 
@@ -24,4 +25,5 @@ pub(crate) struct RepositoryState {
     pub(crate) refs: RepositoryRefs,
     pub(crate) reader: Option<Arc<RemoteGitReader>>,
     pub(crate) commit_graph: Option<Arc<CommitGraphIndex>>,
+    pub(crate) shallow_closure: Option<Arc<ShallowClosureDescriptor>>,
 }

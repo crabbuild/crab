@@ -1076,7 +1076,9 @@ class LargeRepositoryQualification:
         warm = self.clone_root / "full-warm"
         filtered = self.clone_root / "blob-none"
         depth_one = self.clone_root / "depth-1"
+        depth_ten = self.clone_root / "depth-10"
         depth_hundred = self.clone_root / "depth-100"
+        depth_thousand = self.clone_root / "depth-1000"
         self.clone("full_clone_cold", cold, ["--single-branch", "--branch", "main"], fsck=True)
         self.clone(
             "full_clone_warm",
@@ -1100,9 +1102,23 @@ class LargeRepositoryQualification:
             remove_after=True,
         )
         self.clone(
+            "depth_10_clone",
+            depth_ten,
+            ["--depth=10", "--single-branch", "--branch", "main"],
+            fsck=False,
+            remove_after=True,
+        )
+        self.clone(
             "depth_100_clone",
             depth_hundred,
             ["--depth=100", "--single-branch", "--branch", "main"],
+            fsck=False,
+            remove_after=True,
+        )
+        self.clone(
+            "depth_1000_clone",
+            depth_thousand,
+            ["--depth=1000", "--single-branch", "--branch", "main"],
             fsck=False,
             remove_after=True,
         )

@@ -35,6 +35,7 @@ pub mod remote_index;
 pub mod segmented;
 #[cfg(feature = "storage")]
 pub mod segmented_store;
+pub mod shallow_closure;
 pub mod split_commit_graph;
 pub mod transaction;
 mod validation;

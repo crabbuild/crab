@@ -10,7 +10,7 @@
 //! Individual steps are filled in by later tasks — this module provides
 //! the skeleton and step boundaries.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, SeekFrom, Write};
@@ -1766,75 +1766,83 @@ async fn enumerate_git_object_candidates(
     excluded_tips: Vec<String>,
 ) -> Result<Option<Vec<gix_hash::ObjectId>>> {
     tokio::task::spawn_blocking(move || {
-        use std::io::{BufRead, BufReader, Read};
-        use std::process::{Command, Stdio};
-
-        let mut command = Command::new("git");
-        if let Some(git_dir) = git_dir {
-            command.arg("--git-dir").arg(git_dir);
-        }
-        command
-            .arg("rev-list")
-            .arg("--objects")
-            .arg("--no-object-names")
-            .args(&tips);
-        if !excluded_tips.is_empty() {
-            command.arg("--not").args(&excluded_tips);
-        }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(CrabError::Io)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| CrabError::Internal("git rev-list stdout unavailable".to_owned()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| CrabError::Internal("git rev-list stderr unavailable".to_owned()))?;
-        let stderr_reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = BufReader::new(stderr)
-                .take(1024 * 1024)
-                .read_to_end(&mut bytes);
-            bytes
-        });
-
-        let mut objects = Vec::new();
-        let mut bytes_read = 0usize;
-        let mut exceeded = false;
-        for line in BufReader::new(stdout).lines() {
-            let line = line.map_err(CrabError::Io)?;
-            bytes_read = bytes_read.saturating_add(line.len() + 1);
-            if bytes_read > MAX_GIT_OBJECT_ENUM_BYTES || objects.len() >= MAX_GIT_OBJECT_CANDIDATES
-            {
-                exceeded = true;
-                let _ = child.kill();
-                break;
-            }
-            let oid = gix_hash::ObjectId::from_hex(line.as_bytes()).map_err(|error| {
-                CrabError::Internal(format!("git rev-list returned invalid object id: {error}"))
-            })?;
-            objects.push(oid);
-        }
-        let status = child.wait().map_err(CrabError::Io)?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| CrabError::Internal("git rev-list stderr reader panicked".to_owned()))?;
-        if exceeded {
-            return Ok(None);
-        }
-        if !status.success() {
-            return Err(CrabError::Internal(format!(
-                "git rev-list failed: {}",
-                String::from_utf8_lossy(&stderr)
-            )));
-        }
-        objects.sort_unstable();
-        objects.dedup();
-        Ok(Some(objects))
+        enumerate_git_object_candidates_blocking(git_dir, tips, excluded_tips)
     })
     .await
     .map_err(|error| CrabError::Internal(format!("Git object enumeration join failed: {error}")))?
+}
+
+fn enumerate_git_object_candidates_blocking(
+    git_dir: Option<PathBuf>,
+    tips: Vec<String>,
+    excluded_tips: Vec<String>,
+) -> Result<Option<Vec<gix_hash::ObjectId>>> {
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new("git");
+    if let Some(git_dir) = git_dir {
+        command.arg("--git-dir").arg(git_dir);
+    }
+    command
+        .arg("rev-list")
+        .arg("--objects")
+        .arg("--no-object-names")
+        .args(&tips);
+    if !excluded_tips.is_empty() {
+        command.arg("--not").args(&excluded_tips);
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(CrabError::Io)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CrabError::Internal("git rev-list stdout unavailable".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CrabError::Internal("git rev-list stderr unavailable".to_owned()))?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = BufReader::new(stderr)
+            .take(1024 * 1024)
+            .read_to_end(&mut bytes);
+        bytes
+    });
+
+    let mut objects = Vec::new();
+    let mut bytes_read = 0usize;
+    let mut exceeded = false;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(CrabError::Io)?;
+        bytes_read = bytes_read.saturating_add(line.len() + 1);
+        if bytes_read > MAX_GIT_OBJECT_ENUM_BYTES || objects.len() >= MAX_GIT_OBJECT_CANDIDATES {
+            exceeded = true;
+            let _ = child.kill();
+            break;
+        }
+        let oid = gix_hash::ObjectId::from_hex(line.as_bytes()).map_err(|error| {
+            CrabError::Internal(format!("git rev-list returned invalid object id: {error}"))
+        })?;
+        objects.push(oid);
+    }
+    let status = child.wait().map_err(CrabError::Io)?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| CrabError::Internal("git rev-list stderr reader panicked".to_owned()))?;
+    if exceeded {
+        return Ok(None);
+    }
+    if !status.success() {
+        return Err(CrabError::Internal(format!(
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&stderr)
+        )));
+    }
+    objects.sort_unstable();
+    objects.dedup();
+    Ok(Some(objects))
 }
 
 fn exact_missing_git_objects(
@@ -16087,6 +16095,7 @@ pub(crate) async fn rebuild_split_commit_graph_from_storage_git_dir(
         .collect::<Vec<_>>();
     let git_dir = git_dir.to_owned();
     let git_dir_display = git_dir.display().to_string();
+    let shallow_git_dir = git_dir.clone();
     let (entries, inputs) = tokio::task::spawn_blocking(move || {
         let entries = collect_commit_entries(&git_dir, &refs)?;
         let inputs = collect_split_commit_graph_inputs(&git_dir, &entries)?;
@@ -16113,6 +16122,13 @@ pub(crate) async fn rebuild_split_commit_graph_from_storage_git_dir(
         reason: "materialized Git ODB does not contain every manifest ref commit".to_owned(),
     })?;
     upload_split_commit_graph(store, router, &write).await?;
+    let _ = rebuild_shallow_closure_index_from_storage_git_dir(
+        shallow_git_dir.as_path(),
+        manifest,
+        store,
+        router,
+    )
+    .await?;
     info!(
         generation = manifest.generation,
         commits = entries.len(),
@@ -16121,6 +16137,215 @@ pub(crate) async fn rebuild_split_commit_graph_from_storage_git_dir(
         "rebuilt complete split commit graph"
     );
     Ok(write.descriptor_hash)
+}
+
+const MAX_SHALLOW_CLOSURE_TIPS: usize = 128;
+
+/// Build the exact shallow object closures used by the generation-bound
+/// upload-pack accelerator.
+pub(crate) async fn rebuild_shallow_closure_index_from_storage_git_dir(
+    git_dir: &Path,
+    manifest: &Manifest,
+    store: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<bool> {
+    if manifest.refs.is_empty() {
+        return Ok(false);
+    }
+    let roots = shallow_closure_roots(manifest)?;
+    if roots.len() > MAX_SHALLOW_CLOSURE_TIPS {
+        warn!(
+            roots = roots.len(),
+            maximum = MAX_SHALLOW_CLOSURE_TIPS,
+            "skipping shallow closure index because the repository has too many advertised tips"
+        );
+        return Ok(false);
+    }
+    let git_dir = git_dir.to_owned();
+    let entries = tokio::task::spawn_blocking(move || {
+        let refs = roots
+            .iter()
+            .map(|(tip, _)| ("refs/heads/crab-tip".to_owned(), tip.clone()))
+            .collect::<Vec<_>>();
+        let commits = collect_commit_entries(&git_dir, &refs)?;
+        build_shallow_closure_entries(&git_dir, &commits, &roots)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("shallow closure rebuild join: {error}")))??;
+    let Some(entries) = entries else {
+        return Ok(false);
+    };
+    let write = crab_metadata::shallow_closure::build_shallow_closure_write(
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        entries,
+    )
+    .map_err(CrabError::from)?;
+    crab_metadata::shallow_closure::upload_shallow_closure(
+        store,
+        router,
+        &manifest.git_validation_digest,
+        &write,
+    )
+    .await
+    .map_err(CrabError::from)?;
+    info!(
+        generation = manifest.generation,
+        entries = write.entries.len(),
+        descriptor_bytes = write.descriptor_bytes.len(),
+        "published generation-bound shallow closure index"
+    );
+    Ok(true)
+}
+
+fn shallow_closure_roots(manifest: &Manifest) -> Result<Vec<(String, [u8; 20])>> {
+    let mut roots = BTreeMap::new();
+    for (name, oid) in &manifest.refs {
+        let peeled = manifest.peeled_refs.get(name).unwrap_or(oid);
+        let parsed = parse_sha1_array(peeled, "shallow closure root")?;
+        roots.entry(parsed).or_insert_with(|| peeled.clone());
+    }
+    Ok(roots.into_iter().map(|(oid, hex)| (hex, oid)).collect())
+}
+
+fn build_shallow_closure_entries(
+    git_dir: &Path,
+    commits: &[CommitEntry],
+    roots: &[(String, [u8; 20])],
+) -> Result<Option<Vec<crab_metadata::shallow_closure::ShallowClosureEntry>>> {
+    let mut parents = HashMap::<[u8; 20], Vec<[u8; 20]>>::with_capacity(commits.len());
+    for commit in commits {
+        let oid = parse_sha1_array(&commit.oid, "shallow closure commit")?;
+        let commit_parents = commit
+            .parents
+            .iter()
+            .map(|parent| parse_sha1_array(parent, "shallow closure parent"))
+            .collect::<Result<Vec<_>>>()?;
+        parents.insert(oid, commit_parents);
+    }
+
+    let mut entries = Vec::with_capacity(
+        roots
+            .len()
+            .saturating_mul(crab_metadata::shallow_closure::DEFAULT_SHALLOW_CLOSURE_DEPTHS.len()),
+    );
+    for (tip_hex, tip) in roots {
+        for &depth in crab_metadata::shallow_closure::DEFAULT_SHALLOW_CLOSURE_DEPTHS {
+            let shallow = shallow_closure_boundaries(*tip, depth, &parents)?;
+            let repository = create_shallow_enumeration_repository(git_dir, tip_hex, &shallow)?;
+            let objects = enumerate_git_object_candidates_blocking(
+                Some(repository.path().join("repo.git")),
+                vec![tip_hex.clone()],
+                Vec::new(),
+            )?;
+            let Some(objects) = objects else {
+                warn!(
+                    tip = %tip_hex,
+                    depth,
+                    "skipping shallow closure index because object enumeration exceeded its bound"
+                );
+                return Ok(None);
+            };
+            let object_ids = objects
+                .into_iter()
+                .map(|oid| {
+                    oid.as_bytes().try_into().map_err(|_| {
+                        CrabError::Internal(
+                            "shallow closure enumeration returned a non-SHA-1 object".to_owned(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<[u8; 20]>>>()?;
+            entries.push(crab_metadata::shallow_closure::ShallowClosureEntry {
+                tip: *tip,
+                depth,
+                object_ids,
+                shallow,
+            });
+        }
+    }
+    Ok(Some(entries))
+}
+
+fn shallow_closure_boundaries(
+    tip: [u8; 20],
+    depth: u32,
+    parents: &HashMap<[u8; 20], Vec<[u8; 20]>>,
+) -> Result<Vec<[u8; 20]>> {
+    let mut queue = VecDeque::from([(tip, 1_u32)]);
+    let mut visited = HashMap::<[u8; 20], u32>::new();
+    let mut shallow = BTreeSet::new();
+    while let Some((oid, current_depth)) = queue.pop_front() {
+        if visited
+            .get(&oid)
+            .is_some_and(|previous| *previous <= current_depth)
+        {
+            continue;
+        }
+        visited.insert(oid, current_depth);
+        if current_depth >= depth {
+            shallow.insert(oid);
+            continue;
+        }
+        let commit_parents = parents.get(&oid).ok_or_else(|| CrabError::CorruptObject {
+            path: oid.iter().map(|byte| format!("{byte:02x}")).collect(),
+            reason: "shallow closure commit parent is absent from the complete commit graph"
+                .to_owned(),
+        })?;
+        queue.extend(
+            commit_parents
+                .iter()
+                .copied()
+                .map(|parent| (parent, current_depth.saturating_add(1))),
+        );
+    }
+    Ok(shallow.into_iter().collect())
+}
+
+fn create_shallow_enumeration_repository(
+    source_git_dir: &Path,
+    tip: &str,
+    shallow: &[[u8; 20]],
+) -> Result<tempfile::TempDir> {
+    let temporary = tempfile::tempdir().map_err(CrabError::Io)?;
+    let repository = temporary.path().join("repo.git");
+    let output = std::process::Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(&repository)
+        .output()
+        .map_err(CrabError::Io)?;
+    if !output.status.success() {
+        return Err(CrabError::Internal(format!(
+            "git init for shallow closure enumeration failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let source_objects = crate::git::discover::resolve_common_dir(source_git_dir).join("objects");
+    let alternates = repository.join("objects/info/alternates");
+    std::fs::create_dir_all(alternates.parent().ok_or_else(|| {
+        CrabError::Internal("shallow closure alternates path has no parent".to_owned())
+    })?)
+    .map_err(CrabError::Io)?;
+    std::fs::write(&alternates, format!("{}\n", source_objects.display()))
+        .map_err(CrabError::Io)?;
+    let reference = repository.join("refs/heads/crab-tip");
+    std::fs::create_dir_all(
+        reference.parent().ok_or_else(|| {
+            CrabError::Internal("shallow closure ref path has no parent".to_owned())
+        })?,
+    )
+    .map_err(CrabError::Io)?;
+    std::fs::write(reference, format!("{tip}\n")).map_err(CrabError::Io)?;
+    if !shallow.is_empty() {
+        let mut body = String::new();
+        for oid in shallow {
+            body.push_str(&sha1_hex(oid));
+            body.push('\n');
+        }
+        std::fs::write(repository.join("shallow"), body).map_err(CrabError::Io)?;
+    }
+    Ok(temporary)
 }
 
 /// Rebuild and attach a missing split graph from one pinned remote pack set.
@@ -16187,6 +16412,65 @@ pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
         path: router.manifest_path().to_string(),
         expected_etag: None,
     })
+}
+
+/// Rebuild a missing shallow-closure index from one pinned remote pack set.
+pub(crate) async fn rebuild_shallow_closure_index_from_remote_packs_if_current(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<bool>> {
+    let (manifest, _) = read_manifest(store, router).await?;
+    if manifest.generation != required_generation {
+        return Ok(None);
+    }
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(Some(false));
+    }
+    let storage = store.as_storage();
+    let storage_router =
+        crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+    match crab_metadata::shallow_closure::load_shallow_closure_descriptor(
+        storage,
+        &storage_router,
+        &manifest.git_validation_digest,
+        manifest.generation,
+        &manifest.pack_index_hash,
+        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
+    )
+    .await
+    {
+        Ok(Some(_)) => return Ok(Some(false)),
+        Ok(None) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
+    let materialized = materialize_remote_git_packs(
+        storage,
+        &storage_router,
+        &packs,
+        maximum_bytes,
+        4_096,
+        cancel,
+    )
+    .await?;
+    let (current, _) = read_manifest(store, router).await?;
+    if current.generation != manifest.generation
+        || current.pack_index_hash != manifest.pack_index_hash
+        || current.git_validation_digest != manifest.git_validation_digest
+    {
+        return Ok(None);
+    }
+    let rebuilt = rebuild_shallow_closure_index_from_storage_git_dir(
+        materialized.git_dir.path(),
+        &manifest,
+        storage,
+        &storage_router,
+    )
+    .await?;
+    Ok(Some(rebuilt))
 }
 
 async fn build_git_visibility_index_from_remote_packs(
@@ -17227,6 +17511,307 @@ mod tests {
         assert!(!relative.contains(&base_commit));
         assert!(!relative.contains(&base_tree));
         assert!(!relative.contains(&base_blob));
+    }
+
+    #[test]
+    fn shallow_closure_matches_git_depth_one_object_selection() {
+        fn git(git_dir: &std::path::Path, args: &[&str], input: Option<&[u8]>) -> String {
+            let mut command = Command::new("git");
+            command
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Crab Test")
+                .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Crab Test")
+                .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn git");
+            if let Some(input) = input {
+                child
+                    .stdin
+                    .take()
+                    .expect("piped stdin")
+                    .write_all(input)
+                    .expect("write git stdin");
+            }
+            let output = child.wait_with_output().expect("wait for git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output UTF-8")
+                .trim()
+                .to_owned()
+        }
+
+        let temp = tempfile::tempdir().expect("repository tempdir");
+        let git_dir = temp.path().join("repo.git");
+        let initialized = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&git_dir)
+            .status()
+            .expect("initialize repository");
+        assert!(initialized.success());
+
+        let mut commits = Vec::new();
+        let mut parent = None;
+        for value in [
+            b"one\n".as_slice(),
+            b"two\n".as_slice(),
+            b"three\n".as_slice(),
+        ] {
+            let blob = git(&git_dir, &["hash-object", "-w", "--stdin"], Some(value));
+            let tree = git(
+                &git_dir,
+                &["mktree"],
+                Some(format!("100644 blob {blob}\tfile.txt\n").as_bytes()),
+            );
+            let mut args = vec!["commit-tree", &tree];
+            if let Some(parent) = parent.as_deref() {
+                args.extend(["-p", parent]);
+            }
+            let commit = git(&git_dir, &args, Some(b"commit\n"));
+            parent = Some(commit.clone());
+            commits.push(commit);
+        }
+        let head = commits.last().cloned().expect("head commit");
+        let _ = git(&git_dir, &["update-ref", "refs/heads/main", &head], None);
+        let commit_entries =
+            collect_commit_entries(&git_dir, &[("refs/heads/main".to_owned(), head.clone())])
+                .expect("collect commits");
+        let head_oid = parse_sha1_array(&head, "test head").expect("head object ID");
+        let roots = vec![(head.clone(), head_oid)];
+        let entries = build_shallow_closure_entries(&git_dir, &commit_entries, &roots)
+            .expect("build shallow closures")
+            .expect("closures within test bounds");
+        let depth_one = entries
+            .iter()
+            .find(|entry| entry.depth == 1)
+            .expect("depth one entry");
+        assert_eq!(depth_one.shallow, vec![head_oid]);
+        let parent_map = commit_entries
+            .iter()
+            .map(|entry| {
+                (
+                    parse_sha1_array(&entry.oid, "test commit").expect("commit object ID"),
+                    entry
+                        .parents
+                        .iter()
+                        .map(|parent| {
+                            parse_sha1_array(parent, "test parent").expect("parent object ID")
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            shallow_closure_boundaries(head_oid, 2, &parent_map).expect("depth two boundary"),
+            vec![parse_sha1_array(&commits[1], "middle").expect("middle object ID")]
+        );
+        assert!(
+            entries
+                .iter()
+                .find(|entry| entry.depth == 10)
+                .expect("deep entry")
+                .shallow
+                .is_empty()
+        );
+
+        let clone = temp.path().join("clone");
+        let source_url = format!("file://{}", git_dir.display());
+        let cloned = Command::new("git")
+            .args([
+                "clone",
+                "--no-local",
+                "--no-tags",
+                "--depth=1",
+                "--branch",
+                "main",
+            ])
+            .arg(&source_url)
+            .arg(&clone)
+            .status()
+            .expect("clone shallow repository");
+        assert!(cloned.success());
+        let shallow =
+            std::fs::read_to_string(clone.join(".git/shallow")).expect("read Git shallow boundary");
+        assert_eq!(shallow.trim(), head);
+        let output = Command::new("git")
+            .args(["--git-dir"])
+            .arg(clone.join(".git"))
+            .args(["rev-list", "--objects", "--no-object-names", "HEAD"])
+            .output()
+            .expect("enumerate cloned objects");
+        assert!(output.status.success());
+        let mut expected = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                gix_hash::ObjectId::from_hex(line)
+                    .expect("cloned object ID")
+                    .as_bytes()
+                    .try_into()
+                    .expect("cloned SHA-1 object ID")
+            })
+            .collect::<Vec<[u8; 20]>>();
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(depth_one.object_ids, expected);
+    }
+
+    #[test]
+    fn shallow_boundaries_match_git_for_an_octopus_merge_history() {
+        fn git(git_dir: &std::path::Path, args: &[&str], input: Option<&[u8]>) -> String {
+            let mut command = Command::new("git");
+            command
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Crab Test")
+                .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Crab Test")
+                .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn git");
+            if let Some(input) = input {
+                child
+                    .stdin
+                    .take()
+                    .expect("piped stdin")
+                    .write_all(input)
+                    .expect("write git stdin");
+            }
+            let output = child.wait_with_output().expect("wait for git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output UTF-8")
+                .trim()
+                .to_owned()
+        }
+
+        let temp = tempfile::tempdir().expect("repository tempdir");
+        let git_dir = temp.path().join("repo.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .arg(&git_dir)
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let root_blob = git(&git_dir, &["hash-object", "-w", "--stdin"], Some(b"root\n"));
+        let root_tree = git(
+            &git_dir,
+            &["mktree"],
+            Some(format!("100644 blob {root_blob}\tfile.txt\n").as_bytes()),
+        );
+        let root = git(&git_dir, &["commit-tree", &root_tree], Some(b"root\n"));
+        let branches = [b"a\n", b"b\n", b"c\n"]
+            .into_iter()
+            .map(|content| {
+                let blob = git(&git_dir, &["hash-object", "-w", "--stdin"], Some(content));
+                let tree = git(
+                    &git_dir,
+                    &["mktree"],
+                    Some(format!("100644 blob {blob}\tfile.txt\n").as_bytes()),
+                );
+                git(
+                    &git_dir,
+                    &["commit-tree", &tree, "-p", &root],
+                    Some(b"branch\n"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let merge_tree_blob = git(
+            &git_dir,
+            &["hash-object", "-w", "--stdin"],
+            Some(b"merge\n"),
+        );
+        let merge_tree = git(
+            &git_dir,
+            &["mktree"],
+            Some(format!("100644 blob {merge_tree_blob}\tfile.txt\n").as_bytes()),
+        );
+        let merge = git(
+            &git_dir,
+            &[
+                "commit-tree",
+                &merge_tree,
+                "-p",
+                &branches[0],
+                "-p",
+                &branches[1],
+                "-p",
+                &branches[2],
+            ],
+            Some(b"octopus\n"),
+        );
+        let _ = git(&git_dir, &["update-ref", "refs/heads/main", &merge], None);
+        let commit_entries =
+            collect_commit_entries(&git_dir, &[("refs/heads/main".to_owned(), merge.clone())])
+                .expect("collect merge commits");
+        let merge_oid = parse_sha1_array(&merge, "merge").expect("merge object ID");
+        let parent_map = commit_entries
+            .iter()
+            .map(|entry| {
+                (
+                    parse_sha1_array(&entry.oid, "commit").expect("commit object ID"),
+                    entry
+                        .parents
+                        .iter()
+                        .map(|parent| parse_sha1_array(parent, "parent").expect("parent object ID"))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let expected = shallow_closure_boundaries(merge_oid, 2, &parent_map)
+            .expect("compute merge shallow boundaries");
+
+        let clone = temp.path().join("clone");
+        let source_url = format!("file://{}", git_dir.display());
+        assert!(
+            Command::new("git")
+                .args([
+                    "clone",
+                    "--no-local",
+                    "--no-tags",
+                    "--depth=2",
+                    "--branch",
+                    "main"
+                ])
+                .arg(&source_url)
+                .arg(&clone)
+                .status()
+                .expect("clone merge history")
+                .success()
+        );
+        let mut actual = std::fs::read_to_string(clone.join(".git/shallow"))
+            .expect("read merge shallow boundary")
+            .lines()
+            .map(|line| parse_sha1_array(line, "Git shallow boundary").expect("boundary object ID"))
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
     }
 
     #[test]

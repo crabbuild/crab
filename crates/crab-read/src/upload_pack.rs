@@ -454,6 +454,20 @@ async fn plan_with_operation(
         return Ok(plan);
     }
 
+    if let Some(plan) =
+        plan_from_shallow_closure(operation, visible_ref_names, visibility, request).await?
+    {
+        tracing::info!(
+            telemetry_event = "visibility_plan",
+            strategy = "shallow_closure_index",
+            planned_objects = plan.object_ids.len(),
+            shallow_boundaries = plan.shallow.len(),
+            visibility_plan_ms = started.elapsed().as_millis() as u64,
+            "upload-pack object plan completed"
+        );
+        return Ok(plan);
+    }
+
     let common_haves = request
         .haves
         .iter()
@@ -891,6 +905,47 @@ async fn plan_from_visibility_catalog(
         shallow: Vec::new(),
         unshallow: Vec::new(),
     }))
+}
+
+async fn plan_from_shallow_closure(
+    operation: &OperationContext,
+    visible_ref_names: &[String],
+    visibility: &GitVisibilityIndex,
+    request: &UploadPackRequest,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if !shallow_closure_request_supported(request) {
+        return Ok(None);
+    }
+    let Some(depth) = request.deepen else {
+        return Ok(None);
+    };
+    let Some(tip) = request.wants.first().copied() else {
+        return Ok(None);
+    };
+    let Some(selection) = operation.shallow_object_closure(tip, depth).await? else {
+        return Ok(None);
+    };
+    ensure_visible_objects(visibility, visible_ref_names, &selection.object_ids)?;
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
+        common_haves: Vec::new(),
+        filter: UploadPackFilter::None,
+        include_tags: false,
+        object_ids: selection.object_ids,
+        required_bases: Vec::new(),
+        shallow: selection.shallow,
+        unshallow: Vec::new(),
+    }))
+}
+
+fn shallow_closure_request_supported(request: &UploadPackRequest) -> bool {
+    request.wants.len() == 1
+        && request.haves.is_empty()
+        && request.shallow.is_empty()
+        && request.deepen.is_some_and(|depth| depth > 0)
+        && !request.deepen_relative
+        && !request.include_tags
+        && matches!(request.filter, UploadPackFilter::None)
 }
 
 fn plan_from_visibility(
@@ -1564,6 +1619,44 @@ mod tests {
         request.shallow.clear();
         request.deepen_relative = true;
         assert!(!should_deduplicate_by_oid(&request));
+    }
+
+    #[test]
+    fn shallow_closure_index_only_handles_single_fresh_unfiltered_fetches() {
+        let supported = UploadPackRequest {
+            wants: vec![oid('1')],
+            deepen: Some(100),
+            ..UploadPackRequest::default()
+        };
+        assert!(shallow_closure_request_supported(&supported));
+
+        for request in [
+            UploadPackRequest {
+                wants: vec![oid('1'), oid('2')],
+                deepen: Some(100),
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                deepen: Some(100),
+                include_tags: true,
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                deepen: Some(100),
+                filter: UploadPackFilter::BlobNone,
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
+                deepen: Some(100),
+                shallow: vec![oid('2')],
+                ..UploadPackRequest::default()
+            },
+        ] {
+            assert!(!shallow_closure_request_supported(&request));
+        }
     }
 
     #[test]

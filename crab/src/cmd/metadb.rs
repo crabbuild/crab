@@ -656,6 +656,26 @@ async fn generation_owner_sample(
     }
     let mut graph =
         maintain_split_commit_graph(store, router, &manifest, active_pack_bytes, cancel).await?;
+    if graph.action != "superseded" {
+        match crate::git::push::rebuild_shallow_closure_index_from_remote_packs_if_current(
+            store,
+            router,
+            manifest.generation,
+            GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES,
+            cancel,
+        )
+        .await?
+        {
+            None => {
+                graph.action = "superseded";
+                superseded = true;
+            }
+            Some(true) if graph.action == "none" => {
+                graph.action = "shallow_closure_rebuild";
+            }
+            Some(false) | Some(true) => {}
+        }
+    }
     if graph.action == "none" && geometric_repack_packs > 0 {
         crate::replication::ensure_active_active_maintenance_admitted(
             config,

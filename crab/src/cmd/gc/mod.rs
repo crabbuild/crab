@@ -1719,9 +1719,62 @@ async fn extend_reachable_bulk_objects(
                 .as_ref()
                 .to_string(),
         );
+        extend_shallow_closure_reachable(store, router, manifest, reachable).await?;
     }
 
     Ok(())
+}
+
+async fn extend_shallow_closure_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    let descriptor_path = router.shallow_closure_path(&manifest.git_validation_digest);
+    match store.get_with_etag(&descriptor_path).await {
+        Ok((bytes, _)) => {
+            reachable.insert(descriptor_path.as_ref().to_owned());
+            match crab_metadata::shallow_closure::decode_shallow_closure_descriptor(
+                &bytes,
+                descriptor_path.as_ref(),
+            ) {
+                Ok(descriptor) => {
+                    for entry in descriptor.entries {
+                        reachable.insert(router.repo_path(&entry.path).as_ref().to_owned());
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        path = %descriptor_path,
+                        error = %error,
+                        "retaining all shallow closure entries after descriptor validation failure"
+                    );
+                    reachable.extend(
+                        list_shallow_closure_entry_keys(store, router)
+                            .await?
+                            .into_iter(),
+                    );
+                }
+            }
+        }
+        Err(CrabError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+async fn list_shallow_closure_entry_keys(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<Vec<String>> {
+    let prefix = router.repo_path("metadata/shallow-closure/entries");
+    let mut objects = store.inner().list(Some(&prefix));
+    let mut keys = Vec::new();
+    while let Some(object) = objects.try_next().await.map_err(CrabError::Storage)? {
+        keys.push(object.location.as_ref().to_owned());
+    }
+    Ok(keys)
 }
 
 /// Read the manifest and build the repo-local object set that must survive GC.
@@ -1981,6 +2034,45 @@ async fn stream_reachable_bulk_objects(
                 .to_owned(),
         )
         .await?;
+        stream_shallow_closure_reachable(store, router, manifest, sink).await?;
+    }
+    Ok(())
+}
+
+async fn stream_shallow_closure_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    sink: &mut RepoReachabilitySink<'_>,
+) -> Result<()> {
+    let descriptor_path = router.shallow_closure_path(&manifest.git_validation_digest);
+    match store.get_with_etag(&descriptor_path).await {
+        Ok((bytes, _)) => {
+            sink.add(descriptor_path.as_ref().to_owned()).await?;
+            match crab_metadata::shallow_closure::decode_shallow_closure_descriptor(
+                &bytes,
+                descriptor_path.as_ref(),
+            ) {
+                Ok(descriptor) => {
+                    for entry in descriptor.entries {
+                        sink.add(router.repo_path(&entry.path).as_ref().to_owned())
+                            .await?;
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        path = %descriptor_path,
+                        error = %error,
+                        "retaining all shallow closure entries after descriptor validation failure"
+                    );
+                    for key in list_shallow_closure_entry_keys(store, router).await? {
+                        sink.add(key).await?;
+                    }
+                }
+            }
+        }
+        Err(CrabError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
     }
     Ok(())
 }

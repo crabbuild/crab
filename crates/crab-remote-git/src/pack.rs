@@ -20,7 +20,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // whole batch. The operation's object and byte budgets still bound residency.
 const OBJECT_BATCH_SIZE: usize = 10_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-const GENERATED_PACK_CACHE_VERSION: u32 = 1;
+const GENERATED_PACK_CACHE_VERSION: u32 = 2;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(60);
@@ -122,6 +122,7 @@ struct GeneratedPackDescriptor {
     checksum: String,
     size: u64,
     object_count: u32,
+    selection_object_count: u64,
 }
 
 /// A temporary, checksummed Git pack generated from one pinned snapshot.
@@ -792,7 +793,14 @@ async fn produce_cached_pack_under_lease(
             return Ok(pack);
         }
         let generated = repository.generate_pack(object_ids, cancellation).await?;
-        publish_cached_pack(repository, cache_key, &generated, cancellation).await?;
+        publish_cached_pack(
+            repository,
+            cache_key,
+            object_ids.len(),
+            &generated,
+            cancellation,
+        )
+        .await?;
         Ok(generated)
     };
     tokio::pin!(producer);
@@ -832,7 +840,14 @@ async fn produce_cached_pack_without_lease(
         return Ok(pack);
     }
     let generated = repository.generate_pack(object_ids, cancellation).await?;
-    publish_cached_pack(repository, cache_key, &generated, cancellation).await?;
+    publish_cached_pack(
+        repository,
+        cache_key,
+        object_ids.len(),
+        &generated,
+        cancellation,
+    )
+    .await?;
     Ok(generated)
 }
 
@@ -887,20 +902,19 @@ async fn load_cached_pack(
         () = cancellation.cancelled() => return Err(Error::Cancelled),
         result = repository.state.store.get_with_etag(&descriptor_path) => result?,
     };
-    let descriptor = decode_generated_pack_descriptor(&bytes)?;
-    if descriptor.version != GENERATED_PACK_CACHE_VERSION
-        || descriptor.request_hash != request_hash
-        || descriptor.content_hash.len() != 64
-        || descriptor.checksum.len() != 40
-        || descriptor.size < 32
-        || u64::from(descriptor.object_count) != u64::try_from(expected_objects).unwrap_or(u64::MAX)
-        || u64::from(descriptor.object_count)
-            > repository
-                .state
-                .options
-                .operation_limits()
-                .max_logical_objects
-    {
+    let Some(descriptor) = decode_generated_pack_descriptor(&bytes)? else {
+        return Ok(None);
+    };
+    if !generated_pack_descriptor_matches_request(
+        &descriptor,
+        &request_hash,
+        expected_objects,
+        repository
+            .state
+            .options
+            .operation_limits()
+            .max_logical_objects,
+    ) {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
         });
@@ -961,9 +975,25 @@ async fn load_cached_pack(
     }))
 }
 
+fn generated_pack_descriptor_matches_request(
+    descriptor: &GeneratedPackDescriptor,
+    request_hash: &str,
+    expected_objects: usize,
+    max_logical_objects: u64,
+) -> bool {
+    descriptor.version == GENERATED_PACK_CACHE_VERSION
+        && descriptor.request_hash == request_hash
+        && descriptor.content_hash.len() == 64
+        && descriptor.checksum.len() == 40
+        && descriptor.size >= 32
+        && descriptor.selection_object_count == u64::try_from(expected_objects).unwrap_or(u64::MAX)
+        && u64::from(descriptor.object_count) <= max_logical_objects
+}
+
 async fn publish_cached_pack(
     repository: &RemoteGitRepository,
     cache_key: GeneratedPackCacheKey,
+    selection_object_count: usize,
     generated: &GeneratedPack,
     cancellation: &CancellationToken,
 ) -> Result<()> {
@@ -994,6 +1024,7 @@ async fn publish_cached_pack(
         "checksum": generated.checksum_hex(),
         "size": generated.size,
         "object_count": generated.object_count,
+        "selection_object_count": selection_object_count,
     });
     let bytes = serde_json::to_vec(&descriptor).map_err(|_| Error::InternalInvariant {
         invariant: "generated pack descriptor serialization failed",
@@ -1015,13 +1046,8 @@ async fn publish_cached_pack(
     {
         Ok(()) => Ok(()),
         Err(crab_storage::StorageError::StateConflict { .. }) => {
-            match load_cached_pack(
-                repository,
-                cache_key,
-                generated.object_count as usize,
-                cancellation,
-            )
-            .await?
+            match load_cached_pack(repository, cache_key, selection_object_count, cancellation)
+                .await?
             {
                 Some(_) => Ok(()),
                 None => Err(Error::Corrupt {
@@ -1033,32 +1059,35 @@ async fn publish_cached_pack(
     }
 }
 
-fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<GeneratedPackDescriptor> {
+fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<Option<GeneratedPackDescriptor>> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| Error::Corrupt {
         stage: crate::CorruptionStage::PackEntry,
     })?;
     let object = value.as_object().ok_or(Error::Corrupt {
         stage: crate::CorruptionStage::PackEntry,
     })?;
-    if object.len() != 6 {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
     let number = |name: &str| object.get(name).and_then(serde_json::Value::as_u64);
     let string = |name: &str| object.get(name).and_then(serde_json::Value::as_str);
     let corrupt = || Error::Corrupt {
         stage: crate::CorruptionStage::PackEntry,
     };
-    Ok(GeneratedPackDescriptor {
-        version: u32::try_from(number("version").ok_or_else(corrupt)?).map_err(|_| corrupt())?,
+    let version = u32::try_from(number("version").ok_or_else(corrupt)?).map_err(|_| corrupt())?;
+    if version != GENERATED_PACK_CACHE_VERSION {
+        return Ok(None);
+    }
+    if object.len() != 7 {
+        return Err(corrupt());
+    }
+    Ok(Some(GeneratedPackDescriptor {
+        version,
         request_hash: string("request_hash").ok_or_else(corrupt)?.to_owned(),
         content_hash: string("content_hash").ok_or_else(corrupt)?.to_owned(),
         checksum: string("checksum").ok_or_else(corrupt)?.to_owned(),
         size: number("size").ok_or_else(corrupt)?,
         object_count: u32::try_from(number("object_count").ok_or_else(corrupt)?)
             .map_err(|_| corrupt())?,
-    })
+        selection_object_count: number("selection_object_count").ok_or_else(corrupt)?,
+    }))
 }
 
 fn inspect_cached_pack(
@@ -1863,5 +1892,49 @@ mod tests {
             .expect("default logical-object bound fits usize");
 
         assert!(OBJECT_BATCH_SIZE >= maximum);
+    }
+
+    #[test]
+    fn generated_pack_cache_allows_delta_bases_beyond_the_selected_objects() {
+        let descriptor = GeneratedPackDescriptor {
+            version: GENERATED_PACK_CACHE_VERSION,
+            request_hash: "request".to_owned(),
+            content_hash: "a".repeat(64),
+            checksum: "b".repeat(40),
+            size: 64,
+            object_count: 5,
+            selection_object_count: 3,
+        };
+
+        assert!(generated_pack_descriptor_matches_request(
+            &descriptor,
+            "request",
+            3,
+            10,
+        ));
+        assert!(!generated_pack_descriptor_matches_request(
+            &descriptor,
+            "request",
+            5,
+            10,
+        ));
+    }
+
+    #[test]
+    fn generated_pack_cache_treats_an_older_descriptor_as_a_miss() {
+        let bytes = serde_json::json!({
+            "version": 1,
+            "request_hash": "request",
+            "content_hash": "a".repeat(64),
+            "checksum": "b".repeat(40),
+            "size": 64,
+            "object_count": 3,
+        });
+
+        assert!(
+            decode_generated_pack_descriptor(&serde_json::to_vec(&bytes).unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 }

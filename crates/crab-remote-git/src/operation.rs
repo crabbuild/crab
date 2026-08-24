@@ -59,6 +59,15 @@ pub enum OperationKind {
     Submodule,
 }
 
+/// Exact object selection and shallow boundaries for one indexed fetch depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShallowClosureSelection {
+    /// Objects included in the shallow clone.
+    pub object_ids: Vec<gix_hash::ObjectId>,
+    /// Commits that the client must retain as shallow boundaries.
+    pub shallow: Vec<gix_hash::ObjectId>,
+}
+
 impl OperationKind {
     const fn as_str(self) -> &'static str {
         match self {
@@ -372,6 +381,58 @@ impl OperationContext {
                 }),
             })
             .collect()
+    }
+
+    /// Load an exact generation-bound shallow object closure when available.
+    pub async fn shallow_object_closure(
+        &self,
+        tip: gix_hash::ObjectId,
+        depth: u32,
+    ) -> Result<Option<ShallowClosureSelection>> {
+        check_cancelled(&self.cancellation)?;
+        let Some(tip) = tip.as_bytes().try_into().ok() else {
+            return Ok(None);
+        };
+        let Some(index) = self.state.shallow_closure.as_ref() else {
+            return Ok(None);
+        };
+        let Some(reference) = index.entry(&tip, depth) else {
+            return Ok(None);
+        };
+        self.budget
+            .charge(BudgetDimension::StorageRequests, 1)
+            .await?;
+        self.budget
+            .charge(BudgetDimension::FetchedBytes, reference.bytes)
+            .await?;
+        self.budget
+            .charge(
+                BudgetDimension::LogicalObjects,
+                u64::from(reference.object_count),
+            )
+            .await?;
+        let entry = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            result = crab_metadata::shallow_closure::load_shallow_closure_entry(
+                &self.state.store,
+                &self.state.layout,
+                reference,
+                crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
+            ) => result?,
+        };
+        Ok(Some(ShallowClosureSelection {
+            object_ids: entry
+                .object_ids
+                .into_iter()
+                .map(gix_hash::ObjectId::from)
+                .collect(),
+            shallow: entry
+                .shallow
+                .into_iter()
+                .map(gix_hash::ObjectId::from)
+                .collect(),
+        }))
     }
 
     /// Return the maximum complete pack response size for this operation.

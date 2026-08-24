@@ -306,6 +306,14 @@ impl<S> StoreLayout<S> {
         ))
     }
 
+    /// Path to the manifest-digest-bound shallow object closure descriptor.
+    #[must_use]
+    pub fn shallow_closure_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/shallow-closure/{git_validation_digest}.json"
+        ))
+    }
+
     /// Path to immutable ref-update visibility evidence.
     #[must_use]
     pub fn git_visibility_edit_path(&self, evidence_hash: &str) -> ObjectPath {

@@ -35,14 +35,15 @@ long-running fault matrix, and rollout gates still require dedicated evidence.
 The branch must remain a draft until those gates are either recorded here or
 split into explicitly tracked follow-up work approved by maintainers.
 
-The latest live run is `local-k8s-final-20260824` against Kubernetes revision
-`b3bc2ac5` and an isolated local RustFS endpoint. It completed the initial
-import, owner convergence, one incremental push, incremental fetch, full cold
-and warm clones, filtered `blob:none`, and depth-1 clone checks. It was
-intentionally interrupted after the depth-100 planner produced no result for
-11 minutes; the run-owned remote prefix was cleaned successfully. The report
-is evidence for completed stages, but its top-level status is `failed` because
-the depth-100 stop is an unresolved performance gate.
+The latest live runs use Kubernetes revision `b3bc2ac5` and isolated local
+RustFS endpoints. `local-k8s-final-20260824` exercised the pre-index shallow
+path and was stopped after depth-100 produced no plan for 11 minutes.
+`local-k8s-shallow-index-v2-20260824` exercised the generation-bound closure
+index through the legacy `git clone --depth` remote-helper path: depth-1 and
+depth-10 completed with exact clones, while depth-100 still exceeded the
+30-minute harness timeout during response-pack production. Both run-owned
+prefixes were cleaned. These are implementation evidence, not passing phase
+acceptance reports; the depth-100/1,000 pack-generation gate remains open.
 
 Implemented on the current branch:
 
@@ -65,7 +66,14 @@ Implemented on the current branch:
   generated-object-set verification;
 - safe OID deduplication for initial absolute-depth traversal, preserving
   context-sensitive behavior for relative deepening and existing shallow
-  boundaries.
+  boundaries;
+- a generation-bound shallow-closure descriptor with content-addressed,
+  depth-1/10/100/1,000 object selections and Git-derived shallow boundaries;
+- legacy remote-helper integration for fresh single-tip absolute-depth clones,
+  with conservative fallback for relative deepen, filtered, multi-tip, and
+  already-shallow requests;
+- generated-pack cache descriptors that distinguish requested object count
+  from the larger self-contained pack count required by delta bases.
 
 Still required before the roadmap is DONE:
 
@@ -73,11 +81,11 @@ Still required before the roadmap is DONE:
 - the 1,000-push growth and latency comparison for catalog and graph layers;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
-- a generation-bound shallow object-closure accelerator: the split commit graph
-  currently bounds ancestry, but it does not by itself select the tree/blob
-  closure needed by upload-pack. Depth-1 currently performs 47,137 storage
-  requests for 30,031 planned objects, and depth-100 did not emit a plan within
-  11 minutes in the latest run;
+- a complete shallow response-pack accelerator: the generation-bound index now
+  selects the exact object closure and boundaries, but depth-1 still performs
+  90,307 storage requests for 30,031 selected objects and depth-100 response
+  production exceeded 30 minutes. Pre-generated or range-native shallow packs
+  are required before the depth-1/10/100/1,000 SLO can close;
 - the complete Phase 5 interruption and 10,000-push maintenance matrix;
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
@@ -920,16 +928,15 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | PARTIAL | PR #75 | `local-k8s-final-20260824` (interrupted at depth-100; prefix cleaned) | `eb0e9114` + working tree | Seed, incremental, full-clone, filtered, and depth-1 checks completed; a publishable completed report, repeatability, 1,000 replay, and full differential gates remain pending |
 | 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
-| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-final-20260824` | `d2a4c97d` through working tree | Cold two-pack consolidation generated 1.244 GB in 113.969 s; warm clone hit cache; selected `blob:none` repack generated 198.85 MB in 78.564 s; shallow path remains open |
+| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-shallow-index-v2-20260824` | `d2a4c97d` through working tree | Cold two-pack consolidation generated 1.244 GB in 113.969 s; warm clone hit cache; selected `blob:none` repack generated 198.85 MB in 78.564 s; cache descriptors now preserve selected-vs-self-contained object counts |
 | 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `d5090649` + working tree | Catalog had 7 layers/110.09 MB at generation 1 and 10 layers/110.09 MB after one push; 1,000-push drift and canonical-universe proof remain pending |
-| 4 | IMPLEMENTED; SHALLOW EXIT GATE OPEN | PR #75 | `local-k8s-final-20260824` | `9bb558a6` + working tree | Graph covers 140,381 then 140,383 commits and rebuilds in 89.880/135.675 s; depth-1 planner took 40.291 s and depth-100 produced no plan within 11 min |
+| 4 | IMPLEMENTED; SHALLOW EXIT GATE OPEN | PR #75 | `local-k8s-shallow-index-v2-20260824` | `9bb558a6` + working tree | Graph covers 140,381 then 140,383 commits; exact closure index publishes four depth profiles; depth-1/10 clones pass, but depth-100 response production exceeded 30 min |
 | 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `9bb558a6` + working tree | SlateDB is pinned to 0.15.0 and fresh owner scans showed no prior cancellation panic; interruption, 10,000-push, and GC matrix remain pending |
 | 6 | PARTIAL | PR #75 | `local-k8s-final-20260824` | `0a8b5c8f`, `b7749b2e` + working tree | Single-client full/filtered checks pass; shallow and large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
 ### Current branch verification evidence
 
-The following proof was run with
-`CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap`:
+The earlier broad proof was run with the roadmap target directory:
 
 - `cargo test -p crab --lib --locked -- --test-threads=1`: 3,695 passed,
   2 ignored, 0 failed;
@@ -951,6 +958,14 @@ The repository-wide `make clippy` gate is not recorded as passing: it reaches
 pre-existing warnings in untouched `crab-vfs` code. The full Kubernetes/RustFS
 qualification and Phase 6 rollout evidence are also not yet complete, so this
 table is an implementation checkpoint rather than phase acceptance.
+
+The current working tree additionally passes the focused shallow-closure,
+metadata, read-planner, and remote-Git suites. A current full Crab-library
+rerun still reproduces five unrelated baseline fixture failures after the
+empty-generation owner regression was fixed; the failing remote-helper and
+post-CAS cancellation tests also fail on `e54b9a49` without this working-tree
+change. They remain a separate cleanup item and are not counted as green
+qualification evidence.
 
 ### Fresh Kubernetes/RustFS evidence from the current implementation
 
@@ -997,10 +1012,44 @@ planning produced no result for 11 minutes.
   shallow optimization. A generation-bound commit/tree reachability bitmap or
   equivalent exact closure index is now an explicit Phase 4 exit gate.
 
+### Follow-up indexed shallow run
+
+Run profile: `local-k8s-shallow-index-v2-20260824`, the same Kubernetes
+revision and RustFS topology, release binary from this branch, one replay push,
+and closure profiles for depths 1, 10, 100, and 1,000. The run stopped at the
+depth-100 clone timeout and cleaned its remote prefix.
+
+- The owner published generation 1 with four content-addressed closure entries
+  and a 1,438-byte descriptor for the 140,381-commit snapshot. After the
+  replay push, generation 2 retained the closure publication contract.
+- Depth-1 completed in 226.291 s, selected 30,031 objects, transferred
+  49,662,271 bytes, and passed the clone integrity checks. The server recorded
+  90,307 storage requests and 103.750 s of operation time, so exact indexing
+  removed the unbounded history walk but did not yet meet the request-amplification
+  SLO.
+- Depth-10 completed in 301.611 s, transferred 106,665,346 bytes, and passed
+  the clone integrity checks. It recorded 149,584 storage requests and
+  172.045 s of operation time. The response was generated from the exact
+  selection and was cached as a verified artifact.
+- Depth-100 still timed out after 1,803.672 s before publishing response
+  telemetry. The current dense selected-object repack downloads and repacks
+  the canonical pack inventory for this profile; that is the remaining
+  bottleneck. A cache descriptor fix now records both the requested selection
+  count and the larger self-contained pack count, so delta-base expansion will
+  not invalidate a reusable artifact once a bounded producer completes.
+
+This run narrows the Phase 4 gap: object selection and shallow boundaries are
+indexed and correct for the completed profiles, while response-pack production
+still needs a pre-generated or range-native path before the large-repository
+SLO can be accepted.
+
 This evidence proves the push-acknowledgement boundary, generation binding,
 multi-pack response reuse, exact filtered packing, and current owner lifecycle.
-It does not satisfy the 1,000-push, shallow differential/performance,
-owner-fault, concurrency, cache-server, provider, or canary gates.
+The v2 run additionally proves that the legacy remote-helper depth-1 and
+depth-10 clones consume the exact indexed object closures and pass their Git
+integrity checks. It does not satisfy the 1,000-push, depth-100/1,000 shallow
+differential/performance, owner-fault, concurrency, cache-server, provider, or
+canary gates.
 
 ## Final done criteria
 
