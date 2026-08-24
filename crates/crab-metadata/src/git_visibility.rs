@@ -877,7 +877,11 @@ fn validate_oid(value: &str) -> Result<()> {
 fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
     validate_oid(value)?;
     let mut decoded = [0u8; 20];
-    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(corrupt("visibility object ID has an incomplete byte"));
+    }
+    for (output, pair) in decoded.iter_mut().zip(pairs) {
         *output = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
     }
     Ok(decoded)
