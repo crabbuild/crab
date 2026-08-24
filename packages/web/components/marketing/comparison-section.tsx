@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils"
 /*  Data                                                               */
 /* ------------------------------------------------------------------ */
 
-type CellValue = true | false | "partial" | "planned"
+type CellValue = true | false | "partial" | "apache-2.0"
 
 interface ComparisonRow {
   feature: string
@@ -54,7 +54,7 @@ const ROWS: ComparisonRow[] = [
   },
   {
     feature: "Open source",
-    values: ["planned", true, true, "partial"],
+    values: ["apache-2.0", true, true, "partial"],
   },
 ]
 
@@ -82,11 +82,11 @@ function CellIndicator({ value }: { value: CellValue }) {
     )
   }
 
-  if (value === "planned") {
+  if (value === "apache-2.0") {
     return (
-      <span className="inline-flex items-center gap-1 text-green-500 dark:text-green-400">
-        <Minus className="size-5" strokeWidth={2.5} aria-hidden="true" />
-        <span className="text-xs font-medium">Planned</span>
+      <span className="inline-flex items-center gap-1 text-primary">
+        <Check className="size-5" strokeWidth={2.5} aria-hidden="true" />
+        <span className="text-xs font-medium">Apache-2.0</span>
       </span>
     )
   }
