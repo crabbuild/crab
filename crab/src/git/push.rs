@@ -15305,11 +15305,23 @@ impl PushPipeline {
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
+            // Existing remote closures already passed this durability gate.
+            // Excluding every pinned remote tip keeps partial-clone pushes
+            // proportional to newly introduced history instead of re-reading
+            // every ordinary blob in the repository on every push.
+            let remote_tips = self
+                .base_manifest
+                .lock()
+                .await
+                .as_ref()
+                .map(|manifest| manifest.refs.values().cloned().collect())
+                .unwrap_or_default();
             let publication = crate::lfs::publication::publish_reachable(
                 store.as_storage().clone(),
                 self.router.repo_prefix().to_owned(),
                 self.common_git_dir()?,
                 tips,
+                remote_tips,
             )
             .await;
             self.at_stage(PushFailureStage::Preflight, publication)?;

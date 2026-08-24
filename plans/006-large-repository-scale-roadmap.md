@@ -47,6 +47,8 @@ Implemented on the current branch:
 - generation-bound graph/catalog/visibility publication after push and repack;
 - repository GC classification for active, retained-history, grace-period, and
   collectible pack storage;
+- LFS dependency publication bounded to newly introduced history and
+  pointer-sized blobs, including partial-clone push proof;
 - cold/warm clone fanout controls in the qualification harness.
 
 Still required before the roadmap is DONE:
@@ -227,6 +229,8 @@ If `/Volumes/Workspace` is unavailable, stop. Do not compile locally.
 - `crates/crab-remote-git/src/commit_graph.rs`
 - `crab/src/git/upload_pack_wire.rs`
 - `crab/src/git/push.rs`
+- `crab/src/lfs/publication.rs`
+- `crab/src/cmd/lfs/push.rs`
 - `crab/src/cmd/metadb.rs`
 - `crab/src/cmd/repack.rs`
 - repository-scoped GC code under `crab/src/cmd/gc/` when Phase 5 begins
@@ -789,10 +793,15 @@ This phase is a release gate, not a new architecture rewrite.
 2. Add request coalescing for identical generated artifacts and hot immutable
    range reads where metrics prove stampede amplification. Reuse the existing
    cache service; do not create a repository server.
-3. Add bounded admission/backpressure at repository operation boundaries.
+3. Keep LFS dependency publication proportional to new history: scan pushed
+   tips while excluding every ref tip from the pinned base manifest, and ask
+   Git to enumerate only blobs small enough to be valid LFS pointers. Prove a
+   one-commit push from a `blob:none` clone does not hydrate ordinary blobs
+   already reachable from the remote.
+4. Add bounded admission/backpressure at repository operation boundaries.
    Report retryable throttling explicitly; do not copy GitHub's numeric limits
    without Crab workload evidence.
-4. Define and publish operational SLOs for:
+5. Define and publish operational SLOs for:
    - clone/fetch/push p50, p95, and p99;
    - error and retry rate;
    - origin request and egress amplification;
@@ -800,15 +809,15 @@ This phase is a release gate, not a new architecture rewrite.
    - lock wait and contention;
    - maintenance backlog and duration;
    - active/retained/collectible storage ratio.
-5. Roll out in four gates:
+6. Roll out in four gates:
    - shadow: compute new plans and compare with canonical results, never serve;
    - opt-in canary repositories;
    - percentage canary by immutable repository identity;
    - default-on after sustained correctness and SLO evidence.
-6. Keep rollback generation-based: stop selecting new artifacts, pin the prior
+7. Keep rollback generation-based: stop selecting new artifacts, pin the prior
    known-good manifest/index generation, and preserve immutable evidence for
    diagnosis. Never mutate already published pack objects.
-7. Update operator docs, diagnostics, upgrade notes, and incident runbooks.
+8. Update operator docs, diagnostics, upgrade notes, and incident runbooks.
 
 ### Phase 6 acceptance criteria
 
@@ -816,6 +825,9 @@ This phase is a release gate, not a new architecture rewrite.
       every completed clone/fetch checkout.
 - [ ] Independent-ref pushes complete without lost updates; same-ref pushes are
       serialized or rejected with the documented retryable stale/lock outcome.
+- [ ] A one-commit push from a `blob:none` clone leaves already-remote ordinary
+      blobs absent locally, and the LFS scan reads only newly introduced blobs
+      no larger than the maximum pointer size.
 - [ ] Fifty identical cold clones produce no more than two generated-pack
       producers; all other callers coalesce or consume the verified artifact.
 - [ ] Warm clone fanout achieves at least 90% generated-artifact cache hits and
@@ -870,7 +882,7 @@ environment dumps, or credentials.
 | 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d5090649` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
 | 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
 | 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
-| 6 | PARTIAL | PR #75 | — | `9bb558a6` | 50-cold/100-warm clone fanout controls implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
+| 6 | PARTIAL | PR #75 | — | `9bb558a6` | 50-cold/100-warm clone fanout controls and bounded partial-clone LFS publication implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
 
 ### Current branch verification evidence
 

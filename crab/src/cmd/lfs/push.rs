@@ -340,7 +340,14 @@ pub(crate) fn collect_pointers_from_range_in(
     remote_shas: &[String],
 ) -> Result<Vec<(String, LfsPointer)>> {
     // Build rev-list args: local_sha ^remote_sha ...
-    let mut args = vec!["rev-list".to_owned(), "--objects".to_owned()];
+    // Git's blob:limit filter omits blobs at least the given size. LFS
+    // pointers are bounded, so the scan never streams ordinary large blobs
+    // through cat-file merely to prove that they are not pointers.
+    let mut args = vec![
+        "rev-list".to_owned(),
+        "--objects".to_owned(),
+        format!("--filter=blob:limit={}", MAX_LFS_POINTER_SIZE + 1),
+    ];
     for sha in local_shas {
         args.push(sha.clone());
     }
