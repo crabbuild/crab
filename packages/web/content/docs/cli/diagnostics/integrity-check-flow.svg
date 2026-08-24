@@ -1,74 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" width="720" height="420">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 620" width="920" height="620" role="img" aria-labelledby="integrity-title integrity-desc">
+  <title id="integrity-title">Crab repository integrity checks</title>
+  <desc id="integrity-desc">Crab fsck checks Git objects, the data chain, pack and index manifests, push locks, multipart uploads, and shard lists before walking from a pointer through the file index and shard to the xorb.</desc>
 
   <defs>
-    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748B"/>
     </marker>
   </defs>
 
-  <g id="background">
-    <rect x="0" y="0" width="720" height="420" fill="#FFFFFF"/>
+  <rect width="920" height="620" fill="#FFFFFF"/>
+
+  <g id="command">
+    <rect x="350" y="24" width="220" height="72" rx="14" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <text x="460" y="56" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700" fill="#0F172A">crab fsck</text>
+    <text x="460" y="78" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">read-only integrity check</text>
   </g>
 
-  <g id="containers">
-    <!-- Data chain verification container -->
-    <rect x="30" y="260" width="660" height="130" rx="12" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1"/>
+  <g id="checks">
+    <rect x="32" y="148" width="856" height="222" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+    <text x="56" y="177" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#64748B" letter-spacing="0.6">CROSS-CHECK REPOSITORY STATE</text>
+
+    <rect x="48" y="198" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#10B981" stroke-width="1.5"/>
+    <circle cx="70" cy="222" r="5" fill="#10B981"/>
+    <text x="84" y="222" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Git objects</text>
+    <text x="84" y="243" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">all refs resolve</text>
+
+    <rect x="335" y="198" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#10B981" stroke-width="1.5"/>
+    <circle cx="357" cy="222" r="5" fill="#10B981"/>
+    <text x="371" y="222" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Data chain</text>
+    <text x="371" y="243" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">file indices + xorbs</text>
+
+    <rect x="622" y="198" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#10B981" stroke-width="1.5"/>
+    <circle cx="644" cy="222" r="5" fill="#10B981"/>
+    <text x="658" y="222" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Pack / index</text>
+    <text x="658" y="243" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">manifests consistent</text>
+
+    <rect x="48" y="286" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="1.5"/>
+    <circle cx="70" cy="310" r="5" fill="#F59E0B"/>
+    <text x="84" y="310" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Push locks</text>
+    <text x="84" y="331" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">expired locks are repairable</text>
+
+    <rect x="335" y="286" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="1.5"/>
+    <circle cx="357" cy="310" r="5" fill="#F59E0B"/>
+    <text x="371" y="310" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Multipart uploads</text>
+    <text x="371" y="331" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">none abandoned</text>
+
+    <rect x="622" y="286" width="250" height="66" rx="12" fill="#FFFFFF" stroke="#10B981" stroke-width="1.5"/>
+    <circle cx="644" cy="310" r="5" fill="#10B981"/>
+    <text x="658" y="310" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Shard list</text>
+    <text x="658" y="331" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">consistent with manifests</text>
   </g>
 
-  <g id="nodes">
-    <!-- crab fsck -->
-    <rect x="280" y="30" width="160" height="50" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+  <g id="data-chain">
+    <rect x="32" y="408" width="856" height="140" rx="16" fill="#F0F9FF" stroke="#BAE6FD" stroke-width="1.5"/>
+    <text x="56" y="436" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0284C7" letter-spacing="0.6">WALK DATA CHAIN</text>
 
-    <!-- Check items (row) -->
-    <rect x="40" y="130" width="150" height="46" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
-    <rect x="210" y="130" width="150" height="46" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
-    <rect x="380" y="130" width="150" height="46" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
-    <rect x="550" y="130" width="150" height="46" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
+    <rect x="70" y="462" width="180" height="58" rx="12" fill="#FFFFFF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="160" y="486" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Pointer</text>
+    <text x="160" y="505" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">file hash</text>
 
-    <!-- Data chain (inside container) -->
-    <rect x="60" y="300" width="180" height="50" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
-    <rect x="280" y="300" width="180" height="50" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
-    <rect x="500" y="300" width="160" height="50" rx="8" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <rect x="270" y="462" width="180" height="58" rx="12" fill="#FFFFFF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="360" y="486" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">File Index</text>
+    <text x="360" y="505" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">shard hash</text>
+
+    <rect x="470" y="462" width="180" height="58" rx="12" fill="#FFFFFF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="560" y="486" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Shard</text>
+    <text x="560" y="505" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">xorb refs</text>
+
+    <rect x="670" y="462" width="180" height="58" rx="12" fill="#FFFFFF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="760" y="486" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Xorb</text>
+    <text x="760" y="505" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">object bytes</text>
   </g>
 
-  <g id="labels">
-    <!-- crab fsck -->
-    <text x="360" y="60" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="bold" fill="#0F172A">crab fsck</text>
-
-    <!-- Check items -->
-    <text x="115" y="158" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Check git refs</text>
-    <text x="285" y="158" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Verify pack list</text>
-    <text x="455" y="158" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Check push locks</text>
-    <text x="625" y="152" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Find abandoned</text>
-    <text x="625" y="168" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">uploads</text>
-
-    <!-- Container label -->
-    <text x="50" y="283" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#0284C7" letter-spacing="0.5">WALK DATA CHAIN</text>
-
-    <!-- Chain items -->
-    <text x="150" y="320" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Pointer →</text>
-    <text x="150" y="338" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">File Index</text>
-
-    <text x="370" y="320" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">File Index →</text>
-    <text x="370" y="338" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">Shard</text>
-
-    <text x="580" y="320" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Shard →</text>
-    <text x="580" y="338" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">Xorb</text>
+  <g id="connections" fill="none" stroke="#64748B" stroke-width="1.5">
+    <path d="M 460 96 V 148" marker-end="url(#arrowhead)"/>
+    <path d="M 460 370 V 408" marker-end="url(#arrowhead)"/>
+    <line x1="250" y1="491" x2="270" y2="491" marker-end="url(#arrowhead)"/>
+    <line x1="450" y1="491" x2="470" y2="491" marker-end="url(#arrowhead)"/>
+    <line x1="650" y1="491" x2="670" y2="491" marker-end="url(#arrowhead)"/>
   </g>
 
-  <g id="connections">
-    <!-- fsck → checks (fan out) -->
-    <path d="M 310 80 L 310 100 L 115 100 L 115 130" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <path d="M 340 80 L 340 100 L 285 100 L 285 130" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <path d="M 380 80 L 380 100 L 455 100 L 455 130" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <path d="M 410 80 L 410 100 L 625 100 L 625 130" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-
-    <!-- fsck → data chain container -->
-    <path d="M 360 80 L 360 100 L 360 200 L 150 200 L 150 300" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-
-    <!-- Chain connections -->
-    <line x1="240" y1="325" x2="280" y2="325" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <line x1="460" y1="325" x2="500" y2="325" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-  </g>
-
+  <rect x="48" y="570" width="824" height="32" rx="10" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1"/>
+  <text x="460" y="591" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#0F172A">Repairable warning: expired push locks can be removed with crab fsck --repair</text>
 </svg>

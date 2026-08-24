@@ -11,7 +11,7 @@ meta:
 
 When files are stored in archive storage classes (S3 Glacier, Deep Archive, Azure Archive), they can't be read immediately. Crab's hydrate-restore subsystem detects archived xorbs during hydration and either automatically initiates a restore or fails with a clear error explaining what needs to happen.
 
-![Hydrate restore flow — probes storage class, reads warm files immediately, restores archived files with polling.](./hydrate-restore-flow.svg)
+![Hydrate restore flow — probes storage-class metadata, hydrates warm xorbs immediately, and routes archived xorbs through restore policy, tier selection, exponential polling, and timeout handling.](./hydrate-restore-flow.svg)
 
 ## How It Works
 

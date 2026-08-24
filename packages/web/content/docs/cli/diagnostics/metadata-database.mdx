@@ -11,7 +11,7 @@ meta:
 
 Crab maintains two SlateDB databases that map content to storage locations. These databases are what make deduplication and hydration fast — without them, every operation would need to scan all shards.
 
-![Metadata subsystem — push and hydrate use File Index and Chunk Index databases, with a local LRU cache backed by SQLite.](./metadata-database-flow.svg)
+![Metadata subsystem — push and hydrate use a per-repository File Index and bucket-shared Chunk Index, with local in-memory and SQLite caches in front of chunk lookups.](./metadata-database-flow.svg)
 
 ## Two Databases
 
