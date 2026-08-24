@@ -322,6 +322,8 @@ mod tests {
             key: key.to_string(),
             size,
             last_modified: SystemTime::now() - age,
+            e_tag: None,
+            version: None,
             storage_class: Some(class),
             transitioned_at: None,
         }
@@ -332,6 +334,8 @@ mod tests {
             key: key.to_string(),
             size,
             last_modified: SystemTime::now() - age,
+            e_tag: None,
+            version: None,
             storage_class: None,
             transitioned_at: None,
         }
@@ -435,6 +439,8 @@ mod tests {
             key: "xorbs/ab/obj7".to_string(),
             size: 1024,
             last_modified: now - Duration::from_secs(60 * 86_400),
+            e_tag: None,
+            version: None,
             storage_class: Some(StorageClass::S3StandardIa),
             transitioned_at: Some(now - Duration::from_secs(10 * 86_400)),
         };

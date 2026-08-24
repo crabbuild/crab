@@ -34,6 +34,17 @@ SECRET_KEYS = {
     "AZURE_STORAGE_KEY",
 }
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+REQUIRED_CHECKS = {
+    "live_objects_preserved",
+    "unreachable_objects_deleted",
+    "fsck_after_gc",
+    "fresh_clone_readback",
+    "writer_race",
+    "resume_after_delete_crash",
+    "resume_after_journal_crash",
+    "bounded_memory",
+    "bounded_writer_pause",
+}
 
 
 @dataclass(frozen=True)
@@ -60,9 +71,10 @@ def fixture_objects(seed: int, cardinality: int) -> list[FixtureObject]:
     objects: list[FixtureObject] = []
     for index in range(cardinality):
         payload = f"gc-fixture:{seed}:{index}".encode()
+        object_hash = hashlib.blake2b(payload, digest_size=32).hexdigest()
         objects.append(
             FixtureObject(
-                key=f".crab/xorbs/{index % 256:02x}/{hashlib.blake2b(payload, digest_size=32).hexdigest()}",
+                key=f".crab/xorbs/{object_hash[:2]}/{object_hash}",
                 size=1024 + (index % 4096),
                 live=index % 5 != 0,
                 digest=hashlib.sha256(payload).hexdigest(),
@@ -87,7 +99,9 @@ def redact_text(value: str) -> str:
     return value
 
 
-def command_record(command: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
+def command_record(
+    command: list[str], cwd: Path, timeout: int, extra_env: dict[str, str]
+) -> dict[str, Any]:
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -97,7 +111,7 @@ def command_record(command: list[str], cwd: Path, timeout: int) -> dict[str, Any
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=os.environ.copy(),
+            env={**os.environ, **extra_env},
         )
         status = completed.returncode == 0
         stdout_tail = redact_text(completed.stdout[-2000:])
@@ -197,11 +211,42 @@ def run_provider(args: argparse.Namespace, provider: str) -> Path:
         report["qualification_level"] = "end_to_end"
         report["status"] = "running"
         command = [part for part in args.command]
-        record = command_record(command, provider_dir, args.timeout)
+        result_path = provider_dir / "result.json"
+        record = command_record(
+            command,
+            provider_dir,
+            args.timeout,
+            {
+                "CRAB_GC_QUALIFICATION_FIXTURE": str(fixture_path),
+                "CRAB_GC_QUALIFICATION_RESULT": str(result_path),
+                "CRAB_GC_QUALIFICATION_SCOPE": report["scope"],
+            },
+        )
         report["commands"].append(record)
-        report["status"] = "passed" if record["status"] == "passed" else "failed"
-        if report["status"] != "passed":
+        if record["status"] != "passed":
+            report["status"] = "failed"
             report["unsupported_reason"] = record["error"]
+        else:
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                checks = result["checks"]
+                check_names = {
+                    check.get("name")
+                    for check in checks
+                    if isinstance(check, dict) and check.get("status") == "passed"
+                }
+                missing_checks = REQUIRED_CHECKS.difference(check_names)
+                if missing_checks:
+                    raise ValueError(
+                        f"qualification result is missing checks: {sorted(missing_checks)}"
+                    )
+                report["checks"] = checks
+                report["metrics"] = result["metrics"]
+                report["artifacts"].update(result["artifacts"])
+                report["status"] = "passed"
+            except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+                report["status"] = "failed"
+                report["unsupported_reason"] = str(error)
     else:
         report["unsupported_reason"] = (
             "endpoint is configured but no explicit fixture/GC/fsck/clone command was supplied"

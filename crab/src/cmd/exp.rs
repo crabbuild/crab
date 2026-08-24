@@ -8306,8 +8306,9 @@ mod tests {
         // An older remote may have the experiment ref but no workflow root
         // registration yet. A no-op push must repair that protection before
         // reporting the experiment as skipped.
-        store
-            .delete(&ObjectPath::from(".crab/ref-registry"))
+        let storage = store.as_storage().clone();
+        let registry_router = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
+        crab_metadata::ref_registry::deregister_repo(&storage, &registry_router, prefix)
             .await
             .unwrap();
         let skipped = push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
@@ -8368,12 +8369,11 @@ mod tests {
             .unwrap();
         let refs: Vec<String> = serde_json::from_slice(&stage_refs).unwrap();
         assert_eq!(refs, vec!["ab".repeat(32)]);
-        let (registry_bytes, _) = store
-            .get_with_etag(&ObjectPath::from(".crab/ref-registry"))
+        let storage = store.as_storage().clone();
+        let registry_router = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
+        let registry = crab_metadata::ref_registry::load_ref_registry(&storage, &registry_router)
             .await
             .unwrap();
-        let registry: crab_metadata::ref_registry::RefRegistry =
-            serde_json::from_slice(&registry_bytes).unwrap();
         assert_eq!(
             registry.workflow_experiment_ids[prefix],
             vec![id.to_string()]

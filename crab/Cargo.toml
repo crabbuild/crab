@@ -90,11 +90,9 @@ replication-s3-control-plane = [
 replication-gcs-control-plane = ["tier-gcs", "dep:google-cloud-token"]
 replication-azure-control-plane = ["tier-azure", "dep:azure_core", "dep:azure_identity"]
 
-# Debug-only crash-injection harness for the workflow executor.
-# Enables the `CRAB_CRASH_AT=<StateName>` env-var hook so tests can
-# abort the process immediately after a named state transition is
-# recorded to the journal. Never turn this on in release builds —
-# `std::process::abort()` is, by design, lethal.
+# Debug-only crash-injection harnesses for workflow and GC qualification.
+# They terminate subprocesses at named persisted-state boundaries. Never turn
+# this on in release builds; termination is intentionally lethal.
 crash-injection = ["crab-workflow/crash-injection"]
 
 # File-watching for `crab run --watch`. Uses the `notify` crate for

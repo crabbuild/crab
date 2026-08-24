@@ -1,12 +1,10 @@
-//! Ref registry: maps repo prefixes to their referenced global shard sets.
+//! Partitioned ref registry for bucket-wide GC roots.
 //!
-//! The ref-registry is a JSON manifest at `.crab/ref-registry` tracking
-//! which repos reference which global shards. It enables safe garbage
-//! collection without scanning every repo's shard-list on every GC run.
-//!
-//! Updated via CAS after each successful push. The push pipeline reads the
-//! current shard-list for the repo and writes the full set to the registry
-//! (not just the delta — the entry is the complete shard-list for that repo).
+//! Each repository owns a small CAS coordination record beneath
+//! `.crab/ref-registry/records`. Its shard roots are independently CAS-sharded
+//! across deterministic four-hex partitions, so push cost and contention do
+//! not grow with the bucket or require rewriting one large repository root
+//! set. A coverage marker is published only by exclusive repair.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 #[cfg(feature = "storage")]
 use crab_storage::{Store, StoreLayout};
+#[cfg(feature = "storage")]
+use futures_util::TryStreamExt;
+#[cfg(feature = "storage")]
+use object_store::path::Path;
 
 /// Coordinator metadata for a repo that uses active-active writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +41,59 @@ pub struct ActiveActiveCoordinatorRegistration {
 /// into empty maps. Writers always emit the fields, even when empty; the
 /// serde default handles readers that see an older payload.
 pub const REF_REGISTRY_SCHEMA_VERSION: u32 = 1;
+pub const REF_REGISTRY_RECORD_SCHEMA_VERSION: u32 = 2;
+const REF_REGISTRY_ROOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoRefRecord {
+    schema_version: u32,
+    repo_prefix: String,
+    generation: u64,
+    complete: bool,
+    workflow_stage_hashes: Vec<String>,
+    workflow_experiment_ids: Vec<String>,
+    active_active_coordinator: Option<ActiveActiveCoordinatorRegistration>,
+}
+
+impl Default for RepoRefRecord {
+    fn default() -> Self {
+        Self {
+            schema_version: REF_REGISTRY_RECORD_SCHEMA_VERSION,
+            repo_prefix: String::new(),
+            generation: 0,
+            complete: false,
+            workflow_stage_hashes: Vec::new(),
+            workflow_experiment_ids: Vec::new(),
+            active_active_coordinator: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShardRootPartition {
+    schema_version: u32,
+    repo_prefix: String,
+    partition: String,
+    generation: u64,
+    shard_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryCoverage {
+    schema_version: u32,
+    complete: bool,
+}
+
+/// Per-repository GC root proof for one shard hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoShardRootStatus {
+    pub generation: u64,
+    pub complete: bool,
+    pub rooted: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefRegistry {
@@ -291,6 +346,425 @@ impl RefRegistry {
     }
 }
 
+#[cfg(feature = "storage")]
+fn registry_records_prefix(router: &StoreLayout<Store>) -> Path {
+    Path::from(format!("{}/records", router.ref_registry_path()))
+}
+
+#[cfg(feature = "storage")]
+fn registry_record_path(router: &StoreLayout<Store>, repo_prefix: &str) -> Path {
+    let digest = blake3::hash(repo_prefix.as_bytes()).to_hex().to_string();
+    Path::from(format!(
+        "{}/{}/{}.json",
+        registry_records_prefix(router),
+        &digest[..2],
+        digest
+    ))
+}
+
+#[cfg(feature = "storage")]
+fn registry_coverage_path(router: &StoreLayout<Store>) -> Path {
+    Path::from(format!("{}/coverage.json", router.ref_registry_path()))
+}
+
+#[cfg(feature = "storage")]
+fn registry_shard_roots_prefix(router: &StoreLayout<Store>) -> Path {
+    Path::from(format!("{}/shard-roots", router.ref_registry_path()))
+}
+
+#[cfg(feature = "storage")]
+fn repo_digest(repo_prefix: &str) -> String {
+    blake3::hash(repo_prefix.as_bytes()).to_hex().to_string()
+}
+
+#[cfg(feature = "storage")]
+fn shard_root_partition(shard_hash: &str) -> String {
+    let digest = blake3::hash(shard_hash.as_bytes()).to_hex().to_string();
+    digest[..4].to_owned()
+}
+
+#[cfg(feature = "storage")]
+fn repo_shard_roots_prefix(router: &StoreLayout<Store>, repo_prefix: &str) -> Path {
+    Path::from(format!(
+        "{}/{}",
+        registry_shard_roots_prefix(router),
+        repo_digest(repo_prefix)
+    ))
+}
+
+#[cfg(feature = "storage")]
+fn shard_root_partition_path(
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+    partition: &str,
+) -> Path {
+    Path::from(format!(
+        "{}/{}.json",
+        repo_shard_roots_prefix(router, repo_prefix),
+        partition
+    ))
+}
+
+#[cfg(feature = "storage")]
+fn normalize(values: &mut Vec<String>) {
+    values.sort_unstable();
+    values.dedup();
+}
+
+#[cfg(feature = "storage")]
+fn validate_record(record: &RepoRefRecord, path: &Path) -> Result<()> {
+    if record.schema_version != REF_REGISTRY_RECORD_SCHEMA_VERSION
+        || record.repo_prefix.trim().is_empty()
+        || registry_record_path_for_root(path, &record.repo_prefix) != *path
+    {
+        return Err(MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: "invalid partitioned ref-registry record identity".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage")]
+fn validate_shard_root_partition(
+    root: &ShardRootPartition,
+    router: &StoreLayout<Store>,
+    path: &Path,
+) -> Result<()> {
+    let valid_partition = root.partition.len() == 4
+        && root
+            .partition
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    if root.schema_version != REF_REGISTRY_ROOT_SCHEMA_VERSION
+        || root.repo_prefix.trim().is_empty()
+        || !valid_partition
+        || shard_root_partition_path(router, &root.repo_prefix, &root.partition) != *path
+        || root
+            .shard_hashes
+            .windows(2)
+            .any(|window| window[0] >= window[1])
+        || root
+            .shard_hashes
+            .iter()
+            .any(|hash| shard_root_partition(hash) != root.partition)
+    {
+        return Err(MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: "invalid partitioned ref-registry shard roots".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage")]
+fn registry_record_path_for_root(record_path: &Path, repo_prefix: &str) -> Path {
+    let path = record_path.as_ref();
+    let root = path
+        .split_once("/records/")
+        .map(|(root, _)| root)
+        .unwrap_or_default();
+    let digest = blake3::hash(repo_prefix.as_bytes()).to_hex().to_string();
+    Path::from(format!("{root}/records/{}/{}.json", &digest[..2], digest))
+}
+
+#[cfg(feature = "storage")]
+async fn update_repo_record(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    mutate: impl Fn(&mut RepoRefRecord),
+) -> Result<RepoRefRecord> {
+    let repo_prefix = router.repo_prefix().to_owned();
+    let path = registry_record_path(router, &repo_prefix);
+    let record =
+        crab_storage::cas::cas_update_default::<RepoRefRecord, _>(store, path.as_ref(), |record| {
+            if record.repo_prefix.is_empty() {
+                record.repo_prefix.clone_from(&repo_prefix);
+            }
+            if record.repo_prefix == repo_prefix {
+                mutate(record);
+            }
+        })
+        .await
+        .map_err(MetadataError::from)?;
+    validate_record(&record, &path)?;
+    Ok(record)
+}
+
+#[cfg(feature = "storage")]
+async fn union_shard_root_partition(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+    partition: &str,
+    shard_hashes: Vec<String>,
+) -> Result<()> {
+    let path = shard_root_partition_path(router, repo_prefix, partition);
+    let repo_prefix = repo_prefix.to_owned();
+    let partition = partition.to_owned();
+    let root = crab_storage::cas::cas_update_default::<ShardRootPartition, _>(
+        store,
+        path.as_ref(),
+        |root| {
+            if root.repo_prefix.is_empty() {
+                root.repo_prefix.clone_from(&repo_prefix);
+                root.partition.clone_from(&partition);
+            }
+            if root.repo_prefix == repo_prefix && root.partition == partition {
+                root.schema_version = REF_REGISTRY_ROOT_SCHEMA_VERSION;
+                root.shard_hashes.extend(shard_hashes.clone());
+                normalize(&mut root.shard_hashes);
+                root.generation = root.generation.saturating_add(1);
+            }
+        },
+    )
+    .await
+    .map_err(MetadataError::from)?;
+    validate_shard_root_partition(&root, router, &path)
+}
+
+#[cfg(feature = "storage")]
+async fn replace_repo_shard_roots(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+    shard_hashes: Vec<String>,
+) -> Result<()> {
+    let mut partitions = HashMap::<String, Vec<String>>::new();
+    for hash in shard_hashes {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .push(hash);
+    }
+    let mut expected = HashSet::with_capacity(partitions.len());
+    for (partition, mut hashes) in partitions {
+        normalize(&mut hashes);
+        let path = shard_root_partition_path(router, repo_prefix, &partition);
+        expected.insert(path.clone());
+        let repo_prefix = repo_prefix.to_owned();
+        let partition = partition.to_owned();
+        let root = crab_storage::cas::cas_update_default::<ShardRootPartition, _>(
+            store,
+            path.as_ref(),
+            |root| {
+                root.schema_version = REF_REGISTRY_ROOT_SCHEMA_VERSION;
+                root.repo_prefix.clone_from(&repo_prefix);
+                root.partition.clone_from(&partition);
+                root.shard_hashes.clone_from(&hashes);
+                root.generation = root.generation.saturating_add(1);
+            },
+        )
+        .await
+        .map_err(MetadataError::from)?;
+        validate_shard_root_partition(&root, router, &path)?;
+    }
+    let prefix = repo_shard_roots_prefix(router, repo_prefix);
+    let mut roots = store.inner().list(Some(&prefix));
+    while let Some(meta) = roots
+        .try_next()
+        .await
+        .map_err(|source| MetadataError::Storage {
+            source: crab_storage::StorageError::ObjectStore { source },
+        })?
+    {
+        if !expected.contains(&meta.location) {
+            store.delete(&meta.location).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Loads registry coordination records without materializing shard roots.
+#[cfg(feature = "storage")]
+pub async fn load_ref_registry_summary(
+    store: &Store,
+    router: &StoreLayout<Store>,
+) -> Result<RefRegistry> {
+    let coverage_path = registry_coverage_path(router);
+    let coverage = match store.get_with_etag(&coverage_path).await {
+        Ok((body, _)) => serde_json::from_slice::<RegistryCoverage>(&body).map_err(|error| {
+            MetadataError::CorruptObject {
+                path: coverage_path.to_string(),
+                reason: format!("invalid JSON: {error}"),
+            }
+        })?,
+        Err(crab_storage::StorageError::NotFound { .. }) => RegistryCoverage::default(),
+        Err(error) => return Err(MetadataError::from(error)),
+    };
+    if coverage.schema_version != 0 && coverage.schema_version != REF_REGISTRY_RECORD_SCHEMA_VERSION
+    {
+        return Err(MetadataError::CorruptObject {
+            path: coverage_path.to_string(),
+            reason: "unsupported partitioned ref-registry coverage schema".to_owned(),
+        });
+    }
+
+    let prefix = registry_records_prefix(router);
+    let mut records = store.inner().list(Some(&prefix));
+    let mut registry = RefRegistry {
+        coverage_complete: coverage.complete,
+        ..RefRegistry::default()
+    };
+    while let Some(meta) = records
+        .try_next()
+        .await
+        .map_err(|source| MetadataError::Storage {
+            source: crab_storage::StorageError::ObjectStore { source },
+        })?
+    {
+        let (body, _) = store.get_with_etag(&meta.location).await?;
+        let mut record: RepoRefRecord =
+            serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+                path: meta.location.to_string(),
+                reason: format!("invalid JSON: {error}"),
+            })?;
+        validate_record(&record, &meta.location)?;
+        normalize(&mut record.workflow_stage_hashes);
+        normalize(&mut record.workflow_experiment_ids);
+        let repo = record.repo_prefix.clone();
+        if registry.repos.insert(repo.clone(), Vec::new()).is_some() {
+            return Err(MetadataError::CorruptObject {
+                path: meta.location.to_string(),
+                reason: format!("duplicate partitioned ref-registry repo {repo}"),
+            });
+        }
+        if record.complete {
+            registry.complete_repos.insert(repo.clone());
+        }
+        if !record.workflow_stage_hashes.is_empty() {
+            registry
+                .workflow_stage_hashes
+                .insert(repo.clone(), record.workflow_stage_hashes);
+        }
+        if !record.workflow_experiment_ids.is_empty() {
+            registry
+                .workflow_experiment_ids
+                .insert(repo.clone(), record.workflow_experiment_ids);
+        }
+        if let Some(coordinator) = record.active_active_coordinator {
+            registry
+                .active_active_coordinators
+                .insert(repo, coordinator);
+        }
+        registry.generation = registry.generation.saturating_add(record.generation);
+    }
+
+    Ok(registry)
+}
+
+/// Loads one repository record and one shard-root partition.
+///
+/// This keeps push-side receipt validation independent of bucket and
+/// repository cardinality. `None` means the repository has no registry
+/// record; a missing shard partition is a valid `rooted = false` result.
+#[cfg(feature = "storage")]
+pub async fn load_repo_shard_root_status(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+    shard_hash: &str,
+) -> Result<Option<RepoShardRootStatus>> {
+    let record_path = registry_record_path(router, repo_prefix);
+    let (record_body, _) = match store.get_with_etag(&record_path).await {
+        Ok(value) => value,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(MetadataError::from(error)),
+    };
+    let record: RepoRefRecord =
+        serde_json::from_slice(&record_body).map_err(|error| MetadataError::CorruptObject {
+            path: record_path.to_string(),
+            reason: format!("invalid JSON: {error}"),
+        })?;
+    validate_record(&record, &record_path)?;
+
+    let partition = shard_root_partition(shard_hash);
+    let root_path = shard_root_partition_path(router, repo_prefix, &partition);
+    let rooted = match store.get_with_etag(&root_path).await {
+        Ok((body, _)) => {
+            let root: ShardRootPartition =
+                serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+                    path: root_path.to_string(),
+                    reason: format!("invalid JSON: {error}"),
+                })?;
+            validate_shard_root_partition(&root, router, &root_path)?;
+            root.shard_hashes
+                .binary_search_by(|candidate| candidate.as_str().cmp(shard_hash))
+                .is_ok()
+        }
+        Err(crab_storage::StorageError::NotFound { .. }) => false,
+        Err(error) => return Err(MetadataError::from(error)),
+    };
+    Ok(Some(RepoShardRootStatus {
+        generation: record.generation,
+        complete: record.complete,
+        rooted,
+    }))
+}
+
+/// Streams validated shard roots one at a time from bounded partition bodies.
+#[cfg(feature = "storage")]
+pub async fn visit_ref_registry_shard_roots<F, Fut, E>(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    mut visit: F,
+) -> std::result::Result<u64, E>
+where
+    F: FnMut(String, String) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    E: From<MetadataError>,
+{
+    let root_prefix = registry_shard_roots_prefix(router);
+    let mut roots = store.inner().list(Some(&root_prefix));
+    let mut generation = 0u64;
+    while let Some(meta) = roots
+        .try_next()
+        .await
+        .map_err(|source| MetadataError::Storage {
+            source: crab_storage::StorageError::ObjectStore { source },
+        })?
+    {
+        let (body, _) = store
+            .get_with_etag(&meta.location)
+            .await
+            .map_err(MetadataError::from)?;
+        let root: ShardRootPartition =
+            serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+                path: meta.location.to_string(),
+                reason: format!("invalid JSON: {error}"),
+            })?;
+        validate_shard_root_partition(&root, router, &meta.location).map_err(E::from)?;
+        generation = generation.saturating_add(root.generation);
+        for hash in root.shard_hashes {
+            visit(root.repo_prefix.clone(), hash).await?;
+        }
+    }
+    Ok(generation)
+}
+
+/// Loads the partitioned bucket registry into its aggregate compatibility view.
+#[cfg(feature = "storage")]
+pub async fn load_ref_registry(store: &Store, router: &StoreLayout<Store>) -> Result<RefRegistry> {
+    let mut registry = load_ref_registry_summary(store, router).await?;
+    let root_generation = visit_ref_registry_shard_roots(store, router, |repo, hash| {
+        let result = registry
+            .repos
+            .get_mut(&repo)
+            .ok_or_else(|| MetadataError::CorruptObject {
+                path: registry_shard_roots_prefix(router).to_string(),
+                reason: format!("shard-root partition has no repo record for {repo}"),
+            })
+            .map(|shards| shards.push(hash));
+        std::future::ready(result)
+    })
+    .await?;
+    registry.generation = registry.generation.saturating_add(root_generation);
+    for shards in registry.repos.values_mut() {
+        normalize(shards);
+    }
+    Ok(registry)
+}
+
 /// CAS-union a repo's base-plus-candidate shard set before manifest publish.
 #[cfg(feature = "storage")]
 pub async fn union_register_repo_shards(
@@ -298,27 +772,26 @@ pub async fn union_register_repo_shards(
     router: &StoreLayout<Store>,
     shard_hashes: Vec<String>,
 ) -> Result<u64> {
-    let registry_path = router.ref_registry_path();
     let repo_prefix = router.repo_prefix().to_owned();
-    crab_storage::cas::cas_update_default::<RefRegistry, _>(
-        store,
-        registry_path.as_ref(),
-        |registry| {
-            let before = registry
-                .repos
-                .get(&repo_prefix)
-                .cloned()
-                .unwrap_or_default();
-            let was_complete = registry.complete_repos.contains(&repo_prefix);
-            registry.register_union(&repo_prefix, shard_hashes.clone());
-            if registry.repos.get(&repo_prefix) != Some(&before) || !was_complete {
-                registry.generation += 1;
-            }
-        },
-    )
+    let mut partitions = HashMap::<String, Vec<String>>::new();
+    for hash in shard_hashes {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .push(hash);
+    }
+    for (partition, hashes) in partitions {
+        union_shard_root_partition(store, router, &repo_prefix, &partition, hashes).await?;
+    }
+    update_repo_record(store, router, |record| {
+        record.schema_version = REF_REGISTRY_RECORD_SCHEMA_VERSION;
+        record.complete = true;
+        // Shard partitions commit first. Advancing this generation makes a
+        // root-identity seal observe the complete union as one publication.
+        record.generation = record.generation.saturating_add(1);
+    })
     .await
-    .map(|registry| registry.generation)
-    .map_err(MetadataError::from)
+    .map(|record| record.generation)
 }
 
 /// Publish conservative workflow GC roots after immutable experiment
@@ -335,55 +808,107 @@ pub async fn union_register_workflow_roots(
     stage_hashes: Vec<String>,
     exp_ids: Vec<String>,
 ) -> Result<u64> {
-    let registry_path = router.ref_registry_path();
-    let repo_prefix = router.repo_prefix().to_owned();
-    crab_storage::cas::cas_update_default::<RefRegistry, _>(
-        store,
-        registry_path.as_ref(),
-        |registry| {
-            let schema_was_current = registry.schema_version == REF_REGISTRY_SCHEMA_VERSION;
-            let changed = registry.register_workflow_union(
-                &repo_prefix,
-                stage_hashes.clone(),
-                exp_ids.clone(),
-            );
-            if changed || !schema_was_current {
-                registry.generation += 1;
-            }
-        },
-    )
+    update_repo_record(store, router, |record| {
+        let before_stages = record.workflow_stage_hashes.clone();
+        let before_experiments = record.workflow_experiment_ids.clone();
+        record.schema_version = REF_REGISTRY_RECORD_SCHEMA_VERSION;
+        record.workflow_stage_hashes.extend(stage_hashes.clone());
+        record.workflow_experiment_ids.extend(exp_ids.clone());
+        normalize(&mut record.workflow_stage_hashes);
+        normalize(&mut record.workflow_experiment_ids);
+        if record.workflow_stage_hashes != before_stages
+            || record.workflow_experiment_ids != before_experiments
+        {
+            record.generation = record.generation.saturating_add(1);
+        }
+    })
     .await
-    .map(|registry| registry.generation)
-    .map_err(MetadataError::from)
+    .map(|record| record.generation)
 }
 
-/// Union repo shard entries from a bucket-wide manifest scan and mark coverage complete.
+/// Exactly rebuilds repo shard records and publishes complete bucket coverage.
 ///
-/// Repair cannot replace the registry wholesale: an ordinary push registers
-/// candidate shards before manifest CAS, so clearing entries after the scan
-/// could erase that concurrent writer's only GC protection. Extra roots are
-/// safe and compaction remains the owner of exact replacement.
+/// The caller must hold the exclusive bucket GC fence for the entire manifest
+/// scan and this commit. That boundary makes removal of stale roots safe.
 #[cfg(feature = "storage")]
 pub async fn repair_ref_registry_from_manifests(
     store: &Store,
     router: &StoreLayout<Store>,
     repos: HashMap<String, Vec<String>>,
 ) -> Result<()> {
-    let registry_path = router.ref_registry_path();
-    crab_storage::cas::cas_update_default::<RefRegistry, _>(
-        store,
-        registry_path.as_ref(),
-        |registry| {
-            for (repo, shards) in &repos {
-                registry.register_union(repo, shards.clone());
+    let mut expected_paths = HashSet::with_capacity(repos.len());
+    let mut expected_root_prefixes = HashSet::with_capacity(repos.len());
+    for (repo_prefix, shard_hashes) in repos {
+        let repo_router = StoreLayout::with_global_prefix(
+            store.clone(),
+            repo_prefix.clone(),
+            router.global_prefix().to_owned(),
+        );
+        let path = registry_record_path(&repo_router, &repo_prefix);
+        expected_paths.insert(path.clone());
+        expected_root_prefixes.insert(repo_shard_roots_prefix(&repo_router, &repo_prefix));
+        replace_repo_shard_roots(store, &repo_router, &repo_prefix, shard_hashes).await?;
+        update_repo_record(store, &repo_router, |record| {
+            record.schema_version = REF_REGISTRY_RECORD_SCHEMA_VERSION;
+            record.complete = true;
+            record.generation = record.generation.saturating_add(1);
+        })
+        .await?;
+    }
+
+    for meta in store.list_prefix(&registry_records_prefix(router)).await? {
+        if !expected_paths.contains(&meta.location) {
+            let (body, _) = store.get_with_etag(&meta.location).await?;
+            let record: RepoRefRecord =
+                serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+                    path: meta.location.to_string(),
+                    reason: format!("invalid JSON: {error}"),
+                })?;
+            validate_record(&record, &meta.location)?;
+            let prefix = repo_shard_roots_prefix(router, &record.repo_prefix);
+            for root in store.list_prefix(&prefix).await? {
+                store.delete(&root.location).await?;
             }
-            registry.mark_coverage_complete();
-            registry.generation += 1;
-        },
-    )
-    .await
-    .map(|_| ())
-    .map_err(MetadataError::from)
+            store.delete(&meta.location).await?;
+        }
+    }
+    let mut roots = store
+        .inner()
+        .list(Some(&registry_shard_roots_prefix(router)));
+    while let Some(meta) = roots
+        .try_next()
+        .await
+        .map_err(|source| MetadataError::Storage {
+            source: crab_storage::StorageError::ObjectStore { source },
+        })?
+    {
+        if !expected_root_prefixes
+            .iter()
+            .any(|prefix| meta.location.as_ref().starts_with(prefix.as_ref()))
+        {
+            store.delete(&meta.location).await?;
+        }
+    }
+    let coverage = RegistryCoverage {
+        schema_version: REF_REGISTRY_RECORD_SCHEMA_VERSION,
+        complete: true,
+    };
+    let path = registry_coverage_path(router);
+    let bytes = bytes::Bytes::from(serde_json::to_vec(&coverage).map_err(|error| {
+        MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: format!("cannot encode registry coverage: {error}"),
+        }
+    })?);
+    match store.create_strict(&path, bytes.clone()).await {
+        Ok(()) => Ok(()),
+        Err(crab_storage::StorageError::StateConflict { .. }) => {
+            let (_, etag) = store.get_with_etag(&path).await?;
+            store.update(&path, bytes, etag).await?;
+            Ok(())
+        }
+        Err(error) => Err(MetadataError::from(error)),
+    }
 }
 
 /// Registers an active-active coordinator in the bucket ref-registry.
@@ -393,21 +918,55 @@ pub async fn register_active_active_coordinator_for_repo(
     router: &StoreLayout<Store>,
     registration: ActiveActiveCoordinatorRegistration,
 ) -> Result<()> {
-    let registry_path = router.ref_registry_path();
-    let repo_prefix = router.repo_prefix().to_owned();
-    crab_storage::cas::cas_update_default::<RefRegistry, _>(
-        store,
-        registry_path.as_ref(),
-        |registry| {
-            if registry.active_active_coordinators.get(&repo_prefix) != Some(&registration) {
-                registry.register_active_active_coordinator(&repo_prefix, registration.clone());
-                registry.generation += 1;
-            }
-        },
-    )
+    update_repo_record(store, router, |record| {
+        if record.active_active_coordinator.as_ref() != Some(&registration) {
+            record.active_active_coordinator = Some(registration.clone());
+            record.generation = record.generation.saturating_add(1);
+        }
+    })
     .await
     .map(|_| ())
-    .map_err(MetadataError::from)
+}
+
+/// Removes one repository's partitioned registry record.
+#[cfg(feature = "storage")]
+pub async fn deregister_repo(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+) -> Result<bool> {
+    let roots = repo_shard_roots_prefix(router, repo_prefix);
+    for root in store.list_prefix(&roots).await? {
+        store.delete(&root.location).await?;
+    }
+    let path = registry_record_path(router, repo_prefix);
+    match store.delete(&path).await {
+        Ok(()) => Ok(true),
+        Err(crab_storage::StorageError::NotFound { .. }) => Ok(false),
+        Err(error) => Err(MetadataError::from(error)),
+    }
+}
+
+/// Replaces workflow roots for one repository after exact reconciliation.
+#[cfg(feature = "storage")]
+pub async fn register_workflow_roots_exact(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    mut stage_hashes: Vec<String>,
+    mut exp_ids: Vec<String>,
+) -> Result<u64> {
+    normalize(&mut stage_hashes);
+    normalize(&mut exp_ids);
+    update_repo_record(store, router, |record| {
+        if record.workflow_stage_hashes != stage_hashes || record.workflow_experiment_ids != exp_ids
+        {
+            record.workflow_stage_hashes.clone_from(&stage_hashes);
+            record.workflow_experiment_ids.clone_from(&exp_ids);
+            record.generation = record.generation.saturating_add(1);
+        }
+    })
+    .await
+    .map(|record| record.generation)
 }
 
 #[cfg(test)]
@@ -742,11 +1301,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (body, _) = store
-            .get_with_etag(&router.ref_registry_path())
-            .await
-            .unwrap();
-        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
+        let registry = load_ref_registry(&store, &router).await.unwrap();
         assert_eq!(registry.generation, 1);
         assert_eq!(
             registry.active_active_coordinators["org/models"],
@@ -783,11 +1338,7 @@ mod tests {
         .unwrap();
         assert!(second > first);
 
-        let (body, _) = store
-            .get_with_etag(&router.ref_registry_path())
-            .await
-            .unwrap();
-        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
+        let registry = load_ref_registry(&store, &router).await.unwrap();
         assert_eq!(
             registry.workflow_stage_hashes["org/models"],
             vec!["stage-a", "stage-b", "stage-c"]
@@ -800,7 +1351,54 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
-    async fn manifest_repair_preserves_concurrent_pre_cas_roots() {
+    async fn targeted_shard_root_status_reads_only_the_repo_partition() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        let generation = union_register_repo_shards(
+            &store,
+            &router,
+            vec!["root-a".to_owned(), "root-b".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            load_repo_shard_root_status(&store, &router, "org/models", "root-b")
+                .await
+                .unwrap(),
+            Some(RepoShardRootStatus {
+                generation,
+                complete: true,
+                rooted: true,
+            })
+        );
+        assert_eq!(
+            load_repo_shard_root_status(&store, &router, "org/models", "missing")
+                .await
+                .unwrap(),
+            Some(RepoShardRootStatus {
+                generation,
+                complete: true,
+                rooted: false,
+            })
+        );
+        assert_eq!(
+            load_repo_shard_root_status(&store, &router, "org/absent", "root-b")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn manifest_repair_replaces_stale_roots_exactly() {
         use std::sync::Arc;
 
         use object_store::ObjectStore;
@@ -821,16 +1419,56 @@ mod tests {
         .await
         .unwrap();
 
-        let (body, _) = store
-            .get_with_etag(&router.ref_registry_path())
+        let registry = load_ref_registry(&store, &router).await.unwrap();
+        assert_eq!(registry.repos["org/models"], vec!["base".to_owned()]);
+        assert!(registry.is_complete_for_destructive_gc());
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn repo_updates_do_not_rewrite_unrelated_registry_state() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        for index in 0..256 {
+            let router = StoreLayout::new(store.clone(), format!("org/repo-{index:04}"));
+            union_register_repo_shards(&store, &router, vec![format!("shard-{index:04}")])
+                .await
+                .unwrap();
+        }
+        let unrelated = StoreLayout::new(store.clone(), "org/repo-0000".to_owned());
+        let unrelated_path = registry_record_path(&unrelated, unrelated.repo_prefix());
+        let (unrelated_before, _) = store.get_with_etag(&unrelated_path).await.unwrap();
+        let target = StoreLayout::new(store.clone(), "org/target".to_owned());
+        union_register_repo_shards(&store, &target, vec!["first".to_owned()])
             .await
             .unwrap();
-        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            registry.repos["org/models"],
-            vec!["base".to_owned(), "candidate".to_owned()]
-        );
-        assert!(registry.is_complete_for_destructive_gc());
+        let path = registry_record_path(&target, target.repo_prefix());
+        let (before, _) = store.get_with_etag(&path).await.unwrap();
+
+        union_register_repo_shards(&store, &target, vec!["second".to_owned()])
+            .await
+            .unwrap();
+        let (after, _) = store.get_with_etag(&path).await.unwrap();
+        let (unrelated_after, _) = store.get_with_etag(&unrelated_path).await.unwrap();
+        let root_objects = store
+            .list_prefix(&repo_shard_roots_prefix(&target, target.repo_prefix()))
+            .await
+            .unwrap();
+
+        assert!(before.len() < 1024);
+        assert!(after.len() < 1024);
+        assert_eq!(unrelated_before, unrelated_after);
+        assert_eq!(root_objects.len(), 2);
+        assert!(root_objects.iter().all(|object| object.size < 1024));
+        assert!(matches!(
+            store.get_with_etag(&target.ref_registry_path()).await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
     }
 
     #[test]

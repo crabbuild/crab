@@ -1,0 +1,100 @@
+name: GC qualification
+
+on:
+  pull_request:
+    paths:
+      - "crab/src/cmd/gc/**"
+      - "crab/src/maintenance.rs"
+      - "crates/crab-coordination/**"
+      - "crates/crab-metadata/src/ref_registry.rs"
+      - "crab/scripts/e2e/gc_qualification.py"
+      - "crab/scripts/e2e/run_gc_rustfs_qualification.py"
+      - "crab/scripts/e2e/validate_gc_evidence.py"
+      - ".github/workflows/gc-qualification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rustfs:
+    name: RustFS race, crash, and scale gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      CRAB_GC_QUALIFICATION_BUCKET: crab
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev pipx pkg-config
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> ${{ runner.temp }}/crab-gc-qualification-target"
+
+      - name: Build crash-qualified Crab
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-gc-qualification-target
+        run: cargo build -p crab --features crash-injection --release --locked
+
+      - name: Start isolated RustFS
+        run: |
+          docker run -d --name gc-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            rustfs/rustfs:latest /data
+          for attempt in $(seq 1 60); do
+            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs gc-rustfs
+              exit 1
+            fi
+            sleep 1
+          done
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket --bucket crab
+
+      - name: Run GC qualification
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-gc-qualification-target
+          CRAB_GC_QUALIFICATION_CRAB_BIN: ${{ runner.temp }}/crab-gc-qualification-target/release/crab
+        run: |
+          python3 crab/scripts/e2e/gc_qualification.py \
+            --provider rustfs \
+            --work-dir "$RUNNER_TEMP/gc-evidence" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --cardinality 10000 \
+            --timeout 1800 \
+            --command python3 "$GITHUB_WORKSPACE/crab/scripts/e2e/run_gc_rustfs_qualification.py"
+          python3 crab/scripts/e2e/validate_gc_evidence.py \
+            "$RUNNER_TEMP/gc-evidence" \
+            --require-pass
+
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc-rustfs-qualification
+          path: ${{ runner.temp }}/gc-evidence
+          if-no-files-found: error
+
+      - name: Capture RustFS logs
+        if: failure()
+        run: docker logs gc-rustfs

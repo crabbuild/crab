@@ -35,6 +35,11 @@ Bucket administrators can rebuild the shared GC root registry with
 manifests, validates each current shard index, CAS-replaces the discovered
 entries, and only then marks bucket coverage complete. Destructive bucket GC
 fails closed while the registry schema or coverage marker is incomplete.
+The registry stores a small record per repository and spreads each repo's
+shard roots across deterministic four-hex CAS partitions. Push contention and
+write size therefore do not grow with the number of repositories or require a
+whole-repository shard-set rewrite. This is a hard cutover: stop older writers,
+upgrade every writer, then repair the registry before destructive bucket GC.
 
 Bucket-global xorb and shard listing defaults to `adaptive`. Small namespaces
 complete through one recursive stream per kind. Large namespaces cross a
@@ -51,14 +56,27 @@ marks under the run journal. Mark membership is loaded one hash partition at a
 time, and an interrupted planning phase is replayed from its original snapshot
 before any delete is allowed. Referenced shard closures are authoritative: a
 missing or corrupt closure fails closed instead of downloading an unverified
-shard body. File-index reconciliation is committed before the run advances to
-object deletion and is retried idempotently after a crash.
+shard body. Closure hashes are read from bounded immutable segments; orphaned
+segments from an interrupted publication are collected after the grace period.
+File-index reconciliation is committed before the run advances to object
+deletion and is retried idempotently after a crash.
 
-Destructive repository runs use the same durable plan, but walk current,
-historical, journal, workflow, and pack roots directly into key-partitioned
-marks. Pack-list segments and delete outcomes are consumed in bounded batches;
-store-only deletion does not build a process-wide deleted-key list. Preview
-and repair commands intentionally retain their collection-oriented behavior.
+Root walking and LIST run without blocking writers. Crab then takes a short
+exclusive fence to reconcile the exact root snapshot and a separate short
+fence for each 512-object delete batch or file-index partition. If a writer
+crosses between batches, its fence epoch invalidates the plan before the next
+delete. Each resumed candidate is HEADed under the fence and must still match
+its planned ETag/version and size; a recreated or newly fresh key is retained.
+After success, candidate batches, outcomes, and mark chunks are retired and
+only the small completed-run state remains.
+
+Repository runs use the same durable plan, but walk current, historical,
+journal, workflow, and pack roots directly into key-partitioned marks.
+Pack-list segments and delete outcomes are consumed in bounded batches;
+store-only deletion does not build a process-wide deleted-key list. Bucket
+previews use a non-executable journal and remove its temporary batches and
+marks after reporting. Repair commands intentionally retain their
+collection-oriented behavior.
 
 ## How It Works
 

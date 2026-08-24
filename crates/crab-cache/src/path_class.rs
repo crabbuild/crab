@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::CacheKey;
 
 /// Schema identifier for the cache-service route taxonomy.
-pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v2";
+pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v3";
 
 /// Whether a request path refers to an immutable (content-addressed) or
 /// mutable (refs, HEAD, manifests, config, locks) object.
@@ -78,7 +78,7 @@ pub fn cache_route_contract() -> CacheRouteContract {
             ("control", "{repo}/manifests/*"),
             ("control", "{repo}/pack-list"),
             ("control", "{repo}/shard-list"),
-            ("control", ".crab/ref-registry"),
+            ("control", ".crab/ref-registry/*"),
             ("metadata", "{repo}/file_index_db/manifest/current"),
             ("metadata", ".crab/chunk_index_db/manifest/current"),
         ]),
@@ -142,6 +142,9 @@ pub fn parse_mutable_repo_path(path: &str) -> Option<&str> {
     let path = normalize_transport_path(path).trim_matches('/');
     if parse_cache_object_path(path).is_some() {
         return None;
+    }
+    if path == ".crab/ref-registry" || path.starts_with(".crab/ref-registry/") {
+        return Some(".crab");
     }
 
     for marker in [
@@ -552,6 +555,8 @@ mod tests {
             ("org/team/repo/pack-list", "org/team/repo"),
             ("org/team/repo/shard-list", "org/team/repo"),
             (".crab/ref-registry", ".crab"),
+            (".crab/ref-registry/records/ab/repo.json", ".crab"),
+            (".crab/ref-registry/shard-roots/repo/0123.json", ".crab"),
         ] {
             assert_eq!(parse_mutable_repo_path(path), Some(expected), "{path}");
         }

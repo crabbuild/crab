@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
@@ -30,7 +31,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::cmd::gc::marks::{DurableMarkReader, DurableMarkWriter};
-use crate::coordination::cas::cas_update_default;
 use crate::core::config::GcListProfile;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::Store;
@@ -149,7 +149,7 @@ pub async fn run_bucket_gc(
         });
     }
     if args.dry_run {
-        let registry = load_ref_registry(store, args.force).await?;
+        let registry = load_ref_registry_summary(store, args.force).await?;
         return run_bucket_gc_under_maintenance(
             args,
             store,
@@ -165,30 +165,18 @@ pub async fn run_bucket_gc(
         return Ok(BucketGcOutcome::default());
     }
 
-    // The registry and all reachability listings must be observed while the
-    // exclusive bucket fence is held. A per-delete-batch fence would allow a
-    // writer to publish a new registry root between planning and deletion.
-    let sweep = crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, cancel).await?;
-    let operation = async {
-        let registry = load_ref_registry(store, args.force).await?;
-        ensure_registry_complete_for_destructive_gc(&registry)?;
-        ensure_active_active_bucket_gc_proof(&registry, coordinator_protected_repos)?;
-        run_bucket_gc_under_maintenance(
-            args,
-            store,
-            coordinator_protected_keys,
-            &registry,
-            cancel,
-            Some(&sweep),
-        )
-        .await
-    }
-    .await;
-    let release = sweep.release().await;
-    match (operation, release) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
+    let registry = load_ref_registry_summary(store, args.force).await?;
+    ensure_registry_complete_for_destructive_gc(&registry)?;
+    ensure_active_active_bucket_gc_proof(&registry, coordinator_protected_repos)?;
+    run_bucket_gc_under_maintenance(
+        args,
+        store,
+        coordinator_protected_keys,
+        &registry,
+        cancel,
+        None,
+    )
+    .await
 }
 
 /// Run bucket GC while deriving active-active protection after the sweep fence
@@ -208,7 +196,7 @@ pub async fn run_bucket_gc_with_config(
         });
     }
     if args.dry_run {
-        let registry = load_ref_registry(store, args.force).await?;
+        let registry = load_ref_registry_summary(store, args.force).await?;
         let protection = crate::replication::active_active_bucket_gc_protection(
             config,
             &registry,
@@ -230,33 +218,24 @@ pub async fn run_bucket_gc_with_config(
         return Ok(BucketGcOutcome::default());
     }
 
-    let sweep = crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, cancel).await?;
-    let operation = async {
-        let registry = load_ref_registry(store, args.force).await?;
-        ensure_registry_complete_for_destructive_gc(&registry)?;
-        let protection = crate::replication::active_active_bucket_gc_protection(
-            config,
-            &registry,
-            current_repo_prefix,
-        )
-        .await?;
-        ensure_active_active_bucket_gc_proof(&registry, &protection.protected_repos)?;
-        run_bucket_gc_under_maintenance(
-            args,
-            store,
-            &protection.protected_keys,
-            &registry,
-            cancel,
-            Some(&sweep),
-        )
-        .await
-    }
-    .await;
-    let release = sweep.release().await;
-    match (operation, release) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
+    let registry = load_ref_registry_summary(store, args.force).await?;
+    ensure_registry_complete_for_destructive_gc(&registry)?;
+    let protection = crate::replication::active_active_bucket_gc_protection(
+        config,
+        &registry,
+        current_repo_prefix,
+    )
+    .await?;
+    ensure_active_active_bucket_gc_proof(&registry, &protection.protected_repos)?;
+    run_bucket_gc_under_maintenance(
+        args,
+        store,
+        &protection.protected_keys,
+        &registry,
+        cancel,
+        None,
+    )
+    .await
 }
 
 fn confirm_force(args: &BucketGcArgs) -> Result<bool> {
@@ -315,7 +294,7 @@ pub async fn repair_bucket_closures_with_config(
 ) -> Result<u64> {
     let sweep = crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, cancel).await?;
     let operation = async {
-        let registry = load_ref_registry(store, false).await?;
+        let registry = load_ref_registry_summary(store, false).await?;
         ensure_registry_complete_for_destructive_gc(&registry)?;
         let protection = crate::replication::active_active_bucket_gc_protection(
             config,
@@ -392,62 +371,24 @@ async fn repair_one_closure(
     let closure_body = match store.get_with_etag(&closure_path).await {
         Ok((body, _)) => body,
         Err(CrabError::NotFound { .. }) => {
-            if shard_meta.size > SHARD_REPAIR_BUDGET_BYTES {
-                return Err(CrabError::Configuration {
-                    key: "gc.repair_closures.memory_budget".to_owned(),
-                    origin: format!(
-                        "shard {hash_hex} is {} bytes, above the {}-byte repair budget; split or compact the shard before backfill",
-                        shard_meta.size, SHARD_REPAIR_BUDGET_BYTES
-                    ),
-                });
-            }
-            let units = shard_meta
-                .size
-                .saturating_add(SHARD_REPAIR_UNIT_BYTES - 1)
-                .saturating_div(SHARD_REPAIR_UNIT_BYTES)
-                .max(1)
-                .min(SHARD_REPAIR_BUDGET_BYTES / SHARD_REPAIR_UNIT_BYTES);
-            let units = u32::try_from(units).map_err(|_| {
-                CrabError::Internal(
-                    "shard closure body budget exceeds semaphore capacity".to_owned(),
-                )
-            })?;
-            let _budget = body_budget
-                .clone()
-                .acquire_many_owned(units)
-                .await
-                .map_err(|_| CrabError::Cancelled)?;
-            check_cancelled(cancel)?;
-            let body = store
-                .inner()
-                .get(&shard_path)
-                .await
-                .map_err(CrabError::Storage)?
-                .bytes()
-                .await
-                .map_err(CrabError::Storage)?;
-            let closure = super::closure::build(&hash, body, shard_path.as_ref())?;
-            if closure.content_size != shard_meta.size {
-                return Err(CrabError::CorruptObject {
-                    path: shard_path.to_string(),
-                    reason: format!(
-                        "shard body size {} does not match object metadata {}",
-                        closure.content_size, shard_meta.size
-                    ),
-                });
-            }
-            let encoded =
-                serde_json::to_vec(&closure).map_err(|error| CrabError::CorruptObject {
-                    path: closure_path.to_string(),
-                    reason: format!("failed to encode shard closure: {error}"),
-                })?;
-            super::closure::publish_encoded(store, &closure_path, bytes::Bytes::from(encoded))
-                .await?;
+            rebuild_closure(store, &hash, &shard_path, &shard_meta, body_budget, cancel).await?;
             return Ok(true);
         }
         Err(error) => return Err(error),
     };
-    let closure = super::closure::decode(&closure_body, &closure_path, &hash)?;
+    let schema = serde_json::from_slice::<serde_json::Value>(&closure_body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+        });
+    if schema == Some(1) {
+        store.delete(&closure_path).await?;
+        rebuild_closure(store, &hash, &shard_path, &shard_meta, body_budget, cancel).await?;
+        return Ok(true);
+    }
+    let closure = super::closure::read_manifest(store, GLOBAL_PREFIX, &hash).await?;
     if closure.content_size != shard_meta.size {
         return Err(CrabError::CorruptObject {
             path: closure_path.to_string(),
@@ -458,6 +399,61 @@ async fn repair_one_closure(
         });
     }
     Ok(false)
+}
+
+async fn rebuild_closure(
+    store: &Store,
+    hash: &MerkleHash,
+    shard_path: &ObjectPath,
+    shard_meta: &object_store::ObjectMeta,
+    body_budget: &Arc<Semaphore>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if shard_meta.size > SHARD_REPAIR_BUDGET_BYTES {
+        return Err(CrabError::Configuration {
+            key: "gc.repair_closures.memory_budget".to_owned(),
+            origin: format!(
+                "shard {} is {} bytes, above the {}-byte repair budget; split or compact the shard before backfill",
+                hash.hex(),
+                shard_meta.size,
+                SHARD_REPAIR_BUDGET_BYTES
+            ),
+        });
+    }
+    let units = shard_meta
+        .size
+        .saturating_add(SHARD_REPAIR_UNIT_BYTES - 1)
+        .saturating_div(SHARD_REPAIR_UNIT_BYTES)
+        .max(1)
+        .min(SHARD_REPAIR_BUDGET_BYTES / SHARD_REPAIR_UNIT_BYTES);
+    let units = u32::try_from(units).map_err(|_| {
+        CrabError::Internal("shard closure body budget exceeds semaphore capacity".to_owned())
+    })?;
+    let _budget = body_budget
+        .clone()
+        .acquire_many_owned(units)
+        .await
+        .map_err(|_| CrabError::Cancelled)?;
+    check_cancelled(cancel)?;
+    let body = store
+        .inner()
+        .get(shard_path)
+        .await
+        .map_err(CrabError::Storage)?
+        .bytes()
+        .await
+        .map_err(CrabError::Storage)?;
+    if body.len() as u64 != shard_meta.size {
+        return Err(CrabError::CorruptObject {
+            path: shard_path.to_string(),
+            reason: format!(
+                "shard body size {} does not match object metadata {}",
+                body.len(),
+                shard_meta.size
+            ),
+        });
+    }
+    super::closure::publish(store, GLOBAL_PREFIX, hash, body, shard_path.as_ref()).await
 }
 
 async fn run_bucket_gc_under_maintenance(
@@ -512,273 +508,31 @@ async fn run_bucket_gc_under_maintenance(
         .await;
     }
 
-    let repo_shards = repository_referenced_shards(store, registry, args.list_concurrency).await?;
-    let root_identity = bucket_root_identity(registry, &repo_shards, coordinator_protected_keys);
-    let resume_phase = if let Some(run_id) = args.resume_run_id.as_deref() {
-        let journal = super::journal::GcRunJournal::resume(
-            store.clone(),
-            GLOBAL_PREFIX,
-            run_id,
-            "bucket",
-            GLOBAL_PREFIX,
-        )
-        .await?;
-        journal.ensure_policy(args.grace_period, args.force)?;
-        journal.ensure_root_identity(&root_identity)?;
-        Some(journal.state().phase)
-    } else {
-        None
-    };
-
-    let effective_grace = args.grace_period.max(MIN_GRACE_PERIOD);
-    let now = match resume_phase {
-        Some(super::journal::GcRunPhase::Planning) => {
-            let run_id = args.resume_run_id.as_deref().ok_or_else(|| {
-                CrabError::Internal("bucket GC planning resume lost its run id".to_owned())
-            })?;
-            super::journal::GcRunJournal::resume(
-                store.clone(),
-                GLOBAL_PREFIX,
-                run_id,
-                "bucket",
-                GLOBAL_PREFIX,
-            )
-            .await?
-            .snapshot_at()?
-        }
-        _ => SystemTime::now(),
-    };
-    let cutoff = now - effective_grace;
-
-    let global_list_permits = Arc::new(Semaphore::new(args.list_concurrency.max(1)));
-    // Keep global listings disjoint in memory. Closure candidates cannot be
-    // classified until the shard listing has established the deletion set,
-    // so listing both namespaces concurrently only increases peak RAM.
-    let shard_listing = list_global_objects(
+    let roots = bucket_root_snapshot_streaming(
         store,
-        "shards",
-        args.list_profile,
+        registry,
         args.list_concurrency,
-        Arc::clone(&global_list_permits),
-        cancel,
-    )
-    .await?;
-    outcome.list_requests = shard_listing.requests;
-    outcome.list_parallelism = args.list_concurrency.max(1).min(shard_listing.parallelism);
-    debug!(
-        profile = args.list_profile.as_str(),
-        shard_partitioned = shard_listing.partitioned,
-        logical_list_streams = outcome.list_requests,
-        "selected bucket-global listing strategy"
-    );
-    let shard_objects = shard_listing.objects;
-    let existing_shards = shard_objects
-        .iter()
-        .map(|object| extract_hash_from_key(&object.location))
-        .collect::<HashSet<_>>();
-    let referenced_shards = repo_shards
-        .values()
-        .flat_map(|shards| shards.iter().cloned())
-        .collect::<HashSet<_>>();
-    info!(
-        repos = registry.repos.len(),
-        referenced_shards = referenced_shards.len(),
-        "loaded ref-registry"
-    );
-
-    // Step 2: List shards, find unreferenced candidates.
-    check_cancelled(cancel)?;
-    let mut missing_referenced_shards = referenced_shards
-        .difference(&existing_shards)
-        .cloned()
-        .collect::<Vec<_>>();
-    missing_referenced_shards.sort();
-    if let Some(missing) = missing_referenced_shards.first() {
-        return Err(CrabError::CorruptObject {
-            path: canonical_global_content_path("shards", &missing).to_string(),
-            reason: format!(
-                "ref-registry references {} missing shard object(s)",
-                missing_referenced_shards.len()
-            ),
-        });
-    }
-    let ShardGcPartition {
-        unreferenced: unreferenced_shards,
-        referenced: referenced_shard_objects,
-        protected_count: protected_shards,
-    } = partition_shards_for_gc(
-        shard_objects,
-        &referenced_shards,
         coordinator_protected_keys,
-    );
-
-    let shard_candidates = filter_by_grace(unreferenced_shards, cutoff, args.force);
-    debug!(
-        shard_candidates = shard_candidates.len(),
-        protected_shards, "unreferenced shards eligible for deletion"
-    );
-
-    let deletable_shards = shard_candidates
-        .iter()
-        .map(|object| extract_hash_from_key(&object.location))
-        .collect::<HashSet<_>>();
-    check_cancelled(cancel)?;
-    let closure_listing = list_closure_objects(
-        store,
-        args.list_concurrency,
-        Arc::clone(&global_list_permits),
-        cancel,
     )
     .await?;
-    outcome.list_requests = outcome
-        .list_requests
-        .saturating_add(closure_listing.requests);
-    outcome.list_parallelism = outcome.list_parallelism.max(
-        args.list_concurrency
-            .max(1)
-            .min(closure_listing.parallelism),
-    );
-    let closure_candidates = filter_by_grace(
-        partition_closures_for_gc(
-            closure_listing.objects,
-            &referenced_shards,
-            &deletable_shards,
-            &existing_shards,
-            coordinator_protected_keys,
-        ),
-        cutoff,
-        args.force,
-    );
-
-    // Step 3: Download each referenced shard once, in parallel, and
-    // extract both xorb hashes (for step 4) and file hashes (for step 5)
-    // in a single pass so the shard objects are not downloaded twice.
-    let ShardHashes {
-        xorb_hashes: referenced_xorbs,
-        file_hashes_by_shard,
-    } = extract_hashes_from_shards(
+    return run_bucket_gc_streaming(
+        args,
         store,
-        &referenced_shard_objects,
-        args.list_concurrency,
-        Arc::new(Semaphore::new(CLOSURE_READ_PARALLELISM)),
-    )
-    .await?;
-    let referenced_file_hashes = file_hashes_by_shard
-        .values()
-        .map(HashSet::len)
-        .sum::<usize>();
-    check_cancelled(cancel)?;
-    info!(
-        referenced_xorbs = referenced_xorbs.len(),
-        referenced_file_hashes, "computed referenced xorbs + file-index entries from shards"
-    );
-
-    // Step 4: List xorbs, find unreferenced candidates.
-    check_cancelled(cancel)?;
-    let xorb_listing = list_global_objects(
-        store,
-        "xorbs",
-        args.list_profile,
-        args.list_concurrency,
-        Arc::clone(&global_list_permits),
-        cancel,
-    )
-    .await?;
-    outcome.list_requests = outcome.list_requests.saturating_add(xorb_listing.requests);
-    outcome.list_parallelism = outcome
-        .list_parallelism
-        .max(args.list_concurrency.max(1).min(xorb_listing.parallelism));
-    let xorb_partition = partition_xorbs_for_gc(
-        xorb_listing.objects,
-        &referenced_xorbs,
         coordinator_protected_keys,
-    );
-    let protected_xorbs = xorb_partition.protected_count;
-    let unreferenced_xorbs = xorb_partition.unreferenced;
-    let xorb_candidates = filter_by_grace(unreferenced_xorbs, cutoff, args.force);
-    debug!(
-        xorb_candidates = xorb_candidates.len(),
-        protected_xorbs, "unreferenced xorbs eligible for deletion"
-    );
-
-    let referenced_file_hashes = file_hashes_by_shard
-        .values()
-        .flat_map(|files| files.iter().copied())
-        .collect::<HashSet<_>>();
-    let repo_prefixes = repo_shards.keys().cloned().collect::<Vec<_>>();
-    outcome.file_index_deleted = gc_file_indexes(
-        store,
-        &repo_prefixes,
-        &referenced_file_hashes,
-        args.dry_run,
-        args.list_concurrency,
+        registry,
+        roots.repo_prefixes,
+        roots.root_identity,
+        None,
+        cancel,
+        &mut outcome,
+        sweep_lease,
     )
-    .await?;
-
-    // Step 6: Delete or report.
-    check_cancelled(cancel)?;
-    if args.dry_run {
-        delete_or_report(
-            store,
-            "shards",
-            &shard_candidates,
-            true,
-            args.delete_concurrency,
-            &mut outcome,
-        )
-        .await?;
-        delete_or_report(
-            store,
-            "xorbs",
-            &xorb_candidates,
-            true,
-            args.delete_concurrency,
-            &mut outcome,
-        )
-        .await?;
-        delete_or_report(
-            store,
-            "closures",
-            &closure_candidates,
-            true,
-            args.delete_concurrency,
-            &mut outcome,
-        )
-        .await?;
-    } else {
-        let candidates = shard_candidates
-            .into_iter()
-            .chain(xorb_candidates)
-            .chain(closure_candidates)
-            .map(|object| super::ObjectMeta {
-                key: object.location,
-                size: object.size,
-                last_modified: object.last_modified,
-                storage_class: None,
-                transitioned_at: None,
-            })
-            .collect();
-        run_bucket_object_gc(
-            args,
-            store,
-            candidates,
-            cancel,
-            &mut outcome,
-            &root_identity,
-            now,
-            sweep_lease,
-        )
-        .await?;
-    }
-
-    outcome.log();
-    Ok(outcome)
+    .await;
 }
 
-/// Destructive bucket planning path. It creates the journal before any global
+/// Bounded bucket planning path. It creates the journal before any global
 /// listing and feeds candidates into bounded batches as each object arrives;
-/// process death during planning therefore leaves a durable, non-executable
-/// run that can be replayed after root validation.
+/// destructive plans can therefore be replayed after root validation.
 #[expect(
     clippy::too_many_arguments,
     reason = "bucket planning keeps safety inputs explicit"
@@ -836,7 +590,11 @@ async fn run_bucket_gc_streaming(
             let mut journal = super::journal::GcRunJournal::start(
                 store.clone(),
                 GLOBAL_PREFIX,
-                "bucket",
+                if args.dry_run {
+                    "bucket-preview"
+                } else {
+                    "bucket"
+                },
                 GLOBAL_PREFIX,
                 snapshot_at,
                 args.grace_period,
@@ -875,8 +633,15 @@ async fn run_bucket_gc_streaming(
             "referenced-files",
             4,
         );
-        outcome.file_index_deleted =
-            gc_file_indexes_partitioned(store, &repo_prefixes, &mut file_reader, false).await?;
+        outcome.file_index_deleted = gc_file_indexes_partitioned(
+            store,
+            &repo_prefixes,
+            &mut file_reader,
+            false,
+            Some(&mut journal),
+            cancel,
+        )
+        .await?;
         journal.mark_file_index_complete().await?;
     }
     if resume_phase == Some(super::journal::GcRunPhase::Deleting) {
@@ -941,6 +706,7 @@ async fn run_bucket_gc_streaming(
     }
 
     let mut closure_planner = ClosureStreamingPlanner::new(
+        store,
         DurableMarkReader::new_keys(store.clone(), journal.marks_prefix(), "referenced-shards"),
         DurableMarkReader::new(store.clone(), journal.marks_prefix(), "deletable-shards"),
         DurableMarkReader::new(store.clone(), journal.marks_prefix(), "existing-shards"),
@@ -960,6 +726,34 @@ async fn run_bucket_gc_streaming(
     outcome.list_parallelism = outcome
         .list_parallelism
         .max(closure_stats.parallelism.max(1));
+
+    let mut closure_segment_planner = ClosureSegmentStreamingPlanner::new(
+        DurableMarkReader::new_keys(
+            store.clone(),
+            journal.marks_prefix(),
+            "live-closure-segments",
+        ),
+        coordinator_protected_keys,
+        cutoff,
+        args.force,
+        &mut journal,
+    );
+    let segment_stats = scan_closure_segment_objects(
+        store,
+        Arc::clone(&permits),
+        cancel,
+        &mut closure_segment_planner,
+    )
+    .await?;
+    closure_segment_planner.finish().await?;
+    debug!(
+        objects = segment_stats.objects,
+        "streamed bucket closure segment namespace"
+    );
+    outcome.list_requests = outcome.list_requests.saturating_add(segment_stats.requests);
+    outcome.list_parallelism = outcome
+        .list_parallelism
+        .max(segment_stats.parallelism.max(1));
 
     let mut xorb_planner = XorbStreamingPlanner::new(
         DurableMarkReader::new(store.clone(), journal.marks_prefix(), "referenced-xorbs"),
@@ -987,7 +781,71 @@ async fn run_bucket_gc_streaming(
     outcome.list_requests = outcome.list_requests.saturating_add(xorb_stats.requests);
     outcome.list_parallelism = outcome.list_parallelism.max(xorb_stats.parallelism.max(1));
 
+    if args.dry_run {
+        let preview = async {
+            let current_roots = bucket_root_snapshot_streaming(
+                store,
+                registry,
+                args.list_concurrency,
+                coordinator_protected_keys,
+            )
+            .await?;
+            journal.ensure_root_identity(&current_roots.root_identity)?;
+            let mut file_reader = DurableMarkReader::new_hash_width(
+                store.clone(),
+                journal.marks_prefix(),
+                "referenced-files",
+                4,
+            );
+            outcome.file_index_deleted = gc_file_indexes_partitioned(
+                store,
+                &repo_prefixes,
+                &mut file_reader,
+                true,
+                None,
+                cancel,
+            )
+            .await?;
+            for batch in 0..journal.state().planned_batches {
+                for object in journal.planned_batch(batch).await? {
+                    match object.key.split('/').nth(1) {
+                        Some("shards") => outcome.shards_deleted += 1,
+                        Some("xorbs") => outcome.xorbs_deleted += 1,
+                        _ => {}
+                    }
+                    outcome.bytes_reclaimed = outcome
+                        .bytes_reclaimed
+                        .checked_add(object.size)
+                        .ok_or_else(|| {
+                            CrabError::Internal("bucket GC preview byte count overflow".to_owned())
+                        })?;
+                    info!(key = %object.key, size = object.size, "would delete (dry-run)");
+                }
+            }
+            Ok::<(), CrabError>(())
+        }
+        .await;
+        let cleanup = journal.discard_preview().await;
+        match (preview, cleanup) {
+            (Ok(()), Ok(())) => {
+                outcome.log();
+                return Ok(outcome.clone());
+            }
+            (Err(error), _) | (Ok(()), Err(error)) => return Err(error),
+        }
+    }
+
     journal.finish_plan().await?;
+    if sweep_lease.is_none() {
+        seal_bucket_journal(
+            args,
+            store,
+            coordinator_protected_keys,
+            &mut journal,
+            cancel,
+        )
+        .await?;
+    }
     if !journal.file_index_complete() {
         let mut file_reader = DurableMarkReader::new_hash_width(
             store.clone(),
@@ -995,8 +853,15 @@ async fn run_bucket_gc_streaming(
             "referenced-files",
             4,
         );
-        outcome.file_index_deleted =
-            gc_file_indexes_partitioned(store, &repo_prefixes, &mut file_reader, false).await?;
+        outcome.file_index_deleted = gc_file_indexes_partitioned(
+            store,
+            &repo_prefixes,
+            &mut file_reader,
+            false,
+            Some(&mut journal),
+            cancel,
+        )
+        .await?;
         journal.mark_file_index_complete().await?;
     }
     execute_bucket_journal(args, store, &mut journal, cancel, outcome, sweep_lease).await?;
@@ -1004,53 +869,39 @@ async fn run_bucket_gc_streaming(
     Ok(outcome.clone())
 }
 
-async fn run_bucket_object_gc(
+async fn seal_bucket_journal(
     args: &BucketGcArgs,
     store: &Store,
-    candidates: Vec<super::ObjectMeta>,
+    coordinator_protected_keys: &HashSet<String>,
+    journal: &mut super::journal::GcRunJournal,
     cancel: &CancellationToken,
-    outcome: &mut BucketGcOutcome,
-    root_identity: &str,
-    snapshot_at: SystemTime,
-    sweep_lease: Option<&crate::maintenance::GcSweepLease>,
 ) -> Result<()> {
-    let mut journal = match args.resume_run_id.as_deref() {
-        Some(run_id) => {
-            super::journal::GcRunJournal::resume(
-                store.clone(),
-                GLOBAL_PREFIX,
-                run_id,
-                "bucket",
-                GLOBAL_PREFIX,
-            )
-            .await?
-        }
-        None => {
-            let mut journal = super::journal::GcRunJournal::start(
-                store.clone(),
-                GLOBAL_PREFIX,
-                "bucket",
-                GLOBAL_PREFIX,
-                snapshot_at,
-                args.grace_period,
-                args.force,
-            )
-            .await?;
-            journal.set_root_identity(root_identity).await?;
-            journal.plan(&candidates).await?;
-            journal
-        }
-    };
-    if args.resume_run_id.is_some() {
-        journal.ensure_policy(args.grace_period, args.force)?;
-        journal.ensure_root_identity(root_identity)?;
-        if journal.state().phase == super::journal::GcRunPhase::Planning {
-            journal.reset_partial_plan().await?;
-            journal.plan(&candidates).await?;
-        }
+    let seal = crate::maintenance::GcSweepLease::acquire_for_run(
+        store,
+        GLOBAL_PREFIX,
+        &journal.state().run_id,
+        cancel,
+    )
+    .await?;
+    let current = async {
+        let registry = load_ref_registry_summary(store, false).await?;
+        ensure_registry_complete_for_destructive_gc(&registry)?;
+        let roots = bucket_root_snapshot_streaming(
+            store,
+            &registry,
+            args.list_concurrency,
+            coordinator_protected_keys,
+        )
+        .await?;
+        journal.ensure_root_identity(&roots.root_identity)?;
+        journal.seal_fence_epoch(seal.epoch()).await
     }
-
-    execute_bucket_journal(args, store, &mut journal, cancel, outcome, sweep_lease).await
+    .await;
+    let release = seal.release().await;
+    match (current, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 async fn execute_bucket_journal(
@@ -1061,25 +912,49 @@ async fn execute_bucket_journal(
     outcome: &mut BucketGcOutcome,
     sweep_lease: Option<&crate::maintenance::GcSweepLease>,
 ) -> Result<()> {
+    let deleter = super::StoreObjectDeleter::new(store.clone());
+    let prior_keys = journal.deleted_keys().await?;
+    for key in prior_keys {
+        match key.split('/').nth(1) {
+            Some("shards") => outcome.shards_deleted += 1,
+            Some("xorbs") => outcome.xorbs_deleted += 1,
+            _ => {}
+        }
+    }
+    outcome.bytes_reclaimed = outcome
+        .bytes_reclaimed
+        .checked_add(journal.deleted_bytes_reclaimed().await?)
+        .ok_or_else(|| CrabError::Internal("bucket GC byte count overflow".to_owned()))?;
     loop {
         check_cancelled(cancel)?;
-        // Destructive callers hold the bucket sweep from registry snapshot
-        // through the final journal commit. The fallback is retained for
-        // direct internal callers that do not already own that lease.
+        let Some(objects) = journal.next_batch().await? else {
+            break;
+        };
         let lease = if sweep_lease.is_some() {
             None
         } else {
-            Some(crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, cancel).await?)
-        };
-        let Some(objects) = journal.next_batch().await? else {
-            if let Some(lease) = lease {
-                lease.release().await?;
+            let lease = crate::maintenance::GcSweepLease::acquire_for_run(
+                store,
+                GLOBAL_PREFIX,
+                &journal.state().run_id,
+                cancel,
+            )
+            .await?;
+            if let Err(error) = journal.ensure_next_fence_epoch(lease.epoch()) {
+                let _ = lease.release().await;
+                return Err(error);
             }
-            break;
+            Some(lease)
         };
+        let policy = super::DeletePolicy {
+            snapshot_at: journal.snapshot_at()?,
+            grace_period: Duration::from_secs(journal.state().grace_secs),
+            force: journal.state().force,
+        };
+        let deleter = &deleter;
         let results = futures_util::stream::iter(objects.iter().cloned())
             .map(|object| async move {
-                let result = store.delete(&ObjectPath::from(object.key.as_str())).await;
+                let result = super::ObjectDeleter::delete_candidate(deleter, &object, policy).await;
                 (object, result)
             })
             .buffer_unordered(args.delete_concurrency.max(1))
@@ -1096,7 +971,7 @@ async fn execute_bucket_journal(
         let mut batch_bytes = 0u64;
         for (object, result) in results {
             match result {
-                Ok(()) | Err(CrabError::NotFound { .. }) => {
+                Ok(super::CandidateDelete::Deleted) | Err(CrabError::NotFound { .. }) => {
                     deleted_keys.push(object.key.clone());
                     match object.key.split('/').nth(1) {
                         Some("shards") => outcome.shards_deleted += 1,
@@ -1115,6 +990,7 @@ async fn execute_bucket_journal(
                         }
                     };
                 }
+                Ok(super::CandidateDelete::Retained) => {}
                 Err(error) => {
                     if batch_error.is_none() {
                         batch_error = Some(error);
@@ -1150,7 +1026,11 @@ async fn execute_bucket_journal(
             }
             return Err(CrabError::Cancelled);
         }
-        let journal_result = journal.complete_batch(&deleted_keys, batch_bytes).await;
+        super::journal::crash_at("after-provider-delete");
+        let fence_epoch = lease.as_ref().map(crate::maintenance::GcSweepLease::epoch);
+        let journal_result = journal
+            .complete_batch(&deleted_keys, batch_bytes, fence_epoch)
+            .await;
         let release_result = match lease {
             Some(lease) => lease.release().await,
             None => Ok(()),
@@ -1237,16 +1117,32 @@ async fn bucket_root_snapshot_streaming(
     digest.add("registry-schema", &registry.schema_version.to_string());
     digest.add("registry-generation", &registry.generation.to_string());
     digest.add("registry-complete", &registry.coverage_complete.to_string());
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+    crab_metadata::ref_registry::visit_ref_registry_shard_roots(
+        &storage,
+        &router,
+        |repo_prefix, hash| {
+            let result = if !registry.repos.contains_key(&repo_prefix) {
+                Err(CrabError::CorruptObject {
+                    path: ".crab/ref-registry/shard-roots".to_owned(),
+                    reason: format!("shard roots have no repo record for {repo_prefix}"),
+                })
+            } else {
+                MerkleHash::from_hex(&hash)
+                    .map_err(|error| CrabError::CorruptObject {
+                        path: ".crab/ref-registry/shard-roots".to_owned(),
+                        reason: format!("invalid current shard hash for {repo_prefix}: {error}"),
+                    })
+                    .map(|_| {
+                        digest.add("current-shard", &format!("{repo_prefix}\0{hash}"));
+                    })
+            };
+            std::future::ready(result)
+        },
+    )
+    .await?;
     for repo_prefix in &repo_prefixes {
-        if let Some(shards) = registry.repos.get(repo_prefix) {
-            for hash in shards {
-                MerkleHash::from_hex(hash).map_err(|error| CrabError::CorruptObject {
-                    path: ".crab/ref-registry".to_owned(),
-                    reason: format!("invalid current shard hash for {repo_prefix}: {error}"),
-                })?;
-                digest.add("current-shard", &format!("{repo_prefix}\0{hash}"));
-            }
-        }
         let mut visit = |hash: String| {
             let result = MerkleHash::from_hex(&hash)
                 .map_err(|error| CrabError::CorruptObject {
@@ -1293,18 +1189,33 @@ async fn write_bucket_root_marks(
         journal.marks_prefix(),
         "referenced-shards",
     )));
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+    crab_metadata::ref_registry::visit_ref_registry_shard_roots(
+        &storage,
+        &router,
+        |repo_prefix, hash| {
+            let marks = Arc::clone(&marks);
+            let registered = registry.repos.contains_key(&repo_prefix);
+            async move {
+                if !registered {
+                    return Err(CrabError::CorruptObject {
+                        path: ".crab/ref-registry/shard-roots".to_owned(),
+                        reason: format!("shard roots have no repo record for {repo_prefix}"),
+                    });
+                }
+                MerkleHash::from_hex(&hash).map_err(|error| CrabError::CorruptObject {
+                    path: ".crab/ref-registry/shard-roots".to_owned(),
+                    reason: format!("invalid current shard hash for {repo_prefix}: {error}"),
+                })?;
+                marks.lock().await.add(&hash).await
+            }
+        },
+    )
+    .await?;
     let mut repo_prefixes = registry.repos.keys().cloned().collect::<Vec<_>>();
     repo_prefixes.sort_unstable();
     for repo_prefix in repo_prefixes {
-        if let Some(shards) = registry.repos.get(&repo_prefix) {
-            for hash in shards {
-                MerkleHash::from_hex(hash).map_err(|error| CrabError::CorruptObject {
-                    path: ".crab/ref-registry".to_owned(),
-                    reason: format!("invalid current shard hash for {repo_prefix}: {error}"),
-                })?;
-                marks.lock().await.add(hash).await?;
-            }
-        }
         let marks_for_visit = Arc::clone(&marks);
         let mut visit = move |hash: String| {
             let marks = Arc::clone(&marks_for_visit);
@@ -1394,32 +1305,40 @@ fn ensure_active_active_bucket_gc_proof(
 /// explicitly incomplete registry. Dry-run can inspect it, but destructive
 /// GC still fails closed until a manifest backfill establishes coverage.
 pub async fn load_ref_registry(store: &Store, force: bool) -> Result<RefRegistry> {
-    let path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-    match store.get_with_etag(&path).await {
-        Ok((body, _etag)) => {
-            let registry: RefRegistry =
-                serde_json::from_slice(&body).map_err(|e| CrabError::CorruptObject {
-                    path: format!("{GLOBAL_PREFIX}/ref-registry"),
-                    reason: format!("invalid JSON: {e}"),
-                })?;
-            Ok(registry)
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+    let mut registry = crab_metadata::ref_registry::load_ref_registry(&storage, &router).await?;
+    if !registry.coverage_complete && registry.repos.is_empty() {
+        if !force {
+            return Err(CrabError::NotFound {
+                path: format!(
+                    "{GLOBAL_PREFIX}/ref-registry/coverage.json (run crab gc --repair-registry)"
+                ),
+            });
         }
-        Err(CrabError::NotFound { .. }) => {
-            if force {
-                warn!("ref-registry not found; --force specified, treating as incomplete");
-                let mut registry = RefRegistry::default();
-                registry.schema_version = 0;
-                Ok(registry)
-            } else {
-                Err(CrabError::NotFound {
-                    path: format!(
-                        "{GLOBAL_PREFIX}/ref-registry (use --force to proceed without registry)"
-                    ),
-                })
-            }
-        }
-        Err(e) => Err(e),
+        warn!("partitioned ref-registry is not repaired; treating it as incomplete");
+        registry.schema_version = 0;
     }
+    Ok(registry)
+}
+
+async fn load_ref_registry_summary(store: &Store, force: bool) -> Result<RefRegistry> {
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+    let mut registry =
+        crab_metadata::ref_registry::load_ref_registry_summary(&storage, &router).await?;
+    if !registry.coverage_complete && registry.repos.is_empty() {
+        if !force {
+            return Err(CrabError::NotFound {
+                path: format!(
+                    "{GLOBAL_PREFIX}/ref-registry/coverage.json (run crab gc --repair-registry)"
+                ),
+            });
+        }
+        warn!("partitioned ref-registry is not repaired; treating it as incomplete");
+        registry.schema_version = 0;
+    }
+    Ok(registry)
 }
 
 /// Metadata for a listed object.
@@ -1428,152 +1347,8 @@ struct ListedObject {
     location: String,
     size: u64,
     last_modified: SystemTime,
-}
-
-fn bucket_root_identity(
-    registry: &RefRegistry,
-    repo_shards: &HashMap<String, HashSet<String>>,
-    coordinator_protected_keys: &HashSet<String>,
-) -> String {
-    let mut records = vec![format!(
-        "registry:{}:{}:{}",
-        registry.schema_version, registry.generation, registry.coverage_complete
-    )];
-    let mut repos = registry.repos.keys().collect::<Vec<_>>();
-    repos.sort_unstable();
-    for repo in repos {
-        let mut shards = registry.repos.get(repo).cloned().unwrap_or_default();
-        shards.sort_unstable();
-        records.push(format!("registry-repo:{repo}:{shards:?}"));
-    }
-    let mut workflow_repos = registry
-        .workflow_stage_hashes
-        .keys()
-        .chain(registry.workflow_experiment_ids.keys())
-        .collect::<Vec<_>>();
-    workflow_repos.sort_unstable();
-    workflow_repos.dedup();
-    for repo in workflow_repos {
-        let mut stages = registry
-            .workflow_stage_hashes
-            .get(repo)
-            .cloned()
-            .unwrap_or_default();
-        let mut experiments = registry
-            .workflow_experiment_ids
-            .get(repo)
-            .cloned()
-            .unwrap_or_default();
-        stages.sort_unstable();
-        experiments.sort_unstable();
-        records.push(format!("workflow:{repo}:{stages:?}:{experiments:?}"));
-    }
-    let mut shard_repos = repo_shards.keys().collect::<Vec<_>>();
-    shard_repos.sort_unstable();
-    for repo in shard_repos {
-        let mut shards = repo_shards.get(repo).cloned().unwrap_or_default();
-        let mut shards = shards.drain().collect::<Vec<_>>();
-        shards.sort_unstable();
-        records.push(format!("history:{repo}:{shards:?}"));
-    }
-    let mut protected = coordinator_protected_keys.iter().collect::<Vec<_>>();
-    protected.sort_unstable();
-    records.extend(protected.into_iter().map(|key| format!("protected:{key}")));
-    let mut hasher = blake3::Hasher::new();
-    for record in records {
-        hasher.update(record.as_bytes());
-        hasher.update(&[0]);
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
-struct ShardGcPartition {
-    unreferenced: Vec<ListedObject>,
-    referenced: Vec<ListedObject>,
-    protected_count: usize,
-}
-
-fn partition_shards_for_gc(
-    shard_objects: Vec<ListedObject>,
-    referenced_shards: &HashSet<String>,
-    coordinator_protected_keys: &HashSet<String>,
-) -> ShardGcPartition {
-    let mut unreferenced = Vec::new();
-    let mut referenced = Vec::new();
-    let mut protected_count = 0;
-
-    for obj in shard_objects {
-        if coordinator_protected_keys.contains(&obj.location) {
-            protected_count += 1;
-            referenced.push(obj);
-            continue;
-        }
-        let hash = extract_hash_from_key(&obj.location);
-        if referenced_shards.contains(&hash) {
-            referenced.push(obj);
-        } else {
-            unreferenced.push(obj);
-        }
-    }
-
-    ShardGcPartition {
-        unreferenced,
-        referenced,
-        protected_count,
-    }
-}
-
-struct XorbGcPartition {
-    unreferenced: Vec<ListedObject>,
-    protected_count: usize,
-}
-
-fn partition_xorbs_for_gc(
-    xorb_objects: Vec<ListedObject>,
-    referenced_xorbs: &HashSet<String>,
-    coordinator_protected_keys: &HashSet<String>,
-) -> XorbGcPartition {
-    let mut unreferenced = Vec::new();
-    let mut protected_count = 0;
-
-    for obj in xorb_objects {
-        if coordinator_protected_keys.contains(&obj.location) {
-            protected_count += 1;
-            continue;
-        }
-        let hash = extract_hash_from_key(&obj.location);
-        if !referenced_xorbs.contains(&hash) {
-            unreferenced.push(obj);
-        }
-    }
-
-    XorbGcPartition {
-        unreferenced,
-        protected_count,
-    }
-}
-
-fn partition_closures_for_gc(
-    closure_objects: Vec<ListedObject>,
-    referenced_shards: &HashSet<String>,
-    deletable_shards: &HashSet<String>,
-    existing_shards: &HashSet<String>,
-    coordinator_protected_keys: &HashSet<String>,
-) -> Vec<ListedObject> {
-    closure_objects
-        .into_iter()
-        .filter(|object| {
-            if coordinator_protected_keys.contains(&object.location) {
-                return false;
-            }
-            let hash = extract_hash_from_key(&object.location)
-                .strip_suffix(".json")
-                .unwrap_or_default()
-                .to_owned();
-            !referenced_shards.contains(&hash)
-                && (deletable_shards.contains(&hash) || !existing_shards.contains(&hash))
-        })
-        .collect()
+    e_tag: Option<String>,
+    version: Option<String>,
 }
 
 struct GlobalListOutcome {
@@ -1581,8 +1356,6 @@ struct GlobalListOutcome {
     /// Logical list streams. Provider pagination and retries are internal to
     /// `object_store` and are not counted here.
     requests: u64,
-    parallelism: usize,
-    partitioned: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1709,6 +1482,8 @@ async fn scan_global_prefix<C: GlobalObjectConsumer + ?Sized>(
                 location,
                 size: meta.size,
                 last_modified: meta.last_modified.into(),
+                e_tag: meta.e_tag,
+                version: meta.version,
             })
             .await?;
         objects = objects.saturating_add(1);
@@ -1722,7 +1497,7 @@ async fn scan_global_prefix<C: GlobalObjectConsumer + ?Sized>(
 async fn scan_global_partitions<C: GlobalObjectConsumer + ?Sized>(
     store: &Store,
     kind: &str,
-    _concurrency: usize,
+    concurrency: usize,
     permits: Arc<Semaphore>,
     cancel: &CancellationToken,
     consumer: &mut C,
@@ -1775,25 +1550,34 @@ async fn scan_global_partitions<C: GlobalObjectConsumer + ?Sized>(
         .collect::<Result<Vec<_>>>()?;
     partitions.sort_unstable();
     partitions.dedup();
-    // The streaming path intentionally processes one partition at a time so
-    // consumer state and journal batches remain bounded without a shared
-    // async mutex. Report the actual, rather than configured, parallelism.
-    let parallelism = 1;
+    let parallelism = concurrency.max(1).min(partitions.len().max(1));
     let partition_count = partitions.len() as u64;
     let mut objects = 0u64;
-    for partition in partitions {
-        let partition_prefix = global_content_partition_prefix(GLOBAL_PREFIX, kind, &partition);
-        let (_, count) = scan_global_prefix(
-            store,
-            kind,
-            &partition_prefix,
-            None,
-            Arc::clone(&permits),
-            cancel,
-            consumer,
-        )
-        .await?;
-        objects = objects.saturating_add(count);
+    for partitions in partitions.chunks(parallelism) {
+        let prefixes = partitions
+            .iter()
+            .map(|partition| global_content_partition_prefix(GLOBAL_PREFIX, kind, partition))
+            .collect::<Vec<_>>();
+        let streams = futures_util::stream::iter(prefixes.iter())
+            .map(|prefix| {
+                global_partition_stream(store, kind, prefix, Arc::clone(&permits), cancel)
+            })
+            .buffer_unordered(parallelism)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let mut merged = futures_util::stream::select_all(streams);
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                next = merged.next() => next,
+            };
+            let Some(object) = next else {
+                break;
+            };
+            consumer.consume(object?).await?;
+            objects = objects.saturating_add(1);
+        }
     }
     Ok(GlobalScanStats {
         objects,
@@ -1801,6 +1585,42 @@ async fn scan_global_partitions<C: GlobalObjectConsumer + ?Sized>(
         parallelism,
         partitioned: true,
     })
+}
+
+async fn global_partition_stream<'a>(
+    store: &'a Store,
+    kind: &'a str,
+    prefix: &'a ObjectPath,
+    permits: Arc<Semaphore>,
+    cancel: &'a CancellationToken,
+) -> Result<BoxStream<'a, Result<ListedObject>>> {
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        permit = permits.acquire_owned() => {
+            permit.map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?
+        }
+    };
+    Ok(Box::pin(store.inner().list(Some(prefix)).map(
+        move |result| {
+            let _permit = &permit;
+            let meta = result.map_err(CrabError::Storage)?;
+            let location = meta.location.to_string();
+            if content_hash_from_path(&location, kind).is_none() {
+                return Err(CrabError::CorruptObject {
+                    path: location,
+                    reason: format!("global {kind} object does not match its hash partition"),
+                });
+            }
+            Ok(ListedObject {
+                location,
+                size: meta.size,
+                last_modified: meta.last_modified.into(),
+                e_tag: meta.e_tag,
+                version: meta.version,
+            })
+        },
+    )))
 }
 
 // object_store leaves max-keys unset, so each provider applies these service
@@ -1818,110 +1638,6 @@ fn adaptive_probe_limit(store: &Store) -> usize {
     // Switch only once recursive pagination costs as many calls as the full
     // fan-out. Replaying the bounded probe then caps crossover cost near 2x.
     page_objects.saturating_mul(GLOBAL_HASH_PARTITIONS)
-}
-
-/// List a global namespace using the selected cost/latency policy.
-async fn list_global_objects(
-    store: &Store,
-    kind: &str,
-    profile: GcListProfile,
-    concurrency: usize,
-    permits: Arc<Semaphore>,
-    cancel: &CancellationToken,
-) -> Result<GlobalListOutcome> {
-    let prefix = global_content_prefix(GLOBAL_PREFIX, kind);
-    match profile {
-        GcListProfile::Cost => {
-            list_global_prefix(store, kind, &prefix, None, permits, cancel).await
-        }
-        GcListProfile::Latency => {
-            list_global_partitions(store, kind, concurrency, permits, cancel).await
-        }
-        GcListProfile::Adaptive if concurrency <= 1 => {
-            list_global_prefix(store, kind, &prefix, None, permits, cancel).await
-        }
-        GcListProfile::Adaptive => {
-            let probe_limit = adaptive_probe_limit(store);
-            let probe = list_global_prefix(
-                store,
-                kind,
-                &prefix,
-                Some(probe_limit),
-                Arc::clone(&permits),
-                cancel,
-            )
-            .await?;
-            if probe.objects.len() <= probe_limit {
-                return Ok(probe);
-            }
-
-            let probe_requests = probe.requests;
-            drop(probe);
-            let mut partitioned =
-                list_global_partitions(store, kind, concurrency, permits, cancel).await?;
-            partitioned.requests += probe_requests;
-            Ok(partitioned)
-        }
-    }
-}
-
-async fn list_closure_objects(
-    store: &Store,
-    _concurrency: usize,
-    permits: Arc<Semaphore>,
-    cancel: &CancellationToken,
-) -> Result<GlobalListOutcome> {
-    let _permit = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        permit = permits.acquire() => {
-            permit.map_err(|_| CrabError::Internal("closure LIST semaphore closed".to_owned()))?
-        }
-    };
-    let prefix = format!("{GLOBAL_PREFIX}/gc/closures/");
-    let mut stream = store.inner().list(Some(&ObjectPath::from(prefix.as_str())));
-    let mut objects = Vec::new();
-    loop {
-        let next = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(CrabError::Cancelled),
-            next = stream.try_next() => next.map_err(CrabError::Storage)?,
-        };
-        let Some(meta) = next else {
-            break;
-        };
-        let location = meta.location.to_string();
-        let Some(hash) = location
-            .strip_prefix(&prefix)
-            .and_then(|value| value.strip_suffix(".json"))
-        else {
-            return Err(CrabError::CorruptObject {
-                path: location,
-                reason: "closure object is outside the canonical hash key shape".to_owned(),
-            });
-        };
-        let parsed = MerkleHash::from_hex(hash).map_err(|error| CrabError::CorruptObject {
-            path: meta.location.to_string(),
-            reason: format!("invalid closure hash: {error}"),
-        })?;
-        if parsed.hex() != hash {
-            return Err(CrabError::CorruptObject {
-                path: meta.location.to_string(),
-                reason: "closure hash is not canonical lowercase hex".to_owned(),
-            });
-        }
-        objects.push(ListedObject {
-            location,
-            size: meta.size,
-            last_modified: meta.last_modified.into(),
-        });
-    }
-    Ok(GlobalListOutcome {
-        objects,
-        requests: 1,
-        parallelism: 1,
-        partitioned: false,
-    })
 }
 
 async fn scan_closure_objects<C: GlobalObjectConsumer + ?Sized>(
@@ -1974,6 +1690,79 @@ async fn scan_closure_objects<C: GlobalObjectConsumer + ?Sized>(
                 location,
                 size: meta.size,
                 last_modified: meta.last_modified.into(),
+                e_tag: meta.e_tag,
+                version: meta.version,
+            })
+            .await?;
+        objects = objects.saturating_add(1);
+    }
+    Ok(GlobalScanStats {
+        objects,
+        requests: 1,
+        parallelism: 1,
+        partitioned: false,
+    })
+}
+
+async fn scan_closure_segment_objects<C: GlobalObjectConsumer + ?Sized>(
+    store: &Store,
+    permits: Arc<Semaphore>,
+    cancel: &CancellationToken,
+    consumer: &mut C,
+) -> Result<GlobalScanStats> {
+    let _permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        permit = permits.acquire() => {
+            permit.map_err(|_| CrabError::Internal("closure segment LIST semaphore closed".to_owned()))?
+        }
+    };
+    let prefix = format!("{GLOBAL_PREFIX}/gc/closure-segments/");
+    let mut stream = store.inner().list(Some(&ObjectPath::from(prefix.as_str())));
+    let mut objects = 0u64;
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            next = stream.try_next() => next.map_err(CrabError::Storage)?,
+        };
+        let Some(meta) = next else {
+            break;
+        };
+        let location = meta.location.to_string();
+        let Some((hash, index)) = location
+            .strip_prefix(&prefix)
+            .and_then(|value| value.split_once('/'))
+            .and_then(|(hash, file)| file.strip_suffix(".json").map(|index| (hash, index)))
+        else {
+            return Err(CrabError::CorruptObject {
+                path: location,
+                reason: "closure segment is outside the canonical key shape".to_owned(),
+            });
+        };
+        let parsed = MerkleHash::from_hex(hash).map_err(|error| CrabError::CorruptObject {
+            path: meta.location.to_string(),
+            reason: format!("invalid closure segment shard hash: {error}"),
+        })?;
+        let parsed_index = index
+            .parse::<u64>()
+            .map_err(|error| CrabError::CorruptObject {
+                path: meta.location.to_string(),
+                reason: format!("invalid closure segment index: {error}"),
+            })?;
+        if parsed.hex() != hash || index.len() != 20 || format!("{parsed_index:020}") != index {
+            return Err(CrabError::CorruptObject {
+                path: meta.location.to_string(),
+                reason: "closure segment key is not canonical".to_owned(),
+            });
+        }
+        consumer
+            .consume(ListedObject {
+                location,
+                size: meta.size,
+                last_modified: meta.last_modified.into(),
+                e_tag: meta.e_tag,
+                version: meta.version,
             })
             .await?;
         objects = objects.saturating_add(1);
@@ -2023,6 +1812,8 @@ async fn list_global_prefix(
             location,
             size: meta.size,
             last_modified: meta.last_modified.into(),
+            e_tag: meta.e_tag,
+            version: meta.version,
         });
         if max_objects.is_some_and(|limit| objects.len() > limit) {
             break;
@@ -2032,118 +1823,12 @@ async fn list_global_prefix(
     Ok(GlobalListOutcome {
         objects,
         requests: 1,
-        parallelism: 1,
-        partitioned: false,
-    })
-}
-
-/// Discover populated hash partitions, then scan them with bounded concurrency.
-async fn list_global_partitions(
-    store: &Store,
-    kind: &str,
-    concurrency: usize,
-    permits: Arc<Semaphore>,
-    cancel: &CancellationToken,
-) -> Result<GlobalListOutcome> {
-    let prefix = global_content_prefix(GLOBAL_PREFIX, kind);
-    let discovery_permit = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        permit = permits.acquire() => {
-            permit.map_err(|_| CrabError::Internal("global LIST semaphore closed".to_owned()))?
-        }
-    };
-    let discovery = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        result = store.inner().list_with_delimiter(Some(&prefix)) => {
-            result.map_err(CrabError::Storage)?
-        }
-    };
-    drop(discovery_permit);
-    if let Some(object) = discovery.objects.first() {
-        return Err(CrabError::CorruptObject {
-            path: object.location.to_string(),
-            reason: format!("global {kind} object is outside the required two-hex hash partition"),
-        });
-    }
-
-    let mut partitions = discovery
-        .common_prefixes
-        .into_iter()
-        .map(|partition| {
-            let value = partition
-                .as_ref()
-                .strip_prefix(prefix.as_ref())
-                .and_then(|suffix| suffix.strip_prefix('/'))
-                .unwrap_or_default();
-            if value.len() != 2
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-            {
-                return Err(CrabError::CorruptObject {
-                    path: partition.to_string(),
-                    reason: format!(
-                        "global {kind} partition must be exactly two lowercase hex characters"
-                    ),
-                });
-            }
-            Ok(value.to_owned())
-        })
-        .collect::<Result<Vec<_>>>()?;
-    partitions.sort_unstable();
-    partitions.dedup();
-
-    let parallelism = concurrency.max(1).min(partitions.len().max(1));
-    let batches =
-        futures_util::stream::iter(partitions.iter().map(|partition| {
-            let partition_prefix = global_content_partition_prefix(GLOBAL_PREFIX, kind, partition);
-            let permits = Arc::clone(&permits);
-            async move {
-                list_global_prefix(store, kind, &partition_prefix, None, permits, cancel).await
-            }
-        }))
-        .buffer_unordered(concurrency.max(1))
-        .try_collect::<Vec<_>>()
-        .await?;
-    let objects = batches
-        .into_iter()
-        .flat_map(|batch| batch.objects)
-        .collect::<Vec<_>>();
-
-    Ok(GlobalListOutcome {
-        objects,
-        requests: 1 + partitions.len() as u64,
-        parallelism,
-        partitioned: true,
     })
 }
 
 /// Extract the hash portion from a canonical global content key.
 fn extract_hash_from_key(key: &str) -> String {
     key.rsplit('/').next().unwrap_or("").to_string()
-}
-
-/// Filter objects by age unless the operator explicitly bypassed grace.
-fn filter_by_grace(
-    objects: Vec<ListedObject>,
-    cutoff: SystemTime,
-    force: bool,
-) -> Vec<ListedObject> {
-    if force {
-        return objects;
-    }
-    objects
-        .into_iter()
-        .filter(|obj| obj.last_modified < cutoff)
-        .collect()
-}
-
-/// Hashes extracted from a batch of shards.
-struct ShardHashes {
-    xorb_hashes: HashSet<String>,
-    file_hashes_by_shard: HashMap<String, HashSet<MerkleHash>>,
 }
 
 async fn extract_hashes_from_shard(
@@ -2161,7 +1846,9 @@ async fn extract_hashes_from_shard(
         Some(budget) => Some(budget.acquire().await.map_err(|_| CrabError::Cancelled)?),
         None => None,
     };
-    let (closure_body, _) = store.get_with_etag(&closure_path).await.map_err(|error| {
+    let closure = super::closure::read_manifest(store, GLOBAL_PREFIX, &hash)
+        .await
+        .map_err(|error| {
         if matches!(error, CrabError::NotFound { .. }) {
             CrabError::CorruptObject {
                 path: closure_path.to_string(),
@@ -2173,7 +1860,6 @@ async fn extract_hashes_from_shard(
             error
         }
     })?;
-    let closure = super::closure::decode(&closure_body, &closure_path, &hash)?;
     if closure.content_size != object.size {
         return Err(CrabError::CorruptObject {
             path: closure_path.to_string(),
@@ -2183,53 +1869,70 @@ async fn extract_hashes_from_shard(
             ),
         });
     }
-    let xorbs = closure.xorb_hashes.into_iter().collect::<HashSet<_>>();
-    let files = closure
-        .file_hashes
-        .into_iter()
-        .map(|file_hash| {
-            MerkleHash::from_hex(&file_hash).map_err(|error| CrabError::CorruptObject {
-                path: closure_path.to_string(),
-                reason: format!("invalid file hash in shard closure: {error}"),
-            })
-        })
-        .collect::<Result<HashSet<_>>>()?;
+    let mut xorbs = HashSet::new();
+    let mut files = HashSet::new();
+    for segment_ref in &closure.segments {
+        let segment =
+            super::closure::read_segment(store, GLOBAL_PREFIX, &closure, segment_ref).await?;
+        xorbs.extend(segment.xorb_hashes().iter().cloned());
+        for file_hash in segment.file_hashes() {
+            files.insert(MerkleHash::from_hex(file_hash).map_err(|error| {
+                CrabError::CorruptObject {
+                    path: closure_path.to_string(),
+                    reason: format!("invalid file hash in shard closure: {error}"),
+                }
+            })?);
+        }
+    }
     Ok((hash_hex, xorbs, files))
 }
 
-/// Read each referenced shard's durable closure.
-///
-/// Destructive bucket GC never derives a closure from the shard body. Older
-/// repositories must run the explicit closure-repair command first; keeping
-/// that migration outside the delete path makes missing coverage fail closed.
-async fn extract_hashes_from_shards(
+async fn mark_hashes_from_shard(
     store: &Store,
-    shard_objects: &[ListedObject],
-    concurrency: usize,
-    closure_budget: Arc<Semaphore>,
-) -> Result<ShardHashes> {
-    let (xorb_hashes, file_hashes_by_shard) = futures_util::stream::iter(shard_objects.iter())
-        .map(|obj| {
-            let closure_budget = Arc::clone(&closure_budget);
-            async move {
-                extract_hashes_from_shard(store, obj, Some(closure_budget.as_ref())).await
+    object: &ListedObject,
+    xorb_marks: &mut DurableMarkWriter,
+    file_marks: &mut DurableMarkWriter,
+) -> Result<()> {
+    let hash_hex = extract_hash_from_key(&object.location);
+    let hash = MerkleHash::from_hex(&hash_hex).map_err(|error| CrabError::CorruptObject {
+        path: object.location.clone(),
+        reason: format!("invalid referenced shard hash: {error}"),
+    })?;
+    let closure_path = super::closure::path(GLOBAL_PREFIX, &hash_hex);
+    let manifest = super::closure::read_manifest(store, GLOBAL_PREFIX, &hash)
+        .await
+        .map_err(|error| {
+            if matches!(error, CrabError::NotFound { .. }) {
+                CrabError::CorruptObject {
+                    path: closure_path.to_string(),
+                    reason: format!(
+                        "referenced shard {hash_hex} has no durable closure; run `crab gc --scope=bucket --repair-closures` before destructive GC"
+                    ),
+                }
+            } else {
+                error
             }
-        })
-        .buffer_unordered(concurrency.max(1))
-        .try_fold(
-            (HashSet::new(), HashMap::new()),
-            |(mut xorb_hashes, mut file_hashes_by_shard), (shard_hash, x, f)| async move {
-                xorb_hashes.extend(x);
-                file_hashes_by_shard.insert(shard_hash, f);
-                Ok::<_, CrabError>((xorb_hashes, file_hashes_by_shard))
-            },
-        )
-        .await?;
-
-    Ok(ShardHashes {
-        xorb_hashes,
-        file_hashes_by_shard,
-    })
+        })?;
+    if manifest.content_size != object.size {
+        return Err(CrabError::CorruptObject {
+            path: closure_path.to_string(),
+            reason: format!(
+                "shard closure size {} does not match listed shard size {}",
+                manifest.content_size, object.size
+            ),
+        });
+    }
+    for segment_ref in &manifest.segments {
+        let segment =
+            super::closure::read_segment(store, GLOBAL_PREFIX, &manifest, segment_ref).await?;
+        for xorb in segment.xorb_hashes() {
+            xorb_marks.add(xorb).await?;
+        }
+        for file in segment.file_hashes() {
+            file_marks.add(file).await?;
+        }
+    }
+    Ok(())
 }
 
 struct CandidateBatchSink<'a> {
@@ -2250,6 +1953,8 @@ impl<'a> CandidateBatchSink<'a> {
             key: object.location.clone(),
             size: object.size,
             last_modified: object.last_modified,
+            e_tag: object.e_tag.clone(),
+            version: object.version.clone(),
             storage_class: None,
             transitioned_at: None,
         });
@@ -2359,14 +2064,13 @@ impl GlobalObjectConsumer for ShardStreamingPlanner<'_> {
             if is_referenced {
                 self.referenced_seen = self.referenced_seen.saturating_add(1);
             }
-            let (_shard_hash, xorbs, files) =
-                extract_hashes_from_shard(self.store, &object, None).await?;
-            for xorb in xorbs {
-                self.referenced_xorbs.add(&xorb).await?;
-            }
-            for file in files {
-                self.referenced_files.add(&file.hex()).await?;
-            }
+            mark_hashes_from_shard(
+                self.store,
+                &object,
+                &mut self.referenced_xorbs,
+                &mut self.referenced_files,
+            )
+            .await?;
             return Ok(());
         }
         if self.force || object.last_modified < self.cutoff {
@@ -2378,17 +2082,20 @@ impl GlobalObjectConsumer for ShardStreamingPlanner<'_> {
 }
 
 struct ClosureStreamingPlanner<'a> {
+    store: &'a Store,
     referenced_shards: DurableMarkReader,
     deletable_shards: DurableMarkReader,
     existing_shards: DurableMarkReader,
     coordinator_protected_keys: &'a HashSet<String>,
     cutoff: SystemTime,
     force: bool,
+    live_segments: DurableMarkWriter,
     sink: CandidateBatchSink<'a>,
 }
 
 impl<'a> ClosureStreamingPlanner<'a> {
     fn new(
+        store: &'a Store,
         referenced_shards: DurableMarkReader,
         deletable_shards: DurableMarkReader,
         existing_shards: DurableMarkReader,
@@ -2398,9 +2105,76 @@ impl<'a> ClosureStreamingPlanner<'a> {
         journal: &'a mut super::journal::GcRunJournal,
     ) -> Self {
         Self {
+            store,
             referenced_shards,
             deletable_shards,
             existing_shards,
+            coordinator_protected_keys,
+            cutoff,
+            force,
+            live_segments: DurableMarkWriter::new_keys(
+                store.clone(),
+                journal.marks_prefix(),
+                "live-closure-segments",
+            ),
+            sink: CandidateBatchSink::new(journal),
+        }
+    }
+
+    async fn finish(self) -> Result<()> {
+        self.live_segments.finish().await?;
+        self.sink.finish().await
+    }
+}
+
+#[async_trait(?Send)]
+impl GlobalObjectConsumer for ClosureStreamingPlanner<'_> {
+    async fn consume(&mut self, object: ListedObject) -> Result<()> {
+        let hash = extract_hash_from_key(&object.location)
+            .strip_suffix(".json")
+            .unwrap_or_default()
+            .to_owned();
+        let retained = self.coordinator_protected_keys.contains(&object.location)
+            || self.referenced_shards.contains(&hash).await?
+            || (!self.deletable_shards.contains(&hash).await?
+                && self.existing_shards.contains(&hash).await?)
+            || (!self.force && object.last_modified >= self.cutoff);
+        if retained {
+            let parsed = MerkleHash::from_hex(&hash).map_err(|error| CrabError::CorruptObject {
+                path: object.location.clone(),
+                reason: format!("invalid closure shard hash: {error}"),
+            })?;
+            let manifest =
+                super::closure::read_manifest(self.store, GLOBAL_PREFIX, &parsed).await?;
+            for segment in &manifest.segments {
+                let path = super::closure::segment_path(GLOBAL_PREFIX, &hash, segment.index);
+                self.live_segments.add(path.as_ref()).await?;
+            }
+            return Ok(());
+        }
+        self.sink.push(&object).await?;
+        Ok(())
+    }
+}
+
+struct ClosureSegmentStreamingPlanner<'a> {
+    live_segments: DurableMarkReader,
+    coordinator_protected_keys: &'a HashSet<String>,
+    cutoff: SystemTime,
+    force: bool,
+    sink: CandidateBatchSink<'a>,
+}
+
+impl<'a> ClosureSegmentStreamingPlanner<'a> {
+    fn new(
+        live_segments: DurableMarkReader,
+        coordinator_protected_keys: &'a HashSet<String>,
+        cutoff: SystemTime,
+        force: bool,
+        journal: &'a mut super::journal::GcRunJournal,
+    ) -> Self {
+        Self {
+            live_segments,
             coordinator_protected_keys,
             cutoff,
             force,
@@ -2414,25 +2188,15 @@ impl<'a> ClosureStreamingPlanner<'a> {
 }
 
 #[async_trait(?Send)]
-impl GlobalObjectConsumer for ClosureStreamingPlanner<'_> {
+impl GlobalObjectConsumer for ClosureSegmentStreamingPlanner<'_> {
     async fn consume(&mut self, object: ListedObject) -> Result<()> {
-        if self.coordinator_protected_keys.contains(&object.location) {
-            return Ok(());
-        }
-        let hash = extract_hash_from_key(&object.location)
-            .strip_suffix(".json")
-            .unwrap_or_default()
-            .to_owned();
-        if self.referenced_shards.contains(&hash).await?
-            || (!self.deletable_shards.contains(&hash).await?
-                && self.existing_shards.contains(&hash).await?)
+        if self.coordinator_protected_keys.contains(&object.location)
+            || self.live_segments.contains(&object.location).await?
+            || (!self.force && object.last_modified >= self.cutoff)
         {
             return Ok(());
         }
-        if self.force || object.last_modified < self.cutoff {
-            self.sink.push(&object).await?;
-        }
-        Ok(())
+        self.sink.push(&object).await
     }
 }
 
@@ -2504,6 +2268,8 @@ async fn write_referenced_file_marks_from_marked_shards(
                         location: shard_path.to_string(),
                         size: shard_meta.size,
                         last_modified: shard_meta.last_modified.into(),
+                        e_tag: shard_meta.e_tag,
+                        version: shard_meta.version,
                     };
                     let (_, _, files) =
                         extract_hashes_from_shard(store, &object, Some(closure_budget.as_ref()))
@@ -2522,61 +2288,6 @@ async fn write_referenced_file_marks_from_marked_shards(
     Ok(())
 }
 
-async fn gc_file_indexes(
-    store: &Store,
-    repo_prefixes: &[String],
-    referenced_file_hashes: &HashSet<MerkleHash>,
-    dry_run: bool,
-    concurrency: usize,
-) -> Result<u64> {
-    futures_util::stream::iter(repo_prefixes.iter())
-        .map(|repo_prefix| async move {
-            let db_prefix = ObjectPath::from(format!(
-                "{}/file_index_db/",
-                repo_prefix.trim_end_matches('/')
-            ));
-            let mut objects = store.inner().list(Some(&db_prefix));
-            match objects.next().await {
-                None => return Ok(0),
-                Some(Err(error)) => return Err(CrabError::Storage(error)),
-                Some(Ok(_)) => {}
-            }
-
-            let config =
-                crate::metadata::MetaDbConfig::for_repo(repo_prefix).with_read_only(dry_run);
-            let metadb = crate::metadata::MetaDb::new(
-                Arc::clone(store.inner()),
-                repo_prefix.clone(),
-                config,
-            );
-            let guard = crate::metadata::MetaDbGuard::new(metadb);
-            let operation = async {
-                guard
-                    .file_index()
-                    .await?
-                    .gc_unreferenced_committed(
-                        referenced_file_hashes,
-                        dry_run,
-                        FILE_INDEX_GC_BATCH_SIZE,
-                    )
-                    .await
-            }
-            .await;
-            let close = guard.close().await;
-            match (operation, close) {
-                (Ok(removed), Ok(())) => Ok(removed),
-                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-            }
-        })
-        .buffer_unordered(concurrency.max(1))
-        .try_fold(0u64, |total, removed| async move {
-            total
-                .checked_add(removed)
-                .ok_or_else(|| CrabError::Internal("file-index GC count overflow".to_owned()))
-        })
-        .await
-}
-
 /// Reconcile committed file-index rows one hash partition at a time. The
 /// closure mark reader keeps only a bounded partition in memory, while the
 /// MetaDb scan uses the same first-four-byte prefix so a large file-index database
@@ -2586,6 +2297,8 @@ async fn gc_file_indexes_partitioned(
     repo_prefixes: &[String],
     file_marks: &mut DurableMarkReader,
     dry_run: bool,
+    mut journal: Option<&mut super::journal::GcRunJournal>,
+    cancel: &CancellationToken,
 ) -> Result<u64> {
     let mut total = 0u64;
     for repo_prefix in repo_prefixes {
@@ -2626,14 +2339,55 @@ async fn gc_file_indexes_partitioned(
                     })
                     .collect::<Result<HashSet<_>>>()?;
                 let prefix = [crab_metadata::key_codec::PREFIX_COMMITTED, a, b, c, d];
-                let count = file_index
+                let lease = if dry_run || journal.is_none() {
+                    None
+                } else {
+                    let run_id = journal
+                        .as_deref()
+                        .ok_or_else(|| {
+                            CrabError::Internal("file-index GC lost its journal".to_owned())
+                        })?
+                        .state()
+                        .run_id
+                        .clone();
+                    let lease = crate::maintenance::GcSweepLease::acquire_for_run(
+                        store,
+                        GLOBAL_PREFIX,
+                        &run_id,
+                        cancel,
+                    )
+                    .await?;
+                    if let Some(journal) = journal.as_deref() {
+                        if let Err(error) = journal.ensure_next_fence_epoch(lease.epoch()) {
+                            let _ = lease.release().await;
+                            return Err(error);
+                        }
+                    }
+                    Some(lease)
+                };
+                let count_result = file_index
                     .gc_unreferenced_committed_prefix(
                         &prefix,
                         &referenced,
                         dry_run,
                         FILE_INDEX_GC_BATCH_SIZE,
                     )
-                    .await?;
+                    .await;
+                let count = match count_result {
+                    Ok(count) => count,
+                    Err(error) => {
+                        if let Some(lease) = lease {
+                            let _ = lease.release().await;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let Some(lease) = lease {
+                    if let Some(journal) = journal.as_deref_mut() {
+                        journal.advance_fence_epoch(lease.epoch()).await?;
+                    }
+                    lease.release().await?;
+                }
                 removed = removed.checked_add(count).ok_or_else(|| {
                     CrabError::Internal("file-index GC count overflow".to_owned())
                 })?;
@@ -2653,48 +2407,6 @@ async fn gc_file_indexes_partitioned(
     Ok(total)
 }
 
-/// Delete or report candidates depending on dry-run mode.
-async fn delete_or_report(
-    store: &Store,
-    kind: &str,
-    candidates: &[ListedObject],
-    dry_run: bool,
-    concurrency: usize,
-    outcome: &mut BucketGcOutcome,
-) -> Result<()> {
-    let deleted = futures_util::stream::iter(candidates.iter())
-        .map(|obj| async move {
-            let hash = extract_hash_from_key(&obj.location);
-            if dry_run {
-                info!(kind = %kind, hash = %hash, size = obj.size, "would delete (dry-run)");
-                return Ok::<_, CrabError>(obj);
-            }
-            let path = ObjectPath::from(obj.location.as_str());
-            match store.delete(&path).await {
-                Ok(()) => debug!(kind = %kind, hash = %hash, "deleted"),
-                Err(CrabError::NotFound { .. }) => {
-                    debug!(kind = %kind, hash = %hash, "already deleted");
-                }
-                Err(error) => return Err(error),
-            }
-            Ok(obj)
-        })
-        .buffer_unordered(concurrency.max(1))
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    for obj in deleted {
-        match kind {
-            "shards" => outcome.shards_deleted += 1,
-            "xorbs" => outcome.xorbs_deleted += 1,
-            "file-index" => outcome.file_index_deleted += 1,
-            _ => {}
-        }
-        outcome.bytes_reclaimed += obj.size;
-    }
-    Ok(())
-}
-
 /// Deregister a repo from the ref-registry.
 ///
 /// Loads the current ref-registry via CAS, removes the repo's entry,
@@ -2705,25 +2417,15 @@ pub async fn deregister_repo(store: &Store, repo_prefix: &str) -> Result<()> {
     let lease =
         crate::maintenance::GcGlobalWriterLease::acquire(store, GLOBAL_PREFIX, &cancel).await?;
     let result = async {
-        let registry_path = format!("{GLOBAL_PREFIX}/ref-registry");
-        let updated: RefRegistry =
-            cas_update_default(store, &registry_path, |reg: &mut RefRegistry| {
-                let had_entry = reg.repos.contains_key(repo_prefix);
-                reg.deregister(repo_prefix);
-                reg.generation += 1;
-                if had_entry {
-                    info!(repo = %repo_prefix, generation = reg.generation, "deregistered repo");
-                } else {
-                    warn!(repo = %repo_prefix, "repo not found in ref-registry");
-                }
-            })
-            .await?;
-
-        info!(
-            generation = updated.generation,
-            remaining_repos = updated.repos.len(),
-            "ref-registry updated"
-        );
+        let storage = store.as_storage().clone();
+        let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+        let removed =
+            crab_metadata::ref_registry::deregister_repo(&storage, &router, repo_prefix).await?;
+        if removed {
+            info!(repo = %repo_prefix, "deregistered repo");
+        } else {
+            warn!(repo = %repo_prefix, "repo not found in ref-registry");
+        }
         Ok(())
     }
     .await;
@@ -2743,8 +2445,7 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
     use futures_util::StreamExt;
 
     let cancel = CancellationToken::new();
-    let lease =
-        crate::maintenance::GcGlobalWriterLease::acquire(store, GLOBAL_PREFIX, &cancel).await?;
+    let lease = crate::maintenance::GcSweepLease::acquire(store, GLOBAL_PREFIX, &cancel).await?;
     let result = async {
         let mut manifests = store.inner().list(None);
         let mut repo_prefixes = Vec::new();
@@ -2806,6 +2507,104 @@ mod tests {
 
     fn memory_store() -> Store {
         Store::new(Arc::new(InMemory::new()))
+    }
+
+    struct TestListOutcome {
+        objects: Vec<ListedObject>,
+        requests: u64,
+        parallelism: usize,
+    }
+
+    #[derive(Default)]
+    struct TestObjectCollector(Vec<ListedObject>);
+
+    #[async_trait(?Send)]
+    impl GlobalObjectConsumer for TestObjectCollector {
+        async fn consume(&mut self, object: ListedObject) -> Result<()> {
+            self.0.push(object);
+            Ok(())
+        }
+    }
+
+    async fn list_global_objects(
+        store: &Store,
+        kind: &str,
+        profile: GcListProfile,
+        concurrency: usize,
+        permits: Arc<Semaphore>,
+        cancel: &CancellationToken,
+    ) -> Result<TestListOutcome> {
+        let mut collector = TestObjectCollector::default();
+        let stats = scan_global_objects(
+            store,
+            kind,
+            profile,
+            concurrency,
+            permits,
+            cancel,
+            &mut collector,
+        )
+        .await?;
+        Ok(TestListOutcome {
+            objects: collector.0,
+            requests: stats.requests,
+            parallelism: stats.parallelism,
+        })
+    }
+
+    async fn seed_registry(store: &Store, registry: &RefRegistry) {
+        let storage = store.as_storage().clone();
+        let bucket_router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+        let mut repos = registry.repos.clone();
+        for repo in registry
+            .workflow_stage_hashes
+            .keys()
+            .chain(registry.workflow_experiment_ids.keys())
+            .chain(registry.active_active_coordinators.keys())
+        {
+            repos.entry(repo.clone()).or_default();
+        }
+        crab_metadata::ref_registry::repair_ref_registry_from_manifests(
+            &storage,
+            &bucket_router,
+            repos,
+        )
+        .await
+        .unwrap();
+        for repo in registry.repos.keys().chain(
+            registry
+                .workflow_stage_hashes
+                .keys()
+                .chain(registry.workflow_experiment_ids.keys()),
+        ) {
+            let router = crab_storage::StoreLayout::new(storage.clone(), repo.clone());
+            crab_metadata::ref_registry::register_workflow_roots_exact(
+                &storage,
+                &router,
+                registry
+                    .workflow_stage_hashes
+                    .get(repo)
+                    .cloned()
+                    .unwrap_or_default(),
+                registry
+                    .workflow_experiment_ids
+                    .get(repo)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .await
+            .unwrap();
+        }
+        for (repo, coordinator) in &registry.active_active_coordinators {
+            let router = crab_storage::StoreLayout::new(storage.clone(), repo.clone());
+            crab_metadata::ref_registry::register_active_active_coordinator_for_repo(
+                &storage,
+                &router,
+                coordinator.clone(),
+            )
+            .await
+            .unwrap();
+        }
     }
 
     #[test]
@@ -3025,66 +2824,96 @@ mod tests {
         assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
     }
 
-    #[test]
-    fn filter_by_grace_retains_recent() {
-        let cutoff = SystemTime::now() - Duration::from_secs(3600);
-        let recent = ListedObject {
-            location: ".crab/shards/abc".to_string(),
-            size: 100,
-            last_modified: SystemTime::now(),
-        };
-        let result = filter_by_grace(vec![recent], cutoff, false);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn filter_by_grace_passes_old() {
-        let cutoff = SystemTime::now() - Duration::from_secs(3600);
-        let old = ListedObject {
-            location: ".crab/shards/abc".to_string(),
-            size: 100,
-            last_modified: SystemTime::now() - Duration::from_secs(7200),
-        };
-        let result = filter_by_grace(vec![old], cutoff, false);
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn filter_by_grace_force_includes_recent() {
-        let cutoff = SystemTime::now() - Duration::from_secs(3600);
-        let recent = ListedObject {
-            location: ".crab/xorbs/recent".to_owned(),
-            size: 100,
-            last_modified: SystemTime::now(),
-        };
-
-        let result = filter_by_grace(vec![recent], cutoff, true);
-
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn closure_gc_keeps_live_and_grace_retained_sources() {
-        let live = "a".repeat(64);
-        let retained = "b".repeat(64);
-        let orphan = "c".repeat(64);
-        let objects = [live.as_str(), retained.as_str(), orphan.as_str()]
-            .into_iter()
-            .map(|hash| ListedObject {
-                location: format!(".crab/gc/closures/{hash}.json"),
-                size: 1,
-                last_modified: std::time::UNIX_EPOCH,
-            })
-            .collect();
-        let candidates = partition_closures_for_gc(
-            objects,
-            &HashSet::from([live.clone()]),
-            &HashSet::from([orphan.clone()]),
-            &HashSet::from([live.clone(), retained.clone()]),
-            &HashSet::new(),
+    #[tokio::test]
+    async fn destructive_plan_collects_orphan_closure_segments() {
+        let store = memory_store();
+        let hash = "a".repeat(64);
+        let path = super::super::closure::segment_path(GLOBAL_PREFIX, &hash, 7);
+        store
+            .put(&path, Bytes::from_static(b"orphan"))
+            .await
+            .unwrap();
+        let mut journal = super::super::journal::GcRunJournal::start(
+            store.clone(),
+            GLOBAL_PREFIX,
+            "bucket",
+            GLOBAL_PREFIX,
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            true,
+        )
+        .await
+        .unwrap();
+        journal.set_root_identity("root").await.unwrap();
+        let protected = HashSet::new();
+        let mut planner = ClosureSegmentStreamingPlanner::new(
+            DurableMarkReader::new_keys(
+                store.clone(),
+                journal.marks_prefix(),
+                "live-closure-segments",
+            ),
+            &protected,
+            SystemTime::now(),
+            true,
+            &mut journal,
         );
-        assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].location.contains(&orphan));
+
+        scan_closure_segment_objects(
+            &store,
+            Arc::new(Semaphore::new(1)),
+            &CancellationToken::new(),
+            &mut planner,
+        )
+        .await
+        .unwrap();
+        planner.finish().await.unwrap();
+        journal.finish_plan().await.unwrap();
+
+        let batch = journal.next_batch().await.unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].key, path.to_string());
+    }
+
+    #[tokio::test]
+    async fn streaming_plan_retains_coordinator_protected_xorb() {
+        let store = memory_store();
+        let hash = "a".repeat(64);
+        let path = crab_storage::canonical_global_content_path("xorbs", &hash).to_string();
+        let mut journal = super::super::journal::GcRunJournal::start(
+            store.clone(),
+            GLOBAL_PREFIX,
+            "bucket",
+            GLOBAL_PREFIX,
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            true,
+        )
+        .await
+        .unwrap();
+        journal.set_root_identity("root").await.unwrap();
+        let protected = [path.clone()].into_iter().collect();
+        let mut planner = XorbStreamingPlanner::new(
+            DurableMarkReader::new(store.clone(), journal.marks_prefix(), "referenced-xorbs"),
+            &protected,
+            SystemTime::now(),
+            true,
+            &mut journal,
+        );
+
+        planner
+            .consume(ListedObject {
+                location: path,
+                size: 7,
+                last_modified: SystemTime::UNIX_EPOCH,
+                e_tag: Some("planned".to_owned()),
+                version: None,
+            })
+            .await
+            .unwrap();
+        planner.finish().await.unwrap();
+        journal.finish_plan().await.unwrap();
+
+        assert!(journal.next_batch().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -3114,25 +2943,21 @@ mod tests {
                 .collect(),
             ..RefRegistry::default()
         };
-        let body = serde_json::to_vec(&reg).unwrap();
-        let path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
 
         let loaded = load_ref_registry(&store, false).await.unwrap();
-        assert_eq!(loaded.generation, 5);
         assert_eq!(loaded.repos.len(), 1);
     }
 
     #[tokio::test]
-    async fn deregister_creates_registry_if_missing() {
+    async fn deregister_missing_repo_is_a_noop() {
         let store = memory_store();
         deregister_repo(&store, "org/old-repo").await.unwrap();
 
-        let path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        let (body, _) = store.get_with_etag(&path).await.unwrap();
-        let reg: RefRegistry = serde_json::from_slice(&body).unwrap();
-        assert_eq!(reg.generation, 1);
-        assert!(reg.repos.is_empty());
+        assert!(matches!(
+            load_ref_registry(&store, false).await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
@@ -3148,15 +2973,11 @@ mod tests {
             .collect(),
             ..RefRegistry::default()
         };
-        let body = serde_json::to_vec(&reg).unwrap();
-        let path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
 
         deregister_repo(&store, "org/models").await.unwrap();
 
-        let (body, _) = store.get_with_etag(&path).await.unwrap();
-        let updated: RefRegistry = serde_json::from_slice(&body).unwrap();
-        assert_eq!(updated.generation, 4);
+        let updated = load_ref_registry(&store, false).await.unwrap();
         assert_eq!(updated.repos.len(), 1);
         assert!(!updated.repos.contains_key("org/models"));
         assert!(updated.repos.contains_key("org/datasets"));
@@ -3249,11 +3070,8 @@ mod tests {
     #[tokio::test]
     async fn dry_run_bucket_gc_with_empty_store() {
         let store = memory_store();
-        // Put an empty registry so GC can proceed.
         let reg = RefRegistry::default();
-        let body = serde_json::to_vec(&reg).unwrap();
-        let path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
 
         let args = BucketGcArgs {
             bucket: "test-bucket".to_string(),
@@ -3282,6 +3100,11 @@ mod tests {
         assert_eq!(outcome.shards_deleted, 0);
         assert_eq!(outcome.xorbs_deleted, 0);
         assert_eq!(outcome.file_index_deleted, 0);
+
+        let mut scratch = store
+            .inner()
+            .list(Some(&ObjectPath::from(".crab/gc/runs/")));
+        assert!(scratch.try_next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -3289,14 +3112,7 @@ mod tests {
         let store = memory_store();
         let mut registry = RefRegistry::default();
         registry.mark_coverage_complete();
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store
-            .put(
-                &registry_path,
-                Bytes::from(serde_json::to_vec(&registry).unwrap()),
-            )
-            .await
-            .unwrap();
+        seed_registry(&store, &registry).await;
         let xorb_path = canonical_global_content_path("xorbs", &"a".repeat(64));
         store
             .put(&xorb_path, Bytes::from_static(b"recent orphan"))
@@ -3332,14 +3148,7 @@ mod tests {
         let store = memory_store();
         let mut registry = RefRegistry::default();
         registry.mark_coverage_complete();
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store
-            .put(
-                &registry_path,
-                Bytes::from(serde_json::to_vec(&registry).unwrap()),
-            )
-            .await
-            .unwrap();
+        seed_registry(&store, &registry).await;
         let xorb_path = canonical_global_content_path("xorbs", &"b".repeat(64));
         let xorb = Bytes::from_static(b"recent orphan");
         store.put(&xorb_path, xorb.clone()).await.unwrap();
@@ -3434,9 +3243,16 @@ mod tests {
         writer.finish().await.unwrap();
         let mut reader =
             DurableMarkReader::new_hash_width(store.clone(), marks_prefix, "referenced-files", 4);
-        let removed = gc_file_indexes_partitioned(&store, &[repo.to_owned()], &mut reader, false)
-            .await
-            .unwrap();
+        let removed = gc_file_indexes_partitioned(
+            &store,
+            &[repo.to_owned()],
+            &mut reader,
+            false,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(removed, 1);
         let guard = crate::metadata::MetaDbGuard::new(crate::metadata::MetaDb::new(
@@ -3462,13 +3278,7 @@ mod tests {
         let mut registry = RefRegistry::default();
         registry.register("org/models", Vec::new());
         registry.mark_coverage_complete();
-        store
-            .put(
-                &ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry")),
-                Bytes::from(serde_json::to_vec(&registry).unwrap()),
-            )
-            .await
-            .unwrap();
+        seed_registry(&store, &registry).await;
         let held = crab_coordination::GcFenceLease::acquire_writer(
             store.inner(),
             GLOBAL_PREFIX,
@@ -3537,13 +3347,7 @@ mod tests {
         let mut registry = RefRegistry::default();
         registry.register("org/models", vec![shard_hash]);
         registry.mark_coverage_complete();
-        store
-            .put(
-                &ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry")),
-                Bytes::from(serde_json::to_vec(&registry).unwrap()),
-            )
-            .await
-            .unwrap();
+        seed_registry(&store, &registry).await;
 
         let error = run_bucket_gc(
             &BucketGcArgs {
@@ -3574,13 +3378,7 @@ mod tests {
         let mut registry = RefRegistry::default();
         registry.register("org/models", vec!["a".repeat(64)]);
         registry.mark_coverage_complete();
-        store
-            .put(
-                &ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry")),
-                Bytes::from(serde_json::to_vec(&registry).unwrap()),
-            )
-            .await
-            .unwrap();
+        seed_registry(&store, &registry).await;
 
         let error = run_bucket_gc(
             &BucketGcArgs {
@@ -3619,9 +3417,7 @@ mod tests {
                 failover_regions: vec!["us-west-2".to_owned()],
             },
         );
-        let body = serde_json::to_vec(&reg).unwrap();
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&registry_path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
         let args = BucketGcArgs {
             bucket: "test-bucket".to_string(),
             dry_run: false,
@@ -3664,9 +3460,7 @@ mod tests {
                 failover_regions: Vec::new(),
             },
         );
-        let body = serde_json::to_vec(&reg).unwrap();
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&registry_path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
         let args = BucketGcArgs {
             bucket: "test-bucket".to_string(),
             dry_run: false,
@@ -3730,58 +3524,6 @@ mod tests {
         assert!(err.to_string().contains("ref-registry"));
     }
 
-    #[test]
-    fn bucket_gc_excludes_coordinator_protected_shared_objects() {
-        let now = SystemTime::now();
-        let shard_objects = vec![
-            ListedObject {
-                location: ".crab/shards/protected".to_owned(),
-                size: 10,
-                last_modified: now,
-            },
-            ListedObject {
-                location: ".crab/shards/free".to_owned(),
-                size: 20,
-                last_modified: now,
-            },
-        ];
-        let xorb_objects = vec![
-            ListedObject {
-                location: ".crab/xorbs/protected".to_owned(),
-                size: 30,
-                last_modified: now,
-            },
-            ListedObject {
-                location: ".crab/xorbs/free".to_owned(),
-                size: 40,
-                last_modified: now,
-            },
-        ];
-        let referenced = HashSet::new();
-        let protected: HashSet<String> = [".crab/shards/protected", ".crab/xorbs/protected"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-
-        let shard_partition = partition_shards_for_gc(shard_objects, &referenced, &protected);
-        assert_eq!(shard_partition.protected_count, 1);
-        assert_eq!(shard_partition.unreferenced.len(), 1);
-        assert_eq!(
-            shard_partition.unreferenced[0].location,
-            ".crab/shards/free"
-        );
-        assert_eq!(shard_partition.referenced.len(), 1);
-        assert_eq!(
-            shard_partition.referenced[0].location,
-            ".crab/shards/protected"
-        );
-
-        let xorb_partition = partition_xorbs_for_gc(xorb_objects, &referenced, &protected);
-        assert_eq!(xorb_partition.protected_count, 1);
-        assert_eq!(xorb_partition.unreferenced.len(), 1);
-        assert_eq!(xorb_partition.unreferenced[0].location, ".crab/xorbs/free");
-    }
-
     /// Regression: the bucket GC walker MUST NOT enumerate or delete
     /// objects under `.crab/workflow/**`.
     ///
@@ -3806,9 +3548,7 @@ mod tests {
         // Empty ref-registry — worst case for the walker: every
         // workflow object is unreferenced by construction.
         let reg = RefRegistry::default();
-        let body = serde_json::to_vec(&reg).unwrap();
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store.put(&registry_path, Bytes::from(body)).await.unwrap();
+        seed_registry(&store, &reg).await;
 
         // Seed representative workflow objects. Synthetic bytes
         // are fine — the walker never inspects object content,

@@ -54,7 +54,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v2"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
@@ -77,7 +77,7 @@ EXPECTED_MUTABLE_ROUTE_PATTERNS = [
     "{repo}/manifests/*",
     "{repo}/pack-list",
     "{repo}/shard-list",
-    ".crab/ref-registry",
+    ".crab/ref-registry/*",
     "{repo}/file_index_db/manifest/current",
     ".crab/chunk_index_db/manifest/current",
 ]
@@ -3560,7 +3560,7 @@ class CacheServiceRustfsSmoke:
             "{repo}/manifests/*": f"{prefix}/manifests/pack-list-cafebabe",
             "{repo}/pack-list": f"{prefix}/pack-list",
             "{repo}/shard-list": f"{prefix}/shard-list",
-            ".crab/ref-registry": ".crab/ref-registry",
+            ".crab/ref-registry/*": f".crab/ref-registry/records/11/{self.run_id}.json",
             "{repo}/file_index_db/manifest/current": f"{prefix}/file_index_db/manifest/current",
             ".crab/chunk_index_db/manifest/current": ".crab/chunk_index_db/manifest/current",
         }[pattern]

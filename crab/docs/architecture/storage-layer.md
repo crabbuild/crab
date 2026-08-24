@@ -37,10 +37,11 @@ describes storage mechanics and does not redefine that contract.
 ```
 s3://{bucket}/
 ├── .crab/                              Bucket-global core
-│   ├── xorbs/{hash}                    Immutable chunk aggregates
-│   ├── shards/{hash}                   Immutable reconstruction metadata
+│   ├── xorbs/{first-two}/{hash}        Immutable chunk aggregates
+│   ├── shards/{first-two}/{hash}       Immutable reconstruction metadata
 │   ├── chunk_index_db/                 Shared chunk → xorb SlateDB
-│   └── ref-registry                    Cross-repo reachability registry
+│   ├── ref-registry/                   Partitioned cross-repo GC roots
+│   └── gc/                             Closures and resumable run state
 └── {repo-path}/
     ├── manifest                        Authoritative mutable pointer
     ├── manifests/                      Immutable bulk and historical roots
@@ -55,8 +56,8 @@ s3://{bucket}/
 ### Path Layout Notes
 
 Xorbs and shards live under the placement's `global_prefix` (normally the
-bucket-root `.crab`) without a `xet/` prefix, hash fan-out, or filename
-extension. File-index records live inside the opaque per-repository
+bucket-root `.crab`) without a `xet/` prefix or filename extension. Both use
+the first two hash characters for fan-out. File-index records live inside the opaque per-repository
 `file_index_db/` SlateDB; callers do not construct record object keys.
 
 The single `{repo-path}/manifest` owns refs and points at content-addressed
@@ -72,6 +73,8 @@ compatibility with the standard LFS layout.
 | Object | Mutable | Update Mechanism |
 |--------|---------|------------------|
 | xorbs, shards, packs | No | Content-addressed, write-once |
+| closure manifests and segments | No | Content-addressed, write-once |
+| ref-registry records and shard-root partitions | Yes | Per-repo/per-partition CAS |
 | file/chunk index databases | Mixed | SlateDB-owned protocol |
 | manifest | Yes | CAS via `If-Match` ETag |
 | segmented inventory objects, locator SSTs | No | Content-addressed/SlateDB publication |

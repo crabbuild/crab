@@ -30,21 +30,34 @@ candidates, even when they are absent from current branches and tags. Use
 `crab recover history prune --keep-last N` to preview an explicit retention
 boundary, apply it with `--apply`, and then rerun GC.
 
-Destructive repository and bucket GC take renewable exclusive sweep fences, and
-writers take shared fences through their publication boundary. Neither can run
-concurrently with history pruning or history restoration. Bucket destruction
-also requires complete registry and coordinator safety proof.
+Writers take shared renewable fences through publication. GC performs root
+walking and namespace listing online, then takes short exclusive fences for
+root reconciliation, each 512-object delete batch, and each file-index
+partition. A writer admitted between batches advances the fence epoch and
+causes the run to fail closed before another delete. History pruning and
+restoration use the same admission boundary. Bucket destruction also requires
+complete registry and coordinator safety proof.
 
-Bucket GC reads current and retained historical shard roots for registered
-repositories in parallel, validates strict durable shard closures without
-referenced-shard body GETs, and adaptively lists the complete global shard and xorb namespaces. Small
+Bucket GC streams current shard roots from per-repository, four-hex CAS
+partitions and reads retained historical roots for registered repositories. It
+validates bounded, segmented shard closures without referenced-shard body GETs
+and adaptively lists the complete global shard and xorb namespaces. Small
 namespaces use one recursive stream per kind; larger namespaces switch to
 concurrent populated hash partitions after a bounded provider-aware probe. The
 crossover waits until recursive pagination reaches the cost of the complete
 256-way fan-out, bounding restart overhead to about 2x at the threshold. It
 persists partitioned reachability marks and candidate batches in the durable
 run journal, then tombstones generation-pinned `file_index_db` rows before
-object deletion. A crash retries that reconciliation idempotently.
+object deletion. Resume rechecks each candidate's provider ETag/version, size,
+and current grace age while holding the batch fence, so a recreated key is
+retained. A crash retries reconciliation idempotently. Completed runs delete
+their batches, outcomes, and mark chunks while retaining only the small state
+summary.
+
+Before first use of this registry layout, stop older writers, upgrade every
+writer, and run `crab gc --repair-registry --bucket <bucket>`. Destructive
+bucket GC refuses incomplete coverage and does not read the retired aggregate
+`.crab/ref-registry` object.
 
 If any repository-scope object deletion or post-delete reconciliation fails,
 Crab exits non-zero with `CRAB-E0322`. Its structured error details report the

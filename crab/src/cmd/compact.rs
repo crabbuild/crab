@@ -22,7 +22,6 @@ use crate::coordination::cas::cas_update_default;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 use crab_metadata::manifests::ShardList;
-use crab_metadata::ref_registry::RefRegistry;
 use crab_storage::canonical_global_content_path;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::{
@@ -265,24 +264,17 @@ async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactO
     })
     .await?;
 
-    // Step 6: Update the ref-registry to reflect the new shard set.
-    let repo_prefix = args.repo.clone();
-    let registry_path = format!("{GLOBAL_PREFIX}/ref-registry");
-
-    // Re-read the shard-list to get the authoritative set after CAS.
+    // Step 6: Conservatively publish the committed shard set. Exact root
+    // removal belongs to the exclusive registry repair; a concurrent push
+    // must never lose its pre-registered roots to compaction reconciliation.
     let updated_shard_list = read_shard_list(store, &shard_list_path).await?;
     let final_hashes = updated_shard_list.entries.clone();
-
-    cas_update_default::<RefRegistry, _>(store, &registry_path, |reg| {
-        reg.register(&repo_prefix, final_hashes.clone());
-        reg.generation += 1;
-        debug!(
-            generation = reg.generation,
-            repo = %repo_prefix,
-            "updated ref-registry"
-        );
-    })
-    .await?;
+    let storage = store.as_storage().clone();
+    let router = crab_storage::StoreLayout::new(storage.clone(), args.repo.clone());
+    let generation =
+        crab_metadata::ref_registry::union_register_repo_shards(&storage, &router, final_hashes)
+            .await?;
+    debug!(generation, repo = %args.repo, "updated ref-registry");
 
     let outcome = CompactOutcome {
         source_shards: source_hashes.len(),

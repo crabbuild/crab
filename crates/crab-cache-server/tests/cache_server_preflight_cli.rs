@@ -1408,7 +1408,7 @@ fn evidence_summarize_reports_customer_proof_without_config() {
     assert_eq!(summary["routes"]["capabilities_status"].as_i64(), Some(200));
     assert_eq!(
         summary["routes"]["route_schema"].as_str(),
-        Some("crab-cache-service.routes.v2")
+        Some("crab-cache-service.routes.v3")
     );
     assert_eq!(
         summary["routes"]["route_transport_prefix"].as_str(),
@@ -1855,7 +1855,7 @@ impl EvidenceFixture {
                     "name": "cache-service-capabilities",
                     "status": 200,
                     "schema": "crab-cache-service.capabilities.v1",
-                    "route_schema": "crab-cache-service.routes.v2",
+                    "route_schema": "crab-cache-service.routes.v3",
                     "route_transport_prefix": "/v1/",
                     "immutable_route_patterns": immutable_route_patterns(),
                     "mutable_route_patterns": mutable_route_patterns(),
@@ -2062,7 +2062,7 @@ fn mutable_route_patterns() -> Vec<&'static str> {
         "{repo}/manifests/*",
         "{repo}/pack-list",
         "{repo}/shard-list",
-        ".crab/ref-registry",
+        ".crab/ref-registry/*",
         "{repo}/file_index_db/manifest/current",
         ".crab/chunk_index_db/manifest/current",
     ]

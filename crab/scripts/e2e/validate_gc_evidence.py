@@ -32,6 +32,17 @@ REQUIRED_KEYS = {
     "started_at",
     "finished_at",
 }
+REQUIRED_CHECKS = {
+    "live_objects_preserved",
+    "unreachable_objects_deleted",
+    "fsck_after_gc",
+    "fresh_clone_readback",
+    "writer_race",
+    "resume_after_delete_crash",
+    "resume_after_journal_crash",
+    "bounded_memory",
+    "bounded_writer_pause",
+}
 
 
 def fail(message: str) -> None:
@@ -82,6 +93,8 @@ def validate_report(path: Path, require_pass: bool) -> None:
             check.get("status") == "failed" for check in report["checks"]
         ):
             fail(f"{path}: failed evidence has no failure detail")
+        if require_pass:
+            fail(f"{path}: production validation requires a passing end-to-end report")
         return
     if require_pass and report["qualification_level"] != "end_to_end":
         fail(f"{path}: supplementary evidence cannot satisfy a production pass")
@@ -101,6 +114,12 @@ def validate_report(path: Path, require_pass: bool) -> None:
             fail(f"{path}: retained artifact {name} does not exist")
     if any(check.get("status") != "passed" for check in report["checks"]):
         fail(f"{path}: every qualification check must pass")
+    check_names = {
+        check.get("name") for check in report["checks"] if isinstance(check, dict)
+    }
+    missing_checks = REQUIRED_CHECKS.difference(check_names)
+    if missing_checks:
+        fail(f"{path}: missing qualification checks: {sorted(missing_checks)}")
     if any(command.get("status") != "passed" for command in report["commands"]):
         fail(f"{path}: every qualification command must pass")
     if report["metrics"].get("referenced_shard_body_gets") not in {0, 0.0}:

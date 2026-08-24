@@ -26,7 +26,10 @@ flowchart LR
 3. Merges them using xet-core's shard merging algorithm, respecting the maximum shard size limit.
 4. Strips unreferenced xorb-info entries — in global-dedup layouts, merged shards may carry metadata from other repositories.
 5. Uploads compacted shards to the remote store.
-6. Atomically updates the shard-list and ref-registry via CAS operations.
+6. Atomically updates the shard-list, then conservatively CAS-unions its
+   committed roots into the partitioned ref-registry. Exact stale-root removal
+   is reserved for exclusive registry repair so a concurrent push cannot lose
+   its pre-registered roots.
 
 Source shards are left in place for garbage collection to clean up later.
 

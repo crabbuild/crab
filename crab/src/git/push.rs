@@ -5722,11 +5722,6 @@ async fn publish_pack_locator_inventory(
         });
     }
     let bindings = writer.bind_packs(&pack_records).await?;
-    let covered = bindings
-        .iter()
-        .filter(|binding| writer.binding_has_covered_objects(**binding))
-        .map(|binding| binding.record.pack_id)
-        .collect::<HashSet<_>>();
     let retained_slots = bindings
         .iter()
         .map(|binding| binding.pack_slot)
@@ -5737,6 +5732,17 @@ async fn publish_pack_locator_inventory(
         pack_rows_deleted = sweep.pack_rows_deleted,
         "swept stale Git locator rows"
     );
+    // Object keys are OIDs, so an interrupted newer pack can replace a covered
+    // row. Deleting any stale-slot object invalidates every covered-pack shortcut.
+    let covered = if sweep.object_rows_deleted == 0 {
+        bindings
+            .iter()
+            .filter(|binding| writer.binding_has_covered_objects(**binding))
+            .map(|binding| binding.record.pack_id)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     let mut evidence = Vec::new();
     for pack in current_packs {
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
@@ -7235,26 +7241,20 @@ impl PushPipeline {
             self.prove_all_xorbs_for_protected_push().await?;
             0
         } else {
-            let registry_path = self.router.ref_registry_path();
-            let repo_prefix = self.router.repo_prefix().to_owned();
-            let registry = crate::coordination::cas::cas_update_default::<
-                crab_metadata::ref_registry::RefRegistry,
-                _,
-            >(store, registry_path.as_ref(), |registry| {
-                let before = registry
-                    .repos
-                    .get(&repo_prefix)
-                    .cloned()
-                    .unwrap_or_default();
-                let was_complete = registry.complete_repos.contains(&repo_prefix);
-                registry.register_union(&repo_prefix, shard_hashes.clone());
-                if registry.repos.get(&repo_prefix) != Some(&before) || !was_complete {
-                    registry.generation += 1;
-                }
-            })
+            let storage = store.as_storage().clone();
+            let storage_router = crab_storage::StoreLayout::with_global_prefix(
+                storage.clone(),
+                self.router.repo_prefix().to_owned(),
+                self.router.global_prefix().to_owned(),
+            );
+            let generation = crab_metadata::ref_registry::union_register_repo_shards(
+                &storage,
+                &storage_router,
+                shard_hashes.clone(),
+            )
             .await?;
             self.prove_all_origin_xorbs_for_publish().await?;
-            registry.generation
+            generation
         };
 
         let bulk = BulkData {
@@ -12971,7 +12971,7 @@ impl PushPipeline {
         let Some(store) = &self.store else {
             return HashMap::new();
         };
-        let source_repos = {
+        let source_roots = {
             let candidates = self.committed_chunk_receipt_candidates.lock().await;
             if candidates.placements.is_empty() {
                 return HashMap::new();
@@ -12979,27 +12979,38 @@ impl PushPipeline {
             candidates
                 .source_anchors
                 .values()
-                .map(|anchor| anchor.source_repo_prefix.clone())
+                .map(|anchor| {
+                    (
+                        anchor.source_repo_prefix.clone(),
+                        MerkleHash::from(anchor.source_shard_hash).hex(),
+                    )
+                })
                 .collect::<HashSet<_>>()
         };
-        let registry = match store.get_with_etag(&self.router.ref_registry_path()).await {
-            Ok((body, _)) => {
-                match serde_json::from_slice::<crab_metadata::ref_registry::RefRegistry>(&body) {
-                    Ok(registry) => registry,
-                    Err(error) => {
-                        warn!(error = %error, "committed chunk receipts ignored: ref registry is corrupt");
-                        return HashMap::new();
-                    }
+        let storage = store.as_storage().clone();
+        let storage_router = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let mut registry_roots = HashMap::new();
+        for (repo_prefix, shard_hash) in source_roots {
+            match crab_metadata::ref_registry::load_repo_shard_root_status(
+                &storage,
+                &storage_router,
+                &repo_prefix,
+                &shard_hash,
+            )
+            .await
+            {
+                Ok(Some(status)) => {
+                    registry_roots.insert((repo_prefix, shard_hash), status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug!(error = %error, repo_prefix, "committed chunk receipt registry root unavailable");
                 }
             }
-            Err(error) => {
-                debug!(error = %error, "committed chunk receipts ignored: ref registry unavailable");
-                return HashMap::new();
-            }
-        };
-        if registry.schema_version != crab_metadata::ref_registry::REF_REGISTRY_SCHEMA_VERSION {
-            debug!("committed chunk receipts ignored: ref registry schema is incomplete");
-            return HashMap::new();
         }
 
         #[derive(Clone)]
@@ -13010,7 +13021,11 @@ impl PushPipeline {
         }
 
         let mut anchors = HashMap::new();
-        for repo_prefix in source_repos {
+        for repo_prefix in registry_roots
+            .keys()
+            .map(|(repo_prefix, _)| repo_prefix.clone())
+            .collect::<HashSet<_>>()
+        {
             let source_router = StoreLayout::new(store.clone(), repo_prefix.clone());
             let source_anchor = async {
                 let (manifest, _) = read_manifest(store, &source_router).await?;
@@ -13077,17 +13092,16 @@ impl PushPipeline {
                 continue;
             };
             let source_shard = MerkleHash::from(source.source_shard_hash);
-            let rooted = registry
-                .repos
-                .get(&source.source_repo_prefix)
-                .is_some_and(|shards| shards.iter().any(|hash| hash == &source_shard.hex()));
+            let registry_root =
+                registry_roots.get(&(source.source_repo_prefix.clone(), source_shard.hex()));
             let placement_matches = placement.chunk_hash == <[u8; 32]>::from(*chunk_hash)
                 && placement.xorb_hash == <[u8; 32]>::from(xorb_ref.xorb_hash)
                 && placement.chunk_index == xorb_ref.chunk_index
                 && placement.uncompressed_size == xorb_ref.uncompressed_size;
-            if !rooted
-                || !registry.complete_repos.contains(&source.source_repo_prefix)
-                || registry.generation < source.gc_registry_generation
+            if !registry_root.is_some_and(|root| root.rooted)
+                || !registry_root.is_some_and(|root| root.complete)
+                || !registry_root
+                    .is_some_and(|root| root.generation >= source.gc_registry_generation)
                 || !anchor.shards.contains(&source_shard)
                 || !placement_matches
                 || placement
@@ -18068,7 +18082,7 @@ mod tests {
         guard.close().await.expect("close writer");
     }
 
-    use crate::test::git_repo::{GitDirGuard, TEST_GIT_REPO};
+    use crate::test::git_repo::GitDirGuard;
 
     fn pack_manifest_entry_with_tips(ref_tips: Vec<String>) -> PackManifestEntry {
         let pack_id = "a".repeat(64);
@@ -30222,7 +30236,6 @@ mod tests {
         use crate::metadata::manifest::{
             Manifest, PackManifestEntry, append_pack_index, create_manifest, read_manifest,
         };
-        use crab_metadata::ref_registry::RefRegistry;
 
         // Source ref resolution consults the process-wide test GitDir. Hold
         // its guard for the entire async exercise so parallel tests cannot
@@ -30312,11 +30325,13 @@ mod tests {
             assert_eq!(outcome.state, PushTransactionState::Materialized);
             let (materialized, _) = read_manifest(&store, &router).await.unwrap();
             assert_eq!(materialized, candidate);
-            let (registry_bytes, _) = store
-                .get_with_etag(&router.ref_registry_path())
-                .await
-                .unwrap();
-            let registry: RefRegistry = serde_json::from_slice(&registry_bytes).unwrap();
+            let storage = store.as_storage().clone();
+            let storage_router =
+                crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+            let registry =
+                crab_metadata::ref_registry::load_ref_registry(&storage, &storage_router)
+                    .await
+                    .unwrap();
             assert_eq!(
                 registry.active_active_coordinators["org/repo"].url,
                 "dynamodb://crab-coordinator"
