@@ -1,76 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 560" width="620" height="560">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 748" width="960" height="748" role="img" aria-labelledby="restore-title restore-desc">
+  <title id="restore-title">Crab hydrate restore flow</title>
+  <desc id="restore-desc">Crab hydrate probes xorb storage-class metadata, hydrates warm objects immediately, and sends archived objects through restore policy, tiered restore requests, exponential polling, and timeout handling.</desc>
 
   <defs>
-    <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
-      <polygon points="0 0, 7 2.5, 0 5" fill="#64748B"/>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748B"/>
     </marker>
   </defs>
 
-  <g id="background">
-    <rect x="0" y="0" width="620" height="560" fill="#FFFFFF"/>
+  <rect width="960" height="748" fill="#FFFFFF"/>
+
+  <g id="entry">
+    <rect x="365" y="24" width="230" height="54" rx="14" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <text x="480" y="57" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700" fill="#0F172A">crab hydrate --all</text>
+
+    <rect x="325" y="106" width="310" height="58" rx="14" fill="#ECFEFF" stroke="#06B6D4" stroke-width="1.5"/>
+    <text x="480" y="131" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">HEAD xorb</text>
+    <text x="480" y="150" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">read storage-class metadata</text>
+
+    <polygon points="500,200 620,248 500,296 380,248" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="500" y="245" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">storage class?</text>
   </g>
 
-  <g id="containers">
+  <g id="warm-path">
+    <text x="296" y="273" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" fill="#10B981">Warm</text>
+    <rect x="50" y="345" width="300" height="86" rx="14" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
+    <text x="200" y="375" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Warm classes</text>
+    <text x="200" y="397" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">Standard · Standard-IA · Glacier Instant Retrieval</text>
+    <text x="200" y="416" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#10B981">hydrate immediately</text>
+
+    <rect x="105" y="470" width="190" height="62" rx="13" fill="#FFFFFF" stroke="#10B981" stroke-width="1.5"/>
+    <text x="200" y="507" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Hydrate xorb</text>
   </g>
 
-  <g id="nodes">
-    <!-- crab hydrate -->
-    <rect x="220" y="30" width="180" height="50" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
-    <!-- HEAD request -->
-    <rect x="200" y="120" width="220" height="50" rx="8" fill="#ECFEFF" stroke="#06B6D4" stroke-width="1.5"/>
-    <!-- Storage class? diamond -->
-    <polygon points="310,210 410,255 310,300 210,255" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
-    <!-- Read immediately (Warm) -->
-    <rect x="60" y="330" width="180" height="50" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
-    <!-- auto_restore? diamond (Archive) -->
-    <polygon points="460,330 560,375 460,420 360,375" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
-    <!-- Issue restore request (Yes) -->
-    <rect x="360" y="450" width="200" height="50" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
-    <!-- Error (No) -->
-    <rect x="100" y="450" width="220" height="50" rx="8" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1.5"/>
-    <!-- Poll until ready -->
-    <rect x="360" y="530" width="200" height="50" rx="8" fill="#ECFEFF" stroke="#06B6D4" stroke-width="1.5"/>
+  <g id="archive-path">
+    <text x="800" y="273" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" fill="#0284C7">Archive classes</text>
+    <text x="800" y="289" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">Glacier Flexible · Deep Archive · Azure Archive</text>
+
+    <polygon points="800,307 900,352 800,397 700,352" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="800" y="349" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">restore enabled?</text>
+
+    <rect x="390" y="415" width="235" height="76" rx="13" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1.5"/>
+    <text x="507" y="445" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">ArchiveRestoreRequired</text>
+    <text x="507" y="467" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">[CRAB-E0210] · --no-restore</text>
+
+    <rect x="660" y="415" width="280" height="76" rx="13" fill="#ECFEFF" stroke="#06B6D4" stroke-width="1.5"/>
+    <text x="800" y="438" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">RestoreOrchestrator</text>
+    <text x="800" y="458" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">request a restore tier</text>
+    <text x="800" y="477" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" font-weight="600" fill="#06B6D4">expedited · standard · bulk</text>
+
+    <rect x="660" y="515" width="280" height="76" rx="13" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="800" y="539" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Poll until readable</text>
+    <text x="800" y="559" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">30s × 1.5 · 10-minute cap</text>
+    <text x="800" y="578" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">timeout: 6 hours by default</text>
+
+    <rect x="610" y="620" width="170" height="62" rx="13" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
+    <text x="695" y="657" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Hydrate xorb</text>
+
+    <rect x="800" y="620" width="140" height="62" rx="13" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1.5"/>
+    <text x="870" y="647" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" fill="#0F172A">Restore timeout</text>
+    <text x="870" y="666" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#64748B">[CRAB-E0211] · retry</text>
   </g>
 
-  <g id="labels">
-    <text x="310" y="60" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="bold" fill="#0F172A">crab hydrate</text>
-    <text x="310" y="150" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">HEAD request for xorb</text>
-    <text x="310" y="252" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Storage class?</text>
-
-    <!-- Branch labels -->
-    <text x="155" y="310" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">Warm</text>
-    <text x="430" y="310" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#64748B">Archive</text>
-
-    <text x="150" y="360" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Read immediately</text>
-
-    <text x="460" y="372" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">auto_restore?</text>
-
-    <!-- auto_restore branches -->
-    <text x="500" y="430" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#0284C7">Yes</text>
-    <text x="330" y="430" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="bold" fill="#F59E0B">No</text>
-
-    <text x="460" y="480" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">Issue restore request</text>
-    <text x="210" y="480" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="bold" fill="#0F172A">ArchiveRestoreRequired error</text>
-    <text x="460" y="560" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="bold" fill="#0F172A">Poll until ready</text>
+  <g id="connections" fill="none" stroke="#64748B" stroke-width="1.5">
+    <line x1="480" y1="78" x2="480" y2="106" marker-end="url(#arrowhead)"/>
+    <line x1="480" y1="164" x2="480" y2="200" marker-end="url(#arrowhead)"/>
+    <path d="M 380 248 H 200 V 345" marker-end="url(#arrowhead)"/>
+    <line x1="200" y1="431" x2="200" y2="470" marker-end="url(#arrowhead)"/>
+    <path d="M 620 248 H 800 V 307" marker-end="url(#arrowhead)"/>
+    <path d="M 700 352 H 625 V 415" marker-end="url(#arrowhead)"/>
+    <line x1="800" y1="397" x2="800" y2="415" marker-end="url(#arrowhead)"/>
+    <line x1="800" y1="491" x2="800" y2="515" marker-end="url(#arrowhead)"/>
+    <path d="M 800 591 V 607 H 695 V 620" marker-end="url(#arrowhead)"/>
+    <path d="M 800 607 H 870 V 620" marker-end="url(#arrowhead)"/>
   </g>
 
-  <g id="connections">
-    <!-- hydrate → HEAD -->
-    <line x1="310" y1="80" x2="310" y2="120" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- HEAD → Storage class? -->
-    <line x1="310" y1="170" x2="310" y2="210" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- Storage class → Read (Warm, left) -->
-    <path d="M 210 255 L 150 255 L 150 330" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- Storage class → auto_restore? (Archive, right) -->
-    <path d="M 410 255 L 460 255 L 460 330" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- auto_restore → Restore (Yes, down) -->
-    <line x1="460" y1="420" x2="460" y2="450" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- auto_restore → Error (No, left) -->
-    <path d="M 360 375 L 210 375 L 210 450" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- Restore → Poll -->
-    <line x1="460" y1="500" x2="460" y2="530" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-    <!-- Poll → Read -->
-    <path d="M 360 555 L 150 555 L 150 380" fill="none" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <g id="branch-labels" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" fill="#64748B">
+    <text x="670" y="408">No</text>
+    <text x="820" y="410" fill="#10B981">Yes</text>
   </g>
 
+  <rect x="60" y="705" width="840" height="30" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+  <text x="480" y="725" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#0F172A">Restore policy: --no-restore overrides --restore, then hydrate.auto_restore config</text>
 </svg>
