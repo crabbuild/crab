@@ -127,6 +127,12 @@ gated on Plan 004.
 - CLI help, config, JSON/JSONL output, architecture docs, web docs, and
   recovery/runbooks describe one grace/force/plan/resume contract.
 
+The current draft integration branch assembles the Phase 1-5 contracts for
+end-to-end review. This does not override the dependency graph or acceptance
+gates: `006-large-repository-scale-roadmap.md` records which implementation is
+present and which Kubernetes/RustFS, fault, provider, and canary evidence is
+still pending.
+
 ## Findings considered and rejected
 
 - Raising grace alone: it cannot protect a writer longer than grace and is

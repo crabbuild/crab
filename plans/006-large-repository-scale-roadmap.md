@@ -24,6 +24,41 @@
 - **Planned at**: commit `aa150868`, 2026-08-23
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
 
+### Current execution state
+
+The implementation work for Phases 1 through 5 is assembled on one draft
+integration branch so reviewers can inspect the complete generation-binding
+contract across push, read, maintenance, and GC. This intentionally does not
+mark those phases accepted: their Kubernetes/RustFS performance thresholds,
+long-running fault matrix, and rollout gates still require dedicated evidence.
+The branch must remain a draft until those gates are either recorded here or
+split into explicitly tracked follow-up work approved by maintainers.
+
+Implemented on the current branch:
+
+- Phase 0 qualification/report tooling and scheduled/manual workflow;
+- bitmap-native visibility planning and bounded transfer admission;
+- delta-preserving response assembly and generation-bound pack caching;
+- a generation-bound object catalog used as the visibility identity universe;
+- a complete, versioned split commit graph with append and geometric compaction;
+- one bounded generation-owner maintenance action per cycle;
+- selected-suffix geometric repack that leaves stable large packs untouched;
+- generation-bound graph/catalog/visibility publication after push and repack;
+- repository GC classification for active, retained-history, grace-period, and
+  collectible pack storage;
+- cold/warm clone fanout controls in the qualification harness.
+
+Still required before the roadmap is DONE:
+
+- a fresh, publishable Kubernetes/RustFS report from the current branch;
+- the 1,000-push growth and latency comparison for catalog and graph layers;
+- 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
+  shallow differential proof;
+- the complete Phase 5 interruption and 10,000-push maintenance matrix;
+- concurrent fetch/push, cache-server fanout, throttling, and owner-failover
+  scenarios from Phase 6;
+- supported-provider compatibility, sustained canary, and default-on rollout.
+
 ## Outcome
 
 Crab will support repositories with Kubernetes-scale history and sustained
@@ -44,6 +79,15 @@ The target architecture follows the public Git/GitHub large-repository model:
    repositories for every clone.
 6. Lease-owned background maintenance compacts recent data and metadata.
 7. Generated artifacts and hot object ranges are cached for team fanout.
+
+Crab borrows the algorithms and ownership boundaries, not GitHub's deployment
+topology. GitHub can serve from managed repository hosts and replicas; Crab
+keeps immutable Git data in object storage and uses the existing repository
+generation owner plus cache service. Git's MIDX becomes Crab's generation-bound
+object catalog, multi-pack bitmaps become catalog-ordinal visibility closures,
+split commit graphs remain immutable metadata layers, geometric repack becomes
+selected-suffix object-store compaction, and cruft/limbo safety becomes retained
+manifest history plus grace-period GC classification.
 
 Public technical references:
 
@@ -82,7 +126,7 @@ Crab supports Git 2.30 through 2.50+ according to
 `crab/docs/design/technical-design.md:2254`. New behavior must not silently
 require Git 2.55.
 
-## Current state
+## Baseline state at planning commit `aa150868`
 
 ### Geometric pack maintenance exists
 
@@ -819,13 +863,32 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | TODO | — | — | — | Qualification baseline |
-| 1 | TODO | — | — | — | Runtime visibility bitmaps |
-| 2 | TODO | — | — | — | Delta-preserving response packs |
-| 3 | TODO | — | — | — | Incremental object catalog |
-| 4 | TODO | — | — | — | Complete split commit graph |
-| 5 | TODO | — | — | — | Automatic maintenance and retention |
-| 6 | TODO | — | — | — | Team-scale load and rollout |
+| 0 | PARTIAL | This draft PR | Local baseline only | `33256217` | Harness, verifier, docs, and workflow implemented; fresh current-branch report and repeatability gate pending |
+| 1 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `8b17b9d4`, `22955e9d` | Bitmap runtime and bounded incremental visibility publication pass unit/integration proof; Kubernetes RSS/latency gate pending |
+| 2 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `4ee35cd1` through `a5bcaa22` | Canonical/delta reuse and immutable response cache pass strict pack tests; Kubernetes CPU/egress and origin-read gates pending |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `8b9b4893` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
+| 4 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | Current draft head | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
+| 5 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | Current draft head | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
+| 6 | PARTIAL | This draft PR | — | Current draft head | 50-cold/100-warm clone fanout controls implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
+
+### Current branch verification evidence
+
+The following proof was run with
+`CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-roadmap`:
+
+- `cargo test -p crab --lib --locked`: 3,693 passed, 2 ignored, 0 failed;
+- `cargo test -p crab-metadata --locked`: 232 passed, 1 ignored;
+- `cargo test -p crab-read --locked`: 55 passed;
+- `cargo test -p crab-remote-git --locked`: 138 passed;
+- focused split-graph, shallow, fetch-admission, generation-owner, repack, GC,
+  schema, and report-verifier suites passed;
+- production-library clippy for `crab-metadata`, `crab-git`,
+  `crab-remote-git`, and `crab-read` passed with warnings denied.
+
+The repository-wide `make clippy` gate is not recorded as passing: it reaches
+pre-existing warnings in untouched `crab-vfs` code. The full Kubernetes/RustFS
+qualification and Phase 6 rollout evidence are also not yet complete, so this
+table is an implementation checkpoint rather than phase acceptance.
 
 ## Final done criteria
 
