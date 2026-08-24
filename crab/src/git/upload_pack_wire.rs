@@ -37,6 +37,78 @@ const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
+struct ObjectStoreGeneratedPackLeaseProvider {
+    store: Arc<dyn object_store::ObjectStore>,
+    prefix: String,
+}
+
+struct ObjectStoreGeneratedPackLease {
+    lock: crab_coordination::PushLock,
+}
+
+impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLeaseProvider {
+    fn try_acquire<'a>(
+        &'a self,
+        resource: &'a str,
+        ttl: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<
+            crab_remote_git::GeneratedPackLeaseAttempt,
+            crab_remote_git::GeneratedPackLeaseError,
+        >,
+    > {
+        Box::pin(async move {
+            match crab_coordination::PushLock::acquire_internal(
+                &self.store,
+                &self.prefix,
+                resource,
+                ttl,
+            )
+            .await
+            {
+                Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
+                    Box::new(ObjectStoreGeneratedPackLease { lock }),
+                )),
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held)
+                }
+                Err(error) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+            }
+        })
+    }
+}
+
+impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
+    fn renew(
+        &mut self,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
+    > {
+        Box::pin(async move {
+            self.lock
+                .renew()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+        })
+    }
+
+    fn release(
+        self: Box<Self>,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
+    > {
+        Box::pin(async move {
+            self.lock
+                .release()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Packet {
     Data(Vec<u8>),
@@ -431,7 +503,7 @@ async fn open_repository_snapshot(
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1)?;
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let runtime = Arc::new(RemoteGitRuntime::default());
-    RemoteGitRepository::open(
+    let repository = RemoteGitRepository::open(
         store.clone(),
         layout,
         identity,
@@ -439,7 +511,12 @@ async fn open_repository_snapshot(
         upload_pack_repository_options()?,
         cancellation,
     )
-    .await
+    .await?;
+    let lease_provider = ObjectStoreGeneratedPackLeaseProvider {
+        store: Arc::clone(store.inner()),
+        prefix: prefix.to_owned(),
+    };
+    Ok(repository.with_generated_pack_lease_provider(Arc::new(lease_provider)))
 }
 
 fn upload_pack_repository_options() -> crab_remote_git::Result<RepositoryOptions> {
@@ -1282,6 +1359,56 @@ mod tests {
             digest,
             generated_pack_request_digest(&reordered, &[first, second], &[])
         );
+    }
+
+    #[tokio::test]
+    async fn generated_pack_lease_provider_serializes_one_repository_resource() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let provider = ObjectStoreGeneratedPackLeaseProvider {
+            store,
+            prefix: "org/repo".to_owned(),
+        };
+        let first = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("first lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+                panic!("first lease must be available")
+            }
+        };
+        let blocked = crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("contending lease acquisition");
+        assert!(matches!(
+            blocked,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held
+        ));
+
+        first.release().await.expect("release first lease");
+        let replacement = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("replacement lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+                panic!("released lease must be acquirable")
+            }
+        };
+        replacement.release().await.expect("release replacement");
     }
 
     #[test]

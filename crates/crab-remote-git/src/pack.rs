@@ -34,6 +34,65 @@ pub struct GeneratedPackCacheKey {
     selection_digest: [u8; 32],
 }
 
+/// Source-preserving failure returned by a product-owned lease integration.
+#[derive(Debug)]
+pub struct GeneratedPackLeaseError {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl GeneratedPackLeaseError {
+    /// Wrap a concrete coordination error without discarding its source.
+    pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl std::fmt::Display for GeneratedPackLeaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GeneratedPackLeaseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// One acquired cross-process lease for generated response-pack production.
+pub trait GeneratedPackLease: Send {
+    /// Renew the lease before its configured lifetime expires.
+    fn renew(
+        &mut self,
+    ) -> futures_util::future::BoxFuture<'_, std::result::Result<(), GeneratedPackLeaseError>>;
+
+    /// Release the lease with holder-checked semantics.
+    fn release(
+        self: Box<Self>,
+    ) -> futures_util::future::BoxFuture<'static, std::result::Result<(), GeneratedPackLeaseError>>;
+}
+
+/// Result of one non-blocking generated-pack lease acquisition attempt.
+pub enum GeneratedPackLeaseAttempt {
+    Acquired(Box<dyn GeneratedPackLease>),
+    Held,
+}
+
+/// Product-owned cross-process coordination for generated pack production.
+pub trait GeneratedPackLeaseProvider: Send + Sync {
+    /// Try to acquire one opaque repository-scoped resource.
+    fn try_acquire<'a>(
+        &'a self,
+        resource: &'a str,
+        ttl: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<GeneratedPackLeaseAttempt, GeneratedPackLeaseError>,
+    >;
+}
+
 impl GeneratedPackCacheKey {
     fn hex(self) -> String {
         self.digest
@@ -362,6 +421,10 @@ async fn produce_cached_pack(
     cache_key: GeneratedPackCacheKey,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
+    let Some(provider) = repository.generated_pack_lease_provider.as_ref() else {
+        return produce_cached_pack_without_lease(repository, object_ids, cache_key, cancellation)
+            .await;
+    };
     let deadline =
         tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
     let resource = format!("generated-pack-{}", cache_key.hex());
@@ -372,12 +435,7 @@ async fn produce_cached_pack(
         {
             return Ok(pack);
         }
-        let acquire = crab_coordination::PushLock::acquire_internal(
-            repository.state.store.inner(),
-            repository.state.layout.repo_prefix(),
-            &resource,
-            GENERATED_PACK_LEASE_TTL,
-        );
+        let acquire = provider.try_acquire(&resource, GENERATED_PACK_LEASE_TTL);
         let lock = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -385,8 +443,8 @@ async fn produce_cached_pack(
                 return Err(Error::Timeout { operation: "upload-pack" });
             }
             result = acquire => match result {
-                Ok(lock) => lock,
-                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                Ok(GeneratedPackLeaseAttempt::Acquired(lock)) => lock,
+                Ok(GeneratedPackLeaseAttempt::Held) => {
                     if !recorded_waiter {
                         record_generated_pack_cache(repository, crate::CacheOutcome::Coalesced, 1);
                         recorded_waiter = true;
@@ -401,7 +459,7 @@ async fn produce_cached_pack(
                     }
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(source) => return Err(Error::GeneratedPackLease { source }),
             }
         };
         return produce_cached_pack_under_lease(
@@ -419,7 +477,7 @@ async fn produce_cached_pack_under_lease(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
-    mut lock: crab_coordination::PushLock,
+    mut lock: Box<dyn GeneratedPackLease>,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let producer = async {
@@ -442,8 +500,8 @@ async fn produce_cached_pack_under_lease(
             () = cancellation.cancelled() => break Err(Error::Cancelled),
             result = &mut producer => break result,
             _ = renewal.tick() => {
-                if let Err(error) = lock.renew().await {
-                    break Err(error.into());
+                if let Err(source) = lock.renew().await {
+                    break Err(Error::GeneratedPackLease { source });
                 }
             }
         }
@@ -455,6 +513,22 @@ async fn produce_cached_pack_under_lease(
         );
     }
     result
+}
+
+async fn produce_cached_pack_without_lease(
+    repository: &RemoteGitRepository,
+    object_ids: &[ObjectId],
+    cache_key: GeneratedPackCacheKey,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    if let Some(pack) =
+        load_cached_pack(repository, cache_key, object_ids.len(), cancellation).await?
+    {
+        return Ok(pack);
+    }
+    let generated = repository.generate_pack(object_ids, cancellation).await?;
+    publish_cached_pack(repository, cache_key, &generated, cancellation).await?;
+    Ok(generated)
 }
 
 fn record_generated_pack_cache(

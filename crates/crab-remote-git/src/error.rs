@@ -457,8 +457,11 @@ pub enum Error {
     Storage(#[from] crab_storage::StorageError),
 
     /// Generated-artifact production coordination failed.
-    #[error(transparent)]
-    Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("generated response-pack coordination failed")]
+    GeneratedPackLease {
+        #[source]
+        source: crate::GeneratedPackLeaseError,
+    },
 
     /// Closing the locator also failed after the read had already failed.
     #[error("remote Git read failed and its locator could not be closed")]
@@ -531,7 +534,7 @@ impl Error {
             Self::InternalInvariant { .. } => "internal",
             Self::Metadata(_) | Self::Manifest { .. } | Self::Inventory { .. } => "metadata",
             Self::Storage(_) => "storage",
-            Self::Coordination(_) => "coordination",
+            Self::GeneratedPackLease { .. } => "coordination",
             Self::CloseAfterFailure { .. } => "close",
             Self::Revision {
                 reason: RevisionError::TagDepth,

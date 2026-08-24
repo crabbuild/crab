@@ -2112,10 +2112,10 @@ impl CommitGraphProvider for RemoteFetchStore {
         let identity_matches = graph.descriptor.generation == manifest.generation
             && graph.descriptor.pack_index_hash == manifest.pack_index_hash
             && graph.descriptor.git_validation_digest == manifest.git_validation_digest;
-        let roots_complete = manifest
+        let roots_complete = crab_read::manifest_ref_advertisement(&manifest, &[])
             .refs
             .iter()
-            .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+            .map(|entry| entry.peeled.as_ref().unwrap_or(&entry.sha))
             .map(|oid| remote_graph_oid(oid))
             .collect::<Result<Vec<_>>>()?
             .iter()

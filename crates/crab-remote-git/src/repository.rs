@@ -263,6 +263,7 @@ fn validate_non_zero(name: &'static str, value: u64) -> Result<()> {
 #[derive(Clone)]
 pub struct RemoteGitRepository {
     pub(crate) state: Arc<RepositoryState>,
+    pub(crate) generated_pack_lease_provider: Option<Arc<dyn crate::GeneratedPackLeaseProvider>>,
 }
 
 impl fmt::Debug for RemoteGitRepository {
@@ -360,6 +361,7 @@ impl RemoteGitRepository {
                 };
                 return Ok(Self {
                     state: Arc::new(state),
+                    generated_pack_lease_provider: None,
                 });
             }
 
@@ -455,6 +457,7 @@ impl RemoteGitRepository {
                 };
                 return Ok(Self {
                     state: Arc::new(state),
+                    generated_pack_lease_provider: None,
                 });
             }
 
@@ -508,6 +511,18 @@ impl RemoteGitRepository {
     #[must_use]
     pub fn identity(&self) -> &RepositoryIdentity {
         &self.state.identity
+    }
+
+    /// Install product-owned coordination for generated response-pack misses.
+    ///
+    /// The provider must protect this repository's object-store namespace.
+    #[must_use]
+    pub fn with_generated_pack_lease_provider(
+        mut self,
+        provider: Arc<dyn crate::GeneratedPackLeaseProvider>,
+    ) -> Self {
+        self.generated_pack_lease_provider = Some(provider);
+        self
     }
 
     /// Return the number of immutable packs in the pinned inventory.

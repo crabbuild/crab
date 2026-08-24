@@ -23,7 +23,8 @@ use crab_metadata::manifests::{
 };
 use crab_remote_git::{
     BlameUnsupportedReason, ChangeKind, ContentClassification, CursorError, DiffClassification,
-    DirectoryMetadata, EntryKind, EntryMode, Error, GitPath, HistoryTraversal, ObjectLimits,
+    DirectoryMetadata, EntryKind, EntryMode, Error, GeneratedPackLease, GeneratedPackLeaseAttempt,
+    GeneratedPackLeaseError, GeneratedPackLeaseProvider, GitPath, HistoryTraversal, ObjectLimits,
     OperationKind, OperationLimits, PageCursor, PageRequest, RemoteGitRepository, RemoteGitRuntime,
     RepositoryOptions, Revision, RuntimeOptions,
 };
@@ -39,7 +40,7 @@ use object_store::{
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use sha1::{Digest as _, Sha1};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
@@ -1566,13 +1567,18 @@ async fn generated_pack_cache_rejects_corrupt_request_descriptor() {
 async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellation() {
     let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
     let (second_repository, second_runtime) = reopen_fixture(&fixture).await;
+    let lease_provider = Arc::new(TestGeneratedPackLeaseProvider::default());
+    let first_repository = fixture
+        .repository
+        .clone()
+        .with_generated_pack_lease_provider(lease_provider.clone());
+    let second_repository = second_repository.with_generated_pack_lease_provider(lease_provider);
     let mut object_ids = fixture_object_ids(&fixture);
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
         .generated_pack_cache_key([5; 32], [6; 32], &object_ids, false);
     let cancelled = CancellationToken::new();
-    let first_repository = fixture.repository.clone();
     let first_objects = object_ids.clone();
     let first_cancellation = cancelled.clone();
 
@@ -1623,6 +1629,56 @@ async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellatio
     );
     fixture.runtime.shutdown().await;
     second_runtime.shutdown().await;
+}
+
+#[derive(Default)]
+struct TestGeneratedPackLeaseProvider {
+    lease: Arc<Mutex<()>>,
+}
+
+struct TestGeneratedPackLease {
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl GeneratedPackLeaseProvider for TestGeneratedPackLeaseProvider {
+    fn try_acquire<'a>(
+        &'a self,
+        _resource: &'a str,
+        _ttl: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<GeneratedPackLeaseAttempt, GeneratedPackLeaseError>,
+    > {
+        let lease = Arc::clone(&self.lease);
+        Box::pin(async move {
+            Ok(match lease.try_lock_owned() {
+                Ok(guard) => {
+                    GeneratedPackLeaseAttempt::Acquired(Box::new(TestGeneratedPackLease {
+                        _guard: guard,
+                    }))
+                }
+                Err(_) => GeneratedPackLeaseAttempt::Held,
+            })
+        })
+    }
+}
+
+impl GeneratedPackLease for TestGeneratedPackLease {
+    fn renew(
+        &mut self,
+    ) -> futures_util::future::BoxFuture<'_, std::result::Result<(), GeneratedPackLeaseError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn release(
+        self: Box<Self>,
+    ) -> futures_util::future::BoxFuture<'static, std::result::Result<(), GeneratedPackLeaseError>>
+    {
+        Box::pin(async move {
+            drop(self);
+            Ok(())
+        })
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

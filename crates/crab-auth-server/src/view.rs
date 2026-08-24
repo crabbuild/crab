@@ -983,12 +983,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(manifest.refs.iter().all(|(name, tip)| {
-            visibility
+        assert!(
+            manifest
                 .refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-        }));
+                .iter()
+                .all(|(name, tip)| visibility.contains_hex_in_ref(name, tip))
+        );
         let packs = read_bulk_pack_list(&store, &view_router, &manifest.pack_index_hash)
             .await
             .unwrap();

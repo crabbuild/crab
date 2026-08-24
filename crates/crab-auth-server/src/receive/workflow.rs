@@ -1097,10 +1097,7 @@ mod tests {
         )
         .await?;
         assert!(
-            visibility
-                .refs
-                .get("refs/heads/main")
-                .is_some_and(|objects| objects.binary_search(final_oid).is_ok()),
+            visibility.contains_hex_in_ref("refs/heads/main", final_oid),
             "the visibility proof must be durable when the protected ref commits"
         );
 

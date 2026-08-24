@@ -14,7 +14,6 @@ path = "src/lib.rs"
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-git = { workspace = true }
-crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
 crab-storage = { workspace = true }
 crab-xet = { workspace = true }
