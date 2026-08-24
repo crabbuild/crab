@@ -36,14 +36,16 @@ The branch must remain a draft until those gates are either recorded here or
 split into explicitly tracked follow-up work approved by maintainers.
 
 The latest live runs use Kubernetes revision `b3bc2ac5` and isolated local
-RustFS endpoints. `local-k8s-final-20260824` exercised the pre-index shallow
-path and was stopped after depth-100 produced no plan for 11 minutes.
-`local-k8s-shallow-index-v2-20260824` exercised the generation-bound closure
-index through the legacy `git clone --depth` remote-helper path: depth-1 and
-depth-10 completed with exact clones, while depth-100 still exceeded the
-30-minute harness timeout during response-pack production. Both run-owned
-prefixes were cleaned. These are implementation evidence, not passing phase
-acceptance reports; the depth-100/1,000 pack-generation gate remains open.
+RustFS endpoints. `local-k8s-shallow-index-v3-20260824` completed the
+generation-bound closure path for full, filtered, and depth-1/10/100/1,000
+clones; all clone, fsck, object-sample, ref, and cleanup checks passed. A
+focused follow-up, `local-k8s-shallow-prefetch-v1-20260824`, exercised the
+current sparse response-pack path: depth-1 and depth-10 remained exact while
+server-side pack generation fell to roughly 27 seconds and range requests
+fell below 7,600 per clone. These are strong single-client implementation
+reports, not the full 1,000-push acceptance report; repeatability, differential
+depth proof, owner-fault, and team-concurrency gates remain open. Both run-owned
+prefixes were cleaned.
 
 Implemented on the current branch:
 
@@ -74,6 +76,11 @@ Implemented on the current branch:
   already-shallow requests;
 - generated-pack cache descriptors that distinguish requested object count
   from the larger self-contained pack count required by delta bases.
+- sparse response-pack delta-base prefetching in locator batches, bounded range
+  coalescing, local verified reconstruction, and shared decode admission;
+- conservative `include-tags` handling for exact shallow closures: lightweight
+  tags may use the index, while annotated or incomplete tag state falls back to
+  the canonical planner.
 
 Still required before the roadmap is DONE:
 
@@ -81,11 +88,14 @@ Still required before the roadmap is DONE:
 - the 1,000-push growth and latency comparison for catalog and graph layers;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
-- a complete shallow response-pack accelerator: the generation-bound index now
-  selects the exact object closure and boundaries, but depth-1 still performs
-  90,307 storage requests for 30,031 selected objects and depth-100 response
-  production exceeded 30 minutes. Pre-generated or range-native shallow packs
-  are required before the depth-1/10/100/1,000 SLO can close;
+- a publishable full-profile qualification report from the committed latest
+  binary, including the required 1,000-push replay and repeatability run;
+- full shallow differential proof and the final response-pack SLO report. The
+  exact closure index now handles all four measured depths, and sparse
+  delta-base prefetch reduced depth-1 from 36,702 to 7,388 origin requests and
+  depth-10 from 41,493 to 7,502 in focused runs. Depth-100/1,000 currently use
+  the dense selected/complete repack path and pass correctness, but their
+  differential and sustained SLO evidence is still required;
 - the complete Phase 5 interruption and 10,000-push maintenance matrix;
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
@@ -926,11 +936,11 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | `local-k8s-final-20260824` (interrupted at depth-100; prefix cleaned) | `eb0e9114` + working tree | Seed, incremental, full-clone, filtered, and depth-1 checks completed; a publishable completed report, repeatability, 1,000 replay, and full differential gates remain pending |
+| 0 | PARTIAL | PR #75 | `local-k8s-shallow-index-v3-20260824` (smoke; prefix cleaned) | `893e5e46` + working tree | Full/filtered/depth-1/10/100/1,000 correctness checks completed on one replay; the verifier correctly rejects this smoke profile because the 1,000-push and repeatability gates remain pending |
 | 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
-| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-shallow-index-v2-20260824` | `d2a4c97d` through working tree | Cold two-pack consolidation generated 1.244 GB in 113.969 s; warm clone hit cache; selected `blob:none` repack generated 198.85 MB in 78.564 s; cache descriptors now preserve selected-vs-self-contained object counts |
+| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824` | `1d69fe79` | Full two-pack consolidation transferred 1.244 GB and passed fsck; filtered selected repack transferred 198.85 MB; sparse depth-1/10 response generation dropped to 27.180/27.944 s with 7,388/7,502 storage requests; full-profile and reference-pack SLO evidence remain pending |
 | 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `d5090649` + working tree | Catalog had 7 layers/110.09 MB at generation 1 and 10 layers/110.09 MB after one push; 1,000-push drift and canonical-universe proof remain pending |
-| 4 | IMPLEMENTED; SHALLOW EXIT GATE OPEN | PR #75 | `local-k8s-shallow-index-v2-20260824` | `9bb558a6` + working tree | Graph covers 140,381 then 140,383 commits; exact closure index publishes four depth profiles; depth-1/10 clones pass, but depth-100 response production exceeded 30 min |
+| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824` | `1d69fe79` | Graph covers 140,381 then 140,383 commits; exact closure index publishes four depth profiles; depth-1/10/100/1,000 clones pass in v3, and sparse delta-base prefetch meets the focused request target, but 10,000-pair differential and sustained SLO evidence remain pending |
 | 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `9bb558a6` + working tree | SlateDB is pinned to 0.15.0 and fresh owner scans showed no prior cancellation panic; interruption, 10,000-push, and GC matrix remain pending |
 | 6 | PARTIAL | PR #75 | `local-k8s-final-20260824` | `0a8b5c8f`, `b7749b2e` + working tree | Single-client full/filtered checks pass; shallow and large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
@@ -1042,6 +1052,64 @@ This run narrows the Phase 4 gap: object selection and shallow boundaries are
 indexed and correct for the completed profiles, while response-pack production
 still needs a pre-generated or range-native path before the large-repository
 SLO can be accepted.
+
+### Completed indexed shallow run
+
+Run profile: `local-k8s-shallow-index-v3-20260824`, the same Kubernetes
+revision and RustFS topology, one replay push, and the release binary from
+the generation-bound implementation. The run completed and cleaned its
+remote prefix. It is a smoke profile because it replays one commit, but it
+covered every clone shape required to isolate the shallow response bottleneck.
+
+- The seed imported approximately 1,643,202 objects into one canonical pack;
+  the replay added two commits and nine objects. Full, incremental, filtered,
+  and all four shallow clone tips matched the source; full and incremental
+  checkouts passed `git fsck --full`, 1,000 sampled objects were byte-identical,
+  advertised refs matched, the source checkout stayed unchanged, and cleanup
+  left no remote-prefix leaks.
+- Exact indexed planning selected 30,031/44,026/1,001,853/1,643,211 objects
+  for depth 1/10/100/1,000. Planner times were 11/13/227/357 ms and planning
+  used one storage request for depth 1/10 and three for depth 100/1,000.
+- Depth-100 used selected repack: two source packs, 1,263,644,313 source
+  bytes, 813,950,951 response bytes, 86,808 ms pack generation, and three
+  storage requests. Depth-1 and depth-10 were exact but exposed the sparse
+  delta-base response bottleneck addressed by the follow-up below.
+- Depth-1, depth-10, depth-100, depth-1,000, and `blob:none` all completed
+  through protocol v2. The filtered clone selected 1,102,159 objects and
+  transferred 198,850,600 bytes after exact catalog filtering.
+
+This report closes the correctness and exact-selection portion of the Phase 4
+shallow gate for the measured snapshot. It does not close the full-profile
+replay, differential ancestry, provider, concurrency, or canary gates.
+
+### Sparse response-pack follow-up
+
+Run profile: `local-k8s-shallow-prefetch-v1-20260824`, the same Kubernetes
+revision and RustFS topology, one replay push, and focused depth-1/depth-10
+clones. The run used a working-tree release binary containing the changes
+later committed as `1d69fe79` and cleaned its remote prefix. It is a focused
+optimization report, not a full-profile qualification report.
+
+- The exact closure planner issued one storage request for each shallow plan;
+  depth-1 selected 30,031 objects and depth-10 selected 44,026 objects.
+- Depth-1 generated a 49,424,332-byte response in 27,180 ms with 7,388
+  storage requests, 243,207,219 fetched bytes, and 381,891,113 inflated
+  bytes. Depth-10 generated a 98,313,035-byte response in 27,944 ms with
+  7,502 storage requests, 286,410,139 fetched bytes, and 778,311,780
+  inflated bytes.
+- The earlier batch-only baseline recorded 36,702/41,493 storage requests and
+  40,684/71,125 ms of pack generation for the same depth-1/depth-10 profiles.
+  The new path therefore removes the request amplification and materializes
+  cross-batch delta bases locally while retaining strict pack/fsck checks.
+- The new resolver keeps raw entries generation-bound, verifies CRCs, pack
+  headers, delta results, and object IDs, charges aggregate inflated-byte
+  budgets, checks cancellation, and uses the shared decode-admission limit.
+  Its higher fetched-byte total is intentional bounded range amplification;
+  provider-specific range economics still need the Phase 6 matrix.
+
+The focused run passed the incremental tip, source-unchanged, remote-cleanup,
+and artifact-redaction checks. It does not close the full 1,000-push report,
+10,000-pair differential, provider, concurrency, or sustained-canary gates.
 
 This evidence proves the push-acknowledgement boundary, generation binding,
 multi-pack response reuse, exact filtered packing, and current owner lifecycle.
