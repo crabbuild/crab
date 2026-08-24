@@ -342,35 +342,34 @@ fn uninstall_hooks(root: &Path) {
 }
 
 /// Resolve the hooks directory, respecting `core.hooksPath`.
-fn resolve_hooks_dir(root: &Path) -> Result<std::path::PathBuf> {
+pub(crate) fn resolve_hooks_dir(root: &Path) -> Result<std::path::PathBuf> {
     let output = Command::new("git")
-        .args(["config", "core.hooksPath"])
+        .args(["rev-parse", "--git-path", "hooks"])
         .current_dir(root)
         .output()?;
 
-    if output.status.success() {
-        let custom = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !custom.is_empty() {
-            let p = Path::new(&custom);
-            if p.is_absolute() {
-                return Ok(p.to_path_buf());
-            }
-            return Ok(root.join(p));
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CrabError::Configuration {
+            key: "hooks directory".to_owned(),
+            origin: format!("git rev-parse --git-path hooks failed: {stderr}"),
+        });
     }
 
-    // Default: .git/hooks
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(root)
-        .output()?;
-
-    if git_dir.status.success() {
-        let dir = String::from_utf8_lossy(&git_dir.stdout).trim().to_owned();
-        return Ok(Path::new(&dir).join("hooks"));
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if resolved.is_empty() {
+        return Err(CrabError::Configuration {
+            key: "hooks directory".to_owned(),
+            origin: "git rev-parse --git-path hooks returned an empty path".to_owned(),
+        });
     }
 
-    Ok(root.join(".git").join("hooks"))
+    let path = Path::new(&resolved);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    })
 }
 
 /// Set the executable bit on a file (Unix only).
@@ -583,12 +582,11 @@ fn uninstall_completions() {
 /// append detection.
 const MIRROR_HOOK_MARKER: &str = "# Crab mirror:";
 
+pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh\n# Crab mirror: push xorbs before refs go to origin\ncrab add . --skip-git-add 2>/dev/null\ncrab push --remote crab --quiet 2>/dev/null\n";
+
 /// Hook definitions for mirror mode: (hook_name, content_lines).
 const MIRROR_HOOKS: &[(&str, &str)] = &[
-    (
-        "pre-push",
-        "#!/bin/sh\n# Crab mirror: push xorbs before refs go to origin\ncrab add . --skip-git-add 2>/dev/null\ncrab push --remote crab --quiet 2>/dev/null\n",
-    ),
+    ("pre-push", MIRROR_PRE_PUSH_HOOK),
     (
         "post-checkout",
         "#!/bin/sh\n# Crab mirror: hydrate pointer files after checkout\ncrab hydrate . --quiet 2>/dev/null || true\n",

@@ -79,7 +79,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
         exc_filter.as_ref(),
         &ctx.local_lfs_dir,
         options.refetch,
-    );
+    )?;
 
     if transfers.is_empty() {
         if options.json {
@@ -231,7 +231,7 @@ fn plan_fetch_transfers(
     exclude: Option<&PatternFilter>,
     local_lfs_dir: &Path,
     refetch: bool,
-) -> Vec<FetchTransfer> {
+) -> Result<Vec<FetchTransfer>> {
     let mut transfers = Vec::new();
     let mut seen = HashSet::new();
 
@@ -246,7 +246,12 @@ fn plan_fetch_transfers(
         {
             continue;
         }
-        if !refetch && local_object_path(local_lfs_dir, &pointer.oid).is_file() {
+        let local_valid = match crate::lfs::cache::read_pointer(local_lfs_dir, pointer) {
+            Ok(Some(_)) => true,
+            Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => false,
+            Err(error) => return Err(error),
+        };
+        if !refetch && local_valid {
             continue;
         }
         if seen.insert(pointer.oid) {
@@ -257,7 +262,7 @@ fn plan_fetch_transfers(
         }
     }
 
-    transfers
+    Ok(transfers)
 }
 
 #[derive(Serialize)]
@@ -703,7 +708,7 @@ mod tests {
         fs::write(local_path, b"local").unwrap();
         let entries = vec![("asset.bin".to_owned(), ptr)];
 
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false);
+        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
 
         assert!(transfers.is_empty());
     }
@@ -717,7 +722,7 @@ mod tests {
         fs::write(local_path, b"local").unwrap();
         let entries = vec![("asset.bin".to_owned(), ptr)];
 
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), true);
+        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), true).unwrap();
 
         assert_eq!(transfers.len(), 1);
     }
@@ -731,7 +736,7 @@ mod tests {
             ("b.bin".to_owned(), ptr.clone()),
         ];
 
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false);
+        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
 
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].path, "a.bin");

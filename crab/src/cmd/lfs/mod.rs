@@ -40,7 +40,7 @@ use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
 
 pub(super) fn hooks_dir_from(root: &Path) -> Result<PathBuf> {
-    Ok(crate::git::discover::discover_common_git_dir_from(root)?.join("hooks"))
+    crate::cmd::install::resolve_hooks_dir(root)
 }
 
 /// LFS subcommands dispatched from `crab lfs <cmd>`.
@@ -213,8 +213,6 @@ pub enum LfsCmd {
         #[arg(long)]
         rollback: bool,
     },
-    /// Show LFS/XET routing statistics.
-    RoutingStats,
     /// Generate cloud lifecycle policy for LFS objects.
     LifecyclePolicy {
         /// Cloud backend: s3, gcs, or azure.
@@ -394,13 +392,13 @@ pub enum LfsCmd {
         /// Disable remote verification.
         #[arg(long, conflicts_with = "verify_remote")]
         no_verify_remote: bool,
-        /// Also require remote verification for unreachable candidates.
+        /// Compatibility flag; remote verification always covers every candidate.
         #[arg(long, conflicts_with = "no_verify_unreachable")]
         verify_unreachable: bool,
-        /// Do not require remote verification for unreachable candidates.
+        /// Disable unreachable verification only when remote verification is disabled.
         #[arg(long, conflicts_with = "verify_unreachable")]
         no_verify_unreachable: bool,
-        /// Continue or halt when a candidate cannot be verified remotely.
+        /// Continue or halt when verification is disabled; remote verification always halts.
         #[arg(long, value_name = "MODE", value_parser = ["halt", "continue"])]
         when_unverified: Option<String>,
         /// Accept Git LFS recent-pruning flag; Crab does not retain recent unreferenced objects.
@@ -1343,15 +1341,6 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
                 }
             };
             convert::run_convert(direction, pattern, *dry_run, &repo_root)?;
-        }
-        LfsCmd::RoutingStats => {
-            println!("Routing stats: (routing engine active)");
-            println!("  LFS (size):       files below threshold");
-            println!("  LFS (entropy):    high-entropy/compressed files");
-            println!("  LFS (override):   user-specified filter=lfs");
-            println!("  XET (multi-ver):  files with multiple versions");
-            println!("  XET (override):   user-specified filter=crab");
-            println!("Run with RUST_LOG=debug for per-file decision logs.");
         }
         LfsCmd::LifecyclePolicy {
             backend,

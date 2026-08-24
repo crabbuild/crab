@@ -10,7 +10,8 @@ meta:
 # crab lfs
 
 Manage Git LFS compatibility for repositories that still use LFS pointers,
-hooks, or transfer-agent workflows.
+hooks, or transfer-agent workflows. Explicit `.gitattributes` rules can route
+some paths to LFS and other paths to Crab/Xet in the same repository.
 
 ## Synopsis
 
@@ -48,6 +49,11 @@ crab lfs status
 ```
 
 For exact options, run `crab lfs <subcommand> --help`.
+
+`install` and `update` will not silently skip an existing unmanaged
+`pre-push` hook. They return an error so LFS publication cannot be bypassed;
+merge the printed LFS command manually or pass `--force` to replace the hook.
+Crab composes its LFS gate with its own mirror-mode hook automatically.
 
 ## Related Commands
 

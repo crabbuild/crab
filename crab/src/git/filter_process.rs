@@ -937,6 +937,11 @@ fn dispatch_command<R: Read, W: Write>(
 ) -> Result<()> {
     match cmd.command.as_str() {
         "clean" => {
+            // Resolve ownership before touching XET staging. LFS has its own
+            // cache and remote publication path and must never contend on the
+            // XET staging lock in a mixed-repository filter session.
+            let is_lfs = session.resolve_filter_for(&cmd.pathname)
+                == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
             // Fast-fast path: if the hydrated-pointer cache already
             // has a live entry for this pathname, the upcoming clean
             // will be served from cache without needing staging.
@@ -956,7 +961,12 @@ fn dispatch_command<R: Read, W: Write>(
             // reach this branch and never acquire `LOCK_EX`, which is
             // what lets a concurrent `git status` coexist with a
             // long-running `crab add`.
-            if cache_short_circuit {
+            if is_lfs {
+                tracing::debug!(
+                    path = %cmd.pathname,
+                    "filter clean: LFS route resolved, skipping XET staging"
+                );
+            } else if cache_short_circuit {
                 // Don't mutate the staging-unavailable flag here — if
                 // a prior clean already opened staging successfully,
                 // keep the writer attached so subsequent non-cached
@@ -994,9 +1004,9 @@ fn dispatch_command<R: Read, W: Write>(
 
             // Stream pkt-line packets straight into the CDC chunker and
             // blake3 hasher, bounding peak memory to one packet
-            // (≤64 KiB) plus the chunker's internal window instead of
-            // the full file payload. Fresh reader per command — the
-            // borrow on `input` is released as soon as `clean_stream`
+            // (≤64 KiB), the ≤1 KiB pointer probe, and the chunker's
+            // internal window instead of the full file payload. The fresh
+            // reader releases its borrow on `input` as soon as `clean_stream`
             // returns, so the session-isolation wrapper's
             // `drain_until_flush` on the error path still works.
             let mut reader = PktLineReader::from_read(&mut *input);
@@ -1208,10 +1218,15 @@ fn smudge_content(
                 tracing::debug!(path = %pathname, "smudge: LFS fetch filters excluded path, passing through");
                 return Ok(Bytes::copy_from_slice(content));
             }
+            // Git LFS deliberately leaves empty tracked files as empty Git
+            // blobs. They are not pointers and have no remote dependency.
+            if content.is_empty() {
+                return Ok(Bytes::new());
+            }
             // Try LFS smudge regardless of blob content type.
             if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
                 let oid_hex = crab_git::lfs_pointer::hex_encode(&ptr.oid);
-                if let Some(local) = try_local_lfs_cache(&oid_hex) {
+                if let Some(local) = try_local_lfs_cache(&ptr)? {
                     tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
                     return Ok(Bytes::from(content));
@@ -1219,8 +1234,8 @@ fn smudge_content(
                 if let Some(store) = lfs_store {
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
                     let rt = tokio::runtime::Handle::current();
-                    let bytes = rt.block_on(store.get(&ptr.oid))?;
-                    cache_lfs_locally(&oid_hex, &bytes);
+                    let bytes = rt.block_on(store.verify(&ptr.oid))?;
+                    cache_lfs_locally(&ptr, &bytes)?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
                     return Ok(Bytes::from(content));
@@ -1296,7 +1311,7 @@ fn smudge_by_blob_classification(
             let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
 
             // Non-lazy: try local .git/lfs/objects/ cache first, then remote.
-            if let Some(local) = try_local_lfs_cache(&oid_hex) {
+            if let Some(local) = try_local_lfs_cache(&pointer)? {
                 tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
                 let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
                 return Ok(Bytes::from(content));
@@ -1310,9 +1325,9 @@ fn smudge_by_blob_classification(
                     "smudge: downloading LFS object from remote"
                 );
                 let rt = tokio::runtime::Handle::current();
-                let bytes = rt.block_on(store.get(&pointer.oid))?;
+                let bytes = rt.block_on(store.verify(&pointer.oid))?;
                 // Cache locally for future checkouts.
-                cache_lfs_locally(&oid_hex, &bytes);
+                cache_lfs_locally(&pointer, &bytes)?;
                 let content =
                     crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
                 return Ok(Bytes::from(content));
@@ -1620,37 +1635,24 @@ fn write_flush<W: Write>(output: &mut W) -> Result<()> {
 }
 
 /// Try to read an LFS object from the local `.git/lfs/objects/` cache.
-fn try_local_lfs_cache(oid_hex: &str) -> Option<Vec<u8>> {
-    let ctx = WorktreeContext::resolve().ok()?;
-    let local_path = lfs_object_path(&ctx, oid_hex);
-
-    if local_path.is_file() {
-        std::fs::read(&local_path).ok()
-    } else {
-        None
+fn try_local_lfs_cache(pointer: &crab_git::lfs_pointer::LfsPointer) -> Result<Option<Vec<u8>>> {
+    let ctx = WorktreeContext::resolve()?;
+    match crate::lfs::cache::read_pointer(&ctx.common_git_dir.join("lfs"), pointer) {
+        Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
+        result => result,
     }
 }
 
 /// Cache an LFS object in the local `.git/lfs/objects/` directory.
-fn cache_lfs_locally(oid_hex: &str, content: &[u8]) {
-    if let Ok(ctx) = WorktreeContext::resolve() {
-        let local_path = lfs_object_path(&ctx, oid_hex);
-
-        if local_path.is_file() {
-            return;
-        }
-        if let Some(parent) = local_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&local_path, content);
-    }
-}
-
-fn lfs_object_path(ctx: &WorktreeContext, oid_hex: &str) -> PathBuf {
-    ctx.lfs_objects_dir()
-        .join(&oid_hex[..2.min(oid_hex.len())])
-        .join(&oid_hex[2..4.min(oid_hex.len())])
-        .join(oid_hex)
+fn cache_lfs_locally(pointer: &crab_git::lfs_pointer::LfsPointer, content: &[u8]) -> Result<()> {
+    let ctx = WorktreeContext::resolve()?;
+    crate::lfs::cache::install_bytes(
+        &ctx.common_git_dir.join("lfs"),
+        &pointer.oid,
+        pointer.size,
+        content,
+    )?;
+    Ok(())
 }
 
 /// Extract a human-readable message from a panic payload.
@@ -1956,13 +1958,14 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut output = Vec::new();
+        let staging = Arc::new(std::sync::Mutex::new(LazyStaging::Locked {
+            holder_pid: Some(4242),
+        }));
         run_filter_loop(
             &mut &input[..],
             &mut output,
             AppContext::default(),
-            Arc::new(std::sync::Mutex::new(LazyStaging::from_root(Some(
-                paths.shared_staging_root,
-            )))),
+            Arc::clone(&staging),
             None,
             None,
             None,
@@ -1975,6 +1978,30 @@ mod tests {
         assert!(output_str.contains("status=success"));
         assert!(output_str.contains("version https://git-lfs.github.com/spec/v1"));
         assert!(!output_str.contains("version https://crab.dev/spec/v1"));
+        assert!(matches!(
+            &*staging
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            LazyStaging::Locked {
+                holder_pid: Some(4242)
+            }
+        ));
+    }
+
+    #[test]
+    fn lfs_smudge_leaves_empty_tracked_file_empty() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join(".gitattributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+
+        let output = smudge_content(b"", "empty.bin", false, None, &session, None, None).unwrap();
+
+        assert!(output.is_empty());
     }
 
     /// Build a packet-line text frame: 4-hex-length + data + \n.

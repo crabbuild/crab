@@ -71,7 +71,14 @@ impl BatchResolver {
                 let store = Arc::clone(&self.remote_store);
                 let oid = pointer.oid;
                 handles.push(tokio::spawn(async move {
-                    store.exists(&oid).await.map(|exists| (oid, exists))
+                    match store.verify(&oid).await {
+                        Ok(_) => Ok((oid, true)),
+                        Err(
+                            crab_lfs::LfsError::ObjectMissing { .. }
+                            | crab_lfs::LfsError::ObjectCorrupt { .. },
+                        ) => Ok((oid, false)),
+                        Err(error) => Err(error),
+                    }
                 }));
             }
             for (i, handle) in handles.into_iter().enumerate() {
@@ -113,7 +120,7 @@ impl BatchResolver {
             {
                 continue;
             }
-            if !self.local_object_exists(&pointer.oid) {
+            if !self.local_object_exists(pointer)? {
                 missing.push(pointer.clone());
             }
         }
@@ -147,12 +154,14 @@ impl BatchResolver {
             let store = Arc::clone(&self.remote_store);
             let local_path = self.local_object_path(&pointer.oid);
             let oid = pointer.oid;
+            let size = pointer.size;
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|_| CrabError::Cancelled)?;
 
-                // Skip if already present on remote.
-                if store.exists(&oid).await.map_err(CrabError::from)? {
+                // Presence is insufficient: a same-key corrupt object must
+                // never satisfy publication or suppress repair.
+                if store.verify(&oid).await.is_ok() {
                     tracing::debug!(
                         oid = %hex_encode(&oid),
                         "object already on remote, skipping upload",
@@ -160,8 +169,11 @@ impl BatchResolver {
                     return Ok(());
                 }
 
-                let content = read_local_object(&local_path, &oid).await?;
-                store.put(&oid, content).await.map_err(CrabError::from)
+                read_local_object(&local_path, &oid, size).await?;
+                store
+                    .put_stream(&oid, &local_path)
+                    .await
+                    .map_err(CrabError::from)
             });
 
             handles.push((pointer.oid, handle));
@@ -206,12 +218,14 @@ impl BatchResolver {
             let store = Arc::clone(&self.remote_store);
             let local_dir = self.local_lfs_dir.clone();
             let oid = pointer.oid;
+            let size = pointer.size;
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|_| CrabError::Cancelled)?;
 
-                let obj_path = local_object_path_for(&local_dir, &oid);
-                if !force && obj_path.is_file() {
+                if !force
+                    && crate::lfs::cache::read(&local_dir, &oid, size).is_ok_and(|v| v.is_some())
+                {
                     tracing::debug!(
                         oid = %hex_encode(&oid),
                         "object already local, skipping download",
@@ -219,17 +233,9 @@ impl BatchResolver {
                     return Ok(());
                 }
 
-                let content = store.get(&oid).await.map_err(CrabError::from)?;
-
-                // Verify SHA-256 integrity before writing to local storage.
-                let actual_hash: [u8; 32] = sha2::Sha256::digest(&content).into();
-                if actual_hash != oid {
-                    return Err(CrabError::LfsObjectCorrupt {
-                        oid: hex_encode(&oid),
-                    });
-                }
-
-                write_local_object(&obj_path, &content).await
+                let content = store.verify(&oid).await.map_err(CrabError::from)?;
+                crate::lfs::cache::install_bytes(&local_dir, &oid, size, &content)?;
+                Ok(())
             });
 
             handles.push((pointer.oid, handle));
@@ -260,8 +266,12 @@ impl BatchResolver {
     }
 
     /// Checks whether an LFS object exists in local storage.
-    fn local_object_exists(&self, oid: &[u8; 32]) -> bool {
-        self.local_object_path(oid).is_file()
+    fn local_object_exists(&self, pointer: &LfsPointer) -> Result<bool> {
+        match crate::lfs::cache::read_pointer(&self.local_lfs_dir, pointer) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Returns the local filesystem path for an LFS object.
@@ -354,7 +364,7 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
 /// message identifying the local file, rather than only at the remote
 /// PUT's idempotency check where the error says "remote hash mismatch"
 /// and the source of corruption is ambiguous. See finding CR9-F9.
-async fn read_local_object(path: &Path, oid: &[u8; 32]) -> Result<Bytes> {
+async fn read_local_object(path: &Path, oid: &[u8; 32], size: u64) -> Result<Bytes> {
     let path = path.to_owned();
     let oid = *oid;
     tokio::task::spawn_blocking(move || {
@@ -365,7 +375,7 @@ async fn read_local_object(path: &Path, oid: &[u8; 32]) -> Result<Bytes> {
             _ => CrabError::Io(e),
         })?;
         let computed = sha2::Sha256::digest(&content);
-        if computed.as_slice() != oid {
+        if computed.as_slice() != oid || (size > 0 && content.len() as u64 != size) {
             return Err(CrabError::CorruptObject {
                 path: path.display().to_string(),
                 reason: format!(
@@ -376,20 +386,6 @@ async fn read_local_object(path: &Path, oid: &[u8; 32]) -> Result<Bytes> {
             });
         }
         Ok(Bytes::from(content))
-    })
-    .await
-    .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
-}
-
-/// Write an LFS object to local storage, creating parent directories.
-async fn write_local_object(path: &Path, content: &[u8]) -> Result<()> {
-    let path = path.to_owned();
-    let content = content.to_vec();
-    tokio::task::spawn_blocking(move || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
-        }
-        std::fs::write(&path, &content).map_err(CrabError::Io)
     })
     .await
     .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
@@ -605,6 +601,24 @@ mod tests {
             .unwrap();
 
         assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_missing_for_fetch_refetches_corrupt_local_object() {
+        let store = Arc::new(test_lfs_store());
+        let dir = tempfile::tempdir().unwrap();
+        let resolver =
+            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
+        let ptr = make_pointer(b"valid-content");
+        let local_path = local_object_path_for(dir.path(), &ptr.oid);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(local_path, b"corrupt").unwrap();
+
+        let missing = resolver
+            .find_missing_for_fetch(&[("file.bin".to_owned(), ptr.clone())], None, None)
+            .unwrap();
+
+        assert_eq!(missing, vec![ptr]);
     }
 
     #[tokio::test]
