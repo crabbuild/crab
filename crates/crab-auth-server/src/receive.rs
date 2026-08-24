@@ -1546,6 +1546,9 @@ async fn commit_service_git_locators_with_source(
                 .collect::<HashSet<_>>();
             let sweep = writer.sweep_unreferenced(&retained_slots).await?;
             let rebuild_all = sweep.pack_rows_deleted != 0;
+            if rebuild_all {
+                writer.replace_object_catalog().await?;
+            }
             let mut pending_ids = HashSet::new();
             for pack in &current_packs {
                 if !rebuild_all
@@ -1602,6 +1605,7 @@ async fn commit_service_git_locators_with_source(
                             entry_len: location.entry_len,
                             crc32: location.crc32,
                         },
+                        metadata: Default::default(),
                     });
                     if entries.len() == 25_000 {
                         writer.write_locations(binding, &entries).await?;

@@ -2285,6 +2285,10 @@ async fn rebuild_git_object_locators(
             let bindings = writer.bind_packs(&records).await?;
             let retained_slots: HashSet<_> =
                 bindings.iter().map(|binding| binding.pack_slot).collect();
+            // Rebuild is the explicit format-migration boundary. Resetting the
+            // canonical object universe before replay makes retries idempotent
+            // and prevents ordinals from depending on an interrupted attempt.
+            writer.replace_object_catalog().await?;
             for (binding, (_, _, _, index_path, reverse_index_path, git_sha1)) in
                 bindings.into_iter().zip(&derived)
             {
@@ -2315,6 +2319,7 @@ async fn rebuild_git_object_locators(
                             entry_len: location.entry_len,
                             crc32: location.crc32,
                         },
+                        metadata: Default::default(),
                     });
                     if entries.len() == 25_000 {
                         writer.write_locations(binding, &entries).await?;

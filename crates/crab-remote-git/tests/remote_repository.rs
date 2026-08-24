@@ -830,6 +830,7 @@ async fn publish_with_runtime_and_summary(
                     location.crc32
                 },
             },
+            metadata: Default::default(),
         })
         .collect::<Vec<_>>();
     writer

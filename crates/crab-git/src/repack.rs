@@ -359,6 +359,12 @@ fn initialize_bare_repository(path: &Path) -> Result<(), RepackError> {
 }
 
 fn run_git(command: &mut Command, operation: &'static str) -> Result<(), RepackError> {
+    // Every repack subprocess targets an explicit temporary repository or pack.
+    // Ambient remote-helper overrides would redirect that isolated operation.
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR");
     let status = command
         .status()
         .map_err(|source| io_error(format!("run {operation}"), source))?;
@@ -451,6 +457,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn repack_git_subprocess_ignores_repository_overrides() -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let repository = root.path().join("repository");
+        let mut command = Command::new("git");
+        command
+            .env("GIT_DIR", root.path().join("ambient.git"))
+            .env("GIT_WORK_TREE", root.path().join("ambient-worktree"))
+            .args(["init", "--quiet"])
+            .arg(&repository);
+
+        run_git(&mut command, "initialize isolated test repository")?;
+
+        assert!(repository.join(".git").is_dir());
+        assert!(!root.path().join("ambient.git").exists());
+        Ok(())
+    }
+
     fn commit_all(repository: &Path, message: &str) -> Result<(), RepackError> {
         run_git(
             Command::new("git")
@@ -477,7 +501,7 @@ mod tests {
             Command::new("git")
                 .arg("-C")
                 .arg(repository)
-                .args(["gc", "--quiet"]),
+                .args(["repack", "--quiet", "-a", "-d"]),
             "pack test repository",
         )?;
         let source = std::fs::read_dir(repository.join(".git/objects/pack"))

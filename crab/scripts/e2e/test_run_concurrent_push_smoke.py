@@ -63,8 +63,8 @@ class LocatorRequestBudgetTest(unittest.TestCase):
         snapshot = {
             "successful_pushes": 4,
             "categories": {
-                "git_locator_db/manifest": 80,
-                "git_locator_db/compacted": 20,
+                "git_object_catalog_db/manifest": 80,
+                "git_object_catalog_db/compacted": 20,
                 "packs": 400,
             },
         }
@@ -74,7 +74,10 @@ class LocatorRequestBudgetTest(unittest.TestCase):
     def test_requires_a_successful_push(self) -> None:
         self.assertIsNone(
             locator_requests_per_success(
-                {"successful_pushes": 0, "categories": {"git_locator_db/wal": 1}}
+                {
+                    "successful_pushes": 0,
+                    "categories": {"git_object_catalog_db/wal": 1},
+                }
             )
         )
 
@@ -205,7 +208,7 @@ class RequestCountingProxyTest(unittest.TestCase):
     def test_forwards_body_and_records_bounded_request_class(self) -> None:
         request = urllib.request.Request(
             self.proxy.url
-            + "/crab/e2e-concurrent-push/run/git_locator_db/manifest/current",
+            + "/crab/e2e-concurrent-push/run/git_object_catalog_db/manifest/current",
             data=b"payload",
             method="PUT",
         )
@@ -216,7 +219,7 @@ class RequestCountingProxyTest(unittest.TestCase):
         self.assertEqual(body, b"payload")
         self.assertEqual(
             self.proxy.snapshot()["classes"],
-            {"git_locator_db/manifest:put": 1},
+            {"git_object_catalog_db/manifest:put": 1},
         )
 
     def test_preserves_head_content_length(self) -> None:
@@ -233,7 +236,7 @@ class RequestCountingProxyTest(unittest.TestCase):
     def test_list_uses_query_prefix_for_repository_category(self) -> None:
         request = urllib.request.Request(
             self.proxy.url
-            + "/crab?list-type=2&prefix=e2e-concurrent-push%2Frun%2Fgit_locator_db%2Fmanifest%2F",
+            + "/crab?list-type=2&prefix=e2e-concurrent-push%2Frun%2Fgit_object_catalog_db%2Fmanifest%2F",
             method="GET",
         )
 
@@ -242,7 +245,7 @@ class RequestCountingProxyTest(unittest.TestCase):
 
         self.assertEqual(
             self.proxy.snapshot()["classes"],
-            {"git_locator_db/manifest:list": 1},
+            {"git_object_catalog_db/manifest:list": 1},
         )
 
     def assert_ref_journal_gate_waits(

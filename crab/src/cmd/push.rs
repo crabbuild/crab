@@ -198,7 +198,7 @@ struct PushIntegrationSummary {
 /// Resolves the remote, validates the URL, opens staging, resolves refspecs,
 /// and runs the push pipeline. Updates push state on success.
 pub async fn run_push(args: &PushArgs, cancel: &CancellationToken) -> Result<()> {
-    execute_push(args, cancel, true).await.map(|_| ())
+    execute_push(args, cancel, true, None).await.map(|_| ())
 }
 
 /// Run push without emitting its terminal result envelope.
@@ -206,20 +206,39 @@ pub(crate) async fn run_push_without_terminal_output(
     args: &PushArgs,
     cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
-    execute_push(args, cancel, false).await
+    execute_push(args, cancel, false, None).await
+}
+
+/// Run push for an explicit worktree without changing process-global cwd.
+pub(crate) async fn run_push_without_terminal_output_in(
+    repo_root: &Path,
+    args: &PushArgs,
+    cancel: &CancellationToken,
+) -> Result<PushSummaryPayload> {
+    execute_push(args, cancel, false, Some(repo_root)).await
 }
 
 async fn execute_push(
     args: &PushArgs,
     cancel: &CancellationToken,
     emit_terminal: bool,
+    repo_root: Option<&Path>,
 ) -> Result<PushSummaryPayload> {
     let mode = OutputMode::from_flags(args.json, args.jsonl);
     let mut retry_attempts = 0u32;
     let mut retry_stages = BTreeMap::new();
 
     loop {
-        match run_push_once(args, cancel, retry_attempts, &retry_stages, emit_terminal).await? {
+        match run_push_once(
+            args,
+            cancel,
+            retry_attempts,
+            &retry_stages,
+            emit_terminal,
+            repo_root,
+        )
+        .await?
+        {
             PushAttempt::Done(summary) => return Ok(summary),
             PushAttempt::Failed(mut failure) => {
                 if args.rebase_on_non_fast_forward
@@ -500,13 +519,21 @@ async fn run_push_once(
     integration_retries: u32,
     integration_retry_stages: &BTreeMap<String, u32>,
     emit_terminal: bool,
+    explicit_repo_root: Option<&Path>,
 ) -> Result<PushAttempt> {
     let start = Instant::now();
     let mode = OutputMode::from_flags(args.json, args.jsonl);
 
     // Discover the shared Crab state root. The current worktree root is
     // where the user's files are; the main worktree root owns `.crab/`.
-    let repo_root = resolve_push_repo_root()?;
+    let explicit_context = explicit_repo_root
+        .map(crate::git::worktree::WorktreeContext::resolve_from_path)
+        .transpose()?;
+    let repo_root = explicit_context
+        .as_ref()
+        .map_or_else(resolve_push_repo_root, |context| {
+            Ok(context.main_worktree_root.clone())
+        })?;
 
     let target = resolve_push_target(args.remote.as_deref())?;
     let remote_name = target.remote;
@@ -520,7 +547,11 @@ async fn run_push_once(
     );
 
     // Resolve config early — needed for both store construction and push config.
-    let config = crate::core::config::Config::resolve_local()?;
+    let config = if explicit_context.is_some() {
+        crate::core::config::Config::resolve_for_repo(&repo_root)?
+    } else {
+        crate::core::config::Config::resolve_local()?
+    };
 
     // Open staging area (read-only for push).
     //
@@ -635,6 +666,9 @@ async fn run_push_once(
 
     // Build push config from resolved Config + CLI overrides.
     let mut push_config = PushConfig::from_config(&config);
+    if let Some(context) = &explicit_context {
+        push_config.git_dir = Some(context.per_worktree_git_dir.clone());
+    }
     apply_push_cli_overrides(args, &mut push_config);
     if let Err(error) = configure_active_active_push_coordinator(
         &config,

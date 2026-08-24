@@ -141,7 +141,8 @@ Paths are relative to `repo_prefix`.
 | `packs/pack-{pack-id}.{pack,idx,rev}` | canonical Git pack body and indexes | Immutable |
 | `packs/pack-{pack-id}.meta` | pack metadata sidecar | Derived, replaceable |
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
-| `git_locator_db/` | `crab-metadata`: Git object-range SlateDB | Opaque; SlateDB owns children |
+| `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
+| `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
 | `locks/` | coordination namespaces described below | Mutable |
 | `lfs/objects/{aa}/{bb}/{sha256}` | Git LFS bodies | Immutable |
 | `lfs/locks/{blake3(path)}` | Git LFS protocol locks | Mutable |

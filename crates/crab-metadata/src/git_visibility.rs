@@ -13,7 +13,7 @@ use crate::error::{MetadataError, Result};
 use crate::manifests::Manifest;
 
 /// Current serialized visibility-index format.
-pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 4;
+pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 5;
 
 /// Maximum serialized proof accepted from object storage.
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
@@ -579,13 +579,17 @@ impl GitVisibilityIndex {
     #[must_use]
     pub fn objects_for_ref(&self, name: &str) -> Option<Vec<String>> {
         self.refs.get(name).map(|closure| {
-            closure
+            let mut objects = closure
                 .positions()
                 .into_iter()
                 .filter_map(|position| usize::try_from(position).ok())
                 .filter_map(|position| self.objects.get(position))
                 .map(encode_oid)
-                .collect()
+                .collect::<Vec<_>>();
+            // Catalog ordinals follow physical pack publication order. Keep the
+            // public closure contract sorted so set operations remain correct.
+            objects.sort_unstable();
+            objects
         })
     }
 
@@ -939,11 +943,14 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 #[cfg(feature = "storage")]
 mod storage {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD_NO_PAD;
     use bytes::Bytes;
     use crab_storage::{StorageError, Store, StoreLayout};
+    use crab_xet::hash::MerkleHash;
     use object_store::path::Path as ObjectPath;
     use serde::{Deserialize, Serialize};
 
@@ -958,10 +965,13 @@ mod storage {
 
     const LEGACY_GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
     const GIT_VISIBILITY_INDEX_V3_VERSION: u32 = 3;
+    const GIT_VISIBILITY_INDEX_V4_VERSION: u32 = 4;
 
     /// Stored format used to satisfy a visibility read.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum GitVisibilityFormat {
+        /// Catalog-ordinal proof with no independent OID dictionary.
+        V5,
         /// Binary-runtime proof with retained incremental ref transitions.
         V4,
         /// Dictionary-compressed, digest-bound proof written by earlier Crab versions.
@@ -1015,9 +1025,30 @@ mod storage {
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
+    struct GitVisibilityIndexV5 {
+        version: u32,
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        catalog_digest: String,
+        object_count: u64,
+        refs: BTreeMap<String, GitVisibilityClosureV3>,
+        transitions: BTreeMap<String, Vec<GitVisibilityTransitionV5>>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct GitVisibilityTransitionV4 {
         from_oid: String,
         to_oid: String,
+        objects: GitVisibilityClosureV3,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityTransitionV5 {
+        from_ordinal: u32,
+        to_ordinal: u32,
         objects: GitVisibilityClosureV3,
     }
 
@@ -1250,7 +1281,7 @@ mod storage {
                 })
                 .collect::<Result<_>>()?;
             Ok(Self {
-                version: GIT_VISIBILITY_INDEX_VERSION,
+                version: GIT_VISIBILITY_INDEX_V4_VERSION,
                 generation: encoded.generation,
                 pack_index_hash: encoded.pack_index_hash,
                 git_validation_digest: encoded.git_validation_digest,
@@ -1261,7 +1292,7 @@ mod storage {
         }
 
         fn into_index(self) -> Result<GitVisibilityIndex> {
-            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+            if self.version != GIT_VISIBILITY_INDEX_V4_VERSION {
                 return Err(super::corrupt(
                     "visibility index storage version is unsupported",
                 ));
@@ -1299,6 +1330,179 @@ mod storage {
             index.transitions = transitions;
             index.validate()?;
             Ok(index)
+        }
+    }
+
+    impl GitVisibilityIndexV5 {
+        fn from_index(
+            index: &GitVisibilityIndex,
+            catalog: &[[u8; 20]],
+            identity: crate::git_object_locator::GitObjectCatalogIdentity,
+        ) -> Result<Self> {
+            index.validate()?;
+            if identity.generation != index.generation
+                || identity.pack_index_hash.to_string() != index.pack_index_hash
+                || identity.object_count != catalog.len() as u64
+            {
+                return Err(super::corrupt(
+                    "visibility index does not match its Git object catalog",
+                ));
+            }
+            let positions = catalog
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(position, oid)| {
+                    u32::try_from(position)
+                        .map(|position| (oid, position))
+                        .map_err(|_| super::corrupt("Git object catalog is too large"))
+                })
+                .collect::<Result<std::collections::HashMap<_, _>>>()?;
+            if positions.len() != catalog.len() {
+                return Err(super::corrupt(
+                    "Git object catalog contains duplicate object IDs",
+                ));
+            }
+            let remap = |closure: &super::GitVisibilityClosure| {
+                let mut ordinals = closure
+                    .positions()
+                    .into_iter()
+                    .map(|position| {
+                        usize::try_from(position)
+                            .ok()
+                            .and_then(|position| index.objects.get(position))
+                            .and_then(|oid| positions.get(oid))
+                            .copied()
+                            .ok_or_else(|| {
+                                super::corrupt(
+                                    "visibility object is absent from its Git object catalog",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                ordinals.sort_unstable();
+                GitVisibilityClosureV3::from_positions(ordinals, catalog.len())
+            };
+            let refs = index
+                .refs
+                .iter()
+                .map(|(name, closure)| Ok((name.clone(), remap(closure)?)))
+                .collect::<Result<_>>()?;
+            let transitions = index
+                .transitions
+                .iter()
+                .map(|(name, transitions)| {
+                    let transitions = transitions
+                        .iter()
+                        .map(|transition| {
+                            Ok(GitVisibilityTransitionV5 {
+                                from_ordinal: positions
+                                    .get(&transition.from_oid)
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        super::corrupt(
+                                            "visibility transition base is absent from its catalog",
+                                        )
+                                    })?,
+                                to_ordinal: positions
+                                    .get(&transition.to_oid)
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        super::corrupt(
+                                            "visibility transition target is absent from its catalog",
+                                        )
+                                    })?,
+                                objects: remap(&transition.objects)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((name.clone(), transitions))
+                })
+                .collect::<Result<_>>()?;
+            Ok(Self {
+                version: GIT_VISIBILITY_INDEX_VERSION,
+                generation: index.generation,
+                pack_index_hash: index.pack_index_hash.clone(),
+                git_validation_digest: index.git_validation_digest.clone(),
+                catalog_digest: identity.catalog_digest.to_string(),
+                object_count: identity.object_count,
+                refs,
+                transitions,
+            })
+        }
+
+        fn into_index(self, catalog: Vec<[u8; 20]>) -> Result<GitVisibilityIndex> {
+            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+                return Err(super::corrupt(
+                    "visibility index storage version is unsupported",
+                ));
+            }
+            validate_hash(&self.pack_index_hash, "pack index hash")?;
+            validate_hash(&self.git_validation_digest, "Git validation digest")?;
+            validate_hash(&self.catalog_digest, "Git object catalog digest")?;
+            let object_count = usize::try_from(self.object_count)
+                .map_err(|_| super::corrupt("Git object catalog count cannot be represented"))?;
+            if object_count != catalog.len() || self.object_count > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(super::corrupt(
+                    "visibility index object count does not match its Git object catalog",
+                ));
+            }
+            let refs = self
+                .refs
+                .into_iter()
+                .map(|(name, closure)| {
+                    Ok((
+                        name,
+                        super::GitVisibilityClosure::from_positions(
+                            closure.into_positions(object_count)?,
+                            object_count,
+                        )?,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            let transitions = self
+                .transitions
+                .into_iter()
+                .map(|(name, transitions)| {
+                    let transitions = transitions
+                        .into_iter()
+                        .map(|transition| {
+                            let from_oid = catalog
+                                .get(transition.from_ordinal as usize)
+                                .copied()
+                                .ok_or_else(|| {
+                                super::corrupt("visibility transition base is outside its catalog")
+                            })?;
+                            let to_oid = catalog
+                                .get(transition.to_ordinal as usize)
+                                .copied()
+                                .ok_or_else(|| {
+                                    super::corrupt(
+                                        "visibility transition target is outside its catalog",
+                                    )
+                                })?;
+                            Ok(super::GitVisibilityTransition {
+                                from_oid,
+                                to_oid,
+                                objects: super::GitVisibilityClosure::from_positions(
+                                    transition.objects.into_positions(object_count)?,
+                                    object_count,
+                                )?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((name, transitions))
+                })
+                .collect::<Result<_>>()?;
+            GitVisibilityIndex::from_parts(
+                GIT_VISIBILITY_INDEX_VERSION,
+                self.generation,
+                self.pack_index_hash,
+                self.git_validation_digest,
+                catalog,
+                refs,
+                transitions,
+            )
         }
     }
 
@@ -1458,7 +1662,7 @@ mod storage {
             }
         })?;
         match version.version {
-            GIT_VISIBILITY_INDEX_VERSION => {
+            GIT_VISIBILITY_INDEX_V4_VERSION => {
                 let index: GitVisibilityIndexV4 =
                     serde_json::from_slice(body).map_err(|error| {
                         crate::error::MetadataError::CorruptObject {
@@ -1486,6 +1690,60 @@ mod storage {
                 "visibility index storage version is unsupported",
             )),
         }
+    }
+
+    async fn read_catalog_bound(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<(GitVisibilityIndex, GitVisibilityFormat)> {
+        let path = router.git_visibility_catalog_path(git_validation_digest);
+        let body = read_bounded(store, &path).await?;
+        let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid catalog visibility index JSON: {error}"),
+            }
+        })?;
+        if stored.version != GIT_VISIBILITY_INDEX_VERSION
+            || stored.generation != generation
+            || stored.pack_index_hash != pack_index_hash
+            || stored.git_validation_digest != git_validation_digest
+        {
+            return Err(super::corrupt(
+                "catalog visibility index does not match its immutable identity",
+            ));
+        }
+        validate_hash(&stored.catalog_digest, "Git object catalog digest")?;
+        let pack_index_hash = MerkleHash::from_hex(pack_index_hash).map_err(|_| {
+            super::corrupt("catalog visibility index has an invalid pack-index hash")
+        })?;
+        let catalog_digest = MerkleHash::from_hex(&stored.catalog_digest).map_err(|_| {
+            super::corrupt("catalog visibility index has an invalid catalog digest")
+        })?;
+        let identity = crate::git_object_locator::GitObjectCatalogIdentity {
+            generation,
+            pack_index_hash,
+            object_count: stored.object_count,
+            catalog_digest,
+        };
+        let session = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+            identity,
+            Duration::from_secs(60 * 60),
+        )
+        .await?;
+        let catalog = session.all_object_ids_and_close().await?;
+        let index = stored.into_index(catalog)?;
+        index.validate_identity(
+            generation,
+            &pack_index_hash.to_string(),
+            git_validation_digest,
+        )?;
+        Ok((index, GitVisibilityFormat::V5))
     }
 
     async fn read_digest_bound(
@@ -1543,7 +1801,7 @@ mod storage {
         git_validation_digest: &str,
     ) -> Result<GitVisibilityRead> {
         validate_hash(git_validation_digest, "Git validation digest")?;
-        match read_digest_bound(
+        match read_catalog_bound(
             store,
             router,
             generation,
@@ -1555,7 +1813,7 @@ mod storage {
             Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
             Err(crate::error::MetadataError::Storage {
                 source: StorageError::NotFound { .. },
-            }) => read_v1(
+            }) => match read_digest_bound(
                 store,
                 router,
                 generation,
@@ -1563,10 +1821,24 @@ mod storage {
                 git_validation_digest,
             )
             .await
-            .map(|index| GitVisibilityRead {
-                index,
-                format: GitVisibilityFormat::V1,
-            }),
+            {
+                Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
+                Err(crate::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => read_v1(
+                    store,
+                    router,
+                    generation,
+                    pack_index_hash,
+                    git_validation_digest,
+                )
+                .await
+                .map(|index| GitVisibilityRead {
+                    index,
+                    format: GitVisibilityFormat::V1,
+                }),
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         }
     }
@@ -1612,13 +1884,20 @@ mod storage {
         {
             Ok(read) if read.index.matches_manifest(manifest) => Ok(Some(read)),
             Ok(read) if read.format == GitVisibilityFormat::V1 => Ok(None),
-            Ok(_) => Err(crate::error::MetadataError::CorruptObject {
-                path: router
-                    .git_visibility_path(&manifest.git_validation_digest)
-                    .as_ref()
-                    .to_owned(),
-                reason: "digest-bound visibility proof does not match its manifest".to_owned(),
-            }),
+            Ok(read) => {
+                let path = match read.format {
+                    GitVisibilityFormat::V5 => {
+                        router.git_visibility_catalog_path(&manifest.git_validation_digest)
+                    }
+                    GitVisibilityFormat::V4 | GitVisibilityFormat::V3 | GitVisibilityFormat::V1 => {
+                        router.git_visibility_path(&manifest.git_validation_digest)
+                    }
+                };
+                Err(crate::error::MetadataError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: "digest-bound visibility proof does not match its manifest".to_owned(),
+                })
+            }
             Err(crate::error::MetadataError::Storage {
                 source: StorageError::NotFound { .. },
             }) => Ok(None),
@@ -1633,27 +1912,81 @@ mod storage {
         index: &GitVisibilityIndex,
     ) -> Result<()> {
         index.validate()?;
-        let stored = GitVisibilityIndexV4::from_index(index)?;
-        let body = serde_json::to_vec(&stored).map_err(|error| {
-            crate::error::MetadataError::Internal(format!("visibility index serialize: {error}"))
-        })?;
+        let session = crate::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await?;
+        let identity = session.catalog_identity();
+        let catalog_matches = identity.is_some_and(|identity| {
+            identity.generation == index.generation
+                && identity.pack_index_hash.to_string() == index.pack_index_hash
+        });
+        let (path, body) = if catalog_matches {
+            let identity = identity.ok_or_else(|| {
+                crate::error::MetadataError::Internal(
+                    "matching Git object catalog identity disappeared".to_owned(),
+                )
+            })?;
+            let catalog = session.all_object_ids_and_close().await?;
+            let stored = GitVisibilityIndexV5::from_index(index, &catalog, identity)?;
+            let body = serde_json::to_vec(&stored).map_err(|error| {
+                crate::error::MetadataError::Internal(format!(
+                    "catalog visibility index serialize: {error}"
+                ))
+            })?;
+            (
+                router.git_visibility_catalog_path(&index.git_validation_digest),
+                body,
+            )
+        } else {
+            session.close().await?;
+            let stored = GitVisibilityIndexV4::from_index(index)?;
+            let body = serde_json::to_vec(&stored).map_err(|error| {
+                crate::error::MetadataError::Internal(format!(
+                    "visibility index serialize: {error}"
+                ))
+            })?;
+            (
+                router.git_visibility_path(&index.git_validation_digest),
+                body,
+            )
+        };
         if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
-                path: router
-                    .git_visibility_path(&index.git_validation_digest)
-                    .as_ref()
-                    .to_owned(),
+                path: path.as_ref().to_owned(),
                 reason: format!(
                     "visibility index exceeds {} bytes",
                     MAX_GIT_VISIBILITY_INDEX_BYTES
                 ),
             });
         }
-        let path = router.git_visibility_path(&index.git_validation_digest);
-        match store.put(&path, Bytes::from(body)).await {
+        upload_visibility_body(store, &path, Bytes::from(body)).await
+    }
+
+    /// Ensure a manifest's proof is bound to its exact published object catalog.
+    pub async fn ensure_catalog_bound(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<bool> {
+        let Some(read) = read_for_manifest(store, router, manifest).await? else {
+            return Ok(false);
+        };
+        if read.format == GitVisibilityFormat::V5 {
+            return Ok(true);
+        }
+        upload_if_absent(store, router, &read.index).await?;
+        Ok(read_for_manifest(store, router, manifest)
+            .await?
+            .is_some_and(|read| read.format == GitVisibilityFormat::V5))
+    }
+
+    async fn upload_visibility_body(store: &Store, path: &ObjectPath, body: Bytes) -> Result<()> {
+        match store.put(path, body.clone()).await {
             Ok(()) => Ok(()),
             Err(StorageError::StateConflict { .. }) => {
-                let metadata = store.head(&path).await?;
+                let metadata = store.head(path).await?;
                 if metadata.size > MAX_GIT_VISIBILITY_INDEX_BYTES {
                     return Err(crate::error::MetadataError::CorruptObject {
                         path: path.as_ref().to_owned(),
@@ -1682,14 +2015,13 @@ mod storage {
                     &index.git_validation_digest,
                 )?;
                 if existing == *index {
-                    Ok(())
-                } else {
-                    Err(crate::error::MetadataError::CorruptObject {
-                        path: path.as_ref().to_owned(),
-                        reason: "immutable visibility index conflicts with the requested proof"
-                            .to_owned(),
-                    })
+                    return Ok(());
                 }
+                Err(crate::error::MetadataError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: "immutable visibility index conflicts with the requested proof"
+                        .to_owned(),
+                })
             }
             Err(error) => Err(error.into()),
         }
@@ -1839,8 +2171,8 @@ mod storage {
 
 #[cfg(feature = "storage")]
 pub use storage::{
-    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, read, read_edit,
-    read_for_manifest, read_with_format, upload_edit, upload_if_absent,
+    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound, read,
+    read_edit, read_for_manifest, read_with_format, upload_edit, upload_if_absent,
 };
 
 #[cfg(test)]
@@ -2182,6 +2514,119 @@ mod tests {
             .unwrap();
         assert_eq!(left_read, left);
         assert_eq!(right_read, right);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn legacy_dictionary_proof_migrates_to_exact_catalog_ordinals() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use crab_xet::hash::MerkleHash;
+        use object_store::memory::InMemory;
+
+        use crate::git_object_locator::{
+            GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitObjectLocatorWriter,
+            GitPackLocatorRecord,
+        };
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let pack_hash = "a".repeat(64);
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 7;
+        manifest.pack_index_hash.clone_from(&pack_hash);
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        manifest.seal_git_validation();
+        let digest = manifest.git_validation_digest.clone();
+        let index = GitVisibilityIndex::new(
+            7,
+            &pack_hash,
+            &digest,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec!["1".repeat(40), "2".repeat(40)],
+            )]),
+        )
+        .expect("visibility index");
+
+        upload_if_absent(&store, &router, &index)
+            .await
+            .expect("upload dictionary proof");
+        assert_eq!(
+            read_with_format(&store, &router, 7, &pack_hash, &digest)
+                .await
+                .expect("read dictionary proof")
+                .format,
+            GitVisibilityFormat::V4
+        );
+
+        let pack_index_hash = MerkleHash::from_hex(&pack_hash).expect("pack hash");
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .expect("open catalog writer");
+        let binding = writer
+            .bind_packs(&[GitPackLocatorRecord {
+                pack_id: MerkleHash::from([3; 32]),
+                committed_generation: 7,
+                pack_index_hash,
+                object_count: 2,
+                pack_size: 256,
+            }])
+            .await
+            .expect("bind pack")[0];
+        writer
+            .write_locations(
+                binding,
+                &[
+                    GitObjectLocatorEntry {
+                        oid: [0x22; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 12,
+                            entry_len: 64,
+                            crc32: 1,
+                        },
+                        metadata: Default::default(),
+                    },
+                    GitObjectLocatorEntry {
+                        oid: [0x11; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 76,
+                            entry_len: 64,
+                            crc32: 2,
+                        },
+                        metadata: Default::default(),
+                    },
+                ],
+            )
+            .await
+            .expect("write catalog objects");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 7,
+                pack_index_hash,
+            })
+            .await
+            .expect("publish catalog coverage");
+        writer.close().await.expect("close catalog writer");
+
+        assert!(
+            ensure_catalog_bound(&store, &router, &manifest)
+                .await
+                .expect("migrate catalog proof")
+        );
+        let migrated = read_with_format(&store, &router, 7, &pack_hash, &digest)
+            .await
+            .expect("read catalog proof");
+        assert_eq!(migrated.format, GitVisibilityFormat::V5);
+        assert_eq!(
+            migrated.index.objects_for_ref("refs/heads/main"),
+            index.objects_for_ref("refs/heads/main")
+        );
+        assert!(migrated.index.matches_manifest(&manifest));
     }
 
     #[cfg(feature = "storage")]

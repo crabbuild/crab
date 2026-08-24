@@ -511,7 +511,30 @@ async fn publish_filtered_view(
     )
     .await
     {
-        Ok(digest) => Some(digest),
+        Ok(digest) => {
+            let catalog_ready =
+                crab_metadata::git_visibility::ensure_catalog_bound(store, &router, &manifest)
+                    .await;
+            match catalog_ready {
+                Ok(true) => Some(digest),
+                Ok(false) if !visibility_publication.is_published() => Some(digest),
+                Ok(false) => {
+                    tracing::warn!(
+                        generation = manifest.generation,
+                        "ACL view catalog visibility requires repair"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation = manifest.generation,
+                        "ACL view catalog visibility publication failed"
+                    );
+                    None
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,

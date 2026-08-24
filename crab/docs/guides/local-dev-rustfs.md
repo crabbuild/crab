@@ -241,7 +241,7 @@ bursty manifest CAS contention; the normal product default is
 `push.max_cas_retries = 64`.
 
 Use `--max-locator-requests-per-success N` with request capture to make the
-same-branch cohort fail when `git_locator_db/*` HTTP attempts divided by
+same-branch cohort fail when `git_object_catalog_db/*` HTTP attempts divided by
 successful pushes exceed `N`. This is a workload-specific regression budget,
 not a provider bill: record the agent count, integration mode, and parallelism
 with the result. The CI four-agent integration profile uses 500; its complete

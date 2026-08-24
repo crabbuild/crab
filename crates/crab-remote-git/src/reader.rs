@@ -1830,6 +1830,7 @@ mod tests {
         let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
         let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
         let locator = |pack_id, pack_offset, entry_len| GitObjectLocator {
+            ordinal: 0,
             pack_id,
             location: crab_metadata::git_object_locator::GitObjectLocation {
                 pack_offset,

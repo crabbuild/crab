@@ -1380,7 +1380,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn caller_cancellation_interrupts_each_repository_open_io_phase() {
-        for fragment in ["org/repo/manifest", "metadata/pack/", "git_locator_db/"] {
+        for fragment in [
+            "org/repo/manifest",
+            "metadata/pack/",
+            "git_object_catalog_db/",
+        ] {
             let fixture = open_fixture(1, Some(1)).await;
             fixture.backend.block_path_containing(fragment);
             let request_started = fixture.backend.request_started.notified();

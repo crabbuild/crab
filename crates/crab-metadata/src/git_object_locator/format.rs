@@ -1,16 +1,21 @@
 use crab_xet::hash::MerkleHash;
 
-use super::{GitLocatorCoverage, GitObjectLocation, GitPackLocatorRecord};
+use super::{
+    GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectKind, GitObjectLocation,
+    GitObjectMetadata, GitObjectOrdinal, GitPackLocatorRecord,
+};
 
 pub(crate) const METADATA_KEY: [u8; 1] = [0x00];
 pub(crate) const OBJECT_FAMILY: u8 = 0x01;
 pub(crate) const PACK_FAMILY: u8 = 0x02;
-pub(crate) const FORMAT_FINGERPRINT: [u8; 8] = *b"CRABGLOC";
+pub(crate) const ORDINAL_FAMILY: u8 = 0x03;
+pub(crate) const FORMAT_FINGERPRINT: [u8; 8] = *b"CRABGCAT";
 pub(crate) const OBJECT_KEY_LEN: usize = 21;
-pub(crate) const OBJECT_VALUE_LEN: usize = 28;
+pub(crate) const OBJECT_VALUE_LEN: usize = 64;
 pub(crate) const PACK_KEY_LEN: usize = 9;
 pub(crate) const PACK_VALUE_LEN: usize = 88;
-pub(crate) const METADATA_VALUE_LEN: usize = 57;
+pub(crate) const ORDINAL_KEY_LEN: usize = 5;
+pub(crate) const METADATA_VALUE_LEN: usize = 101;
 
 const PACK_HEADER_LEN: u64 = 12;
 const PACK_TRAILER_LEN: u64 = 20;
@@ -18,23 +23,27 @@ const MIN_PACK_SIZE: u64 = PACK_HEADER_LEN + PACK_TRAILER_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StoredObjectLocation {
+    pub(crate) ordinal: GitObjectOrdinal,
     pub(crate) pack_slot: u64,
     pub(crate) pack_offset: u64,
     pub(crate) entry_len: u64,
     pub(crate) crc32: u32,
+    pub(crate) metadata: GitObjectMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LocatorMetadata {
     pub(crate) next_pack_slot: u64,
-    pub(crate) coverage: Option<GitLocatorCoverage>,
+    pub(crate) next_object_ordinal: u64,
+    pub(crate) identity: Option<GitObjectCatalogIdentity>,
 }
 
 impl LocatorMetadata {
     pub(crate) const fn empty() -> Self {
         Self {
             next_pack_slot: 1,
-            coverage: None,
+            next_object_ordinal: 0,
+            identity: None,
         }
     }
 }
@@ -63,6 +72,20 @@ pub(crate) fn pack_key(pack_slot: u64) -> Option<[u8; PACK_KEY_LEN]> {
     Some(key)
 }
 
+pub(crate) fn ordinal_key(ordinal: GitObjectOrdinal) -> [u8; ORDINAL_KEY_LEN] {
+    let mut key = [0; ORDINAL_KEY_LEN];
+    key[0] = ORDINAL_FAMILY;
+    key[1..].copy_from_slice(&ordinal.to_be_bytes());
+    key
+}
+
+pub(crate) fn decode_ordinal_key(bytes: &[u8]) -> Option<GitObjectOrdinal> {
+    if bytes.len() != ORDINAL_KEY_LEN || bytes[0] != ORDINAL_FAMILY {
+        return None;
+    }
+    Some(u32::from_be_bytes(array(bytes, 1)?))
+}
+
 pub(crate) fn decode_pack_key(bytes: &[u8]) -> Option<u64> {
     if bytes.len() != PACK_KEY_LEN || bytes[0] != PACK_FAMILY {
         return None;
@@ -73,10 +96,39 @@ pub(crate) fn decode_pack_key(bytes: &[u8]) -> Option<u64> {
 
 pub(crate) fn encode_object_location(location: StoredObjectLocation) -> [u8; OBJECT_VALUE_LEN] {
     let mut bytes = [0; OBJECT_VALUE_LEN];
-    bytes[..8].copy_from_slice(&location.pack_slot.to_be_bytes());
-    bytes[8..16].copy_from_slice(&location.pack_offset.to_be_bytes());
-    bytes[16..24].copy_from_slice(&location.entry_len.to_be_bytes());
-    bytes[24..].copy_from_slice(&location.crc32.to_be_bytes());
+    bytes[..4].copy_from_slice(&location.ordinal.to_be_bytes());
+    bytes[4..12].copy_from_slice(&location.pack_slot.to_be_bytes());
+    bytes[12..20].copy_from_slice(&location.pack_offset.to_be_bytes());
+    bytes[20..28].copy_from_slice(&location.entry_len.to_be_bytes());
+    bytes[28..32].copy_from_slice(&location.crc32.to_be_bytes());
+    let mut flags = 0_u8;
+    if location.metadata.kind.is_some() {
+        flags |= 1;
+    }
+    if location.metadata.logical_size.is_some() {
+        flags |= 1 << 1;
+    }
+    if location.metadata.delta_base_oid.is_some() {
+        flags |= 1 << 2;
+    }
+    bytes[32] = flags;
+    bytes[33] = match location.metadata.kind {
+        None => 0,
+        Some(GitObjectKind::Commit) => 1,
+        Some(GitObjectKind::Tree) => 2,
+        Some(GitObjectKind::Blob) => 3,
+        Some(GitObjectKind::Tag) => 4,
+    };
+    bytes[34..42].copy_from_slice(
+        &location
+            .metadata
+            .logical_size
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    if let Some(base) = location.metadata.delta_base_oid {
+        bytes[42..62].copy_from_slice(&base);
+    }
     bytes
 }
 
@@ -84,11 +136,43 @@ pub(crate) fn decode_object_location(bytes: &[u8]) -> Option<StoredObjectLocatio
     if bytes.len() != OBJECT_VALUE_LEN {
         return None;
     }
+    let flags = bytes[32];
+    if flags & !0b111 != 0 || bytes[62..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let kind = match (flags & 1 != 0, bytes[33]) {
+        (false, 0) => None,
+        (true, 1) => Some(GitObjectKind::Commit),
+        (true, 2) => Some(GitObjectKind::Tree),
+        (true, 3) => Some(GitObjectKind::Blob),
+        (true, 4) => Some(GitObjectKind::Tag),
+        _ => return None,
+    };
+    let logical_size = if flags & (1 << 1) != 0 {
+        Some(u64::from_be_bytes(array(bytes, 34)?))
+    } else if bytes[34..42].iter().all(|byte| *byte == 0) {
+        None
+    } else {
+        return None;
+    };
+    let delta_base_oid = if flags & (1 << 2) != 0 {
+        Some(array(bytes, 42)?)
+    } else if bytes[42..62].iter().all(|byte| *byte == 0) {
+        None
+    } else {
+        return None;
+    };
     let location = StoredObjectLocation {
-        pack_slot: u64::from_be_bytes(array(bytes, 0)?),
-        pack_offset: u64::from_be_bytes(array(bytes, 8)?),
-        entry_len: u64::from_be_bytes(array(bytes, 16)?),
-        crc32: u32::from_be_bytes(array(bytes, 24)?),
+        ordinal: u32::from_be_bytes(array(bytes, 0)?),
+        pack_slot: u64::from_be_bytes(array(bytes, 4)?),
+        pack_offset: u64::from_be_bytes(array(bytes, 12)?),
+        entry_len: u64::from_be_bytes(array(bytes, 20)?),
+        crc32: u32::from_be_bytes(array(bytes, 28)?),
+        metadata: GitObjectMetadata {
+            kind,
+            logical_size,
+            delta_base_oid,
+        },
     };
     if location.pack_slot == 0
         || location.entry_len == 0
@@ -133,10 +217,17 @@ pub(crate) fn encode_metadata(metadata: LocatorMetadata) -> [u8; METADATA_VALUE_
     let mut bytes = [0; METADATA_VALUE_LEN];
     bytes[..8].copy_from_slice(&FORMAT_FINGERPRINT);
     bytes[8..16].copy_from_slice(&metadata.next_pack_slot.to_be_bytes());
-    if let Some(coverage) = metadata.coverage {
-        bytes[16] = 1;
-        bytes[17..25].copy_from_slice(&coverage.generation.to_be_bytes());
-        bytes[25..].copy_from_slice(&<[u8; 32]>::from(coverage.pack_index_hash));
+    bytes[16..24].copy_from_slice(&metadata.next_object_ordinal.to_be_bytes());
+    if let Some(identity) = metadata.identity {
+        bytes[24] = 1;
+        bytes[25..33].copy_from_slice(&identity.generation.to_be_bytes());
+        bytes[33..65].copy_from_slice(&<[u8; 32]>::from(identity.pack_index_hash));
+        bytes[65..69].copy_from_slice(
+            &GitObjectOrdinal::try_from(identity.object_count)
+                .unwrap_or(GitObjectOrdinal::MAX)
+                .to_be_bytes(),
+        );
+        bytes[69..].copy_from_slice(&<[u8; 32]>::from(identity.catalog_digest));
     }
     bytes
 }
@@ -149,23 +240,38 @@ pub(crate) fn decode_metadata(bytes: &[u8]) -> Option<LocatorMetadata> {
     if next_pack_slot == 0 {
         return None;
     }
-    let coverage = match bytes[16] {
-        0 if bytes[17..].iter().all(|byte| *byte == 0) => None,
+    let next_object_ordinal = u64::from_be_bytes(array(bytes, 16)?);
+    if next_object_ordinal > u64::from(GitObjectOrdinal::MAX) {
+        return None;
+    }
+    let identity = match bytes[24] {
+        0 if bytes[25..].iter().all(|byte| *byte == 0) => None,
         1 => {
-            let generation = u64::from_be_bytes(array(bytes, 17)?);
-            if generation == 0 {
+            let generation = u64::from_be_bytes(array(bytes, 25)?);
+            let object_count = u64::from(u32::from_be_bytes(array(bytes, 65)?));
+            if generation == 0 || object_count > next_object_ordinal {
                 return None;
             }
-            Some(GitLocatorCoverage {
+            Some(GitObjectCatalogIdentity {
                 generation,
-                pack_index_hash: MerkleHash::from(array(bytes, 25)?),
+                pack_index_hash: MerkleHash::from(array(bytes, 33)?),
+                object_count,
+                catalog_digest: MerkleHash::from(array(bytes, 69)?),
             })
         }
         _ => return None,
     };
     Some(LocatorMetadata {
         next_pack_slot,
-        coverage,
+        next_object_ordinal,
+        identity,
+    })
+}
+
+pub(crate) fn coverage(metadata: LocatorMetadata) -> Option<GitLocatorCoverage> {
+    metadata.identity.map(|identity| GitLocatorCoverage {
+        generation: identity.generation,
+        pack_index_hash: identity.pack_index_hash,
     })
 }
 
@@ -195,13 +301,19 @@ mod tests {
     }
 
     #[test]
-    fn object_row_is_exactly_one_family_byte_plus_sha1_and_28_value_bytes() {
+    fn object_row_binds_one_dense_ordinal_to_one_exact_pack_range() {
         let oid = [0x11; 20];
         let location = StoredObjectLocation {
+            ordinal: 0x0102_0304,
             pack_slot: 0x0102_0304_0506_0708,
             pack_offset: 0x1112_1314_1516_1718,
             entry_len: 0x2122_2324_2526_2728,
             crc32: 0x3132_3334,
+            metadata: GitObjectMetadata {
+                kind: Some(GitObjectKind::Blob),
+                logical_size: Some(0x4142_4344_4546_4748),
+                delta_base_oid: Some([0x51; 20]),
+            },
         };
 
         let key = object_key(&oid);
@@ -210,13 +322,30 @@ mod tests {
         assert_eq!(key.len(), 21);
         assert_eq!(key[0], OBJECT_FAMILY);
         assert_eq!(&key[1..], &oid);
-        assert_eq!(value.len(), 28);
-        assert_eq!(&value[..8], &location.pack_slot.to_be_bytes());
-        assert_eq!(&value[8..16], &location.pack_offset.to_be_bytes());
-        assert_eq!(&value[16..24], &location.entry_len.to_be_bytes());
-        assert_eq!(&value[24..], &location.crc32.to_be_bytes());
+        assert_eq!(value.len(), 64);
+        assert_eq!(&value[..4], &location.ordinal.to_be_bytes());
+        assert_eq!(&value[4..12], &location.pack_slot.to_be_bytes());
+        assert_eq!(&value[12..20], &location.pack_offset.to_be_bytes());
+        assert_eq!(&value[20..28], &location.entry_len.to_be_bytes());
+        assert_eq!(&value[28..32], &location.crc32.to_be_bytes());
+        assert_eq!(value[32], 0b111);
+        assert_eq!(value[33], 3);
+        assert_eq!(
+            &value[34..42],
+            &location
+                .metadata
+                .logical_size
+                .expect("logical size")
+                .to_be_bytes()
+        );
+        assert_eq!(&value[42..62], &[0x51; 20]);
+        assert_eq!(&value[62..], &[0, 0]);
         assert_eq!(decode_object_key(&key), Some(oid));
         assert_eq!(decode_object_location(&value), Some(location));
+        assert_eq!(
+            decode_ordinal_key(&ordinal_key(location.ordinal)),
+            Some(location.ordinal)
+        );
     }
 
     #[test]
@@ -229,28 +358,35 @@ mod tests {
         bytes[8..16].fill(0);
         assert_eq!(decode_metadata(&bytes), None);
         let mut bytes = encode_metadata(valid);
-        bytes[16] = 2;
+        bytes[24] = 2;
         assert_eq!(decode_metadata(&bytes), None);
     }
 
     #[test]
     fn metadata_requires_zero_absent_coverage_and_nonzero_present_generation() {
         let mut absent = encode_metadata(LocatorMetadata::empty());
-        absent[25] = 1;
+        absent[69] = 1;
         assert_eq!(decode_metadata(&absent), None);
 
         let present = LocatorMetadata {
             next_pack_slot: 9,
-            coverage: Some(GitLocatorCoverage {
+            next_object_ordinal: 4,
+            identity: Some(GitObjectCatalogIdentity {
                 generation: 7,
                 pack_index_hash: hash(3),
+                object_count: 4,
+                catalog_digest: hash(5),
             }),
         };
         assert_eq!(decode_metadata(&encode_metadata(present)), Some(present));
 
         let mut zero_generation = encode_metadata(present);
-        zero_generation[17..25].fill(0);
+        zero_generation[25..33].fill(0);
         assert_eq!(decode_metadata(&zero_generation), None);
+
+        let mut mismatched_count = encode_metadata(present);
+        mismatched_count[65..69].copy_from_slice(&5_u32.to_be_bytes());
+        assert_eq!(decode_metadata(&mismatched_count), None);
     }
 
     #[test]
@@ -260,18 +396,20 @@ mod tests {
         assert_eq!(pack_key(0), None);
 
         let mut object = encode_object_location(StoredObjectLocation {
+            ordinal: 0,
             pack_slot: 1,
             pack_offset: 12,
             entry_len: 20,
             crc32: 4,
+            metadata: GitObjectMetadata::default(),
         });
-        object[..8].fill(0);
+        object[4..12].fill(0);
         assert_eq!(decode_object_location(&object), None);
-        object[..8].copy_from_slice(&1_u64.to_be_bytes());
-        object[16..24].fill(0);
+        object[4..12].copy_from_slice(&1_u64.to_be_bytes());
+        object[20..28].fill(0);
         assert_eq!(decode_object_location(&object), None);
-        object[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
-        object[16..24].copy_from_slice(&1_u64.to_be_bytes());
+        object[12..20].copy_from_slice(&u64::MAX.to_be_bytes());
+        object[20..28].copy_from_slice(&1_u64.to_be_bytes());
         assert_eq!(decode_object_location(&object), None);
     }
 

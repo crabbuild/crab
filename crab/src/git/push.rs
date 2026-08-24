@@ -5758,6 +5758,9 @@ async fn publish_pack_locator_inventory(
         .map(|binding| binding.pack_slot)
         .collect::<HashSet<_>>();
     let sweep = writer.sweep_unreferenced(&retained_slots).await?;
+    if sweep.pack_rows_deleted != 0 {
+        writer.replace_object_catalog().await?;
+    }
     debug!(
         object_rows_deleted = sweep.object_rows_deleted,
         pack_rows_deleted = sweep.pack_rows_deleted,
@@ -5834,6 +5837,7 @@ async fn publish_pack_locator_inventory(
                     entry_len: location.entry_len,
                     crc32: location.crc32,
                 },
+                metadata: Default::default(),
             });
             if entries.len() == 25_000 {
                 writer.write_locations(binding, &entries).await?;
@@ -6323,23 +6327,9 @@ async fn git_visibility_index_exists_for_manifest(
     let storage = store.as_storage();
     let storage_router =
         crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-    match crab_metadata::git_visibility::read_for_manifest(storage, &storage_router, manifest).await
-    {
-        Ok(Some(read)) => {
-            if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
-                crab_metadata::git_visibility::upload_if_absent(
-                    storage,
-                    &storage_router,
-                    &read.index,
-                )
-                .await
-                .map_err(CrabError::from)?;
-            }
-            Ok(true)
-        }
-        Ok(None) => Ok(false),
-        Err(error) => Err(CrabError::from(error)),
-    }
+    crab_metadata::git_visibility::ensure_catalog_bound(storage, &storage_router, manifest)
+        .await
+        .map_err(CrabError::from)
 }
 
 async fn publish_uploaded_pack_locators(
@@ -8514,13 +8504,12 @@ impl PushPipeline {
     async fn record_current_git_visibility(
         &self,
         store: &crate::storage::store::Store,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (current, _) = read_manifest(store, &self.router).await?;
-        if self.git_visibility_index_exists(&current, store).await? {
-            self.git_visibility_published
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(())
+        let published = self.git_visibility_index_exists(&current, store).await?;
+        self.git_visibility_published
+            .store(published, std::sync::atomic::Ordering::Relaxed);
+        Ok(published)
     }
 
     async fn publish_commit_graph_summary(&self) -> Result<()> {
@@ -15622,6 +15611,24 @@ impl PushPipeline {
                             flushes = stats.flushes,
                             "post-CAS Git locator publication completed"
                         );
+                        match self.record_current_git_visibility(store).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                git_indexed = false;
+                                warn!(
+                                    generation = anchor.generation,
+                                    "post-CAS catalog visibility proof was not published"
+                                );
+                            }
+                            Err(error) => {
+                                git_indexed = false;
+                                warn!(
+                                    error = %error,
+                                    generation = anchor.generation,
+                                    "post-CAS catalog visibility publication requires repair"
+                                );
+                            }
+                        }
                     }
                     Ok(stats) => {
                         git_indexed = false;
@@ -22122,6 +22129,7 @@ mod tests {
                 &[crab_metadata::git_object_locator::GitObjectLocatorEntry {
                     oid: oid_bytes,
                     location,
+                    metadata: Default::default(),
                 }],
             )
             .await

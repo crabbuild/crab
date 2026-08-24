@@ -288,22 +288,32 @@ that cannot fit in the limit remains a `pack-too-large` rejection.
 
 Source: `crab/src/git/pack.rs`
 
-## Compact Git Object Locator
+## Generation-bound Git Object Catalog
 
 Standard packs and their canonical indexes remain the source of truth. After
 manifest CAS, Crab streams verified `.idx/.rev` locations into the sole
-`{repo}/git_locator_db/` SlateDB database. Each Git OID has one fixed-width
-current row containing a numeric pack slot, byte offset, entry length, and
-CRC32. Pack-slot records join those rows to immutable pack identities.
+`{repo}/git_object_catalog_db/` SlateDB database. Each Git OID has one dense,
+stable ordinal and one fixed-width current row containing an immutable pack
+slot, byte offset, entry length, and CRC32. Reverse ordinal rows provide the
+canonical object order used by visibility bitmaps and response-pack planning;
+there is no second runtime OID dictionary.
 
-The locator has no generation-history, head, or reverse-offset key families.
-Exact coverage records the one manifest generation and pack-index hash whose
-complete inventory was published. Planning against a different snapshot
-validates misses through that snapshot's canonical `.idx` files. Rebuild
-streams every pinned pack, removes stale slots, and advances coverage only
-after the full inventory is durable.
+Exact coverage records the manifest generation, pack-index hash, object count,
+and catalog digest whose complete inventory was published. A digest-named
+SlateDB checkpoint pins that exact catalog while the mutable database advances.
+Planning against a different snapshot validates misses through that snapshot's
+canonical `.idx` files. Ordinary pushes append rows only for uncovered packs.
+Pack removal or explicit migration rebuilds a dense universe before publishing
+new visibility closures, so mixed-generation catalog/bitmap tuples fail
+closed.
 
-Locator writers disable SlateDB's periodic background garbage collector because
+`crab metadb rebuild` is the repository-scoped migration and repair boundary.
+It ignores the retired `git_locator_db/` namespace, reconstructs the catalog
+from manifest-pinned immutable packs, and publishes coverage only after every
+row and the exact visibility proof are durable. Re-running it is safe; an
+interrupted attempt never advances the digest-named checkpoint.
+
+Catalog writers disable SlateDB's periodic background garbage collector because
 each helper is short-lived and SlateDB's first timer tick runs immediately.
 The writer compactor commits and polls on a 500 ms cadence: short publications
 avoid the request burst caused by 100 ms polling, while longer publications
@@ -312,7 +322,10 @@ request-cost policy, not part of locator correctness.
 After exact coverage crosses each 32-generation boundary, that publication runs
 one foreground collection for superseded manifest and compaction objects. The
 collector keeps SlateDB's five-minute minimum age, so it cannot race freshly
-published locator state.
+published catalog state. SlateDB's size-tiered levels geometrically compact the
+mutable layer chain. The current digest checkpoint remains permanent; a replaced
+checkpoint receives a two-hour retirement lifetime so in-flight readers remain
+pinned without retaining every historical layer indefinitely.
 
 Source: `crates/crab-metadata/src/git_object_locator/`,
 `crates/crab-git/src/pack_locator.rs`

@@ -355,6 +355,7 @@ async fn run_repack_locked(
 
     let committed = repack_manifest(manifest, new_generation, pack_index_hash);
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
+    let visibility_expected = visibility.is_some();
     if let Some(visibility) = visibility {
         let visibility = rebind_visibility(visibility, &committed);
         let storage_router = crab_storage::StoreLayout::new(
@@ -394,7 +395,7 @@ async fn run_repack_locked(
             git_sha1: &pack.generated.git_sha1,
         })
         .collect::<Vec<_>>();
-    if let Err(error) = publish_committed_pack_locators(
+    let locator_published = match publish_committed_pack_locators(
         store,
         router,
         &committed_packs,
@@ -405,7 +406,32 @@ async fn run_repack_locked(
     )
     .await
     {
-        warn!(error = %error, "repack committed; locator publication requires repair");
+        Ok(stats) if stats.coverage_updated => true,
+        Ok(_) => false,
+        Err(error) => {
+            warn!(error = %error, "repack committed; locator publication requires repair");
+            false
+        }
+    };
+    if visibility_expected && locator_published {
+        match crab_metadata::git_visibility::ensure_catalog_bound(
+            store.as_storage(),
+            &crab_storage::StoreLayout::new(
+                store.as_storage().clone(),
+                router.repo_prefix().to_owned(),
+            ),
+            &committed,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!("repack committed; catalog visibility proof was not published");
+            }
+            Err(error) => {
+                warn!(error = %error, "repack committed; catalog visibility requires repair");
+            }
+        }
     }
 
     info!(
@@ -914,7 +940,7 @@ mod tests {
         commit_all(&repository, "second")?;
         let second = snapshot_repository_pack(&repository, source.path(), "second")?;
         let tip = git_output(
-            Command::new("git")
+            isolated_test_git_command()
                 .arg("-C")
                 .arg(&repository)
                 .arg("rev-parse")
@@ -1031,14 +1057,14 @@ mod tests {
 
     fn initialize_work_repository(repository: &Path) -> Result<()> {
         run_git(
-            Command::new("git")
+            isolated_test_git_command()
                 .arg("init")
                 .arg("--quiet")
                 .arg(repository),
             "initialize test repository",
         )?;
         run_git(
-            Command::new("git").arg("-C").arg(repository).args([
+            isolated_test_git_command().arg("-C").arg(repository).args([
                 "config",
                 "user.name",
                 "Crab Test",
@@ -1046,7 +1072,7 @@ mod tests {
             "configure test user name",
         )?;
         run_git(
-            Command::new("git").arg("-C").arg(repository).args([
+            isolated_test_git_command().arg("-C").arg(repository).args([
                 "config",
                 "user.email",
                 "crab@example.invalid",
@@ -1057,19 +1083,28 @@ mod tests {
 
     fn commit_all(repository: &Path, message: &str) -> Result<()> {
         run_git(
-            Command::new("git")
+            isolated_test_git_command()
                 .arg("-C")
                 .arg(repository)
                 .args(["add", "."]),
             "stage test commit",
         )?;
         run_git(
-            Command::new("git")
+            isolated_test_git_command()
                 .arg("-C")
                 .arg(repository)
                 .args(["commit", "--quiet", "-m", message]),
             "create test commit",
         )
+    }
+
+    fn isolated_test_git_command() -> Command {
+        let mut command = Command::new("git");
+        command
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR");
+        command
     }
 
     struct TestPack {
@@ -1083,10 +1118,10 @@ mod tests {
         name: &str,
     ) -> Result<TestPack> {
         run_git(
-            Command::new("git")
+            isolated_test_git_command()
                 .arg("-C")
                 .arg(repository)
-                .args(["gc", "--quiet"]),
+                .args(["repack", "--quiet", "-a", "-d"]),
             "pack test repository",
         )?;
         let pack_dir = repository.join(".git/objects/pack");
