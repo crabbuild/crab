@@ -966,7 +966,14 @@ class ProtocolV2PartialCloneSmoke:
             f"size {len(lfs_content)}\n"
         ).encode()
         lfs_path = self.source / "lfs-pointer.bin"
-        lfs_path.write_bytes(lfs_pointer)
+        self.run_binary(
+            "clean LFS fixture",
+            [str(self.crab_bin), "lfs", "clean", lfs_path.name],
+            self.source,
+            lfs_path,
+            input_data=lfs_content,
+        )
+        lfs_pointer = lfs_path.read_bytes()
         self.lfs_pointer_bytes = lfs_pointer
         lfs_object = self.source / ".git" / "lfs" / "objects" / lfs_oid_hex[:2] / lfs_oid_hex[2:4] / lfs_oid_hex
         lfs_object.parent.mkdir(parents=True, exist_ok=True)
