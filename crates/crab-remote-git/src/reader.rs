@@ -86,7 +86,12 @@ pub struct RemoteGitObject {
 pub(crate) type GitObject = RemoteGitObject;
 
 const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_COALESCED_GAP_BYTES: u64 = 4 * 1024;
+// Git pack entries are often separated by small unrelated entries. A wider
+// gap removes thousands of object-store round trips while the range-size
+// bound keeps transient response memory bounded.
+const MAX_COALESCED_GAP_BYTES: u64 = 32 * 1024;
+const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
+const MATERIALIZE_CHUNK_SIZE: usize = 256;
 
 struct CoalescedRange {
     pack_id: MerkleHash,
@@ -108,6 +113,7 @@ pub struct RemoteGitObjectMetadata {
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteGitPackedEntry {
     pub(crate) oid: gix_hash::ObjectId,
+    pub(crate) pack_offset: u64,
     pub(crate) header: Header,
     pub(crate) decompressed_size: u64,
     pub(crate) header_size: usize,
@@ -613,6 +619,7 @@ impl RemoteGitReader {
                     };
                     entries.push(RemoteGitPackedEntry {
                         oid,
+                        pack_offset: locator.location.pack_offset,
                         header: parsed.header,
                         decompressed_size: parsed.decompressed_size,
                         header_size,
@@ -640,6 +647,104 @@ impl RemoteGitReader {
                 })
             })
             .collect()
+    }
+
+    pub(crate) async fn materialize_packed_entries(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        initial_entries: Vec<RemoteGitPackedEntry>,
+        requested: &[gix_hash::ObjectId],
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObject>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut entries = HashMap::with_capacity(initial_entries.len());
+        for entry in initial_entries {
+            if entries.insert(entry.oid, entry).is_some() {
+                return Err(Error::InternalInvariant {
+                    invariant: "packed entry materializer received duplicate objects",
+                });
+            }
+        }
+        for oid in requested {
+            if !entries.contains_key(oid) {
+                return Err(Error::InternalInvariant {
+                    invariant: "packed entry materializer is missing a requested object",
+                });
+            }
+        }
+
+        loop {
+            check_cancelled(cancellation)?;
+            let mut missing = Vec::new();
+            let mut visited = HashMap::new();
+            for oid in requested {
+                collect_missing_delta_bases(
+                    *oid,
+                    0,
+                    &entries,
+                    &mut visited,
+                    &mut missing,
+                    self.limits.max_delta_depth,
+                )?;
+            }
+            missing.sort_unstable();
+            missing.dedup();
+            if missing.is_empty() {
+                break;
+            }
+            for batch in missing.chunks(DELTA_PREFETCH_BATCH_SIZE) {
+                let fetched = self
+                    .read_packed_many_with_session(
+                        session,
+                        batch,
+                        concurrency,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                for entry in fetched {
+                    if entries.insert(entry.oid, entry).is_some() {
+                        return Err(Error::InternalInvariant {
+                            invariant: "delta base prefetch returned a duplicate object",
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut resolver = PackedEntryResolver::new(
+            entries,
+            self.limits.max_object_bytes,
+            self.limits.max_inflated_entry_bytes,
+            self.limits.max_delta_depth,
+        );
+        let mut objects = Vec::with_capacity(requested.len());
+        for requested_chunk in requested.chunks(MATERIALIZE_CHUNK_SIZE) {
+            check_cancelled(cancellation)?;
+            let requested_chunk = requested_chunk.to_vec();
+            let token = cancellation.clone();
+            let max_inflated = budget.remaining(BudgetDimension::InflatedBytes).await;
+            let decode_permit = self.runtime.decode_permit(cancellation).await?;
+            let (next_resolver, result) = tokio::task::spawn_blocking(move || {
+                let mut resolver = resolver;
+                let result = resolver.resolve_many(&requested_chunk, max_inflated, &token);
+                (resolver, result)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?;
+            drop(decode_permit);
+            resolver = next_resolver;
+            let (mut chunk_objects, inflated_bytes) = result?;
+            budget
+                .charge(BudgetDimension::InflatedBytes, inflated_bytes)
+                .await?;
+            objects.append(&mut chunk_objects);
+        }
+        Ok(objects)
     }
 
     async fn read_from_locator(
@@ -1367,6 +1472,209 @@ fn coalesce_ranges(
     Ok(ranges)
 }
 
+fn collect_missing_delta_bases(
+    oid: gix_hash::ObjectId,
+    depth: usize,
+    entries: &HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+    visited: &mut HashMap<gix_hash::ObjectId, usize>,
+    missing: &mut Vec<gix_hash::ObjectId>,
+    max_delta_depth: usize,
+) -> Result<()> {
+    if visited.get(&oid).is_some_and(|known| *known <= depth) {
+        return Ok(());
+    }
+    visited.insert(oid, depth);
+    let Some(entry) = entries.get(&oid) else {
+        missing.push(oid);
+        return Ok(());
+    };
+    let Some(base_oid) = entry.base_oid else {
+        return Ok(());
+    };
+    if depth >= max_delta_depth {
+        return Err(Error::LimitExceeded {
+            limit: "delta depth",
+            actual: depth.saturating_add(1) as u64,
+            maximum: max_delta_depth as u64,
+        });
+    }
+    collect_missing_delta_bases(
+        base_oid,
+        depth.saturating_add(1),
+        entries,
+        visited,
+        missing,
+        max_delta_depth,
+    )
+}
+
+struct PackedEntryResolver {
+    entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+    objects: HashMap<gix_hash::ObjectId, GitObject>,
+    resolving: HashSet<gix_hash::ObjectId>,
+    max_object_bytes: u64,
+    max_inflated_entry_bytes: u64,
+    max_delta_depth: usize,
+}
+
+impl PackedEntryResolver {
+    fn new(
+        entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+        max_object_bytes: u64,
+        max_inflated_entry_bytes: u64,
+        max_delta_depth: usize,
+    ) -> Self {
+        Self {
+            entries,
+            objects: HashMap::new(),
+            resolving: HashSet::new(),
+            max_object_bytes,
+            max_inflated_entry_bytes,
+            max_delta_depth,
+        }
+    }
+
+    fn resolve_many(
+        &mut self,
+        requested: &[gix_hash::ObjectId],
+        max_inflated_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<(Vec<GitObject>, u64)> {
+        let mut objects = Vec::with_capacity(requested.len());
+        let mut inflated_bytes = 0u64;
+        for oid in requested {
+            let (object, added_bytes) =
+                self.resolve(*oid, 0, inflated_bytes, max_inflated_bytes, cancellation)?;
+            inflated_bytes =
+                inflated_bytes
+                    .checked_add(added_bytes)
+                    .ok_or(Error::LimitExceeded {
+                        limit: "inflated bytes",
+                        actual: u64::MAX,
+                        maximum: max_inflated_bytes,
+                    })?;
+            objects.push(object);
+        }
+        Ok((objects, inflated_bytes))
+    }
+
+    fn resolve(
+        &mut self,
+        oid: gix_hash::ObjectId,
+        depth: usize,
+        inflated_bytes: u64,
+        max_inflated_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<(GitObject, u64)> {
+        check_cancelled(cancellation)?;
+        if let Some(object) = self.objects.get(&oid) {
+            return Ok((object.clone(), 0));
+        }
+        if !self.resolving.insert(oid) {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Delta,
+            });
+        }
+        let entry = self
+            .entries
+            .get(&oid)
+            .cloned()
+            .ok_or(Error::ObjectNotFound { oid })?;
+        let entry_bytes = entry.decompressed_size;
+        ensure_inflated_budget(inflated_bytes, entry_bytes, max_inflated_bytes)?;
+        let packed = inflate_entry(
+            oid,
+            entry.pack_offset,
+            entry.bytes,
+            self.max_inflated_entry_bytes,
+            self.max_object_bytes,
+            cancellation,
+        )?;
+        let mut added_bytes = entry_bytes;
+        let object = if let Some(kind) = packed.header.as_kind() {
+            verify_object(oid, kind, &packed.inflated)?;
+            GitObject {
+                oid,
+                kind,
+                data: packed.inflated,
+            }
+        } else {
+            if depth >= self.max_delta_depth {
+                return Err(Error::LimitExceeded {
+                    limit: "delta depth",
+                    actual: depth.saturating_add(1) as u64,
+                    maximum: self.max_delta_depth as u64,
+                });
+            }
+            let base_oid = entry.base_oid.ok_or(Error::Corrupt {
+                stage: CorruptionStage::Delta,
+            })?;
+            let (base, base_bytes) = self.resolve(
+                base_oid,
+                depth.saturating_add(1),
+                inflated_bytes.saturating_add(entry_bytes),
+                max_inflated_bytes,
+                cancellation,
+            )?;
+            let maximum = usize_limit(self.max_object_bytes, "decoded object bytes")?;
+            let instructions = packed.inflated;
+            let parsed = delta::parse(&instructions, maximum)
+                .map_err(|error| map_delta_error(error, oid))?;
+            let result_size = parsed.result_size as u64;
+            ensure_inflated_budget(
+                inflated_bytes.saturating_add(entry_bytes),
+                base_bytes,
+                max_inflated_bytes,
+            )?;
+            ensure_inflated_budget(
+                inflated_bytes
+                    .saturating_add(entry_bytes)
+                    .saturating_add(base_bytes),
+                result_size,
+                max_inflated_bytes,
+            )?;
+            let data = delta::apply(&base.data, parsed, cancellation)
+                .map_err(|error| map_delta_error(error, oid))?;
+            added_bytes = added_bytes
+                .checked_add(base_bytes)
+                .and_then(|value| value.checked_add(result_size))
+                .ok_or(Error::LimitExceeded {
+                    limit: "inflated bytes",
+                    actual: u64::MAX,
+                    maximum: max_inflated_bytes,
+                })?;
+            verify_object(oid, base.kind, &data)?;
+            GitObject {
+                oid,
+                kind: base.kind,
+                data: Bytes::from(data),
+            }
+        };
+        ensure_inflated_budget(inflated_bytes, added_bytes, max_inflated_bytes)?;
+        self.resolving.remove(&oid);
+        self.objects.insert(oid, object.clone());
+        Ok((object, added_bytes))
+    }
+}
+
+fn ensure_inflated_budget(current: u64, additional: u64, maximum: u64) -> Result<()> {
+    let actual = current
+        .checked_add(additional)
+        .ok_or(Error::LimitExceeded {
+            limit: "inflated bytes",
+            actual: u64::MAX,
+            maximum,
+        })?;
+    if actual > maximum {
+        return Err(Error::LimitExceeded {
+            limit: "inflated bytes",
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 fn order_completed_objects(
     requested: &[gix_hash::ObjectId],
     completed: &HashMap<gix_hash::ObjectId, GitObject>,
@@ -1842,7 +2150,7 @@ mod tests {
         let ranges = coalesce_ranges(vec![
             (oid, locator(first_pack, 100, 20)),
             (oid, locator(first_pack, 130, 20)),
-            (oid, locator(first_pack, 5_000, 20)),
+            (oid, locator(first_pack, 100_000, 20)),
             (oid, locator(second_pack, 100, 20)),
         ])
         .expect("valid ranges");
@@ -1861,5 +2169,37 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn collects_each_missing_delta_base_once_across_requested_objects() {
+        let oid = |value: u8| gix_hash::ObjectId::from([value; 20]);
+        let entry = |value: u8, base: Option<u8>| {
+            let base_oid = base.map(oid);
+            RemoteGitPackedEntry {
+                oid: oid(value),
+                pack_offset: 0,
+                header: base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id }),
+                decompressed_size: 1,
+                header_size: 1,
+                base_oid,
+                bytes: Bytes::new(),
+            }
+        };
+        let entries = HashMap::from([
+            (oid(1), entry(1, Some(2))),
+            (oid(2), entry(2, Some(3))),
+            (oid(4), entry(4, Some(3))),
+        ]);
+        let mut visited = HashMap::new();
+        let mut missing = Vec::new();
+        for requested in [oid(1), oid(4)] {
+            collect_missing_delta_bases(requested, 0, &entries, &mut visited, &mut missing, 128)
+                .expect("delta dependency walk");
+        }
+
+        missing.sort_unstable();
+        missing.dedup();
+        assert_eq!(missing, [oid(3)]);
     }
 }

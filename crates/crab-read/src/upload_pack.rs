@@ -454,8 +454,14 @@ async fn plan_with_operation(
         return Ok(plan);
     }
 
-    if let Some(plan) =
-        plan_from_shallow_closure(operation, visible_ref_names, visibility, request).await?
+    if let Some(plan) = plan_from_shallow_closure(
+        operation,
+        &repository.refs().entries,
+        visible_ref_names,
+        visibility,
+        request,
+    )
+    .await?
     {
         tracing::info!(
             telemetry_event = "visibility_plan",
@@ -909,6 +915,7 @@ async fn plan_from_visibility_catalog(
 
 async fn plan_from_shallow_closure(
     operation: &OperationContext,
+    references: &[RepositoryRef],
     visible_ref_names: &[String],
     visibility: &GitVisibilityIndex,
     request: &UploadPackRequest,
@@ -925,6 +932,11 @@ async fn plan_from_shallow_closure(
     let Some(selection) = operation.shallow_object_closure(tip, depth).await? else {
         return Ok(None);
     };
+    if request.include_tags
+        && !shallow_closure_tags_are_complete(references, visible_ref_names, &selection.object_ids)
+    {
+        return Ok(None);
+    }
     ensure_visible_objects(visibility, visible_ref_names, &selection.object_ids)?;
     Ok(Some(PackPlan {
         wants: request.wants.clone(),
@@ -944,8 +956,27 @@ fn shallow_closure_request_supported(request: &UploadPackRequest) -> bool {
         && request.shallow.is_empty()
         && request.deepen.is_some_and(|depth| depth > 0)
         && !request.deepen_relative
-        && !request.include_tags
         && matches!(request.filter, UploadPackFilter::None)
+}
+
+fn shallow_closure_tags_are_complete(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    object_ids: &[ObjectId],
+) -> bool {
+    let selected = object_ids.iter().copied().collect::<HashSet<_>>();
+    references
+        .iter()
+        .filter(|reference| {
+            reference.name.starts_with("refs/tags/")
+                && visible_ref_names.iter().any(|name| name == &reference.name)
+        })
+        .all(|reference| {
+            let Some(peeled) = reference.peeled else {
+                return false;
+            };
+            !selected.contains(&peeled) || reference.target == peeled
+        })
 }
 
 fn plan_from_visibility(
@@ -1630,16 +1661,18 @@ mod tests {
         };
         assert!(shallow_closure_request_supported(&supported));
 
+        let include_tags = UploadPackRequest {
+            wants: vec![oid('1')],
+            deepen: Some(100),
+            include_tags: true,
+            ..UploadPackRequest::default()
+        };
+        assert!(shallow_closure_request_supported(&include_tags));
+
         for request in [
             UploadPackRequest {
                 wants: vec![oid('1'), oid('2')],
                 deepen: Some(100),
-                ..UploadPackRequest::default()
-            },
-            UploadPackRequest {
-                wants: vec![oid('1')],
-                deepen: Some(100),
-                include_tags: true,
                 ..UploadPackRequest::default()
             },
             UploadPackRequest {
@@ -1657,6 +1690,48 @@ mod tests {
         ] {
             assert!(!shallow_closure_request_supported(&request));
         }
+    }
+
+    #[test]
+    fn shallow_closure_include_tags_requires_complete_visible_tag_objects() {
+        let selected = [oid('1')];
+        let lightweight = RepositoryRef {
+            name: "refs/tags/lightweight".to_owned(),
+            target: oid('1'),
+            peeled: Some(oid('1')),
+        };
+        assert!(shallow_closure_tags_are_complete(
+            &[lightweight],
+            &["refs/tags/lightweight".to_owned()],
+            &selected,
+        ));
+
+        let annotated = RepositoryRef {
+            name: "refs/tags/annotated".to_owned(),
+            target: oid('2'),
+            peeled: Some(oid('1')),
+        };
+        assert!(!shallow_closure_tags_are_complete(
+            &[annotated.clone()],
+            &["refs/tags/annotated".to_owned()],
+            &selected,
+        ));
+        assert!(shallow_closure_tags_are_complete(
+            &[annotated],
+            &["refs/tags/annotated".to_owned()],
+            &[oid('3')],
+        ));
+
+        let unpeeled = RepositoryRef {
+            name: "refs/tags/unpeeled".to_owned(),
+            target: oid('2'),
+            peeled: None,
+        };
+        assert!(!shallow_closure_tags_are_complete(
+            &[unpeeled],
+            &["refs/tags/unpeeled".to_owned()],
+            &selected,
+        ));
     }
 
     #[test]

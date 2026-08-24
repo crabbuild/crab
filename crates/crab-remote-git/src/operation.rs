@@ -648,6 +648,37 @@ impl OperationContext {
             .await
     }
 
+    pub(crate) async fn materialize_packed_entries(
+        &self,
+        entries: Vec<RemoteGitPackedEntry>,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::RemoteGitObject>> {
+        check_cancelled(&self.cancellation)?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        reader
+            .materialize_packed_entries(
+                session,
+                entries,
+                oids,
+                batch_concurrency(
+                    self.state.runtime.options(),
+                    self.state.options.object_limits(),
+                    self.state.options.operation_limits(),
+                ),
+                &self.budget,
+                &self.cancellation,
+            )
+            .instrument(self.span.clone())
+            .await
+    }
+
     pub async fn read_object_metadata(
         &self,
         oid: gix_hash::ObjectId,

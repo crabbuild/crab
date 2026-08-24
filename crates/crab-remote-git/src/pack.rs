@@ -16,9 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRepository, Result};
 
-// Large locator batches let the reader coalesce adjacent pack ranges across the
-// whole batch. The operation's object and byte budgets still bound residency.
-const OBJECT_BATCH_SIZE: usize = 10_000;
+// Keep enough packed entries together for delta dependencies to cross the
+// default read batch boundary. Operation object and byte budgets still bound
+// the total selection and each coalesced range bounds transient range memory.
+const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
 const GENERATED_PACK_CACHE_VERSION: u32 = 2;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
@@ -1334,7 +1335,9 @@ async fn generate_pack_with_operation(
                 materialize.then_some(entry.oid)
             })
             .collect::<Vec<_>>();
-        let objects = operation.read_objects_uncharged(&materialize).await?;
+        let objects = operation
+            .materialize_packed_entries(entries.clone(), &materialize)
+            .await?;
         let materialized = objects
             .into_iter()
             .map(|object| (object.oid, object))
@@ -1777,6 +1780,7 @@ mod tests {
         let base_oid = base_oid.map(|base| ObjectId::from([base; 20]));
         crate::reader::RemoteGitPackedEntry {
             oid,
+            pack_offset: 0,
             header: base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id }),
             decompressed_size: 1,
             header_size: 1,
