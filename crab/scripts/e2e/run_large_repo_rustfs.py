@@ -593,13 +593,18 @@ class LargeRepositoryQualification:
                 (SCRIPT_DIR.parent / "verify-large-repo-rustfs-report.py").read_bytes()
             ).hexdigest(),
         }
+        binary_git_sha = crab_build.get("git_sha")
+        source_git_sha = self.report["provenance"]["crab_source_revision"]
         self.check(
             "crab-build-matches-source",
-            crab_build.get("git_sha")
-            == self.report["provenance"]["crab_source_revision"],
+            isinstance(binary_git_sha, str)
+            and len(binary_git_sha) >= 7
+            and binary_git_sha != "unknown"
+            and re.fullmatch(r"[0-9a-f]+", binary_git_sha) is not None
+            and source_git_sha.startswith(binary_git_sha),
             {
-                "binary_git_sha": crab_build.get("git_sha"),
-                "source_git_sha": self.report["provenance"]["crab_source_revision"],
+                "binary_git_sha": binary_git_sha,
+                "source_git_sha": source_git_sha,
             },
         )
         self.write_report()
