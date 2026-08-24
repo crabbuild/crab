@@ -526,8 +526,12 @@ pub async fn upload_segmented_bulk(
     router: &StoreLayout<Store>,
     bulk: &BulkData,
 ) -> Result<()> {
-    segmented_store::upload_write(store, router, &bulk.shard_index).await?;
-    segmented_store::upload_write(store, router, &bulk.pack_index).await
+    futures_util::future::try_join(
+        segmented_store::upload_write(store, router, &bulk.shard_index),
+        segmented_store::upload_write(store, router, &bulk.pack_index),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Upload a bulk manifest object if it does not already exist.

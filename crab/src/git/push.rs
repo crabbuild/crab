@@ -15252,7 +15252,10 @@ impl PushPipeline {
         // hand this lock in after discovery; direct callers acquire it here.
         // This preserves lock-then-push serialization while immutable xorb
         // uploads overlap the remaining staged reads.
-        self.at_stage(PushFailureStage::Lock, self.acquire_push_lock().await)?;
+        let push_lock_phase = PhaseTimer::start("push", "push_lock_acquire");
+        let push_lock_result = self.acquire_push_lock().await;
+        self.emit_perf_phase(push_lock_phase.finish(0, 0, 0));
+        self.at_stage(PushFailureStage::Lock, push_lock_result)?;
         self.at_stage(
             PushFailureStage::Admission,
             self.acquire_active_active_gc_writer().await,
@@ -15299,10 +15302,11 @@ impl PushPipeline {
         // Protected pushes are admitted by the authenticated service before it
         // grants a session-private staging store. Coordination objects written
         // through that store cannot provide repository-wide mutual exclusion.
-        let admission_lock = if object_store_admission {
+        let admission_phase = PhaseTimer::start("push", "push_admission");
+        let admission_result = if object_store_admission {
             match self.store.as_ref() {
-                Some(store) => Some(
-                    self.at_stage(
+                Some(store) => self
+                    .at_stage(
                         PushFailureStage::Admission,
                         acquire_push_admission_lock(
                             store,
@@ -15313,13 +15317,15 @@ impl PushPipeline {
                             &self.cancel,
                         )
                         .await,
-                    )?,
-                ),
-                None => None,
+                    )
+                    .map(Some),
+                None => Ok(None),
             }
         } else {
-            None
+            Ok(None)
         };
+        self.emit_perf_phase(admission_phase.finish(0, 0, 0));
+        let admission_lock = self.at_stage(PushFailureStage::Admission, admission_result)?;
         match admission_lock {
             Some(lock) => {
                 let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
@@ -15556,6 +15562,7 @@ impl PushPipeline {
                     .lock()
                     .await
                     .is_empty();
+            let metadb_phase = PhaseTimer::start("push", "post_cas_metadb");
             let indexing = if !needs_metadb_write {
                 Ok(())
             } else {
@@ -15577,6 +15584,7 @@ impl PushPipeline {
                     Err(error) => Err(error),
                 }
             };
+            self.emit_perf_phase(metadb_phase.finish(0, 0, file_index_plan.len() as u64));
             let file_indexed = match indexing {
                 Ok(()) => true,
                 Err(error) => {
@@ -15602,7 +15610,8 @@ impl PushPipeline {
             if locator_deferred {
                 git_indexed = false;
             } else if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
-                match publish_uploaded_pack_locators(
+                let locator_phase = PhaseTimer::start("push", "post_cas_git_locator");
+                let locator_result = publish_uploaded_pack_locators(
                     store,
                     &self.router,
                     &uploaded_packs,
@@ -15611,8 +15620,9 @@ impl PushPipeline {
                     self.config.lock_ttl,
                     &self.cancel,
                 )
-                .await
-                {
+                .await;
+                self.emit_perf_phase(locator_phase.finish(0, 0, uploaded_packs.len() as u64));
+                match locator_result {
                     Ok(stats) if stats.coverage_updated => {
                         info!(
                             generation = anchor.generation,
@@ -15668,13 +15678,17 @@ impl PushPipeline {
             if file_indexed
                 && git_indexed
                 && let Some(anchor) = anchor
-                && let Err(error) = self.write_generation_index_receipt(anchor).await
             {
-                warn!(
-                    error = %error,
-                    generation = anchor.generation,
-                    "post-CAS generation-index receipt write failed; manifest-scoped repair remains available"
-                );
+                let receipt_phase = PhaseTimer::start("push", "post_cas_receipt");
+                let receipt_result = self.write_generation_index_receipt(anchor).await;
+                self.emit_perf_phase(receipt_phase.finish(0, 0, 1));
+                if let Err(error) = receipt_result {
+                    warn!(
+                        error = %error,
+                        generation = anchor.generation,
+                        "post-CAS generation-index receipt write failed; manifest-scoped repair remains available"
+                    );
+                }
             }
         }
 
