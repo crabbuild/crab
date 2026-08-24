@@ -3114,16 +3114,6 @@ pub async fn run_hydrate_in(
         return Ok(());
     };
 
-    // A `git pull` after the initial `crab clone` can land new
-    // pointer blobs for extensions that are not yet in
-    // `.gitattributes`. Rescan the working tree so extensions
-    // discovered since the last clone are picked up automatically.
-    // Best-effort: failures here must not block hydrate. Idempotent —
-    // only appends missing rules, existing ones are left alone.
-    if let Err(e) = crate::cmd::clone::autotrack_pointer_extensions(root, args.mode) {
-        debug!(error = %e, "autotrack rescan failed; continuing with existing patterns");
-    }
-
     let mut to_hydrate: Vec<(PathBuf, Pointer)> = Vec::new();
     let manifest_filter;
     let selection_filter = if let Some(ref entries) = manifest_entries {
@@ -5441,24 +5431,13 @@ mod tests {
             .unwrap();
     }
 
-    /// Regression: after `git pull` lands a pointer file whose extension
-    /// is not yet in `.gitattributes`, `crab hydrate` used to silently
-    /// report "No pointer files match" because the walker filters by
-    /// tracked globs. The autotrack rescan at the top of `run_hydrate_in`
-    /// fixes that by picking up the new extension before the walk.
     #[tokio::test]
-    async fn hydrate_autotracks_new_pointer_extensions_after_pull() {
+    async fn hydrate_does_not_modify_committed_tracking_rules() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Simulate state after `crab clone` + later `git pull`:
-        // - `.gitattributes` already tracks `*.zip` (from a prior clone),
-        // - `git pull` just dropped a `.dmg` pointer into the tree.
-        std::fs::write(
-            root.join(".gitattributes"),
-            "*.zip filter=crab diff=crab merge=crab -text\n",
-        )
-        .unwrap();
+        let attributes = "*.zip filter=crab diff=crab merge=crab -text\n";
+        std::fs::write(root.join(".gitattributes"), attributes).unwrap();
         let ptr = sample_pointer(1_024);
         std::fs::write(root.join("big.dmg"), ptr.serialize()).unwrap();
 
@@ -5474,13 +5453,11 @@ mod tests {
             .await
             .unwrap();
 
-        // The rescan must have appended a `*.dmg` rule so a subsequent
-        // hydrate (or the same one, walk-wise) can pick the file up.
         let ga = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
-        assert!(ga.contains("*.zip filter=crab"), "existing rule preserved");
-        assert!(
-            ga.contains("*.dmg filter=crab"),
-            "new extension auto-tracked after pull",
+        assert_eq!(ga, attributes);
+        assert_eq!(
+            std::fs::read(root.join("big.dmg")).unwrap(),
+            ptr.serialize()
         );
     }
 

@@ -110,19 +110,19 @@ export AWS_ACCESS_KEY_ID=crab
 export AWS_SECRET_ACCESS_KEY=crab
 export AWS_REGION=us-east-1
 export AWS_ENDPOINT_URL=http://127.0.0.1:9000
+export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+export AWS_ALLOW_HTTP=true
 export AWS_EC2_METADATA_DISABLED=true   # skip IMDS lookup on macOS/Linux
 ```
 
-For Crab-specific config, point the remote URL at your bucket:
+Point the remote URL at your bucket:
 
 ```bash
-crab init --remote crab://dev-bucket/my-repo
-crab config set storage.endpoint http://127.0.0.1:9000
-crab config set storage.force_path_style true
+crab init crab://dev-bucket/my-repo --storage-provider s3
 ```
 
-`force_path_style = true` is important. RustFS (like single-node MinIO) does not
-serve virtual-hosted-style URLs by default — requests go to
+`AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false` is important. RustFS (like
+single-node MinIO) does not serve virtual-hosted-style URLs by default — requests go to
 `http://127.0.0.1:9000/<bucket>/<key>`, not `http://<bucket>.127.0.0.1:9000/`.
 
 ## Smoke Test
