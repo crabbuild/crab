@@ -1004,9 +1004,9 @@ fn dispatch_command<R: Read, W: Write>(
 
             // Stream pkt-line packets straight into the CDC chunker and
             // blake3 hasher, bounding peak memory to one packet
-            // (≤64 KiB) plus the chunker's internal window instead of
-            // the full file payload. Fresh reader per command — the
-            // borrow on `input` is released as soon as `clean_stream`
+            // (≤64 KiB), the ≤1 KiB pointer probe, and the chunker's
+            // internal window instead of the full file payload. The fresh
+            // reader releases its borrow on `input` as soon as `clean_stream`
             // returns, so the session-isolation wrapper's
             // `drain_until_flush` on the error path still works.
             let mut reader = PktLineReader::from_read(&mut *input);

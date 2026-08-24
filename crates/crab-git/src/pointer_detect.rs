@@ -31,7 +31,7 @@ pub enum PointerKind {
 /// full parse. Empty or oversized blobs are classified as `NotAPointer`.
 #[must_use]
 pub fn classify(bytes: &[u8]) -> PointerKind {
-    if bytes.is_empty() || bytes.len() > MAX_LFS_POINTER_SIZE {
+    if bytes.is_empty() || bytes.len() >= MAX_LFS_POINTER_SIZE {
         return PointerKind::NotAPointer;
     }
 
@@ -142,6 +142,18 @@ mod tests {
     }
 
     #[test]
+    fn classify_at_lfs_blob_size_cutoff_is_not_a_pointer() {
+        let mut raw = format!(
+            "version {LFS_VERSION_URL}\noid sha256:{}\nsize 1\n",
+            sample_oid_hex(),
+        )
+        .into_bytes();
+        raw.resize(MAX_LFS_POINTER_SIZE, b'\n');
+        assert!(LfsPointer::parse(&raw).is_ok());
+        assert!(matches!(classify(&raw), PointerKind::NotAPointer));
+    }
+
+    #[test]
     fn classify_random_bytes_is_not_a_pointer() {
         assert!(matches!(
             classify(b"hello world, this is not a pointer"),
@@ -159,6 +171,23 @@ mod tests {
     fn classify_lfs_with_bad_body_is_not_a_pointer() {
         let raw = format!("version {LFS_VERSION_URL}\ngarbage\n");
         assert!(matches!(classify(raw.as_bytes()), PointerKind::NotAPointer));
+    }
+
+    #[test]
+    fn classify_lfs_with_unknown_or_out_of_order_lines_is_not_a_pointer() {
+        let oid = sample_oid_hex();
+        let cases = [
+            format!("version {LFS_VERSION_URL}\nmeta arbitrary\noid sha256:{oid}\nsize 1\n"),
+            format!("version {LFS_VERSION_URL}\nsize 1\noid sha256:{oid}\n"),
+            format!("version {LFS_VERSION_URL}\noid sha256:{oid}\nsize 1\nmeta arbitrary\n"),
+        ];
+
+        for raw in cases {
+            assert!(
+                matches!(classify(raw.as_bytes()), PointerKind::NotAPointer),
+                "classified {raw:?} as a pointer",
+            );
+        }
     }
 
     #[test]

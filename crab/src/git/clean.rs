@@ -21,7 +21,7 @@ use crate::core::error::{CrabError, Result};
 use crate::core::pattern::PatternFilter;
 use crate::storage::StoreLayout;
 use bytes::Bytes;
-use crab_git::lfs_pointer::LfsPointer;
+use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_lfs::LfsObjectStore;
 use crab_staging::StagingArea;
@@ -1720,9 +1720,10 @@ impl CleanSession {
     /// given input, the output pointer bytes are identical to
     /// [`clean_file`] on the same content.
     ///
-    /// Pointer passthrough and LFS detection are handled by peeking the
-    /// first packet. Unextended LFS content streams to a temporary cache
-    /// file while hashing, so memory use is independent of object size.
+    /// Pointer passthrough is decided from the complete input only while it
+    /// remains below Git LFS's pointer-size cutoff. Unextended LFS content
+    /// streams to a temporary cache file while hashing, so memory use is
+    /// independent of object size.
     pub fn clean_stream<R: std::io::Read>(
         &mut self,
         pathname: &str,
@@ -1751,10 +1752,11 @@ impl CleanSession {
         // always take precedence over pointer format detection.
         let resolved_filter = self.resolve_filter_for(pathname);
 
-        // Peek the first packet. If empty stream (flush immediately),
-        // fall through to crab path with no content — same semantics
-        // as `clean_file` on an empty Vec.
-        let Some(first) = reader.read_packet()?.map(<[u8]>::to_vec) else {
+        // Buffer only the bounded pointer probe. A pointer may span packets,
+        // and a pointer-shaped first packet may be followed by real content;
+        // classification before either condition is known can bypass cleaning
+        // or grow an unbounded passthrough Vec.
+        let Some(mut prefix) = reader.read_packet()?.map(<[u8]>::to_vec) else {
             // Empty stream: mirror `clean_file(vec![])`.
             match resolved_filter {
                 Some(crate::git::filter_attr_cache::FilterKind::Lfs) => {
@@ -1766,12 +1768,24 @@ impl CleanSession {
             }
         };
 
-        // Pointer passthrough with filter-awareness: if the content is
-        // already a pointer and it matches the resolved filter, pass it
-        // through unchanged. If the pointer format disagrees with the
-        // filter rule, fall through and re-process with the correct
-        // pipeline.
-        let ptr_kind = classify(&first);
+        let mut reached_flush = false;
+        while prefix.len() < MAX_LFS_POINTER_SIZE {
+            let Some(packet) = reader.read_packet()? else {
+                reached_flush = true;
+                break;
+            };
+            prefix.extend_from_slice(packet);
+        }
+
+        // Pointer passthrough with filter-awareness: if the complete content
+        // is a pointer and it matches the resolved filter, pass it through.
+        // If the stream exceeded the pointer cutoff or the format disagrees
+        // with the filter rule, re-process it with the selected pipeline.
+        let ptr_kind = if reached_flush {
+            classify(&prefix)
+        } else {
+            PointerKind::NotAPointer
+        };
         let should_passthrough = match (resolved_filter, &ptr_kind) {
             (Some(crate::git::filter_attr_cache::FilterKind::Lfs), PointerKind::Lfs(_)) => {
                 !lfs_extensions_configured_for_clean()
@@ -1792,16 +1806,12 @@ impl CleanSession {
         };
 
         if should_passthrough {
-            let mut out = first;
-            while let Some(pkt) = reader.read_packet()? {
-                out.extend_from_slice(pkt);
-            }
             tracing::debug!(
                 path = %pathname,
-                size = out.len(),
+                size = prefix.len(),
                 "clean_stream: content is already a matching pointer, passing through"
             );
-            return Ok(out);
+            return Ok(prefix);
         }
 
         // Explicit attributes are the routing contract. Unmatched paths
@@ -1812,9 +1822,11 @@ impl CleanSession {
                 let extensions = crate::lfs::extension::configured_extensions_sorted()?;
                 let lfs_dir = self.lfs_dir()?;
                 let mut writer = crate::lfs::cache::ObjectWriter::new(&lfs_dir)?;
-                std::io::Write::write_all(&mut writer, &first).map_err(CrabError::Io)?;
-                while let Some(pkt) = reader.read_packet()? {
-                    std::io::Write::write_all(&mut writer, pkt).map_err(CrabError::Io)?;
+                std::io::Write::write_all(&mut writer, &prefix).map_err(CrabError::Io)?;
+                if !reached_flush {
+                    while let Some(pkt) = reader.read_packet()? {
+                        std::io::Write::write_all(&mut writer, pkt).map_err(CrabError::Io)?;
+                    }
                 }
                 let cleaned = crate::lfs::extension::clean_staged_with_extensions(
                     writer.finish()?,
@@ -1827,7 +1839,7 @@ impl CleanSession {
             _ => {
                 // Crab/XET path: stream into the hasher and chunker.
                 // This is the default when no filter matches (backward compat).
-                self.crab_clean_stream(pathname, first, reader)
+                self.crab_clean_stream(pathname, prefix, reader, reached_flush)
             }
         }
     }
@@ -1838,9 +1850,9 @@ impl CleanSession {
     /// at EOF, and adopts staged rows under the final file hash before
     /// emitting the pointer.
     ///
-    /// `first` holds the packet that [`clean_stream`] already consumed
-    /// to peek for pointer/LFS content; the remaining packets are read
-    /// from `reader`.
+    /// `first` holds the bounded pointer probe that [`clean_stream`] already
+    /// consumed. When that probe reached the flush packet, `reached_flush`
+    /// prevents a second read past the command boundary.
     ///
     /// [`GearChunker::feed`]: crab_xet::chunker::GearChunker::feed
     /// [`try_fast_path`]: Self::try_fast_path
@@ -1849,6 +1861,7 @@ impl CleanSession {
         pathname: &str,
         first: Vec<u8>,
         reader: &mut crate::git::filter_process::PktLineReader<R>,
+        reached_flush: bool,
     ) -> Result<Vec<u8>> {
         use crab_xet::chunker::GearChunker;
 
@@ -1880,20 +1893,22 @@ impl CleanSession {
             }
 
             // Drain the remaining packets.
-            while let Some(pkt) = reader.read_packet()? {
-                file_size += pkt.len() as u64;
-                file_hasher.update(pkt);
-                if let Some(chunker) = chunker.as_mut() {
-                    let new_chunks = chunker.feed(pkt);
-                    buffer_or_stage_clean_chunks(
-                        new_chunks,
-                        &mut buffered_stager,
-                        &mut provisional_stager,
-                        &mut self.chunk_stager,
-                        &mut recipe_recorder,
-                        pathname,
-                        self.chunk_buffer_cap,
-                    )?;
+            if !reached_flush {
+                while let Some(pkt) = reader.read_packet()? {
+                    file_size += pkt.len() as u64;
+                    file_hasher.update(pkt);
+                    if let Some(chunker) = chunker.as_mut() {
+                        let new_chunks = chunker.feed(pkt);
+                        buffer_or_stage_clean_chunks(
+                            new_chunks,
+                            &mut buffered_stager,
+                            &mut provisional_stager,
+                            &mut self.chunk_stager,
+                            &mut recipe_recorder,
+                            pathname,
+                            self.chunk_buffer_cap,
+                        )?;
+                    }
                 }
             }
 
@@ -3841,6 +3856,55 @@ size 45\n";
         let out = session.clean_stream("test.bin", &mut reader).unwrap();
 
         assert_eq!(out, pointer_bytes);
+    }
+
+    #[test]
+    fn clean_stream_recognizes_pointer_split_across_packets() {
+        use crate::git::filter_process::PktLineReader;
+
+        let pointer_bytes = Pointer {
+            file_hash: [0xA5u8; 32],
+            size: 123,
+            shard_hint: None,
+        }
+        .serialize();
+        let split = pointer_bytes.len() / 2;
+        let mut framed = encode_pktline(&pointer_bytes[..split]);
+        framed.extend_from_slice(&encode_pktline(&pointer_bytes[split..]));
+        framed.extend_from_slice(b"0000");
+
+        let mut session = CleanSession::new(AppContext::default());
+        let mut reader = PktLineReader::from_slice(&framed);
+        let out = session.clean_stream("test.bin", &mut reader).unwrap();
+
+        assert_eq!(out, pointer_bytes);
+    }
+
+    #[test]
+    fn clean_stream_pointer_prefix_does_not_bypass_cleaning() {
+        use crate::git::filter_process::PktLineReader;
+
+        let pointer_bytes = Pointer {
+            file_hash: [0xA5u8; 32],
+            size: 123,
+            shard_hint: None,
+        }
+        .serialize();
+        let tail = vec![0x5a; 2 * 1024];
+        let mut content = pointer_bytes.clone();
+        content.extend_from_slice(&tail);
+
+        let mut expected_session = CleanSession::new(AppContext::default());
+        let expected = expected_session.clean_file("test.bin", content).unwrap();
+
+        let mut framed = encode_pktline(&pointer_bytes);
+        framed.extend_from_slice(&encode_pktline(&tail));
+        framed.extend_from_slice(b"0000");
+        let mut session = CleanSession::new(AppContext::default());
+        let mut reader = PktLineReader::from_slice(&framed);
+        let out = session.clean_stream("test.bin", &mut reader).unwrap();
+
+        assert_eq!(out, expected);
     }
 
     #[test]
