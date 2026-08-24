@@ -129,7 +129,7 @@ gated on Plan 004.
 
 The current draft integration branch assembles the Phase 1-5 contracts for
 end-to-end review. This does not override the dependency graph or acceptance
-gates: `006-large-repository-scale-roadmap.md` records which implementation is
+gates: `001-large-repository-scale-roadmap.md` records which implementation is
 present and which Kubernetes/RustFS, fault, provider, and canary evidence is
 still pending.
 
@@ -148,7 +148,7 @@ still pending.
 
 ## Large-repository scale track
 
-`006-large-repository-scale-roadmap.md` is a separate P1, high-risk delivery
+`001-large-repository-scale-roadmap.md` is a separate P1, high-risk delivery
 track for Kubernetes-scale Git history and team fanout. It covers bitmap
 reachability, delta-preserving response packs, a generation-bound object
 catalog, split commit graphs, bounded geometric maintenance, stale-pack

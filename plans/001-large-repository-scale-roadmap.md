@@ -1,4 +1,4 @@
-# Plan 006: Harden Crab for large repositories and teams
+# Plan: Harden Crab for large repositories and teams
 
 > **Executor instructions**: This roadmap is divided into independently
 > reviewable phases. Execute one phase per branch and pull request. Follow each
