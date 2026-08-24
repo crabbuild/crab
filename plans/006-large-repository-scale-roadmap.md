@@ -23,6 +23,7 @@
 - **Category**: performance, correctness, architecture, operations
 - **Planned at**: commit `aa150868`, 2026-08-23
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
+- **Current draft PR**: https://github.com/crabbuild/crab-oss/pull/75
 
 ### Current execution state
 
@@ -863,13 +864,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | This draft PR | Local baseline only | `33256217` | Harness, verifier, docs, and workflow implemented; fresh current-branch report and repeatability gate pending |
-| 1 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `8b17b9d4`, `22955e9d` | Bitmap runtime and bounded incremental visibility publication pass unit/integration proof; Kubernetes RSS/latency gate pending |
-| 2 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `4ee35cd1` through `a5bcaa22` | Canonical/delta reuse and immutable response cache pass strict pack tests; Kubernetes CPU/egress and origin-read gates pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | `8b9b4893` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
-| 4 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | Current draft head | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
-| 5 | IMPLEMENTED; QUALIFICATION PENDING | This draft PR | — | Current draft head | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
-| 6 | PARTIAL | This draft PR | — | Current draft head | 50-cold/100-warm clone fanout controls implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
+| 0 | PARTIAL | PR #75 | Local baseline only | `fa779130` | Harness, verifier, docs, and workflow implemented; fresh current-branch report and repeatability gate pending |
+| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `4c771baa`, `ac74dad1` | Bitmap runtime and bounded incremental visibility publication pass unit/integration proof; Kubernetes RSS/latency gate pending |
+| 2 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d2a4c97d` through `0bddea98` | Canonical/delta reuse and immutable response cache pass strict pack tests; Kubernetes CPU/egress and origin-read gates pending |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d5090649` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
+| 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
+| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
+| 6 | PARTIAL | PR #75 | — | `9bb558a6` | 50-cold/100-warm clone fanout controls implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
 
 ### Current branch verification evidence
 
