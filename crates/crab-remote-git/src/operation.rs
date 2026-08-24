@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crab_metadata::git_object_locator::GitObjectLocatorSession;
+use crab_metadata::git_object_locator::{GitObjectKind, GitObjectLocatorSession, GitObjectLookup};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -13,8 +13,8 @@ use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
 use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
-    AnnotatedTag, Blame, BudgetDimension, Commit, Error, GitPath, MetricKind, MetricObservation,
-    MetricOutcome, Result, TreeEntry,
+    AnnotatedTag, Blame, BudgetDimension, Commit, CorruptionStage, Error, GitPath, MetricKind,
+    MetricObservation, MetricOutcome, Result, TreeEntry,
 };
 
 /// Bounded semantic operation name used only for metrics and traces.
@@ -337,6 +337,41 @@ impl OperationContext {
     #[must_use]
     pub fn max_logical_objects(&self) -> u64 {
         self.state.options.operation_limits().max_logical_objects
+    }
+
+    /// Resolve the published object kinds without reading packed object bodies.
+    pub async fn catalog_object_kinds(
+        &self,
+        object_ids: &[[u8; 20]],
+    ) -> Result<Vec<Option<GitObjectKind>>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        let lookups = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            lookups = session.lookup_batch(object_ids, &self.state.inventory) => lookups?,
+        };
+        if lookups.len() != object_ids.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        lookups
+            .into_iter()
+            .map(|lookup| match lookup {
+                GitObjectLookup::Hit(locator) => Ok(locator.metadata.kind),
+                GitObjectLookup::Miss => Ok(None),
+                GitObjectLookup::Corrupt => Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                }),
+            })
+            .collect()
     }
 
     /// Return the maximum complete pack response size for this operation.

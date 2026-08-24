@@ -434,6 +434,26 @@ async fn plan_with_operation(
         return Ok(plan);
     }
 
+    if let Some(plan) = plan_from_visibility_catalog(
+        operation,
+        &repository.refs().entries,
+        visible_ref_names,
+        visibility,
+        request,
+        maximum_objects,
+    )
+    .await?
+    {
+        tracing::info!(
+            telemetry_event = "visibility_plan",
+            strategy = "catalog_filter",
+            planned_objects = plan.object_ids.len(),
+            visibility_plan_ms = started.elapsed().as_millis() as u64,
+            "upload-pack object plan completed"
+        );
+        return Ok(plan);
+    }
+
     let common_haves = request
         .haves
         .iter()
@@ -445,9 +465,8 @@ async fn plan_with_operation(
         .copied()
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
-    let deduplicate_by_oid = request.deepen.is_none()
-        && !request.deepen_relative
-        && !filter_requires_traversal_context(&request.filter);
+    let deduplicate_by_oid =
+        should_deduplicate_by_oid(request) && !filter_requires_traversal_context(&request.filter);
     let sparse_matchers =
         prepare_sparse_matchers(operation, visibility, visible_ref_names, &request.filter).await?;
     let mut queue = VecDeque::new();
@@ -651,18 +670,22 @@ async fn plan_with_operation(
     Ok(plan)
 }
 
-fn plan_from_visibility(
+struct VisibilityObjectSelection {
+    objects: Vec<[u8; 20]>,
+    common_haves: Vec<ObjectId>,
+}
+
+fn visibility_object_selection(
     references: &[RepositoryRef],
     visible_ref_names: &[String],
     visibility: &GitVisibilityIndex,
     request: &UploadPackRequest,
     maximum_objects: u64,
-) -> crab_remote_git::Result<Option<PackPlan>> {
+) -> crab_remote_git::Result<Option<VisibilityObjectSelection>> {
     if request.wants.is_empty()
         || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
-        || !matches!(request.filter, UploadPackFilter::None)
     {
         return Ok(None);
     }
@@ -671,7 +694,7 @@ fn plan_from_visibility(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let selected_refs = request
+    let Some(mut selected_refs) = request
         .wants
         .iter()
         .map(|want| {
@@ -682,8 +705,8 @@ fn plan_from_visibility(
                 })
                 .map(|reference| reference.name.as_str())
         })
-        .collect::<Option<Vec<_>>>();
-    let Some(mut selected_refs) = selected_refs else {
+        .collect::<Option<Vec<_>>>()
+    else {
         return Ok(None);
     };
 
@@ -701,7 +724,21 @@ fn plan_from_visibility(
         }
     }
 
-    if !request.haves.is_empty() {
+    let mut common_haves = Vec::new();
+    let mut objects = if request.haves.is_empty() {
+        if request.include_tags {
+            let selected_objects = visibility.objects_for_refs(selected_refs.iter().copied());
+            selected_refs.extend(references.iter().filter_map(|reference| {
+                let peeled = reference.peeled?;
+                let peeled: [u8; 20] = peeled.as_bytes().try_into().ok()?;
+                (reference.name.starts_with("refs/tags/")
+                    && visible.contains(reference.name.as_str())
+                    && selected_objects.contains(&peeled))
+                .then_some(reference.name.as_str())
+            }));
+        }
+        visibility.objects_for_refs(selected_refs.iter().copied())
+    } else {
         let haves = request
             .haves
             .iter()
@@ -713,6 +750,7 @@ fn plan_from_visibility(
             })
             .collect::<Vec<_>>();
         let have_oids = haves.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        common_haves = haves.into_iter().map(|(have, _)| have).collect();
         let mut objects = Vec::new();
         for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
             let want = want
@@ -749,41 +787,11 @@ fn plan_from_visibility(
                 }
             }
         }
-        objects.sort_unstable();
-        objects.dedup();
-        let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
-        if actual > maximum_objects {
-            return Err(RemoteGitError::LimitExceeded {
-                limit: "upload-pack planned objects",
-                actual,
-                maximum: maximum_objects,
-            });
-        }
-        return Ok(Some(PackPlan {
-            wants: request.wants.clone(),
-            common_haves: haves.into_iter().map(|(have, _)| have).collect(),
-            filter: request.filter.clone(),
-            include_tags: request.include_tags,
-            object_ids: objects.into_iter().map(ObjectId::from).collect(),
-            required_bases: Vec::new(),
-            shallow: Vec::new(),
-            unshallow: Vec::new(),
-        }));
-    }
+        objects
+    };
 
-    if request.include_tags {
-        let selected_objects = visibility.objects_for_refs(selected_refs.iter().copied());
-        selected_refs.extend(references.iter().filter_map(|reference| {
-            let peeled = reference.peeled?;
-            let peeled: [u8; 20] = peeled.as_bytes().try_into().ok()?;
-            (reference.name.starts_with("refs/tags/")
-                && visible.contains(reference.name.as_str())
-                && selected_objects.contains(&peeled))
-            .then_some(reference.name.as_str())
-        }));
-    }
-
-    let objects = visibility.objects_for_refs(selected_refs.iter().copied());
+    objects.sort_unstable();
+    objects.dedup();
     let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
     if actual > maximum_objects {
         return Err(RemoteGitError::LimitExceeded {
@@ -792,14 +800,132 @@ fn plan_from_visibility(
             maximum: maximum_objects,
         });
     }
-    let object_ids = objects.into_iter().map(ObjectId::from).collect::<Vec<_>>();
+    Ok(Some(VisibilityObjectSelection {
+        objects,
+        common_haves,
+    }))
+}
 
+fn catalog_filter_supported(filter: &UploadPackFilter) -> bool {
+    match filter {
+        UploadPackFilter::BlobNone | UploadPackFilter::ObjectType(_) => true,
+        UploadPackFilter::Combine(filters) => {
+            !filters.is_empty() && filters.iter().all(catalog_filter_supported)
+        }
+        _ => false,
+    }
+}
+
+fn catalog_filter_accepts(filter: &UploadPackFilter, kind: gix_object::Kind) -> bool {
+    match filter {
+        UploadPackFilter::BlobNone => kind != gix_object::Kind::Blob,
+        UploadPackFilter::ObjectType(expected) => expected.matches(kind),
+        UploadPackFilter::Combine(filters) => filters
+            .iter()
+            .all(|filter| catalog_filter_accepts(filter, kind)),
+        _ => false,
+    }
+}
+
+fn gix_kind(kind: crab_metadata::git_object_locator::GitObjectKind) -> gix_object::Kind {
+    match kind {
+        crab_metadata::git_object_locator::GitObjectKind::Commit => gix_object::Kind::Commit,
+        crab_metadata::git_object_locator::GitObjectKind::Tree => gix_object::Kind::Tree,
+        crab_metadata::git_object_locator::GitObjectKind::Blob => gix_object::Kind::Blob,
+        crab_metadata::git_object_locator::GitObjectKind::Tag => gix_object::Kind::Tag,
+    }
+}
+
+async fn plan_from_visibility_catalog(
+    operation: &OperationContext,
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    visibility: &GitVisibilityIndex,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if !catalog_filter_supported(&request.filter)
+        || request.wants.is_empty()
+        || !request.shallow.is_empty()
+        || request.deepen.is_some()
+        || request.deepen_relative
+    {
+        return Ok(None);
+    }
+    let Some(selection) = visibility_object_selection(
+        references,
+        visible_ref_names,
+        visibility,
+        request,
+        maximum_objects,
+    )?
+    else {
+        return Ok(None);
+    };
+    let kinds = operation.catalog_object_kinds(&selection.objects).await?;
+    if kinds.iter().any(Option::is_none) {
+        tracing::debug!(
+            requested_objects = selection.objects.len(),
+            "published Git object-kind metadata is incomplete; using bounded upload-pack traversal"
+        );
+        return Ok(None);
+    }
+    let roots = request.wants.iter().copied().collect::<HashSet<_>>();
+    let object_ids = selection
+        .objects
+        .into_iter()
+        .zip(kinds)
+        .filter_map(|(oid, kind)| {
+            let kind = kind.map(gix_kind)?;
+            (roots.contains(&ObjectId::from(oid)) || catalog_filter_accepts(&request.filter, kind))
+                .then_some(ObjectId::from(oid))
+        })
+        .collect::<Vec<_>>();
     Ok(Some(PackPlan {
         wants: request.wants.clone(),
-        common_haves: Vec::new(),
+        common_haves: selection.common_haves,
         filter: request.filter.clone(),
         include_tags: request.include_tags,
         object_ids,
+        required_bases: Vec::new(),
+        shallow: Vec::new(),
+        unshallow: Vec::new(),
+    }))
+}
+
+fn plan_from_visibility(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    visibility: &GitVisibilityIndex,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if request.wants.is_empty()
+        || !request.shallow.is_empty()
+        || request.deepen.is_some()
+        || request.deepen_relative
+        || !matches!(request.filter, UploadPackFilter::None)
+    {
+        return Ok(None);
+    }
+
+    let Some(selection) = visibility_object_selection(
+        references,
+        visible_ref_names,
+        visibility,
+        request,
+        maximum_objects,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
+        common_haves: selection.common_haves,
+        filter: request.filter.clone(),
+        include_tags: request.include_tags,
+        object_ids: selection.objects.into_iter().map(ObjectId::from).collect(),
         required_bases: Vec::new(),
         shallow: Vec::new(),
         unshallow: Vec::new(),
@@ -948,6 +1074,10 @@ fn filter_requires_traversal_context(filter: &UploadPackFilter) -> bool {
         UploadPackFilter::Combine(filters) => filters.iter().any(filter_requires_traversal_context),
         _ => false,
     }
+}
+
+fn should_deduplicate_by_oid(request: &UploadPackRequest) -> bool {
+    !request.deepen_relative && request.shallow.is_empty()
 }
 
 fn ensure_visible_objects(
@@ -1418,6 +1548,68 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn initial_absolute_depth_traversal_deduplicates_shared_objects() {
+        let mut request = UploadPackRequest {
+            deepen: Some(100),
+            ..UploadPackRequest::default()
+        };
+        assert!(should_deduplicate_by_oid(&request));
+
+        request.shallow.push(oid('1'));
+        assert!(!should_deduplicate_by_oid(&request));
+
+        request.shallow.clear();
+        request.deepen_relative = true;
+        assert!(!should_deduplicate_by_oid(&request));
+    }
+
+    #[test]
+    fn catalog_filter_supports_kind_only_combinations_and_rejects_contextual_filters() {
+        assert!(catalog_filter_supported(&UploadPackFilter::BlobNone));
+        assert!(catalog_filter_supported(&UploadPackFilter::ObjectType(
+            UploadPackObjectType::Tree,
+        )));
+        assert!(catalog_filter_supported(&UploadPackFilter::Combine(vec![
+            UploadPackFilter::BlobNone,
+            UploadPackFilter::ObjectType(UploadPackObjectType::Tree),
+        ])));
+        assert!(!catalog_filter_supported(&UploadPackFilter::BlobLimit(
+            1024
+        )));
+        assert!(!catalog_filter_supported(&UploadPackFilter::TreeDepth(1)));
+        assert!(!catalog_filter_supported(&UploadPackFilter::Sparse {
+            oid: oid('7')
+        }));
+    }
+
+    #[test]
+    fn catalog_filter_keeps_explicit_wants_and_matches_catalogued_kinds() {
+        let filter = UploadPackFilter::BlobNone;
+        let root = oid('1');
+        let blob = oid('3');
+        let roots = HashSet::from([root]);
+        let planned = [
+            (root, gix_object::Kind::Commit),
+            (blob, gix_object::Kind::Blob),
+        ]
+        .into_iter()
+        .filter_map(|(oid, kind)| {
+            (roots.contains(&oid) || catalog_filter_accepts(&filter, kind)).then_some(oid)
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(planned, [root]);
+        assert!(catalog_filter_accepts(
+            &UploadPackFilter::ObjectType(UploadPackObjectType::Blob),
+            gix_object::Kind::Blob
+        ));
+        assert!(!catalog_filter_accepts(
+            &UploadPackFilter::ObjectType(UploadPackObjectType::Blob),
+            gix_object::Kind::Tree
+        ));
     }
 
     #[test]

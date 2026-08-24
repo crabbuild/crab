@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use slatedb::DbReaderMode;
 use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
@@ -164,7 +165,7 @@ impl GitObjectLocatorSession {
         let mut builder = slatedb::DbReader::builder(ObjectPath::from(path.as_str()), store)
             .with_options(options);
         if let Some(checkpoint) = checkpoint {
-            builder = builder.with_checkpoint_id(checkpoint.id);
+            builder = builder.with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id));
         }
         let reader = match builder
             .with_db_cache(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
@@ -673,7 +674,8 @@ mod tests {
 
     use super::*;
     use crate::git_object_locator::{
-        GitObjectLocatorEntry, GitObjectLocatorWriter, GitPackLocatorRecord,
+        GitObjectKind, GitObjectLocatorEntry, GitObjectLocatorWriter, GitObjectMetadata,
+        GitPackLocatorRecord,
     };
     use crab_xet::hash::MerkleHash;
 
@@ -910,6 +912,53 @@ mod tests {
                 .expect("miss"),
             vec![GitObjectLookup::Miss]
         );
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn object_kind_metadata_round_trips_through_the_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fixture = publish(Arc::clone(&store), pack(1), [33; 20], None).await;
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[fixture.pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(
+                binding,
+                &[GitObjectLocatorEntry {
+                    oid: fixture.oid,
+                    location: GitObjectLocation {
+                        pack_offset: 12,
+                        entry_len: 96,
+                        crc32: 7,
+                    },
+                    metadata: GitObjectMetadata {
+                        kind: Some(GitObjectKind::Blob),
+                        ..Default::default()
+                    },
+                }],
+            )
+            .await
+            .expect("write kind metadata");
+        writer.flush_objects().await.expect("flush kind metadata");
+        writer.close().await.expect("close writer");
+
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+        let lookup = session
+            .lookup_batch(
+                &[fixture.oid],
+                &HashMap::from([(fixture.pack.pack_id, fixture.inventory)]),
+            )
+            .await
+            .expect("lookup object kind");
+        assert!(matches!(
+            lookup.as_slice(),
+            [GitObjectLookup::Hit(locator)]
+                if locator.metadata.kind == Some(GitObjectKind::Blob)
+        ));
         session.close().await.expect("close reader");
     }
 

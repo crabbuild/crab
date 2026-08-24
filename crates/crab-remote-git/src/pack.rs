@@ -27,6 +27,7 @@ const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(60);
 const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(20);
 const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(100);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
+const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 
 /// Immutable key for one authorization- and generation-bound response pack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -337,15 +338,25 @@ impl RemoteGitRepository {
                             .await?
                             {
                                 Some(pack) => Ok(pack),
-                                None => {
-                                    generate_pack_with_operation(
-                                        &operation,
-                                        &unique,
-                                        thin_bases,
-                                        cancellation,
-                                    )
-                                    .await
-                                }
+                                None => match Self::try_repack_selected_pack(
+                                    self,
+                                    &operation,
+                                    &unique,
+                                    cancellation,
+                                )
+                                .await?
+                                {
+                                    Some(pack) => Ok(pack),
+                                    None => {
+                                        generate_pack_with_operation(
+                                            &operation,
+                                            &unique,
+                                            thin_bases,
+                                            cancellation,
+                                        )
+                                        .await
+                                    }
+                                },
                             }
                         } else {
                             generate_pack_with_operation(
@@ -500,6 +511,116 @@ impl RemoteGitRepository {
         Ok(Some(pack))
     }
 
+    async fn try_repack_selected_pack(
+        repository: &RemoteGitRepository,
+        operation: &crate::OperationContext,
+        object_ids: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GeneratedPack>> {
+        let inventory = repository
+            .state
+            .inventory
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        let inventory_objects = inventory
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        let inventory_bytes = inventory
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+        if !Self::selected_pack_repack_candidate(
+            inventory_objects,
+            object_ids.len(),
+            SELECTED_PACK_REPACK_MIN_OBJECTS,
+        ) || inventory_bytes > operation.max_fetched_bytes()
+        {
+            return Ok(None);
+        }
+
+        let started = Instant::now();
+        let source_pack_count = inventory.len();
+        let workspace = tempfile::tempdir().map_err(io_error)?;
+        let download_dir = workspace.path().join("source-packs");
+        std::fs::create_dir_all(&download_dir).map_err(io_error)?;
+        let mut sources = Vec::with_capacity(inventory.len());
+        for pack in inventory {
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let path = download_dir.join(format!("pack-{}.pack", pack.pack_id));
+            std::fs::File::create(&path).map_err(io_error)?;
+            operation
+                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
+                .await?;
+            sources.push(crab_git::repack::RepackSource {
+                canonical_id: pack.pack_id.to_string(),
+                path,
+                size: pack.pack_size,
+                object_count: pack.object_count,
+            });
+        }
+        let selected_oids = object_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let repacked = tokio::task::spawn_blocking(move || {
+            crab_git::repack::repack_selected_objects(&sources, &selected_oids)
+        })
+        .await
+        .map_err(|source| Error::DecodeTask { source })?
+        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
+            invariant: "selected-object repack produced no pack",
+        })?;
+        let size = generated.pack_size;
+        operation
+            .charge(BudgetDimension::ResponseBytes, size)
+            .await?;
+        let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        })?;
+        let content_hash = generated.pack_hash;
+        let destination = NamedTempFile::new().map_err(io_error)?;
+        let destination_path = destination.path().to_owned();
+        let destination = destination.into_temp_path();
+        std::fs::remove_file(&destination_path).map_err(io_error)?;
+        std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
+        let file = std::fs::File::open(&destination_path).map_err(io_error)?;
+        let file = NamedTempFile::from_parts(file, destination);
+        let object_count = generated.object_count;
+        drop(repacked);
+        drop(workspace);
+
+        let pack = GeneratedPack {
+            file: Arc::new(file),
+            size,
+            checksum,
+            content_hash,
+            object_count: u32::try_from(object_count).map_err(|_| Error::LimitExceeded {
+                limit: "pack object count",
+                actual: object_count,
+                maximum: u32::MAX as u64,
+            })?,
+        };
+        pack.verify_checksum()?;
+        tracing::info!(
+            target: "crab_remote_git::telemetry",
+            telemetry_event = "pack_generation",
+            strategy = "selected_object_repack",
+            source_pack_count,
+            object_count = pack.object_count,
+            source_bytes = inventory_bytes,
+            response_bytes = size,
+            pack_generation_ms = started.elapsed().as_millis() as u64,
+            "remote Git response pack repacked from selected objects"
+        );
+        Ok(Some(pack))
+    }
+
     fn complete_pack_consolidation_candidate(
         pack_count: usize,
         inventory_objects: u64,
@@ -508,6 +629,17 @@ impl RemoteGitRepository {
         pack_count > 1
             && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
             && inventory_objects == selected_objects as u64
+    }
+
+    fn selected_pack_repack_candidate(
+        inventory_objects: u64,
+        selected_objects: usize,
+        minimum_objects: usize,
+    ) -> bool {
+        let selected_objects = u64::try_from(selected_objects).unwrap_or(u64::MAX);
+        selected_objects >= u64::try_from(minimum_objects).unwrap_or(u64::MAX)
+            && selected_objects < inventory_objects
+            && selected_objects.saturating_mul(2) >= inventory_objects
     }
 
     /// Reuse or publish one immutable generation- and authorization-bound pack.
@@ -1592,6 +1724,22 @@ mod tests {
             2,
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64 + 1,
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
+        ));
+    }
+
+    #[test]
+    fn selected_pack_repack_requires_a_large_dense_filter() {
+        assert!(RemoteGitRepository::selected_pack_repack_candidate(
+            200_000, 100_000, 100_000,
+        ));
+        assert!(!RemoteGitRepository::selected_pack_repack_candidate(
+            200_000, 99_999, 100_000,
+        ));
+        assert!(!RemoteGitRepository::selected_pack_repack_candidate(
+            200_000, 200_000, 100_000,
+        ));
+        assert!(!RemoteGitRepository::selected_pack_repack_candidate(
+            200_000, 100_000, 100_001,
         ));
     }
 

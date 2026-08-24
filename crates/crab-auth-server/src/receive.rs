@@ -1211,6 +1211,7 @@ struct ServiceLocatorEvidence {
     idx_path: std::path::PathBuf,
     rev_path: std::path::PathBuf,
     git_sha1: String,
+    kind_by_oid: Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>,
 }
 
 fn validate_service_locator_evidence(
@@ -1321,6 +1322,7 @@ async fn download_service_locator_evidence_with_legacy_repair(
         idx_path,
         rev_path,
         git_sha1,
+        kind_by_oid: None,
     })
 }
 
@@ -1359,7 +1361,9 @@ async fn derive_service_locator_evidence(
         idx_hash,
         rev_size,
         rev_hash,
+        kind_by_oid,
     ) = tokio::task::spawn_blocking(move || {
+        crab_git::initialize_bare_git_dir(temp.path()).map_err(AuthServerError::from)?;
         let pack_dir = temp.path().join("objects/pack");
         std::fs::create_dir_all(&pack_dir)?;
         let installed = crab_git::pack::install_pack_file_from_path(
@@ -1372,7 +1376,7 @@ async fn derive_service_locator_evidence(
             // packs, so object fsck would reject valid incremental packs.
             false,
         )?;
-        let locations = crab_git::pack_locator::PackLocationIter::open(
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
             &installed.idx_path,
             &installed.rev_path,
             downloaded,
@@ -1390,6 +1394,45 @@ async fn derive_service_locator_evidence(
                 "committed pack index checksum disagrees with pack trailer",
             ));
         }
+        let object_ids = locations
+            .by_ref()
+            .map(|location| {
+                location
+                    .map(|location| location.oid)
+                    .map_err(crab_git::pack::PackError::from)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuthServerError::from)?;
+        let kinds = crab_git::object_kinds_from_git_dir(temp.path(), &object_ids)
+            .map_err(AuthServerError::from)?;
+        if kinds.len() != object_ids.len() {
+            return Err(AuthServerError::Internal(
+                "Git object-kind catalog returned an incomplete pack result".to_owned(),
+            ));
+        }
+        let kind_by_oid = kinds
+            .into_iter()
+            .map(|(oid, kind)| {
+                let oid = oid.as_bytes().try_into().map_err(|_| {
+                    AuthServerError::Internal(
+                        "Git object-kind catalog returned a non-SHA1 object".to_owned(),
+                    )
+                })?;
+                let kind = match kind {
+                    gix_object::Kind::Commit => {
+                        crab_metadata::git_object_locator::GitObjectKind::Commit
+                    }
+                    gix_object::Kind::Tree => {
+                        crab_metadata::git_object_locator::GitObjectKind::Tree
+                    }
+                    gix_object::Kind::Blob => {
+                        crab_metadata::git_object_locator::GitObjectKind::Blob
+                    }
+                    gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+                };
+                Ok((oid, kind))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let mut file = std::fs::File::open(&source)?;
         let mut hasher = blake3::Hasher::new();
         std::io::copy(&mut file, &mut hasher)?;
@@ -1411,6 +1454,7 @@ async fn derive_service_locator_evidence(
             *idx_hasher.finalize().as_bytes(),
             rev_size,
             *rev_hasher.finalize().as_bytes(),
+            kind_by_oid,
         ))
     })
     .await
@@ -1449,6 +1493,7 @@ async fn derive_service_locator_evidence(
         idx_path,
         rev_path,
         git_sha1,
+        kind_by_oid: Some(Arc::new(kind_by_oid)),
     })
 }
 
@@ -1605,7 +1650,13 @@ async fn commit_service_git_locators_with_source(
                             entry_len: location.entry_len,
                             crc32: location.crc32,
                         },
-                        metadata: Default::default(),
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            kind: evidence
+                                .kind_by_oid
+                                .as_ref()
+                                .and_then(|kinds| kinds.get(&oid).copied()),
+                            ..Default::default()
+                        },
                     });
                     if entries.len() == 25_000 {
                         writer.write_locations(binding, &entries).await?;

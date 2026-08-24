@@ -120,6 +120,9 @@ pub enum RepackError {
         operation: &'static str,
         status: std::process::ExitStatus,
     },
+    /// A selected-object pack contained an object outside the requested set.
+    #[error("selected pack {pack_id} failed exact object-set validation: {reason}")]
+    SelectedObjectSet { pack_id: String, reason: String },
 }
 
 /// Return the number of smallest packs that must be rolled up for geometry.
@@ -406,6 +409,111 @@ pub fn consolidate_pack_suffix(
     })
 }
 
+/// Generates one self-contained pack for an exact set of selected objects.
+///
+/// The source packs are validated before Git repacks them. The generated
+/// index is compared with the requested set so Git cannot silently add a
+/// filtered-out object as a delta base.
+pub fn repack_selected_objects(
+    sources: &[RepackSource],
+    selected_oids: &[String],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    if sources.is_empty() {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: "selected-pack".to_owned(),
+            reason: "no source packs were supplied".to_owned(),
+        });
+    }
+    let selected = selected_oids.iter().cloned().collect::<BTreeSet<_>>();
+    if selected.is_empty() || selected.len() != selected_oids.len() {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: "selected-pack".to_owned(),
+            reason: "selected object IDs must be non-empty and unique".to_owned(),
+        });
+    }
+
+    let workspace =
+        tempfile::tempdir().map_err(|source| io_error("create selected-pack workspace", source))?;
+    let source_git = workspace.path().join("source.git");
+    initialize_bare_repository(&source_git)?;
+    let pack_dir = source_git.join("objects/pack");
+    for source in sources {
+        validate_source(source)?;
+        install_pack_file_from_path(
+            &pack_dir,
+            &source.path,
+            &source.canonical_id,
+            source.size,
+            false,
+        )?;
+    }
+
+    let object_list = workspace.path().join("selected-objects.txt");
+    let mut input = File::create(&object_list)
+        .map_err(|source| io_error(format!("create {}", object_list.display()), source))?;
+    for oid in &selected {
+        writeln!(input, "{oid}")
+            .map_err(|source| io_error(format!("write {}", object_list.display()), source))?;
+    }
+    drop(input);
+    let stdin = File::open(&object_list)
+        .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
+    let output_prefix = pack_dir.join("pack-crab-selected");
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", source_git.display()))
+            .arg("pack-objects")
+            .arg("--quiet")
+            .arg("--reuse-delta")
+            .arg("--reuse-object")
+            .arg("--delta-base-offset")
+            .arg("--depth=64")
+            .arg(&output_prefix)
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::null()),
+        "pack selected Git objects",
+    )?;
+    let pack_path = std::fs::read_dir(&pack_dir)
+        .map_err(|source| io_error(format!("read {}", pack_dir.display()), source))?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("pack-crab-selected-") && name.ends_with(".pack")
+                })
+        })
+        .ok_or_else(|| RepackError::SelectedObjectSet {
+            pack_id: "selected-pack".to_owned(),
+            reason: "selected-object packing produced no pack".to_owned(),
+        })?;
+    let generated = verified_generated_pack(pack_path)?;
+    let mut generated_locations = PackLocationIter::open(
+        &generated.index_path,
+        &generated.reverse_index_path,
+        generated.pack_size,
+    )?;
+    let mut generated_oids = BTreeSet::new();
+    for location in &mut generated_locations {
+        generated_oids.insert(location?.oid.to_string());
+    }
+    if generated_oids != selected {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: generated.pack_id,
+            reason: format!(
+                "generated {} objects for {} requested objects",
+                generated_oids.len(),
+                selected.len()
+            ),
+        });
+    }
+    Ok(GeometricRepackedRepository {
+        _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
 fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, RepackError> {
     let index_path = pack_path.with_extension("idx");
     let reverse_index_path = pack_path.with_extension("rev");
@@ -663,6 +771,22 @@ mod tests {
         let selected = consolidate_pack_suffix(&sources)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
+
+        let selected_oids = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-list", "--objects", "HEAD"]),
+            "list selected test objects",
+        )?
+        .lines()
+        .take(2)
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .collect::<Vec<_>>();
+        assert_eq!(selected_oids.len(), 2);
+        let selected = repack_selected_objects(&sources, &selected_oids)?;
+        assert_eq!(selected.packs().len(), 1);
+        assert_eq!(selected.packs()[0].object_count, selected_oids.len() as u64);
         Ok(())
     }
 

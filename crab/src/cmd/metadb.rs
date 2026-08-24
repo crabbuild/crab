@@ -2310,6 +2310,7 @@ async fn rebuild_git_object_locators(
             .await?
     };
     let visibility_temp = tempfile::tempdir()?;
+    crab_git::initialize_bare_git_dir(visibility_temp.path())?;
     let visibility_pack_dir = visibility_temp.path().join("objects/pack");
     std::fs::create_dir_all(&visibility_pack_dir)?;
     let mut failed = 0u64;
@@ -2466,6 +2467,68 @@ async fn rebuild_git_object_locators(
         ));
     }
 
+    let mut kind_by_pack = HashMap::with_capacity(derived.len());
+    for (pack, pack_id, _, index_path, reverse_index_path, _) in &derived {
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            index_path,
+            reverse_index_path,
+            pack.size,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        let object_ids = locations
+            .by_ref()
+            .map(|location| {
+                location
+                    .map(|location| location.oid)
+                    .map_err(crab_git::pack::PackError::from)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(CrabError::from)?;
+        let object_count = object_ids.len();
+        let git_dir = visibility_temp.path().to_owned();
+        let kinds = tokio::task::spawn_blocking(move || {
+            crab_git::object_kinds_from_git_dir(&git_dir, &object_ids)
+        })
+        .await
+        .map_err(|error| {
+            CrabError::Internal(format!(
+                "Git object-kind catalog worker failed during locator rebuild: {error}"
+            ))
+        })?
+        .map_err(CrabError::from)?;
+        if kinds.len() != object_count {
+            return Err(CrabError::Internal(format!(
+                "Git object-kind catalog returned {} objects for a pack containing {}",
+                kinds.len(),
+                object_count
+            )));
+        }
+        let kinds = kinds
+            .into_iter()
+            .map(|(oid, kind)| {
+                let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
+                    CrabError::Internal(
+                        "Git object-kind catalog returned a non-SHA1 object".to_owned(),
+                    )
+                })?;
+                let kind = match kind {
+                    gix_object::Kind::Commit => {
+                        crab_metadata::git_object_locator::GitObjectKind::Commit
+                    }
+                    gix_object::Kind::Tree => {
+                        crab_metadata::git_object_locator::GitObjectKind::Tree
+                    }
+                    gix_object::Kind::Blob => {
+                        crab_metadata::git_object_locator::GitObjectKind::Blob
+                    }
+                    gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+                };
+                Ok((oid, kind))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        kind_by_pack.insert(*pack_id, kinds);
+    }
+
     let mut lock = crab_coordination::PushLock::acquire_internal_default(
         store.inner(),
         router.repo_prefix(),
@@ -2507,7 +2570,7 @@ async fn rebuild_git_object_locators(
             // canonical object universe before replay makes retries idempotent
             // and prevents ordinals from depending on an interrupted attempt.
             writer.replace_object_catalog().await?;
-            for (binding, (_, _, _, index_path, reverse_index_path, git_sha1)) in
+            for (binding, (_, pack_id, _, index_path, reverse_index_path, git_sha1)) in
                 bindings.into_iter().zip(&derived)
             {
                 let mut locations = crab_git::pack_locator::PackLocationIter::open(
@@ -2525,7 +2588,7 @@ async fn rebuild_git_object_locators(
                 let mut entries = Vec::with_capacity(25_000);
                 for location in &mut locations {
                     let location = location.map_err(crab_git::pack::PackError::from)?;
-                    let oid = location.oid.as_bytes().try_into().map_err(|_| {
+                    let oid: [u8; 20] = location.oid.as_bytes().try_into().map_err(|_| {
                         CrabError::Internal(
                             "rebuilt pack index contains non-SHA1 object".to_owned(),
                         )
@@ -2537,7 +2600,12 @@ async fn rebuild_git_object_locators(
                             entry_len: location.entry_len,
                             crc32: location.crc32,
                         },
-                        metadata: Default::default(),
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            kind: kind_by_pack
+                                .get(pack_id)
+                                .and_then(|kinds| kinds.get(&oid).copied()),
+                            ..Default::default()
+                        },
                     });
                     if entries.len() == 25_000 {
                         writer.write_locations(binding, &entries).await?;

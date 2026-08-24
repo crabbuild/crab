@@ -439,6 +439,7 @@ async fn run_repack_locked(
             idx_path: pack.generated.index_path(),
             rev_path: pack.generated.reverse_index_path(),
             git_sha1: &pack.generated.git_sha1,
+            kind_by_oid: None,
         })
         .collect::<Vec<_>>();
     let locator_published = match publish_committed_pack_locators(

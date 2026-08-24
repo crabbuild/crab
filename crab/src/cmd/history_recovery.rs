@@ -1130,6 +1130,7 @@ async fn rebuild_locator_inventory(
             idx_path: &pack.index_path,
             rev_path: &pack.reverse_index_path,
             git_sha1: &pack.git_sha1,
+            kind_by_oid: None,
         })
         .collect::<Vec<_>>();
     publish_committed_pack_locators(

@@ -35,6 +35,15 @@ long-running fault matrix, and rollout gates still require dedicated evidence.
 The branch must remain a draft until those gates are either recorded here or
 split into explicitly tracked follow-up work approved by maintainers.
 
+The latest live run is `local-k8s-final-20260824` against Kubernetes revision
+`b3bc2ac5` and an isolated local RustFS endpoint. It completed the initial
+import, owner convergence, one incremental push, incremental fetch, full cold
+and warm clones, filtered `blob:none`, and depth-1 clone checks. It was
+intentionally interrupted after the depth-100 planner produced no result for
+11 minutes; the run-owned remote prefix was cleaned successfully. The report
+is evidence for completed stages, but its top-level status is `failed` because
+the depth-100 stop is an unresolved performance gate.
+
 Implemented on the current branch:
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
@@ -50,6 +59,13 @@ Implemented on the current branch:
 - LFS dependency publication bounded to newly introduced history and
   pointer-sized blobs, including partial-clone push proof;
 - cold/warm clone fanout controls in the qualification harness.
+- SlateDB 0.15.0 cancellation-safe reader behavior and explicit initialization
+  of temporary bare Git repositories before pack/index operations;
+- selected-object response repacking for dense type-only filters, with exact
+  generated-object-set verification;
+- safe OID deduplication for initial absolute-depth traversal, preserving
+  context-sensitive behavior for relative deepening and existing shallow
+  boundaries.
 
 Still required before the roadmap is DONE:
 
@@ -57,6 +73,11 @@ Still required before the roadmap is DONE:
 - the 1,000-push growth and latency comparison for catalog and graph layers;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
+- a generation-bound shallow object-closure accelerator: the split commit graph
+  currently bounds ancestry, but it does not by itself select the tree/blob
+  closure needed by upload-pack. Depth-1 currently performs 47,137 storage
+  requests for 30,031 planned objects, and depth-100 did not emit a plan within
+  11 minutes in the latest run;
 - the complete Phase 5 interruption and 10,000-push maintenance matrix;
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
@@ -475,6 +496,11 @@ implement safe packed-entry reuse rather than port GPLv2 source.
 8. Add metrics for copied entries, converted deltas, materialized entries,
    source bytes, response bytes, assembler CPU, cache hit/miss, and coalesced
    waiters.
+9. For dense `blob:none` and `object:type` selections, permit a selected
+   object-set repack only when the catalog proves the complete set and the
+   generated pack is verified against that exact set. Keep shallow and
+   path-context filters on a correctness-preserving path until their own
+   reachability index exists.
 
 ### Phase 2 acceptance criteria
 
@@ -493,6 +519,10 @@ implement safe packed-entry reuse rather than port GPLv2 source.
       and at least 70% less response-pack CPU than the cold clone.
 - [ ] A manifest or authorization-digest change cannot hit an older cached
       artifact.
+- [ ] On the Kubernetes two-pack snapshot, a dense `blob:none` request uses
+      the catalog-selected path, omits every cataloged blob, and its response
+      pack passes exact object-set verification plus the client-side clone
+      integrity gate.
 
 ### Phase 2 tests and verification
 
@@ -634,6 +664,13 @@ as authoritative.
    acceleration only where the existing public correctness contract requires
    it; corruption itself must be surfaced for repair.
 7. Add doctor/fsck diagnostics and an idempotent graph rebuild operation.
+8. Add the missing shallow object-closure acceleration as an explicit graph
+   exit gate. A commit graph alone identifies commit boundaries; it does not
+   identify every tree/blob reachable from the selected commits. The chosen
+   implementation must publish a generation-bound reachability bitmap or
+   equivalent tree-closure index that upload-pack can use without issuing one
+   remote object traversal for every shallow request. It must remain
+   conservative when the index is absent, stale, incomplete, or corrupt.
 
 ### Phase 4 acceptance criteria
 
@@ -649,6 +686,11 @@ as authoritative.
 - [ ] Median Kubernetes ancestry query is at least 5x faster than baseline and
       does not download pack bodies when the graph is current.
 - [ ] Graph corruption or generation mismatch cannot authorize a ref update.
+- [ ] For the Kubernetes snapshot, depth-1/10/100/1,000 planning is exact and
+      emits the same object set as Git's shallow clone differential. Depth-1
+      and depth-100 planner p95 is at most 10 seconds, and storage requests
+      are no more than twice the number of selected objects; otherwise the
+      phase remains incomplete.
 
 ### Phase 4 tests and verification
 
@@ -876,13 +918,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | `local-k8s-multipack-fixed2-20260824` (interrupted) | `fa779130` | Current working-tree run proves seed/incremental/full-clone correctness and cleans its prefix; repeatability, 1,000 replay, and partial-clone gates remain pending |
-| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Bitmap runtime and bounded incremental visibility publication pass unit/integration and Rust 1.98 strict-lint proof; full filtered-planning RSS/latency gate pending |
-| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-multipack-fixed2-20260824` | `d2a4c97d` through `0bddea98` | Two-pack consolidation produced a verified 1.244 GB response; warm clone hit the cache; CPU/egress and filtered/shallow gates pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `d5090649` | Catalog advance was 6.176 s at seed and 802 ms after one incremental pack; 1,000-push layer/publication drift gate pending |
-| 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-multipack-fixed2-20260824` | `9bb558a6` | Complete graph rebuilds covered 140,381/140,383 commits; 10,000-pair and shallow differential/performance gate pending |
-| 5 | IMPLEMENTED; OPEN DEPENDENCY BLOCKER | PR #75 | `local-k8s-multipack-fixed2-20260824` | `9bb558a6` | Owner sequencing works, but SlateDB 0.14.1 `sst_iter` cancellation panics recur during scans; interruption/10,000-push matrix pending |
-| 6 | PARTIAL | PR #75 | `local-k8s-multipack-fixed2-20260824` | `0a8b5c8f`, `b7749b2e` | Full cold/warm single-client clones pass; `blob:none` planning exceeds six minutes; concurrency, fault, cache-server, provider, and canary gates pending |
+| 0 | PARTIAL | PR #75 | `local-k8s-final-20260824` (interrupted at depth-100; prefix cleaned) | `eb0e9114` + working tree | Seed, incremental, full-clone, filtered, and depth-1 checks completed; a publishable completed report, repeatability, 1,000 replay, and full differential gates remain pending |
+| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
+| 2 | IMPLEMENTED; PARTIAL EVIDENCE | PR #75 | `local-k8s-final-20260824` | `d2a4c97d` through working tree | Cold two-pack consolidation generated 1.244 GB in 113.969 s; warm clone hit cache; selected `blob:none` repack generated 198.85 MB in 78.564 s; shallow path remains open |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `d5090649` + working tree | Catalog had 7 layers/110.09 MB at generation 1 and 10 layers/110.09 MB after one push; 1,000-push drift and canonical-universe proof remain pending |
+| 4 | IMPLEMENTED; SHALLOW EXIT GATE OPEN | PR #75 | `local-k8s-final-20260824` | `9bb558a6` + working tree | Graph covers 140,381 then 140,383 commits and rebuilds in 89.880/135.675 s; depth-1 planner took 40.291 s and depth-100 produced no plan within 11 min |
+| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `9bb558a6` + working tree | SlateDB is pinned to 0.15.0 and fresh owner scans showed no prior cancellation panic; interruption, 10,000-push, and GC matrix remain pending |
+| 6 | PARTIAL | PR #75 | `local-k8s-final-20260824` | `0a8b5c8f`, `b7749b2e` + working tree | Single-client full/filtered checks pass; shallow and large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -912,39 +954,53 @@ table is an implementation checkpoint rather than phase acceptance.
 
 ### Fresh Kubernetes/RustFS evidence from the current implementation
 
-Run profile: `local-k8s-multipack-fixed2-20260824`, source Kubernetes `b3bc2ac5`,
-isolated RustFS, one replay push, current working tree release binary. The run
-was intentionally stopped at the partial-clone probe after the probe spent
-more than six minutes in the current traversal planner without producing a
-response; its isolated remote prefix was cleaned successfully.
+Run profile: `local-k8s-final-20260824`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, one replay
+push, and the release binary built from this working tree. The run-owned
+remote prefix was cleaned successfully. Its report is intentionally not a
+passing qualification report: the run was interrupted after depth-100
+planning produced no result for 11 minutes.
 
-- Seed import created a 1,643,202-object, 1,263,633,295-byte pack. The seed
-  generation owner advanced the catalog in 6,176 ms, published visibility in
-  143,481 ms, and rebuilt the 140,381-commit graph in 72,010 ms.
-- The first incremental push committed two commits and nine new objects in
-  2,950 ms in the report (2,511 ms in the structured push result); the
-  ref-journal phase was 237 ms and no catalog, visibility, graph, or pack
-  maintenance ran before acknowledgement.
-- The next owner cycle compacted the ref journal first; catalog advance for the
-  two-pack generation completed in 802 ms and graph rebuild completed in
-  109,410 ms for 140,383 commits. SlateDB 0.14.1 emitted repeated
-  `sst_iter.rs:453` `JoinError::Cancelled` panics during owner scans while the
-  command still exited zero. This is an open production blocker, not accepted
-  behavior.
-- The two-pack cold full clone selected
-  `complete_pack_consolidation`, verified 1,643,211 objects, produced a
-  1,244,177,064-byte response in 89,078 ms of pack generation, and passed
-  `git fsck --full`. The warm clone was a generated-pack cache hit, with
-  14,636 ms server-side response generation, and also passed `git fsck --full`.
-- The `blob:none --no-checkout` clone remains unaccepted: the current
-  filter-aware planner falls back to per-object commit/tree traversal, stayed
-  CPU-bound for more than six minutes without response bytes, and was
-  interrupted. A type-aware catalog or equivalent filtered-pack planning path
-  is required before partial-clone SLOs can pass.
+- Seed import created one 1,643,202-object, 1,263,633,295-byte pack. The
+  synchronous push closed in 233 s, ran no repository-wide maintenance before
+  acknowledgement, and owner convergence published seven catalog layers
+  (110,087,330 bytes), visibility, and a one-layer graph for 140,381 commits.
+  The visibility owner operation took 137,657 ms; graph publication took
+  89,880 ms.
+- The replay push added two commits and nine objects in an 11,018-byte pack,
+  passed connectivity with zero missing objects, and advanced the manifest to
+  generation 2 with two active packs. Its incremental fetch planned nine
+  objects in 0 ms, generated a 11,018-byte response in 5 ms, and completed the
+  server operation in 60 ms (local Git fetch wall time was 98 s).
+- Post-replay owner convergence rebuilt a one-layer graph for 140,383 commits
+  in 135,675 ms and left ten catalog layers totalling 110,088,407 bytes. No
+  SlateDB cancellation panic or temporary-bare-repository BrokenPipe appeared
+  in this fresh run; the branch pins SlateDB to 0.15.0 and initializes every
+  temporary Git directory before pack/index use.
+- The cold full clone planned 1,643,211 objects in 66 ms, consolidated the two
+  packs in 113,969 ms, and transferred a verified 1,244,177,064-byte response.
+  The full clone passed `git fsck --full`. The warm clone hit the generated-pack
+  cache, reused the same response, and generated it in 17,859 ms; its fsck also
+  passed.
+- The catalog-aware `blob:none --no-checkout` clone selected 1,102,159
+  objects, omitted 541,052 blobs, planned in 1,987 ms, and used the guarded
+  `selected_object_repack` path. Exact-set validation succeeded; pack
+  generation took 78,564 ms and transferred 198,850,600 bytes. The clone
+  completed and the run advanced to shallow probes.
+- Depth-1 remained on the context-aware traversal path. It selected 30,031
+  objects, took 40,291 ms to plan, issued 47,137 storage requests, and spent
+  53,923 ms generating a 49,662,271-byte response. This is correct but not a
+  large-repository SLO pass.
+- Depth-100 was still in planning after 11 minutes and emitted no visibility
+  plan or response telemetry. The OID deduplication regression test passes, but
+  this live result proves that queue deduplication alone is not the required
+  shallow optimization. A generation-bound commit/tree reachability bitmap or
+  equivalent exact closure index is now an explicit Phase 4 exit gate.
 
-This evidence proves the push-acknowledgement boundary and complete multi-pack
-response path, but it does not satisfy the 1,000-push, shallow differential,
-partial-clone, owner-fault, fanout, provider, or canary gates.
+This evidence proves the push-acknowledgement boundary, generation binding,
+multi-pack response reuse, exact filtered packing, and current owner lifecycle.
+It does not satisfy the 1,000-push, shallow differential/performance,
+owner-fault, concurrency, cache-server, provider, or canary gates.
 
 ## Final done criteria
 
