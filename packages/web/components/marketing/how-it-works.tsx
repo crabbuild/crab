@@ -8,7 +8,6 @@ import { Reveal } from "@/components/marketing/reveal"
 /* ------------------------------------------------------------------ */
 
 interface Step {
-  /** Two-digit step number label, e.g. "01" */
   number: string
   icon: LucideIcon
   title: string
@@ -23,7 +22,7 @@ interface Step {
 
 const steps: Step[] = [
   {
-    number: "01",
+    number: "1",
     icon: Download,
     title: "Install & Init",
     description:
@@ -31,7 +30,7 @@ const steps: Step[] = [
     code: "crab init --storage-provider s3 crab://my-bucket/repo && crab setup",
   },
   {
-    number: "02",
+    number: "2",
     icon: GitBranch,
     title: "Ship Your Files",
     description:
@@ -39,7 +38,7 @@ const steps: Step[] = [
     code: 'crab ship . -m "add model v2"',
   },
   {
-    number: "03",
+    number: "3",
     icon: Cloud,
     title: "Stored in Your Cloud",
     description:
@@ -57,7 +56,7 @@ function HorizontalConnector() {
   return (
     <div
       aria-hidden="true"
-      className="hidden items-center md:flex"
+      className="absolute top-1/2 left-full z-10 hidden w-6 -translate-y-1/2 items-center md:flex"
     >
       <div className="h-px w-full border-t-2 border-dashed border-border" />
       {/* Arrowhead */}
@@ -73,7 +72,7 @@ function VerticalConnector() {
       aria-hidden="true"
       className="flex flex-col items-center py-2 md:hidden"
     >
-      <div className="w-px grow border-l-2 border-dashed border-border min-h-8" />
+      <div className="min-h-8 w-px grow border-l-2 border-dashed border-border" />
       {/* Arrowhead */}
       <div className="mt-[-6px] h-0 w-0 shrink-0 border-x-[5px] border-t-[7px] border-x-transparent border-t-primary" />
     </div>
@@ -85,7 +84,7 @@ function StepCard({ step, index }: { step: Step; index: number }) {
   const Icon = step.icon
 
   return (
-    <Reveal duration={450} threshold={0.1} className="flex-1">
+    <Reveal duration={450} threshold={0.1} className="h-full min-w-0 flex-1">
       <article
         className={
           "relative flex h-full flex-col rounded-card border border-border bg-card p-card " +
@@ -93,37 +92,33 @@ function StepCard({ step, index }: { step: Step; index: number }) {
         }
       >
         {/* Title & description */}
-        <h3 className="mb-4 font-heading text-heading-sm font-semibold text-foreground flex items-center gap-2">
+        <h3 className="mb-4 flex items-center gap-3 font-heading text-heading-sm font-semibold text-foreground">
           {/* Icon */}
-          <div
-            aria-hidden="true"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-lg bg-primary-muted text-primary"
-          >
-            <Icon size={22} strokeWidth={2} />
+          <div className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary-muted text-primary">
+            <Icon aria-hidden="true" size={22} strokeWidth={2} />
+            <span
+              aria-label={`Step ${index + 1}`}
+              className="absolute -top-1.5 -right-1.5 inline-flex h-6 w-6 items-center justify-center rounded-full border-2 border-card bg-primary text-[10px] font-bold text-primary-foreground"
+            >
+              {step.number}
+            </span>
           </div>
-
-          {/* Step number badge */}
-          <span
-            aria-label={`Step ${index + 1}`}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground"
-          >
-            {step.number}
-          </span> <span>{step.title}</span>
+          <span>{step.title}</span>
         </h3>
         <p className="mb-4 text-sm leading-relaxed text-muted-foreground">
           {step.description}
         </p>
 
         {/* Mini-terminal code block */}
-        <div className="mt-auto overflow-hidden rounded-lg bg-foreground">
+        <div className="mt-auto min-w-0 overflow-hidden rounded-lg bg-foreground">
           <div className="flex items-center gap-1.5 px-3 pt-2">
             <span className="h-2.5 w-2.5 rounded-full bg-red-400/70" />
             <span className="h-2.5 w-2.5 rounded-full bg-yellow-400/70" />
             <span className="h-2.5 w-2.5 rounded-full bg-green-400/70" />
           </div>
-          <pre className="px-3 pb-3 pt-2">
+          <pre className="max-w-full overflow-x-auto px-3 pt-2 pb-3">
             <code className="text-xs leading-relaxed text-background">
-              <span className="select-none text-muted-foreground/60">$ </span>
+              <span className="text-muted-foreground/60 select-none">$ </span>
               {step.code}
             </code>
           </pre>
@@ -164,11 +159,11 @@ export function HowItWorks() {
       </Reveal>
 
       {/* Step cards with connectors */}
-      <div className="flex flex-col md:flex-row md:items-stretch gap-1 md:gap-1">
+      <div className="grid grid-cols-1 gap-1 md:grid-cols-3 md:gap-6">
         {steps.map((step, index) => (
           <div
             key={step.number}
-            className="flex flex-col md:flex-row md:items-stretch md:flex-1"
+            className="relative flex min-w-0 flex-col md:block"
           >
             <StepCard step={step} index={index} />
 
