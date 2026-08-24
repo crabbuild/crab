@@ -555,21 +555,14 @@ fn resolve_local_lfs_dir() -> Result<PathBuf> {
     let repo_root = crate::git::discover::resolve_current_worktree_root()
         .map_or_else(std::env::current_dir, Ok)?;
     let config = crate::lfs::config::LfsConfig::resolve(&repo_root)?;
-    if let Some(lfs_dir) = config.lfs_dir {
-        return Ok(if lfs_dir.is_absolute() {
-            lfs_dir
-        } else {
-            repo_root.join(lfs_dir)
-        });
-    }
-
     let git_dir = crate::git::discover::discover_git_dir()?;
     let git_dir = if git_dir.is_absolute() {
         git_dir
     } else {
         repo_root.join(git_dir)
     };
-    Ok(crate::git::discover::resolve_common_dir(&git_dir).join("lfs"))
+    let common_git_dir = crate::git::discover::resolve_common_dir(&git_dir);
+    Ok(config.storage_dir(&common_git_dir))
 }
 
 /// Parse a human-readable duration string like "24h", "7d", "30m".

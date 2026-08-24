@@ -17,6 +17,18 @@ pub const ENTRY_SCHEMA_VERSION: u16 = 3;
 /// Maximum schema version this crate can read.
 pub const ENTRY_SCHEMA_MAX_SUPPORTED: u16 = 3;
 
+/// Maximum serialized size accepted for one stage-cache manifest.
+pub const MAX_STAGE_CACHE_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum number of output records accepted in one stage-cache manifest.
+pub const MAX_STAGE_CACHE_OUTPUTS: usize = 1_000_000;
+
+/// Maximum number of entries accepted in one directory output manifest.
+pub const MAX_STAGE_CACHE_TREE_ENTRIES: usize = 1_000_000;
+
+/// Maximum serialized xorb body accepted by the workflow cache.
+pub const MAX_STAGE_CACHE_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// One output recorded in a stage cache entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedOut {
@@ -134,6 +146,15 @@ pub(crate) fn validate_stage_cache_entry_at(
         ("metric", entry.metrics.as_slice()),
         ("plot", entry.plots.as_slice()),
     ] {
+        if outputs.len() > MAX_STAGE_CACHE_OUTPUTS {
+            return Err(cache_entry_invalid(
+                &stage_hash,
+                format!(
+                    "{kind} output count {} exceeds the safety limit of {MAX_STAGE_CACHE_OUTPUTS}",
+                    outputs.len()
+                ),
+            ));
+        }
         for (index, output) in outputs.iter().enumerate() {
             validate_cached_out(
                 output,
@@ -150,6 +171,15 @@ pub(crate) fn validate_stage_cache_entry_at(
 
 /// Validate a directory manifest before it is joined to a staging path.
 pub(crate) fn validate_tree_manifest(manifest: &[TreeManifestEntry]) -> Result<([u8; 32], u64)> {
+    if manifest.len() > MAX_STAGE_CACHE_TREE_ENTRIES {
+        return Err(cache_entry_invalid(
+            "",
+            format!(
+                "directory manifest contains {} entries; safety limit is {MAX_STAGE_CACHE_TREE_ENTRIES}",
+                manifest.len()
+            ),
+        ));
+    }
     let mut paths = BTreeSet::new();
     let mut kinds = BTreeMap::new();
     let mut entries = Vec::with_capacity(manifest.len());
@@ -170,6 +200,15 @@ pub(crate) fn validate_tree_manifest(manifest: &[TreeManifestEntry]) -> Result<(
             return Err(cache_entry_invalid(
                 "",
                 format!("directory manifest mode is invalid for {:?}", entry.path),
+            ));
+        }
+        if entry.size > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+            return Err(cache_entry_invalid(
+                "",
+                format!(
+                    "directory entry {:?} is {} bytes; safety limit is {MAX_STAGE_CACHE_ARTIFACT_BYTES}",
+                    entry.path, entry.size
+                ),
             ));
         }
 
@@ -316,6 +355,15 @@ fn validate_cached_out(
         return Err(cache_entry_invalid(
             stage_hash,
             format!("{category}[{index}] mode is invalid"),
+        ));
+    }
+    if output.size > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+        return Err(cache_entry_invalid(
+            stage_hash,
+            format!(
+                "{category}[{index}] is {} bytes; safety limit is {MAX_STAGE_CACHE_ARTIFACT_BYTES}",
+                output.size
+            ),
         ));
     }
     if decode_b3_hash(&output.file_hash).is_none() {
@@ -549,6 +597,14 @@ mod tests {
 
         entry.outs[0].path = PathBuf::from("model.bin");
         entry.outs[0].file_hash = "b3:short".to_owned();
+        let error = validate_stage_cache_entry(&entry).unwrap_err();
+        assert!(matches!(error, WorkflowError::CacheEntryInvalid { .. }));
+    }
+
+    #[test]
+    fn cache_entry_validation_rejects_oversized_artifacts() {
+        let mut entry = entry_with_outs(vec![cached_out("model.bin", true)]);
+        entry.outs[0].size = MAX_STAGE_CACHE_ARTIFACT_BYTES + 1;
         let error = validate_stage_cache_entry(&entry).unwrap_err();
         assert!(matches!(error, WorkflowError::CacheEntryInvalid { .. }));
     }

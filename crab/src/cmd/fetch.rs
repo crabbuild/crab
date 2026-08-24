@@ -1,25 +1,25 @@
-//! `crab fetch` — pre-fetch objects from the remote store into the local cache.
+//! `crab fetch` — prewarm canonical local caches for selected Crab files.
 //!
-//! Downloads xorbs and shards referenced by the current HEAD (or a
-//! specified ref) without hydrating files. This warms the local cache
-//! so subsequent `crab hydrate` or `git checkout` operations are fast.
+//! Selection comes from Git pointer blobs, not bucket-global object listing.
+//! Each selected file is reconstructed into a hash-verifying sink through the
+//! same shard, file-index, replica, and xet-core range-cache path as hydrate.
 
-use std::future::Future;
 use std::io::Stdout;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::cmd::hydrate::{HydrateArgs, ShardHydrator};
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::core::output::event_payloads::{
-    PERF_PHASE_SCHEMA, PerfPhasePayload, ProgressPayload, XorbDonePayload,
-};
+use crate::core::output::event_payloads::{PERF_PHASE_SCHEMA, PerfPhasePayload};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::perf_phase::PhaseTimer;
+
+const MAX_FETCH_CANDIDATES: usize = 1_000_000;
 
 /// Arguments for the `crab fetch` command.
 pub struct FetchArgs {
@@ -31,9 +31,7 @@ pub struct FetchArgs {
     pub all: bool,
     /// Report what would be fetched without downloading.
     pub dry_run: bool,
-    /// Skip the post-fetch shard-sync step that warms the local
-    /// chunk-index cache. CI workloads that push once and never read
-    /// back can use this to avoid the warming cost.
+    /// Skip the post-fetch shard-sync step that warms the local chunk index.
     pub no_sync_chunk_index: bool,
     /// Output mode resolved from `--json` / `--jsonl` flags.
     pub mode: OutputMode,
@@ -54,355 +52,224 @@ pub struct FetchSummary {
 
 /// Run `crab fetch` in the current working directory.
 pub async fn run_fetch(args: &FetchArgs, cancel: &CancellationToken) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    run_fetch_in(&cwd, args, cancel).await
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
+    run_fetch_in(&worktree.current_worktree_root, args, cancel).await
 }
 
 fn emit_phase(stream: Option<&Mutex<JsonlStream<Stdout>>>, payload: PerfPhasePayload) {
-    if let Some(stream) = stream {
-        let Ok(mut s) = stream.lock() else {
-            return;
-        };
-        s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+    if let Some(stream) = stream
+        && let Ok(mut stream) = stream.lock()
+    {
+        stream.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
     }
 }
 
-/// Fetch objects for the repository rooted at `root`.
-///
-/// Reads the remote URL from `.crab/remote`, resolves the current
-/// HEAD's tree, and downloads any missing xorbs/shards into the local
-/// cache directory.
+/// Fetch selected repository content through the canonical hydrate path.
 pub async fn run_fetch_in(root: &Path, args: &FetchArgs, cancel: &CancellationToken) -> Result<()> {
     let config = Config::resolve_for_repo(root)?;
-
-    run_fetch_in_with_selector(
-        root,
-        args,
-        cancel,
-        config,
-        |config, parsed, cancel| async move {
-            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
-        },
-    )
-    .await
-}
-
-async fn run_fetch_in_with_selector<F, Fut>(
-    root: &Path,
-    args: &FetchArgs,
-    cancel: &CancellationToken,
-    config: Config,
-    select_read: F,
-) -> Result<()>
-where
-    F: FnOnce(Config, crate::git::url::CrabUrl, tokio_util::sync::CancellationToken) -> Fut,
-    Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
-{
-    use futures_util::TryStreamExt;
-
+    let candidates = resolve_candidates(root, args, &config, cancel)?;
+    if candidates.len() > MAX_FETCH_CANDIDATES {
+        return Err(CrabError::Configuration {
+            key: "fetch candidate count".to_owned(),
+            origin: format!(
+                "fetch selection exceeds the safety limit of {MAX_FETCH_CANDIDATES} files"
+            ),
+        });
+    }
+    let logical_bytes = candidates
+        .iter()
+        .try_fold(0u64, |bytes, (_, pointer)| bytes.checked_add(pointer.size))
+        .ok_or_else(|| CrabError::Internal("selected fetch size exceeds u64".to_owned()))?;
+    let selected = u64::try_from(candidates.len())
+        .map_err(|_| CrabError::Internal("selected fetch count exceeds u64".to_owned()))?;
     let start = Instant::now();
 
+    if args.dry_run {
+        return emit_summary(
+            args.mode,
+            FetchSummary {
+                objects_fetched: 0,
+                bytes_downloaded: 0,
+                objects_skipped: selected,
+                duration_ms: elapsed_millis(start),
+            },
+            Some((selected, logical_bytes)),
+            None,
+        );
+    }
+    if candidates.is_empty() {
+        return emit_summary(
+            args.mode,
+            FetchSummary {
+                objects_fetched: 0,
+                bytes_downloaded: 0,
+                objects_skipped: 0,
+                duration_ms: elapsed_millis(start),
+            },
+            None,
+            None,
+        );
+    }
+
     check_cancelled(cancel)?;
-
-    let remote_path = root.join(".crab/remote");
-    let url = std::fs::read_to_string(&remote_path).map_err(|_| CrabError::Configuration {
-        key: "no remote configured".into(),
-        origin: remote_path.display().to_string(),
-    })?;
-    let url = url.trim();
-
-    let parsed = crate::git::url::CrabUrl::parse(url)?;
-
-    tracing::info!(
-        bucket = %parsed.bucket,
-        repo_path = %parsed.repo_path,
-        all = args.all,
-        dry_run = args.dry_run,
-        "starting fetch",
-    );
-
-    check_cancelled(cancel)?;
-
-    let selection = select_read(config.clone(), parsed.clone(), cancel.clone()).await?;
-    let crate::replication::ReadStoreSelection {
-        store,
-        router: read_router,
-        source,
-    } = selection;
-    if let crate::replication::ReadSource::Replica { name } = &source {
+    let parsed = read_remote(root)?;
+    let selection =
+        crate::replication::select_read_store(&config, &parsed, "fetch", cancel).await?;
+    if let crate::replication::ReadSource::Replica { name } = &selection.source {
         tracing::debug!(replica = %name, "selected read replica for fetch");
     }
+    let read_router = selection.router;
+    let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
+    let mut hydrator = ShardHydrator::with_config_from_cli_layout(
+        caching_store.clone(),
+        read_router.clone(),
+        &config,
+    )?;
+    let chunk_cache = crate::cache::xet_chunk_cache_from_config(&config)?;
+    hydrator = hydrator.with_xet_chunk_cache(chunk_cache.cache);
 
-    // Wrap with CachingStore when a cache service is configured.
-    let caching_store = crab_cache_store::CachingStore::new(store, &config.cache)?;
-
-    // List objects under the repo prefix to discover what needs fetching.
-    let prefix = object_store::path::Path::from(parsed.repo_path.as_str());
-
-    if args.dry_run {
-        let summary = FetchSummary {
-            objects_fetched: 0,
-            bytes_downloaded: 0,
-            objects_skipped: 0,
-            duration_ms: start.elapsed().as_millis() as u64,
-        };
-        match args.mode {
-            OutputMode::Text => {
-                eprintln!("fetch (dry run): would fetch objects from {url}");
-                eprintln!("  prefix: {prefix}");
-                eprintln!("  include: {:?}", args.include);
-                eprintln!("  exclude: {:?}", args.exclude);
-            }
-            OutputMode::Json => {
-                emit_json("fetch", "1.0", &summary);
-            }
-            OutputMode::Jsonl => {
-                let mut stream = JsonlStream::new("fetch.event", "1.0", std::io::stdout());
-                stream.emit_result(&summary);
-            }
-        }
-        return Ok(());
-    }
-
-    // Build the optional JSONL stream for streaming mode.
-    let jsonl_stream: Option<Mutex<JsonlStream<Stdout>>> = match args.mode {
-        OutputMode::Jsonl => Some(Mutex::new(JsonlStream::new(
-            "fetch.event",
-            "1.0",
-            std::io::stdout(),
-        ))),
-        _ => None,
-    };
-
-    // Fetch shard metadata first (from global prefix), then xorbs (from global prefix).
-    // Packs remain at the per-repo prefix.
-    let global_shards_prefix = object_store::path::Path::from(".crab/shards");
-    let global_xorbs_prefix = object_store::path::Path::from(".crab/xorbs");
-
-    let mut fetched_count: u64 = 0;
-    let mut fetched_bytes: u64 = 0;
-    let mut skipped_count: u64 = 0;
-
+    let jsonl_stream = (args.mode == OutputMode::Jsonl)
+        .then(|| Mutex::new(JsonlStream::new("fetch.event", "1.0", std::io::stdout())));
     let phase = PhaseTimer::start("fetch", "hydration_prefetch");
-    for obj_prefix in [&global_shards_prefix, &global_xorbs_prefix] {
-        check_cancelled(cancel)?;
-
-        let mut list_stream = caching_store.origin().inner().list(Some(obj_prefix));
-        while let Some(meta) = list_stream.try_next().await.map_err(CrabError::Storage)? {
-            check_cancelled(cancel)?;
-
-            let cache_path = cache_path_for(&meta.location);
-            if cache_path.exists() {
-                tracing::debug!(path = %meta.location, "already cached, skipping");
-                skipped_count += 1;
-                continue;
-            }
-
-            tracing::debug!(path = %meta.location, size = meta.size, "fetching");
-            let (data, _etag) = caching_store.get_with_etag(&meta.location).await?;
-
-            // Ensure parent directory exists.
-            if let Some(parent) = cache_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&cache_path, &data)?;
-
-            let obj_bytes = data.len() as u64;
-            fetched_count += 1;
-            fetched_bytes += obj_bytes;
-
-            // Emit xorb_done and progress events in JSONL mode.
-            if let Some(ref stream) = jsonl_stream
-                && let Ok(mut s) = stream.lock()
-            {
-                s.emit_xorb_done(XorbDonePayload {
-                    hash: meta.location.to_string(),
-                    bytes: obj_bytes,
-                    compressed_bytes: obj_bytes,
-                    status: "ok".to_owned(),
-                });
-
-                let elapsed = start.elapsed();
-                let rate = if elapsed.as_secs_f64() > 0.0 {
-                    fetched_bytes as f64 / elapsed.as_secs_f64()
-                } else {
-                    0.0
-                };
-                s.emit_progress(ProgressPayload {
-                    operation: "fetching".to_owned(),
-                    current: fetched_count,
-                    total: 0,
-                    bytes: fetched_bytes,
-                    total_bytes: 0,
-                    rate_bytes_per_sec: rate,
-                    xorbs_produced: None,
-                });
-            }
-        }
-    }
+    let prefetched = hydrator.prefetch_batch(&candidates, cancel).await?;
     emit_phase(
         jsonl_stream.as_ref(),
-        phase.finish(0, fetched_bytes, fetched_count),
+        phase.finish(0, prefetched.bytes_prefetched, prefetched.prefetched),
     );
+    if prefetched.failed > 0 {
+        return Err(CrabError::Protocol(format!(
+            "fetch failed to prewarm {} of {} selected file(s)",
+            prefetched.failed, selected
+        )));
+    }
 
-    let elapsed = start.elapsed();
-    let summary = FetchSummary {
-        objects_fetched: fetched_count,
-        bytes_downloaded: fetched_bytes,
-        objects_skipped: skipped_count,
-        duration_ms: elapsed.as_millis() as u64,
-    };
-
-    // After the packs/xorbs/shards are on disk, warm the local
-    // chunk-index cache so the next push can classify most chunks as
-    // already-remote from the local tiers alone. Failures are
-    // non-fatal: the cache is an optimisation, correctness comes from
-    // lazy-on-miss lookups against the remote chunk_index_db.
-    if !args.no_sync_chunk_index && !args.dry_run {
+    if !args.no_sync_chunk_index {
         check_cancelled(cancel)?;
         let phase = PhaseTimer::start("fetch", "shard_sync");
-
         let router = crate::storage::StoreLayout::new(
             crate::storage::Store::from_storage(caching_store.origin().clone()),
             read_router.repo_prefix().to_owned(),
         );
-        let cache_dir = crate::cache::default_cache_root();
         let repo_hash = crate::git::push::compute_repo_hash(&parsed.repo_path);
-
-        let emit_text = matches!(args.mode, OutputMode::Text);
-        match crate::metadata::shard_sync::run_post_fetch_shard_sync(
-            router, &repo_hash, &cache_dir, None, emit_text,
+        crate::metadata::shard_sync::run_post_fetch_shard_sync(
+            router,
+            &repo_hash,
+            &crate::cache::default_cache_root(),
+            None,
+            args.mode == OutputMode::Text,
         )
-        .await
-        {
-            Ok(stats) => {
-                tracing::debug!(
-                    downloaded = stats.shards_downloaded,
-                    skipped = stats.shards_skipped,
-                    failed = stats.shards_failed,
-                    "fetch: post-fetch shard sync finished"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "fetch: post-fetch shard sync failed (non-fatal)");
-            }
-        }
+        .await?;
+        // The sync updates the persistent chunk index and local shard cache;
+        // let that derived-state mutation settle before honoring cancellation.
+        check_cancelled(cancel)?;
         emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
     }
 
-    match args.mode {
-        OutputMode::Text => {
-            eprintln!("fetch complete: {fetched_count} objects, {fetched_bytes} bytes downloaded",);
-        }
-        OutputMode::Json => {
-            emit_json("fetch", "1.0", &summary);
-        }
+    emit_summary(
+        args.mode,
+        FetchSummary {
+            objects_fetched: prefetched.prefetched,
+            bytes_downloaded: prefetched.bytes_prefetched,
+            objects_skipped: 0,
+            duration_ms: elapsed_millis(start),
+        },
+        None,
+        jsonl_stream.as_ref(),
+    )
+}
+
+fn resolve_candidates(
+    root: &Path,
+    args: &FetchArgs,
+    config: &Config,
+    cancel: &CancellationToken,
+) -> Result<Vec<(PathBuf, crab_types::pointer::Pointer)>> {
+    if args.all {
+        return crate::cmd::hydrate::resolve_all_ref_pointer_prefetch_candidates(
+            root,
+            &args.include,
+            &args.exclude,
+            cancel,
+        );
+    }
+    let hydrate_args = HydrateArgs {
+        patterns: Vec::new(),
+        include: args.include.clone(),
+        exclude: args.exclude.clone(),
+        all: args.include.is_empty() && args.exclude.is_empty(),
+        mode: OutputMode::Text,
+        manifest: None,
+        manifest_ref: None,
+        profile: None,
+        ignore_sparse: true,
+        recover_from: None,
+    };
+    crate::cmd::hydrate::resolve_git_pointer_prefetch_candidates(
+        root,
+        &hydrate_args,
+        config,
+        cancel,
+    )
+}
+
+fn read_remote(root: &Path) -> Result<crate::git::url::CrabUrl> {
+    let path = root.join(".crab/remote");
+    let url = std::fs::read_to_string(&path).map_err(|_| CrabError::Configuration {
+        key: "no remote configured".into(),
+        origin: path.display().to_string(),
+    })?;
+    crate::git::url::CrabUrl::parse(url.trim())
+}
+
+fn elapsed_millis(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn emit_summary(
+    mode: OutputMode,
+    summary: FetchSummary,
+    dry_run_selection: Option<(u64, u64)>,
+    jsonl_stream: Option<&Mutex<JsonlStream<Stdout>>>,
+) -> Result<()> {
+    match mode {
+        OutputMode::Text => match dry_run_selection {
+            Some((files, bytes)) => {
+                eprintln!("fetch (dry run): would prewarm {files} file(s), {bytes} logical bytes")
+            }
+            None => eprintln!(
+                "fetch complete: {} file(s), {} logical bytes verified",
+                summary.objects_fetched, summary.bytes_downloaded
+            ),
+        },
+        OutputMode::Json => emit_json("fetch", "1.0", &summary),
         OutputMode::Jsonl => {
-            if let Some(ref stream) = jsonl_stream
-                && let Ok(mut s) = stream.lock()
-            {
-                s.emit_result(&summary);
+            if let Some(stream) = jsonl_stream {
+                stream
+                    .lock()
+                    .map_err(|_| CrabError::Internal("fetch output lock poisoned".to_owned()))?
+                    .emit_result(&summary);
+            } else {
+                JsonlStream::new("fetch.event", "1.0", std::io::stdout()).emit_result(&summary);
             }
         }
     }
-
     Ok(())
-}
-
-/// Derive a local cache path for a remote object.
-fn cache_path_for(location: &object_store::path::Path) -> std::path::PathBuf {
-    let cache_root = crate::cache::default_cache_root();
-    cache_root.join(location.as_ref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use object_store::path::Path as ObjectPath;
-    use std::sync::Arc;
-
     #[test]
-    fn cache_path_includes_object_location() {
-        let loc = object_store::path::Path::from("repo/shards/abc123");
-        let path = cache_path_for(&loc);
-        assert!(
-            path.to_string_lossy().contains("repo/shards/abc123"),
-            "cache path should include the object location, got: {}",
-            path.display(),
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_command_uses_selected_replica_store_for_cached_objects() {
-        let cache_tmp = tempfile::tempdir().expect("cache tempdir");
-        let _cache_guard = crate::test::git_repo::CacheDirGuard::new(cache_tmp.path());
-        let root = tempfile::tempdir().expect("workspace tempdir");
-        std::fs::create_dir_all(root.path().join(".crab")).expect("create .crab");
-        std::fs::write(
-            root.path().join(".crab/remote"),
-            "crab://primary/org/repo\n",
-        )
-        .expect("write remote");
-
-        let primary = crate::storage::store::Store::new(Arc::new(InMemory::new()));
-        primary
-            .put(
-                &ObjectPath::from(".crab/shards/only-primary"),
-                Bytes::from_static(b"primary"),
-            )
-            .await
-            .expect("write primary marker");
-        let replica = crate::storage::store::Store::new(Arc::new(InMemory::new()));
-        replica
-            .put(
-                &ObjectPath::from(".crab/shards/only-replica"),
-                Bytes::from_static(b"replica"),
-            )
-            .await
-            .expect("write replica marker");
-
-        let args = FetchArgs {
-            include: Vec::new(),
-            exclude: Vec::new(),
-            all: false,
-            dry_run: false,
-            no_sync_chunk_index: true,
-            mode: OutputMode::Json,
+    fn dry_run_summary_does_not_claim_downloads() {
+        let summary = FetchSummary {
+            objects_fetched: 0,
+            bytes_downloaded: 0,
+            objects_skipped: 3,
+            duration_ms: 1,
         };
-        let cancel = CancellationToken::new();
-
-        run_fetch_in_with_selector(
-            root.path(),
-            &args,
-            &cancel,
-            Config::default(),
-            move |_, _, _| {
-                let replica = replica.clone();
-                async move {
-                    Ok(crate::replication::ReadStoreSelection {
-                        store: replica.clone(),
-                        router: crate::storage::StoreLayout::new(replica, "org/repo".into()),
-                        source: crate::replication::ReadSource::Replica {
-                            name: "west".into(),
-                        },
-                    })
-                }
-            },
-        )
-        .await
-        .expect("fetch command");
-
-        assert_eq!(
-            std::fs::read(cache_tmp.path().join(".crab/shards/only-replica"))
-                .expect("replica marker cached"),
-            b"replica"
-        );
-        assert!(
-            !cache_tmp.path().join(".crab/shards/only-primary").exists(),
-            "fetch must consume selected replica store, not the primary fallback"
-        );
+        assert_eq!(summary.objects_skipped, 3);
+        assert_eq!(summary.bytes_downloaded, 0);
     }
 }

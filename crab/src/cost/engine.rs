@@ -24,7 +24,6 @@ use super::report::{self, ClassCost, CostReport};
 
 const BYTES_PER_GIB: u64 = 1_073_741_824;
 const DEFAULT_TOP_K_COLD: usize = 100;
-const MAX_LIST_CONCURRENCY: u32 = 128;
 
 /// CLI overrides for a cost report.
 #[derive(Debug, Clone, Default)]
@@ -73,15 +72,20 @@ pub async fn build_report(
     }
 
     let list_concurrency = config.cost.list_concurrency;
-    if !(1..=MAX_LIST_CONCURRENCY).contains(&list_concurrency) {
+    if !(1..=live::MAX_LIST_CONCURRENCY).contains(&list_concurrency) {
         return Err(CrabError::Configuration {
             key: format!("cost.list_concurrency={list_concurrency}"),
-            origin: format!("expected a value from 1 through {MAX_LIST_CONCURRENCY}"),
+            origin: format!(
+                "expected a value from 1 through {}",
+                live::MAX_LIST_CONCURRENCY
+            ),
         });
     }
 
     let sample_ratio = options.sample_ratio.unwrap_or(config.cost.sample_ratio);
     validate_sample_ratio(sample_ratio)?;
+    let top_k_cold = options.top_k.unwrap_or(DEFAULT_TOP_K_COLD);
+    validate_top_k_cold(top_k_cold)?;
     if config.cost.apply_free_tier {
         return Err(CrabError::Configuration {
             key: "cost.apply_free_tier".to_string(),
@@ -107,7 +111,7 @@ pub async fn build_report(
         LiveWalkConfig {
             list_concurrency,
             sample_ratio: (sample_ratio < 1.0).then_some(sample_ratio),
-            top_k_cold: options.top_k.unwrap_or(DEFAULT_TOP_K_COLD),
+            top_k_cold,
             provider,
         },
         cancel,
@@ -163,6 +167,16 @@ fn validate_sample_ratio(ratio: f64) -> Result<()> {
         return Err(CrabError::Configuration {
             key: format!("cost.sample_ratio={ratio}"),
             origin: "expected a finite value greater than 0 and no greater than 1".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_top_k_cold(top_k: usize) -> Result<()> {
+    if top_k > live::MAX_TOP_K_COLD {
+        return Err(CrabError::Configuration {
+            key: format!("cost.top_k={top_k}"),
+            origin: format!("expected a value from 0 through {}", live::MAX_TOP_K_COLD),
         });
     }
     Ok(())
@@ -325,6 +339,13 @@ mod tests {
         assert!(validate_sample_ratio(1.0).is_ok());
         assert!(validate_sample_ratio(0.25).is_ok());
         assert!(validate_sample_ratio(1.01).is_err());
+    }
+
+    #[test]
+    fn top_k_is_bounded_for_large_inventory_walks() {
+        assert!(validate_top_k_cold(0).is_ok());
+        assert!(validate_top_k_cold(live::MAX_TOP_K_COLD).is_ok());
+        assert!(validate_top_k_cold(live::MAX_TOP_K_COLD + 1).is_err());
     }
 
     #[test]

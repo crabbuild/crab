@@ -148,6 +148,23 @@ pub async fn read_bulk_shard_list(
         .map_err(CrabError::from)
 }
 
+pub async fn read_bulk_shard_list_with_limit(
+    store: &Store,
+    router: &StoreLayout,
+    hash: &str,
+    max_records: u64,
+) -> Result<Vec<String>> {
+    let router = storage_layout(store, router);
+    crab_metadata::manifest_store::read_bulk_shard_list_with_limit(
+        store.as_storage(),
+        &router,
+        hash,
+        max_records,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
 pub async fn read_bulk_pack_list(
     store: &Store,
     router: &StoreLayout,
@@ -157,6 +174,23 @@ pub async fn read_bulk_pack_list(
     crab_metadata::manifest_store::read_bulk_pack_list(store.as_storage(), &router, hash)
         .await
         .map_err(CrabError::from)
+}
+
+pub async fn read_bulk_pack_list_with_limit(
+    store: &Store,
+    router: &StoreLayout,
+    hash: &str,
+    max_records: u64,
+) -> Result<Vec<PackManifestEntry>> {
+    let router = storage_layout(store, router);
+    crab_metadata::manifest_store::read_bulk_pack_list_with_limit(
+        store.as_storage(),
+        &router,
+        hash,
+        max_records,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 pub async fn read_shard_index(

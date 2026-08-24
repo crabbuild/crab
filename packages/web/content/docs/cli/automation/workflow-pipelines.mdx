@@ -42,6 +42,10 @@ is needed.
 
 If no local cache entries exist (`.crab/cache/` is absent), the command
 reports zero entries and exits successfully.
+If any discovered entry is unreadable, invalid, or cannot be uploaded, the
+summary reports the partial counts and the command exits nonzero. Invoking the
+command from a repository subdirectory still resolves the worktree root before
+scanning `.crab/cache/stages/`.
 
 ## Options
 

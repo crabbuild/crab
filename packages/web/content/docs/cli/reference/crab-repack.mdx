@@ -27,6 +27,12 @@ to retain old packs by default, so repack first optimizes active reads. To
 reclaim superseded storage, explicitly prune older recovery generations and
 then run repository GC.
 
+Apply mode validates the complete source and replacement Git object graphs,
+uses the repository maintenance lease, and does not report success until Git
+visibility, locator coverage, and the generation receipt are durable. Dry-run
+does not download packs; structured output retains the current byte count in
+`bytes_after` rather than presenting it as an estimated replacement size.
+
 For conceptual background, see [Repacking Objects](/docs/cli/storage/repacking-objects).
 
 ## Options

@@ -509,6 +509,9 @@ where
         emit_progress,
     )
     .await?;
+    // The sync updates the persistent chunk index and local shard cache;
+    // let that derived-state mutation settle before honoring cancellation.
+    check_cancelled(cancel)?;
 
     Ok(())
 }

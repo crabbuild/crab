@@ -22,8 +22,6 @@ pub const GIT_OBJECT_LOCATOR_RESOURCE: &str = "git-object-locator";
 pub const GIT_GENERATION_OWNER_RESOURCE: &str = "git-generation-owner";
 /// Internal resource serializing unified manifest publication.
 pub const GIT_MANIFEST_RESOURCE: &str = "git-manifest";
-/// Internal resource serializing repository repacks.
-pub const REPACK_RESOURCE: &str = "repack";
 /// Internal resource used when a push has no destination ref.
 pub const BATCH_RESOURCE: &str = "batch";
 /// Internal resource serializing history recovery without existing refs.
@@ -1367,8 +1365,8 @@ mod tests {
             "org/repo/acl-views/v1/scope/7-deadbeef/locks/refs/tags/releases/v1/lock"
         );
         assert_eq!(
-            internal_lock_path(prefix, REPACK_RESOURCE).unwrap(),
-            "org/repo/acl-views/v1/scope/7-deadbeef/locks/internal/repack/lock"
+            internal_lock_path(prefix, REPOSITORY_MAINTENANCE_RESOURCE).unwrap(),
+            "org/repo/acl-views/v1/scope/7-deadbeef/locks/internal/repository-maintenance/lock"
         );
     }
 

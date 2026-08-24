@@ -6,6 +6,7 @@ Manage the local Crab cache.
 
 ```
 crab cache stats
+crab cache verify
 crab cache clean
 ```
 
@@ -34,6 +35,8 @@ service cache data after a successful push cannot affect clone or hydrate.
 ### crab cache stats
 
 Print cache statistics: total size, number of objects, and cache directory path.
+The xet-core range-cache walk streams filesystem entries on one blocking worker
+instead of retaining the complete inventory or blocking the async runtime.
 
 ```bash
 crab cache stats
@@ -47,6 +50,20 @@ re-fetched from the remote store as needed.
 ```bash
 crab cache clean
 ```
+
+Cleanup covers both the Crab object-cache root and a separately configured
+xet-core range-cache directory. Crab refuses recursive cleanup when either path
+resolves to a filesystem root, the home directory, or an ancestor of the
+current checkout. `crab optimize cache clean --dry-run` reports the exact file
+and byte totals without deleting them.
+
+### crab cache verify
+
+Hash-check chunks and shards, validate xorb metadata and compressed chunks, and
+validate xet-core range filenames, lengths, offset headers, and CRCs while
+streaming the inventory. Corrupt entries are evicted; Xorb index rows are
+removed with corrupt xorb bodies. Filesystem read or removal failures fail the
+command rather than producing a false clean report.
 
 ## Cache Location
 
@@ -95,8 +112,8 @@ crab fetch  # re-populate on the fast disk
 - When the cache may be corrupted.
 - When switching to a different remote and the old cache is no longer relevant.
 
-Note: `crab prune` is usually preferred over `cache clean` because it only
-removes unreferenced objects, keeping useful cached data intact.
+Note: `crab prune` is usually preferred over `cache clean` because it evicts
+the least-recently-used objects only until configured byte budgets are met.
 
 ## Related Commands
 

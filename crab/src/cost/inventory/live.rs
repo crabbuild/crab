@@ -22,9 +22,12 @@ use super::{
     ALL_CRAB_PREFIXES, ClassStats, Inventory, InventoryItem, InventorySourceInfo, PrefixStats,
     sample,
 };
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result};
 use crate::tier::classes::StorageClass;
 use crate::tier::provider::Provider;
+
+pub(crate) const MAX_LIST_CONCURRENCY: u32 = 128;
+pub(crate) const MAX_TOP_K_COLD: usize = 10_000;
 
 /// Configuration for a live inventory walk.
 #[derive(Debug, Clone)]
@@ -136,7 +139,11 @@ async fn walk_prefix(
             continue;
         }
 
-        let size = meta.size as u64;
+        let size = u64::try_from(meta.size).map_err(|_| {
+            CrabError::Internal(format!(
+                "live inventory object size for {key} exceeds the u64 limit"
+            ))
+        })?;
         let last_modified = meta.last_modified.to_rfc3339();
 
         // Infer storage class from object metadata.
@@ -156,19 +163,43 @@ async fn walk_prefix(
         // Update per-class stats.
         let class_key = format!("{storage_class}");
         let class_stats = result.per_class.entry(class_key).or_default();
-        class_stats.objects += 1;
-        class_stats.bytes += size;
+        class_stats.objects = class_stats.objects.checked_add(1).ok_or_else(|| {
+            CrabError::Internal("live inventory object count overflow".to_string())
+        })?;
+        class_stats.bytes = class_stats
+            .bytes
+            .checked_add(size)
+            .ok_or_else(|| CrabError::Internal("live inventory byte count overflow".to_string()))?;
 
-        result.objects += 1;
-        result.bytes += size;
+        result.objects = result.objects.checked_add(1).ok_or_else(|| {
+            CrabError::Internal("live inventory object count overflow".to_string())
+        })?;
+        result.bytes = result
+            .bytes
+            .checked_add(size)
+            .ok_or_else(|| CrabError::Internal("live inventory byte count overflow".to_string()))?;
 
         // Track top-K cold objects.
         if storage_class.is_archive_class() {
             insert_top_k(&mut result.heaviest_cold, item, config.top_k_cold);
         }
 
-        progress.objects_listed.fetch_add(1, Ordering::Relaxed);
-        progress.bytes_observed.fetch_add(size, Ordering::Relaxed);
+        progress
+            .objects_listed
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| {
+                CrabError::Internal("live inventory progress count overflow".to_string())
+            })?;
+        progress
+            .bytes_observed
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(size)
+            })
+            .map_err(|_| {
+                CrabError::Internal("live inventory progress byte count overflow".to_string())
+            })?;
     }
 
     Ok(result)
@@ -221,6 +252,19 @@ pub async fn walk_live(
     config: LiveWalkConfig,
     cancel: &CancellationToken,
 ) -> Result<Inventory> {
+    if !(1..=MAX_LIST_CONCURRENCY).contains(&config.list_concurrency) {
+        return Err(CrabError::Configuration {
+            key: format!("cost.list_concurrency={}", config.list_concurrency),
+            origin: format!("expected a value from 1 through {MAX_LIST_CONCURRENCY}"),
+        });
+    }
+    if config.top_k_cold > MAX_TOP_K_COLD {
+        return Err(CrabError::Configuration {
+            key: format!("cost.top_k={}", config.top_k_cold),
+            origin: format!("expected a value from 0 through {MAX_TOP_K_COLD}"),
+        });
+    }
+
     let semaphore = Arc::new(Semaphore::new(config.list_concurrency as usize));
     let progress = Arc::new(WalkProgress::new());
     let config = Arc::new(config);
@@ -241,7 +285,12 @@ pub async fn walk_live(
         let cancel = cancel.clone();
 
         let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await;
+            let _permit = tokio::select! {
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                permit = sem.acquire() => permit.map_err(|_| {
+                    CrabError::Internal("live inventory semaphore closed unexpectedly".to_string())
+                })?,
+            };
             walk_prefix(store.as_ref(), prefix, &cfg, &prog, &cancel).await
         });
 
@@ -261,8 +310,12 @@ pub async fn walk_live(
             ))
         })??;
 
-        total_objects += result.objects;
-        total_bytes += result.bytes;
+        total_objects = total_objects.checked_add(result.objects).ok_or_else(|| {
+            CrabError::Internal("live inventory object count overflow".to_string())
+        })?;
+        total_bytes = total_bytes
+            .checked_add(result.bytes)
+            .ok_or_else(|| CrabError::Internal("live inventory byte count overflow".to_string()))?;
 
         per_prefix.insert(
             prefix.clone(),
@@ -274,8 +327,12 @@ pub async fn walk_live(
 
         for (class_key, stats) in result.per_class {
             let entry = per_class.entry(class_key).or_default();
-            entry.objects += stats.objects;
-            entry.bytes += stats.bytes;
+            entry.objects = entry.objects.checked_add(stats.objects).ok_or_else(|| {
+                CrabError::Internal("live inventory class object count overflow".to_string())
+            })?;
+            entry.bytes = entry.bytes.checked_add(stats.bytes).ok_or_else(|| {
+                CrabError::Internal("live inventory class byte count overflow".to_string())
+            })?;
         }
 
         for item in result.heaviest_cold {
@@ -289,16 +346,16 @@ pub async fn walk_live(
     let (adjusted_objects, adjusted_bytes) = if let Some(ratio) = config.sample_ratio {
         if ratio > 0.0 && ratio < 1.0 {
             for stats in per_class.values_mut() {
-                stats.objects = scale_sample_value(stats.objects, ratio);
-                stats.bytes = scale_sample_value(stats.bytes, ratio);
+                stats.objects = scale_sample_value(stats.objects, ratio)?;
+                stats.bytes = scale_sample_value(stats.bytes, ratio)?;
             }
             for stats in per_prefix.values_mut() {
-                stats.objects = scale_sample_value(stats.objects, ratio);
-                stats.bytes = scale_sample_value(stats.bytes, ratio);
+                stats.objects = scale_sample_value(stats.objects, ratio)?;
+                stats.bytes = scale_sample_value(stats.bytes, ratio)?;
             }
             (
-                scale_sample_value(total_objects, ratio),
-                scale_sample_value(total_bytes, ratio),
+                scale_sample_value(total_objects, ratio)?,
+                scale_sample_value(total_bytes, ratio)?,
             )
         } else {
             (total_objects, total_bytes)
@@ -332,8 +389,14 @@ pub async fn walk_live(
     })
 }
 
-fn scale_sample_value(value: u64, ratio: f64) -> u64 {
-    ((value as f64) / ratio).round() as u64
+fn scale_sample_value(value: u64, ratio: f64) -> Result<u64> {
+    let scaled = (value as f64) / ratio;
+    if !scaled.is_finite() || scaled > u64::MAX as f64 {
+        return Err(CrabError::Internal(
+            "sampled live inventory exceeds the u64 counter limit".to_string(),
+        ));
+    }
+    Ok(scaled.round() as u64)
 }
 
 /// Returns the current UTC time as an RFC 3339 string.
@@ -443,8 +506,29 @@ mod tests {
 
     #[test]
     fn sample_scaling_rounds_aggregate_values() {
-        assert_eq!(scale_sample_value(25, 0.25), 100);
-        assert_eq!(scale_sample_value(1, 0.3), 3);
+        assert_eq!(scale_sample_value(25, 0.25).unwrap(), 100);
+        assert_eq!(scale_sample_value(1, 0.3).unwrap(), 3);
+    }
+
+    #[test]
+    fn sample_scaling_rejects_counter_overflow() {
+        assert!(scale_sample_value(u64::MAX, f64::MIN_POSITIVE).is_err());
+    }
+
+    #[tokio::test]
+    async fn live_walk_rejects_invalid_concurrency() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let result = walk_live(
+            store,
+            LiveWalkConfig {
+                list_concurrency: 0,
+                ..LiveWalkConfig::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
     }
 
     #[test]

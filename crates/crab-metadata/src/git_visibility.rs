@@ -725,7 +725,9 @@ mod storage {
                 ),
             });
         }
-        let (body, _) = store.get_with_etag(path).await?;
+        let (body, _) = store
+            .get_with_etag_bounded(path, MAX_GIT_VISIBILITY_INDEX_BYTES)
+            .await?;
         if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),
@@ -922,7 +924,9 @@ mod storage {
                         ),
                     });
                 }
-                let (existing, _) = store.get_with_etag(&path).await?;
+                let (existing, _) = store
+                    .get_with_etag_bounded(&path, MAX_GIT_VISIBILITY_INDEX_BYTES)
+                    .await?;
                 if existing.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
                     return Err(crate::error::MetadataError::CorruptObject {
                         path: path.as_ref().to_owned(),
@@ -1003,7 +1007,9 @@ mod storage {
                 ),
             });
         }
-        let (body, _) = store.get_with_etag(&path).await?;
+        let (body, _) = store
+            .get_with_etag_bounded(&path, MAX_GIT_VISIBILITY_INDEX_BYTES)
+            .await?;
         if blake3::hash(&body).to_hex().as_str() != evidence_hash {
             return Err(crate::error::MetadataError::CorruptObject {
                 path: path.as_ref().to_owned(),

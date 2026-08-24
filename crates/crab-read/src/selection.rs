@@ -4,7 +4,10 @@ use crab_metadata::ref_journal::list_active_transactions;
 use crab_metadata::{error::MetadataError, manifest_store, manifests::Manifest};
 use crab_storage::{StorageError, Store, StoreLayout};
 use crab_types::replication::ReplicaConfig;
-use crab_xet::{shard_parse::extract_chunk_entries_streaming, xorb::format::MerkleHash};
+use crab_xet::{
+    shard_parse::{MAX_SHARD_SIZE_BYTES, extract_chunk_entries_streaming},
+    xorb::format::MerkleHash,
+};
 use object_store::path::Path as ObjectPath;
 
 use crate::{ReadError, Result};
@@ -370,7 +373,10 @@ async fn referenced_object_gap(
             let shard_hash = parse_merkle_hash(&shard, "shard")?;
             let shard_path = router.shard_path(&shard_hash);
             stats.object_read_count = stats.object_read_count.saturating_add(1);
-            let shard_bytes = match store.get_with_etag(&shard_path).await {
+            let shard_bytes = match store
+                .get_with_etag_bounded(&shard_path, MAX_SHARD_SIZE_BYTES as u64)
+                .await
+            {
                 Ok((bytes, _etag)) => bytes,
                 Err(StorageError::NotFound { .. }) => {
                     return Ok(Some(format!("shard missing at {}", shard_path.as_ref())));

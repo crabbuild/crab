@@ -12,7 +12,9 @@ pub mod provider_store;
 pub mod retry;
 pub mod store;
 
-pub use cas::{DEFAULT_MAX_ATTEMPTS, cas_update, cas_update_default};
+pub use cas::{
+    DEFAULT_MAX_ATTEMPTS, MAX_CAS_OBJECT_BYTES, cas_update, cas_update_bounded, cas_update_default,
+};
 pub use crab_types::storage::StorageScope;
 pub use error::{Result, StorageError};
 pub use error_map::{classify_auth_error, map_object_store_error};

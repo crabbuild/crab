@@ -34,8 +34,8 @@ The cache is a content-addressed store — chunks are identified by their blake3
 | Priority | Source | Default Path |
 |----------|--------|-------------|
 | 1 | `$CRAB_CACHE_DIR` environment variable | Custom path |
-| 2 | `.crab/config.toml` `cache.dir` setting | Custom path |
-| 3 | Platform default | `~/.cache/crab/` |
+| 2 | `[cache].chunk_cache_dir` | Custom xet range-cache path |
+| 3 | Platform default | `~/.cache/crab/` (range cache under `chunks/`) |
 
 To use a fast NVMe drive for the cache:
 
@@ -47,11 +47,9 @@ export CRAB_CACHE_DIR=/mnt/nvme/crab-cache
 
 The cache grows as you hydrate files. You can set a maximum size:
 
-```toml
-# .crab/config.toml
-[cache]
-max_size = "50GB"
-```
+The xet range-cache byte ceiling uses Crab's `chunk_cache_bytes` configuration;
+the shard object cache uses `shard_cache_bytes` when configured. `crab prune`
+applies those byte budgets.
 
 When the cache exceeds this limit, least-recently-used chunks are evicted. Eviction is lazy — it happens during the next cache write, not in the background.
 
@@ -61,7 +59,8 @@ When the cache exceeds this limit, least-recently-used chunks are evicted. Evict
 crab cache stats
 ```
 
-Shows total size, number of objects, hit rate, and cache directory path.
+Shows the read-only xet range-cache snapshot and the Crab object-cache counts
+and bytes. Stats never initializes, repairs, or deletes cache entries.
 
 ## Cleaning the Cache
 

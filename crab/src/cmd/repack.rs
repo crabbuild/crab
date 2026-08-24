@@ -127,7 +127,7 @@ pub async fn run_repack(
     let lock = match PushLock::acquire_internal(
         store.inner(),
         router.repo_prefix(),
-        crab_coordination::REPACK_RESOURCE,
+        crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
         config.lock_ttl,
     )
     .await

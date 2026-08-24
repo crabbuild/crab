@@ -6094,7 +6094,7 @@ async fn run_cache_stats() -> Result<()> {
         }
     };
 
-    let stats = handle.stats().await;
+    let stats = handle.stats().await?;
     println!("Chunk cache:");
     println!("  directory:   {}", handle.directory.display());
     println!(

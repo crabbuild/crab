@@ -16,7 +16,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::coordination::cas::cas_update_default;
 use crate::core::error::{CrabError, Result};
@@ -31,6 +31,9 @@ use xet_runtime::core::XetContext;
 
 /// Default maximum compacted shard size (100 MiB).
 pub const DEFAULT_MAX_SHARD_SIZE: u64 = 100 * 1024 * 1024;
+const MAX_SOURCE_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SHARD_LIST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SHARD_LIST_ENTRIES: usize = 1_000_000;
 
 /// Global prefix for content-addressed objects.
 const GLOBAL_PREFIX: &str = ".crab";
@@ -83,6 +86,7 @@ impl CompactOutcome {
 /// xet-core's `merge_shards()`, uploads the results, and CAS-updates
 /// the shard-list and ref-registry.
 pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
+    validate_max_shard_size(args.max_shard_size)?;
     if args.dry_run {
         return run_compact_inner(args, store).await;
     }
@@ -290,13 +294,25 @@ async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactO
 /// Returns a default (empty) list if the manifest does not exist yet.
 async fn read_shard_list(store: &Store, path: &str) -> Result<ShardList> {
     let obj_path = ObjectPath::from(path);
-    match store.get_with_etag(&obj_path).await {
+    match store
+        .get_with_etag_bounded(&obj_path, MAX_SHARD_LIST_BYTES)
+        .await
+    {
         Ok((body, _etag)) => {
             let list: ShardList =
                 serde_json::from_slice(&body).map_err(|e| CrabError::CorruptObject {
                     path: path.to_string(),
                     reason: format!("invalid shard-list JSON: {e}"),
                 })?;
+            if list.entries.len() > MAX_SHARD_LIST_ENTRIES {
+                return Err(CrabError::Configuration {
+                    key: "compact shard-list entries".to_owned(),
+                    origin: format!(
+                        "shard-list contains {} entries; bounded compaction supports at most {MAX_SHARD_LIST_ENTRIES}",
+                        list.entries.len()
+                    ),
+                });
+            }
             Ok(list)
         }
         Err(CrabError::NotFound { .. }) => Ok(ShardList::default()),
@@ -313,14 +329,28 @@ async fn download_shards(
     let shard_file_cache = new_shard_file_cache();
     for hash_hex in shard_hashes {
         let shard_path = canonical_global_content_path("shards", hash_hex);
-
-        let data = match store.get_with_etag(&shard_path).await {
-            Ok((body, _)) => body,
-            Err(e) => {
-                warn!(shard = %hash_hex, error = %e, "failed to download shard, skipping");
-                continue;
-            }
-        };
+        let (data, _) = store
+            .get_with_etag_bounded(&shard_path, MAX_SOURCE_SHARD_BYTES)
+            .await
+            .map_err(|error| match error {
+                CrabError::NotFound { .. } => CrabError::CorruptObject {
+                    path: shard_path.to_string(),
+                    reason: "shard-list references a missing shard".to_owned(),
+                },
+                error => error,
+            })?;
+        let expected =
+            MerkleHash::from_hex(hash_hex).map_err(|error| CrabError::CorruptObject {
+                path: shard_path.to_string(),
+                reason: format!("invalid shard hash: {error}"),
+            })?;
+        let actual = compute_data_hash(&data);
+        if actual != expected {
+            return Err(CrabError::CorruptObject {
+                path: shard_path.to_string(),
+                reason: format!("shard content hash is {actual}, expected {expected}"),
+            });
+        }
 
         // Write shard bytes to the temp directory via MDBShardFile.
         let mut cursor = std::io::Cursor::new(data.as_ref());
@@ -490,7 +520,25 @@ pub fn parse_size_str(s: &str) -> Result<u64> {
         origin: "cli".into(),
     })?;
 
-    Ok(value * multiplier)
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| CrabError::Configuration {
+            key: format!("invalid size: {s}"),
+            origin: "size overflows u64".into(),
+        })
+}
+
+fn validate_max_shard_size(value: u64) -> Result<()> {
+    const MIN_SHARD_SIZE: u64 = 1024 * 1024;
+    if !(MIN_SHARD_SIZE..=MAX_SOURCE_SHARD_BYTES).contains(&value) {
+        return Err(CrabError::Configuration {
+            key: "max_shard_size".to_owned(),
+            origin: format!(
+                "expected a value from {MIN_SHARD_SIZE} through {MAX_SOURCE_SHARD_BYTES} bytes"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2,7 +2,8 @@
 //!
 //! Wires the CLI prune subcommand to [`crate::lfs::prune::run_prune`].
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
+use tokio_util::sync::CancellationToken;
 
 /// Options for `crab lfs prune`.
 #[derive(Debug, Clone)]
@@ -34,6 +35,15 @@ pub fn run_lfs_prune(options: LfsPruneOptions) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Run LFS pruning while honoring a caller's cancellation boundary.
+pub fn run_lfs_prune_with_cancel(
+    options: LfsPruneOptions,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    run_lfs_prune(options)
 }
 
 fn resolve_prune_options(options: LfsPruneOptions) -> Result<crate::lfs::prune::PruneOptions> {

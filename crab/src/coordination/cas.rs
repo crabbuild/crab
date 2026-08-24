@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
-pub use crab_storage::DEFAULT_MAX_ATTEMPTS;
+pub use crab_storage::{DEFAULT_MAX_ATTEMPTS, MAX_CAS_OBJECT_BYTES};
 
 /// Updates one JSON object with a load, mutate, conditional-write loop.
+/// The default loop rejects objects larger than [`MAX_CAS_OBJECT_BYTES`].
 ///
 /// # Errors
 ///

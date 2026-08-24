@@ -19,9 +19,14 @@ crab compact [OPTIONS] --repo <REPO> --bucket <BUCKET>
 
 ## Description
 
-`crab compact` is a remote storage maintenance command. It merges small
-shards under the selected bucket and repository prefix. It does not replace
-`crab metadb compact`, which compacts local metadata databases.
+`crab compact` is the legacy top-level entry for `crab optimize shards`. It
+merges the Xet metadata shards selected by the repository's canonical manifest.
+Downloads and output are hash-verified, publication is fail-closed, and source
+shards remain immutable until garbage collection. Before downloading, Crab
+HEAD-checks the selected shards and requires workspace capacity for twice their
+combined size plus a 512 MiB reserve. Temporary files live under the configured
+Crab cache's maintenance directory. It does not replace `crab metadb compact`,
+which maintains the metadata databases themselves.
 
 For conceptual background, see [Compacting Data](/docs/cli/storage/compacting-data).
 
@@ -32,13 +37,14 @@ For conceptual background, see [Compacting Data](/docs/cli/storage/compacting-da
 | `--repo <REPO>` | required | Repository prefix, such as `org/models` |
 | `--bucket <BUCKET>` | required | S3 bucket containing the repository |
 | `--dry-run` | `false` | Report the plan without mutating remote storage |
-| `--max-shard-size <SIZE>` | `100MiB` | Maximum compacted shard size |
+| `--max-shard-size <SIZE>` | `100MiB` | Maximum compacted shard size; greater than zero and at most `100MiB` |
 
 ## Examples
 
 ```bash
 crab compact --repo org/models --bucket my-bucket --dry-run
 crab compact --repo org/models --bucket my-bucket
+crab optimize shards --repo org/models --bucket my-bucket --max-shard-size 50MiB
 ```
 
 Start with `--dry-run` and record the proposed shard count and size. Apply the

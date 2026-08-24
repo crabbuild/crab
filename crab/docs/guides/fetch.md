@@ -10,10 +10,10 @@ crab fetch [OPTIONS]
 
 ## Description
 
-`crab fetch` downloads xorbs and shards from the remote store into the local
-cache without hydrating any files. This warms the cache so that subsequent
-`crab hydrate` or `git checkout` operations are fast, even on slow or
-unreliable networks.
+`crab fetch` resolves Crab pointer blobs from Git, reconstructs each selected
+file into a discard sink, and retains the verified xet ranges and metadata in
+the canonical local caches. It never materializes the selected files in the
+working tree.
 
 Think of it as "download now, use later" — you can fetch objects while on a fast
 connection, then hydrate files later when offline or on a slower link.
@@ -30,12 +30,15 @@ connection, then hydrate files later when offline or on a slower link.
 ## How It Works
 
 1. Reads the remote URL from `.crab/remote`.
-2. Builds an S3 client for the configured bucket.
-3. Lists objects under the repository prefix (shards first, then xorbs).
-4. For each object:
-   - Checks if it already exists in the local cache.
-   - If not cached, downloads it and writes it to the cache directory.
-5. Reports the total number of objects and bytes fetched.
+2. Resolves pointer blobs from the index/HEAD, or every local ref with `--all`.
+3. Applies `--include` and `--exclude` to repository paths before reading blob
+   bodies. Git blob sizes are batch-checked so large non-pointer blobs are not
+   loaded into memory.
+4. Selects the configured primary or replica through the normal read policy.
+5. Reconstructs each unique file through the canonical file-index, shard, and
+   xet-core range-cache path. Output is discarded after its hash and size are
+   verified, so memory use is independent of logical file size.
+6. Synchronizes the local chunk index unless `--no-sync-chunk-index` is set.
 
 Objects are stored in the local cache at `~/.cache/crab/` (or the path
 specified by `$CRAB_CACHE_DIR`).
@@ -66,12 +69,9 @@ crab fetch --all
 crab fetch --dry-run
 ```
 
-```
-fetch (dry run): would fetch objects from crab://my-bucket/my-repo
-  prefix: my-repo
-  include: []
-  exclude: []
-```
+Dry-run resolves the exact local Git selection and reports its file count and
+logical bytes. It does not resolve credentials, contact a replica, or mutate a
+cache.
 
 ### Fetch everything except training data
 
@@ -82,7 +82,7 @@ crab fetch --exclude 'data/train/*'
 ## Output
 
 ```
-fetch complete: 42 objects, 1288490188 bytes downloaded
+fetch complete: 42 file(s), 1288490188 logical bytes verified
 ```
 
 ## Use Cases
@@ -117,7 +117,7 @@ crab fetch
 Supports `--json` and `--jsonl`.
 
 - `--json` runs to completion and emits a single result envelope.
-- `--jsonl` streams per-xorb progress followed by a terminal `result` event.
+- `--jsonl` emits phase progress followed by a terminal `result` event.
 
 ### crab fetch --json
 
@@ -128,7 +128,8 @@ Supports `--json` and `--jsonl`.
   "timestamp": "2026-04-24T18:32:30.200Z",
   "data": {
     "objects_fetched": 42,
-    "bytes_fetched": 1288490188,
+    "bytes_downloaded": 1288490188,
+    "objects_skipped": 0,
     "duration_ms": 8500
   }
 }
@@ -137,9 +138,8 @@ Supports `--json` and `--jsonl`.
 ### crab fetch --jsonl
 
 ```
-{"schema":"fetch.event","version":"1.0","timestamp":"2026-04-24T18:32:22.100Z","type":"progress","data":{"operation":"fetching","current":10,"total":42,"bytes":314572800,"total_bytes":1288490188,"rate_bytes_per_sec":52000000.0}}
-{"schema":"fetch.event","version":"1.0","timestamp":"2026-04-24T18:32:25.300Z","type":"xorb_done","data":{"hash":"a1b2c3d4e5f6","bytes":31457280,"compressed_bytes":28311552,"status":"ok"}}
-{"schema":"fetch.event","version":"1.0","timestamp":"2026-04-24T18:32:30.200Z","type":"result","data":{"objects_fetched":42,"bytes_fetched":1288490188,"duration_ms":8500}}
+{"schema":"perf.phase","version":"1.0","timestamp":"2026-04-24T18:32:30.100Z","type":"event","data":{"command":"fetch","phase":"hydration_prefetch","duration_ms":8400,"bytes":1288490188,"items":42}}
+{"schema":"fetch.event","version":"1.0","timestamp":"2026-04-24T18:32:30.200Z","type":"result","data":{"objects_fetched":42,"bytes_downloaded":1288490188,"objects_skipped":0,"duration_ms":8500}}
 ```
 
 See [Structured Output](structured-output.md) for envelope details, event types,

@@ -335,7 +335,12 @@ impl FileIndexLookupSession {
                         let router = self.router.clone();
                         async move {
                             let path = router.shard_path(&shard_hash);
-                            let (body, _) = storage.get_with_etag(&path).await?;
+                            let (body, _) = storage
+                                .get_with_etag_bounded(
+                                    &path,
+                                    crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
+                                )
+                                .await?;
                             if crab_xet::hash::compute_data_hash(&body) != shard_hash {
                                 return Err(MetadataError::CorruptObject {
                                     path: path.to_string(),

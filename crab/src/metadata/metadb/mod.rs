@@ -55,7 +55,10 @@ const DEFAULT_CACHE_GC_GRACE: u64 = 3;
 /// before a compaction is scheduled).
 const DEFAULT_COMPACTION_THRESHOLD: u32 = 4;
 
-/// Default WAL flush size per instance (4 MiB).
+/// Default L0 SST target per instance (4 MiB).
+///
+/// The shipped configuration key is named `wal_flush_size`; SlateDB 0.14
+/// exposes this boundary as `l0_sst_size_bytes`.
 const DEFAULT_WAL_FLUSH_SIZE: u64 = 4 * 1024 * 1024;
 
 /// Default bloom-filter density per key in bits. Ten bits per key gives
@@ -108,6 +111,27 @@ pub enum CacheDriftOutcome {
     },
 }
 
+/// SlateDB tuning applied independently to one metadata database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaDbEngineConfig {
+    /// Minimum number of similarly sized sources before compaction is proposed.
+    pub compaction_threshold: u32,
+    /// L0 SST target in bytes, retained under the shipped `wal_flush_size` name.
+    pub wal_flush_size: u64,
+    /// Bloom-filter bits per key per SSTable.
+    pub bloom_bits_per_key: u32,
+}
+
+impl Default for MetaDbEngineConfig {
+    fn default() -> Self {
+        Self {
+            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            wal_flush_size: DEFAULT_WAL_FLUSH_SIZE,
+            bloom_bits_per_key: DEFAULT_BLOOM_BITS_PER_KEY,
+        }
+    }
+}
+
 /// Tunables and paths for a [`MetaDb`] session.
 ///
 /// Defaults are safe for production: paths are derived from the repo
@@ -134,15 +158,11 @@ pub struct MetaDbConfig {
     /// wiped to stay consistent with an advanced remote.
     pub cache_gc_grace: u64,
 
-    /// SlateDB compaction threshold — SSTables at level 0 before a
-    /// compaction runs.
-    pub compaction_threshold: u32,
+    /// SlateDB tuning for the per-repository file index.
+    pub file_index: MetaDbEngineConfig,
 
-    /// WAL flush size per SlateDB instance, in bytes.
-    pub wal_flush_size: u64,
-
-    /// Bloom-filter bits per key per SSTable.
-    pub bloom_bits_per_key: u32,
+    /// SlateDB tuning for the bucket-shared chunk index.
+    pub chunk_index: MetaDbEngineConfig,
 
     /// Open the underlying SlateDB instances in read-only mode.
     ///
@@ -197,9 +217,8 @@ impl Default for MetaDbConfig {
             local_chunk_index_path: PathBuf::from(".cache/crab/chunk-index.sqlite"),
             in_memory_ceiling_bytes: DEFAULT_IN_MEMORY_CEILING_BYTES,
             cache_gc_grace: DEFAULT_CACHE_GC_GRACE,
-            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
-            wal_flush_size: DEFAULT_WAL_FLUSH_SIZE,
-            bloom_bits_per_key: DEFAULT_BLOOM_BITS_PER_KEY,
+            file_index: MetaDbEngineConfig::default(),
+            chunk_index: MetaDbEngineConfig::default(),
             read_only: false,
         }
     }
@@ -761,6 +780,7 @@ impl MetaDb {
                             path,
                             stores::file_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.file_index,
                         )
                         .await?;
                         m.inc_metadb_open_count();
@@ -772,6 +792,7 @@ impl MetaDb {
                             path,
                             stores::file_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.file_index,
                         )
                         .await?
                     }
@@ -781,6 +802,7 @@ impl MetaDb {
                             path,
                             stores::file_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.file_index,
                         )
                         .await?;
                         m.inc_metadb_open_count();
@@ -792,6 +814,7 @@ impl MetaDb {
                             path,
                             stores::file_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.file_index,
                         )
                         .await?
                     }
@@ -819,6 +842,7 @@ impl MetaDb {
                             path,
                             stores::chunk_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.chunk_index,
                         )
                         .await?;
                         m.inc_metadb_open_count();
@@ -830,6 +854,7 @@ impl MetaDb {
                             path,
                             stores::chunk_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.chunk_index,
                         )
                         .await?
                     }
@@ -839,6 +864,7 @@ impl MetaDb {
                             path,
                             stores::chunk_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.chunk_index,
                         )
                         .await?;
                         m.inc_metadb_open_count();
@@ -850,6 +876,7 @@ impl MetaDb {
                             path,
                             stores::chunk_index::DB_LABEL,
                             Arc::clone(&self.db_cache),
+                            &self.config.chunk_index,
                         )
                         .await?
                     }
@@ -1114,9 +1141,10 @@ mod tests {
         let cfg = MetaDbConfig::default();
         assert_eq!(cfg.in_memory_ceiling_bytes, 1024 * 1024 * 1024);
         assert_eq!(cfg.cache_gc_grace, 3);
-        assert_eq!(cfg.compaction_threshold, 4);
-        assert_eq!(cfg.wal_flush_size, 4 * 1024 * 1024);
-        assert_eq!(cfg.bloom_bits_per_key, 10);
+        assert_eq!(cfg.file_index.compaction_threshold, 4);
+        assert_eq!(cfg.file_index.wal_flush_size, 4 * 1024 * 1024);
+        assert_eq!(cfg.file_index.bloom_bits_per_key, 10);
+        assert_eq!(cfg.chunk_index, cfg.file_index);
         assert_eq!(cfg.chunk_index_path, ".crab/chunk_index_db/");
     }
 

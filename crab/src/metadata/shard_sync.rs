@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,7 @@ use crab_metadata::manifests::ShardList;
 use crab_metadata::persistent_chunk_index::PersistentChunkIndex;
 use crab_xet::hash::compute_data_hash;
 use crab_xet::shard::{MDBMinimalShard, MDBShardFile, new_shard_file_cache};
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::{MerkleHash, XorbRef};
 
 static SHARD_GEN_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -70,7 +71,19 @@ pub struct CachedShardListGen {
 /// Returns `None` if the file is missing or corrupt (triggers full sync
 /// fallback).
 fn load_cached_generation(path: &Path) -> Option<CachedShardListGen> {
-    let data = match std::fs::read(path) {
+    const MAX_GENERATION_FILE_BYTES: u64 = 64 * 1024 * 1024;
+    let data = match std::fs::File::open(path).and_then(|file| {
+        let mut data = Vec::new();
+        file.take(MAX_GENERATION_FILE_BYTES + 1)
+            .read_to_end(&mut data)?;
+        if data.len() as u64 > MAX_GENERATION_FILE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cached shard-list generation is oversized",
+            ));
+        }
+        Ok(data)
+    }) {
         Ok(d) => d,
         Err(e) => {
             debug!(path = %path.display(), error = %e, "no cached shard-list generation");
@@ -893,13 +906,16 @@ async fn download_one_shard(
     shard_path: &object_store::path::Path,
     hash: MerkleHash,
 ) -> Result<(MerkleHash, Bytes)> {
-    let (body, _etag) = store.get_with_etag(shard_path).await.map_err(|e| {
-        if matches!(e, CrabError::NotFound { .. }) {
-            CrabError::NotFound { path: hash.hex() }
-        } else {
-            e
-        }
-    })?;
+    let (body, _etag) = store
+        .get_with_etag_bounded(shard_path, MAX_SHARD_SIZE_BYTES as u64)
+        .await
+        .map_err(|e| {
+            if matches!(e, CrabError::NotFound { .. }) {
+                CrabError::NotFound { path: hash.hex() }
+            } else {
+                e
+            }
+        })?;
 
     let actual = compute_data_hash(&body);
     if actual == hash {

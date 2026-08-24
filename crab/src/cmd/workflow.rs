@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
 use crate::git::url::CrabUrl;
 use crate::workflow::WorkflowStore;
@@ -54,12 +54,31 @@ pub struct PushCacheResult {
 
 /// Execute `crab workflow push-cache`.
 pub async fn exec_push_cache(args: PushCacheArgs) -> Result<()> {
+    exec_push_cache_with_cancel(args, &CancellationToken::new()).await
+}
+
+/// Execute `crab workflow push-cache` while honoring the process shutdown token.
+pub async fn exec_push_cache_with_cancel(
+    args: PushCacheArgs,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    exec_push_cache_in(&args, &cwd).await
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
+    exec_push_cache_in_with_cancel(&args, &worktree.current_worktree_root, cancel).await
 }
 
 /// Testable entry point.
 pub async fn exec_push_cache_in(args: &PushCacheArgs, repo_root: &Path) -> Result<()> {
+    exec_push_cache_in_with_cancel(args, repo_root, &CancellationToken::new()).await
+}
+
+async fn exec_push_cache_in_with_cancel(
+    args: &PushCacheArgs,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
     let config = Config::resolve_for_repo(repo_root)?;
     if !config.workflow.enabled {
         return Err(CrabError::WorkflowDisabled);
@@ -88,18 +107,22 @@ pub async fn exec_push_cache_in(args: &PushCacheArgs, repo_root: &Path) -> Resul
     }
 
     // Build the remote store from the repo's crab remote config.
-    let (store, prefix) = build_remote_store(repo_root, &config).await?;
-    let cancel = CancellationToken::new();
-    let artifact_stores = build_workflow_artifact_stores(&config, &cancel).await;
+    let (store, prefix) = build_remote_store_for(repo_root, &config, None, cancel).await?;
+    let artifact_stores = build_workflow_artifact_stores(&config, cancel).await;
+    check_cancelled(cancel)?;
     let artifact_stores = (!artifact_stores.is_empty()).then_some(artifact_stores);
 
-    let push_result = cache::push_all_local_with_artifact_stores(
-        &store,
-        &prefix,
-        artifact_stores.as_ref(),
-        &cache_root,
-    )
-    .await?;
+    let push_result = tokio::select! {
+        _ = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = cache::push_all_local_with_artifact_stores_and_cancel(
+            &store,
+            &prefix,
+            artifact_stores.as_ref(),
+            &cache_root,
+            cancel,
+        ) => result?,
+    };
+    check_cancelled(cancel)?;
 
     info!(
         pushed = push_result.pushed,
@@ -123,29 +146,65 @@ pub async fn exec_push_cache_in(args: &PushCacheArgs, repo_root: &Path) -> Resul
         );
     }
 
+    ensure_push_succeeded(push_result.errors)
+}
+
+fn ensure_push_succeeded(errors: u32) -> Result<()> {
+    if errors > 0 {
+        return Err(CrabError::Internal(format!(
+            "workflow cache push failed for {} local entr{}",
+            errors,
+            if errors == 1 { "y" } else { "ies" }
+        )));
+    }
     Ok(())
 }
 
-/// Build a remote Store + prefix from the repo's crab configuration.
-///
-/// Reuses the same credential chain and store construction as
-/// `crab push` — no separate credential configuration needed.
-async fn build_remote_store(repo_root: &Path, config: &Config) -> Result<(WorkflowStore, String)> {
-    build_remote_store_for(repo_root, config, None).await
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_push_errors_fail_the_command() {
+        let error = ensure_push_succeeded(2).unwrap_err();
+
+        assert!(error.to_string().contains("2 local entries"));
+    }
+
+    #[tokio::test]
+    async fn push_cache_honors_cancellation_before_repository_resolution() {
+        let repo = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = exec_push_cache_in_with_cancel(
+            &PushCacheArgs {
+                all: true,
+                json: false,
+            },
+            repo.path(),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CrabError::Cancelled));
+    }
 }
 
 pub(crate) async fn build_remote_store_for(
     repo_root: &Path,
     config: &Config,
     remote_name: Option<&str>,
+    cancel: &CancellationToken,
 ) -> Result<(WorkflowStore, String)> {
+    check_cancelled(cancel)?;
     // Read the crab remote URL from git's remote configuration.
     let url_str = read_crab_remote_url_for(repo_root, remote_name)?;
     let crab_url = CrabUrl::parse(&url_str)?;
     let prefix = crab_url.repo_path.clone();
 
-    let cancel = CancellationToken::new();
-    let store = crate::auth::build_store(config, &crab_url, "workflow-push-cache", &cancel).await?;
+    let store = crate::auth::build_store(config, &crab_url, "workflow-push-cache", cancel).await?;
 
     Ok((WorkflowStore::from_storage(store.into_storage()), prefix))
 }
@@ -156,6 +215,9 @@ pub(crate) async fn build_workflow_artifact_stores(
 ) -> RemoteArtifactStores {
     let mut stores = RemoteArtifactStores::default();
     for (name, remote) in &config.workflow.remotes {
+        if cancel.is_cancelled() {
+            return stores;
+        }
         let parsed = match CrabUrl::parse(remote.url.trim()) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -210,11 +272,19 @@ pub fn read_crab_remote_url_for(repo_root: &Path, remote_name: Option<&str>) -> 
         .unwrap_or("origin");
 
     // Try reading from the selected git remote first.
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args(["remote", "get-url", remote_name])
         .current_dir(repo_root)
-        .output()
-        .map_err(CrabError::Io)?;
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
+        .env_remove("GIT_NAMESPACE");
+    let output = command.output().map_err(CrabError::Io)?;
 
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();

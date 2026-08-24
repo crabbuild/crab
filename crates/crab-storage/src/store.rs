@@ -31,6 +31,7 @@ use object_store::{
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
+use xet_core_structures::merklehash::HashedWrite;
 
 use crab_types::storage::StorageScope;
 
@@ -48,6 +49,56 @@ pub type ETag = object_store::UpdateVersion;
 
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
+
+#[derive(Clone, Copy)]
+enum FileHashAlgorithm {
+    Blake3,
+    Xet,
+}
+
+#[derive(Clone, Copy)]
+struct FileHashExpectation {
+    expected: [u8; 32],
+    algorithm: FileHashAlgorithm,
+}
+
+enum FileHasher {
+    Blake3(blake3::Hasher),
+    Xet(HashedWrite<std::io::Sink>),
+}
+
+impl FileHasher {
+    fn new(algorithm: FileHashAlgorithm) -> Self {
+        match algorithm {
+            FileHashAlgorithm::Blake3 => Self::Blake3(blake3::Hasher::new()),
+            FileHashAlgorithm::Xet => Self::Xet(HashedWrite::new(std::io::sink())),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Blake3(hasher) => {
+                hasher.update(bytes);
+                Ok(())
+            }
+            Self::Xet(hasher) => std::io::Write::write_all(hasher, bytes),
+        }
+    }
+
+    fn finalize(self) -> [u8; 32] {
+        match self {
+            Self::Blake3(hasher) => *hasher.finalize().as_bytes(),
+            Self::Xet(hasher) => hasher.hash().into(),
+        }
+    }
+}
+
+fn file_hash_algorithm_name(algorithm: FileHashAlgorithm) -> &'static str {
+    match algorithm {
+        FileHashAlgorithm::Blake3 => "blake3",
+        FileHashAlgorithm::Xet => "Xet data hash",
+    }
+}
 
 /// CAS-aware facade over an `object_store::ObjectStore`.
 ///
@@ -737,6 +788,79 @@ impl Store {
         .await
     }
 
+    /// Reads `path` into memory only when the provider advertises and
+    /// delivers at most `max_bytes`.
+    ///
+    /// The metadata check happens before the response stream is consumed, so
+    /// malformed or unexpectedly large immutable objects fail closed without
+    /// allocating their full body. The streamed body is checked again because
+    /// provider metadata and response bytes must agree.
+    pub async fn get_with_etag_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(Bytes, ETag)> {
+        retry(&self.retry, || {
+            let path = path.clone();
+            async move {
+                let read_inner = self.read_inner_for(&path);
+                self.record_read_request(StorageReadKind::Get);
+                let got = read_inner
+                    .get(&path)
+                    .await
+                    .map_err(|e| map_object_store_error(e, path.as_ref()))?;
+                let expected_size = got.meta.size;
+                if expected_size > max_bytes {
+                    return Err(StorageError::CorruptObject {
+                        path: path.to_string(),
+                        reason: format!(
+                            "object is {expected_size} bytes; bounded read supports at most {max_bytes} bytes"
+                        ),
+                    });
+                }
+                let etag = ETag {
+                    e_tag: got.meta.e_tag.clone(),
+                    version: got.meta.version.clone(),
+                };
+                let capacity = usize::try_from(expected_size).map_err(|_| {
+                    StorageError::Internal(format!(
+                        "object size {expected_size} cannot be represented on this platform"
+                    ))
+                })?;
+                let mut body = Vec::new();
+                body.try_reserve_exact(capacity).map_err(|error| {
+                    StorageError::Internal(format!(
+                        "failed to reserve {expected_size} bytes for bounded object read: {error}"
+                    ))
+                })?;
+                let mut stream = got.into_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| map_object_store_error(e, path.as_ref()))?;
+                    let next_len = body.len().checked_add(chunk.len()).ok_or_else(|| {
+                        StorageError::CorruptObject {
+                            path: path.to_string(),
+                            reason: "object body length overflowed while reading".to_owned(),
+                        }
+                    })?;
+                    let next_size = u64::try_from(next_len).unwrap_or(u64::MAX);
+                    if next_size > max_bytes {
+                        return Err(StorageError::CorruptObject {
+                            path: path.to_string(),
+                            reason: format!(
+                                "streamed body exceeds bounded read limit of {max_bytes} bytes"
+                            ),
+                        });
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                ensure_complete_body(&path, expected_size, body.len() as u64)?;
+                self.record_read_bytes(body.len() as u64);
+                Ok((Bytes::from(body), etag))
+            }
+        })
+        .await
+    }
+
     /// Reads one exact provider object version and returns its metadata.
     ///
     /// # Errors
@@ -855,6 +979,80 @@ impl Store {
                 file.flush().await?;
                 self.record_read_bytes(written);
                 Ok(written)
+            }
+        })
+        .await
+    }
+
+    /// Stream `path` to a local file while enforcing a maximum body size.
+    ///
+    /// The provider's advertised size is checked before creating the
+    /// destination, and the streamed body is checked again so a changed or
+    /// malformed response cannot fill the workspace beyond the caller's
+    /// bound. Partial files are removed before the error is returned.
+    pub async fn download_to_path_bounded(
+        &self,
+        path: &Path,
+        dest: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<u64> {
+        retry(&self.retry, || {
+            let path = path.clone();
+            let dest = dest.to_owned();
+            async move {
+                use futures_util::StreamExt;
+                use tokio::io::AsyncWriteExt;
+
+                let _ = tokio::fs::remove_file(&dest).await;
+                let result = async {
+                    let read_inner = self.read_inner_for(&path);
+                    let got = read_inner
+                        .get(&path)
+                        .await
+                        .map_err(|e| map_object_store_error(e, path.as_ref()))?;
+                    if got.meta.size > max_bytes {
+                        return Err(StorageError::CorruptObject {
+                            path: path.as_ref().to_owned(),
+                            reason: format!(
+                                "object advertises {} bytes, bounded download allows {max_bytes}",
+                                got.meta.size
+                            ),
+                        });
+                    }
+                    let expected_size = got.meta.size;
+                    let mut stream = got.into_stream();
+                    let mut file = tokio::fs::File::create(&dest).await?;
+                    let mut written = 0u64;
+
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(|e| map_object_store_error(e, path.as_ref()))?;
+                        let next = written.checked_add(chunk.len() as u64).ok_or_else(|| {
+                            StorageError::CorruptObject {
+                                path: path.as_ref().to_owned(),
+                                reason: "streamed body size overflows u64".to_owned(),
+                            }
+                        })?;
+                        if next > max_bytes {
+                            return Err(StorageError::CorruptObject {
+                                path: path.as_ref().to_owned(),
+                                reason: format!(
+                                    "streamed body exceeds bounded download limit of {max_bytes} bytes"
+                                ),
+                            });
+                        }
+                        file.write_all(&chunk).await?;
+                        written = next;
+                    }
+                    file.flush().await?;
+                    ensure_complete_body(&path, expected_size, written)?;
+                    self.record_read_bytes(written);
+                    Ok(written)
+                }
+                .await;
+                if result.is_err() {
+                    let _ = tokio::fs::remove_file(&dest).await;
+                }
+                result
             }
         })
         .await
@@ -1220,6 +1418,11 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<()> {
+        if part_size == 0 {
+            return Err(StorageError::Internal(
+                "multipart part size must be greater than zero".to_owned(),
+            ));
+        }
         let expected_hash = *blake3::hash(&data).as_bytes();
         let size = data.len() as u64;
         let (write_path, write_inner, record_staged_write) = self.exact_write_target(path);
@@ -1261,6 +1464,63 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<()> {
+        self.put_multipart_file_retry_with_algorithm(
+            path,
+            file_path,
+            size,
+            FileHashExpectation {
+                expected: expected_hash,
+                algorithm: FileHashAlgorithm::Blake3,
+            },
+            part_size,
+            cancel,
+            on_part_done,
+        )
+        .await
+    }
+
+    /// Upload a local file while verifying the keyed Xet data hash used by
+    /// Xet metadata shards and xorbs.
+    pub async fn put_multipart_file_retry_with_xet_hash(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
+        self.put_multipart_file_retry_with_algorithm(
+            path,
+            file_path,
+            size,
+            FileHashExpectation {
+                expected: expected_hash,
+                algorithm: FileHashAlgorithm::Xet,
+            },
+            part_size,
+            cancel,
+            on_part_done,
+        )
+        .await
+    }
+
+    async fn put_multipart_file_retry_with_algorithm(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expectation: FileHashExpectation,
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
+        if part_size == 0 {
+            return Err(StorageError::Internal(
+                "multipart part size must be greater than zero".to_owned(),
+            ));
+        }
         let (write_path, write_inner, record_staged_write) = self.exact_write_target(path);
 
         let result = retry(&self.retry, || {
@@ -1274,6 +1534,7 @@ impl Store {
                     &path,
                     &file_path,
                     size,
+                    expectation,
                     part_size,
                     &cancel,
                     on_part_done,
@@ -1283,7 +1544,7 @@ impl Store {
         })
         .await;
         if result.is_ok() && record_staged_write {
-            self.record_staged_write(path, &write_path, &expected_hash, size);
+            self.record_staged_write(path, &write_path, &expectation.expected, size);
         }
         result
     }
@@ -1386,6 +1647,7 @@ impl Store {
         path: &Path,
         file_path: &std::path::Path,
         size: u64,
+        expectation: FileHashExpectation,
         part_size: usize,
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
@@ -1409,7 +1671,28 @@ impl Store {
             }
         };
 
-        let mut file = tokio::fs::File::open(file_path).await?;
+        let mut file = match tokio::fs::File::open(file_path).await {
+            Ok(file) => file,
+            Err(error) => {
+                abort_on(upload).await;
+                return Err(error.into());
+            }
+        };
+        let actual_size = match file.metadata().await {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                abort_on(upload).await;
+                return Err(error.into());
+            }
+        };
+        if actual_size != size {
+            abort_on(upload).await;
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!("local file has {actual_size} bytes; upload expects {size}"),
+            });
+        }
+        let mut hasher = FileHasher::new(expectation.algorithm);
         let mut remaining = size;
         let mut pending = FuturesUnordered::new();
         while remaining > 0 {
@@ -1439,7 +1722,11 @@ impl Store {
 
             let want = std::cmp::min(part_size as u64, remaining) as usize;
             let mut buf = vec![0u8; want];
-            file.read_exact(&mut buf).await?;
+            if let Err(error) = file.read_exact(&mut buf).await {
+                abort_on(upload).await;
+                return Err(error.into());
+            }
+            hasher.update(&buf)?;
             remaining -= want as u64;
 
             let bytes = want as u64;
@@ -1459,6 +1746,36 @@ impl Store {
                     return Err(map_object_store_error(e, path.as_ref()));
                 }
             }
+        }
+
+        let actual_hash = hasher.finalize();
+        if actual_hash != expectation.expected {
+            abort_on(upload).await;
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local {} hash {} does not match expected {}",
+                    file_hash_algorithm_name(expectation.algorithm),
+                    hex_lower(&actual_hash),
+                    hex_lower(&expectation.expected)
+                ),
+            });
+        }
+        let final_size = match file.metadata().await {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                abort_on(upload).await;
+                return Err(error.into());
+            }
+        };
+        if final_size != size {
+            abort_on(upload).await;
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local file changed during upload: expected {size} bytes, found {final_size}"
+                ),
+            });
         }
 
         if cancel.is_cancelled() {
@@ -1659,6 +1976,74 @@ mod tests {
         store.put(&path, body.clone()).await.unwrap();
         let (got, _etag) = store.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn bounded_get_rejects_objects_before_consuming_oversized_body() {
+        let store = memory_store();
+        let path = Path::from("blobs/oversized");
+        store
+            .put(&path, Bytes::from_static(b"0123456789"))
+            .await
+            .unwrap();
+
+        let error = store
+            .get_with_etag_bounded(&path, 9)
+            .await
+            .expect_err("bounded read must reject an oversized object");
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn bounded_get_roundtrips_objects_at_the_limit() {
+        let store = memory_store();
+        let path = Path::from("blobs/bounded");
+        let body = Bytes::from_static(b"0123456789");
+        store.put(&path, body.clone()).await.unwrap();
+
+        let (got, _etag) = store
+            .get_with_etag_bounded(&path, body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn bounded_download_rejects_oversized_objects_before_creating_file() {
+        let store = memory_store();
+        let path = Path::from("blobs/oversized-download");
+        store
+            .put(&path, Bytes::from_static(b"0123456789"))
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("download");
+
+        let error = store
+            .download_to_path_bounded(&path, &dest, 9)
+            .await
+            .expect_err("bounded download must reject an oversized object");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn bounded_download_roundtrips_objects_at_the_limit() {
+        let store = memory_store();
+        let path = Path::from("blobs/bounded-download");
+        let body = Bytes::from_static(b"0123456789");
+        store.put(&path, body.clone()).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("download");
+
+        let size = store
+            .download_to_path_bounded(&path, &dest, body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(size, body.len() as u64);
+        assert_eq!(std::fs::read(dest).unwrap(), body);
     }
 
     #[tokio::test]
@@ -1989,6 +2374,103 @@ mod tests {
                 size: body.len() as u64,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn multipart_file_rejects_hash_mismatch_before_completion() {
+        let store = memory_store();
+        let path = Path::from("blobs/file-hash-mismatch");
+        let body = Bytes::from_static(b"file body");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, &body).await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let error = store
+            .put_multipart_file_retry(&path, &source, body.len() as u64, [0; 32], 3, &cancel, None)
+            .await
+            .expect_err("multipart file upload must verify its expected hash");
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert!(matches!(
+            store.head(&path).await,
+            Err(StorageError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn multipart_file_verifies_keyed_xet_hash() {
+        let store = memory_store();
+        let path = Path::from("blobs/xet-hash");
+        let body = Bytes::from_static(b"keyed Xet body");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, &body).await.unwrap();
+        let mut hasher = xet_core_structures::merklehash::HashedWrite::new(std::io::sink());
+        std::io::Write::write_all(&mut hasher, &body).unwrap();
+        let expected_hash: [u8; 32] = hasher.hash().into();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        store
+            .put_multipart_file_retry_with_xet_hash(
+                &path,
+                &source,
+                body.len() as u64,
+                expected_hash,
+                3,
+                &cancel,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (got, _) = store.get_with_etag(&path).await.unwrap();
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn multipart_file_rejects_size_mismatch_before_upload() {
+        let store = memory_store();
+        let path = Path::from("blobs/file-size-mismatch");
+        let body = Bytes::from_static(b"file body");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, &body).await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let error = store
+            .put_multipart_file_retry(
+                &path,
+                &source,
+                body.len() as u64 + 1,
+                *blake3::hash(&body).as_bytes(),
+                3,
+                &cancel,
+                None,
+            )
+            .await
+            .expect_err("multipart file upload must verify its expected size");
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert!(matches!(
+            store.head(&path).await,
+            Err(StorageError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn multipart_upload_rejects_zero_part_size() {
+        let store = memory_store();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let error = store
+            .put_multipart_retry(
+                &Path::from("blobs/zero-part"),
+                Bytes::from_static(b"body"),
+                0,
+                &cancel,
+                None,
+            )
+            .await
+            .expect_err("zero-sized multipart parts are invalid");
+        assert!(matches!(error, StorageError::Internal(_)));
     }
 
     #[tokio::test]

@@ -624,7 +624,10 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.transfer.maxretries` | 8 | Max retries per object on transient failure |
 | `lfs.transfer.maxretrydelay` | 10s | Max delay between retries |
 | `lfs.skipdownloaderrors` | false | Continue on download errors instead of aborting |
-| `lfs.lfsdir` | `.git/lfs` | Override local LFS storage directory |
+| `lfs.storage` | `.git/lfs` | Override local LFS storage; relative paths resolve inside the common Git directory |
+| `lfs.lfsdir` | `.git/lfs` | Legacy Crab alias for `lfs.storage` |
+| `lfs.pruneverifyremotealways` | false | Verify prune candidates remotely unless the CLI overrides it |
+| `lfs.pruneverifyunreachablealways` | false | Also verify unreachable prune candidates unless the CLI overrides it |
 
 ### Configuration Precedence
 
@@ -638,7 +641,9 @@ Lowest priority
 ```
 
 When a key is set in both `.lfsconfig` and `.gitconfig`, the `.lfsconfig`
-value wins. This matches official `git-lfs` behavior.
+value wins, except tracked `.lfsconfig` files cannot set `lfs.storage` or
+`lfs.lfsdir`. Repository-controlled configuration must not redirect local
+writes or prune deletion outside the repository's Git directory.
 
 ### Transfer Agent Config (set by `crab lfs install`)
 

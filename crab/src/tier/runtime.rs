@@ -3,7 +3,7 @@
 //! This module is intentionally small: it connects resolved config and
 //! repository remote metadata to the provider-neutral tier interfaces.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,10 @@ use super::restore::RestoreOptions;
 
 /// Read and parse the current repository's `crab://` remote URL.
 pub fn current_crab_url() -> Result<CrabUrl> {
-    let repo_root = repo_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let repo_root = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)
+        .map(|worktree| worktree.current_worktree_root)
+        .unwrap_or(cwd);
     let remote = read_crab_remote_url(&repo_root)?;
     CrabUrl::parse(&remote)
 }
@@ -164,28 +167,24 @@ fn read_crab_remote_url(repo_root: &Path) -> Result<String> {
 }
 
 fn git_origin_crab_url(repo_root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_root)
-        .output()
-        .ok()?;
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
+        .env_remove("GIT_NAMESPACE");
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     url.starts_with("crab://").then_some(url)
-}
-
-fn repo_root() -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 fn aws_region(config: &Config) -> String {

@@ -30,10 +30,16 @@ use crab_xet::shard::{
     XorbChunkSequenceEntry, XorbChunkSequenceHeader,
 };
 use crab_xet::shard_parse::extract_file_recipes;
-use crab_xet::xorb::format::{MerkleHash, XorbRef};
+use crab_xet::xorb::format::{MAX_XORB_SIZE, MerkleHash, XorbRef};
 use crab_xet::xorb::parser::XorbParser;
 
 const MAX_CAS_ATTEMPTS: u32 = 8;
+const MAX_RECONCILIATION_MAPPING_ENTRIES: u64 = 1_000_000;
+const MAX_DESTINATIONS_PER_SOURCE: usize = 1_000_000;
+const MAX_DESTINATION_JSON_BYTES: usize = 80 * 1024 * 1024;
+const MAX_RECONCILIATION_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES: usize = 10_000_000;
+const SOURCES_PER_RECONCILIATION_BATCH: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Reconciliation outcome
@@ -65,22 +71,70 @@ fn build_mapping(
     journal: &OptimizeXorbsJournal,
     run_id: &str,
 ) -> Result<(HashMap<String, Vec<String>>, u64, u64)> {
-    let done_sources = journal.sources_by_status(run_id, SourceStatus::Done)?;
     let counts = journal.count_by_status(run_id)?;
 
-    let mut src_to_dest: HashMap<String, Vec<String>> = HashMap::new();
+    let mut src_to_dest = HashMap::new();
     let mut entries_updated: u64 = 0;
 
-    for source in &done_sources {
-        if let Some(ref dest_json) = source.dest_xorbs {
+    let mut after = String::new();
+    loop {
+        let done_sources = journal.sources_by_status_after(
+            run_id,
+            SourceStatus::Done,
+            Some(&after),
+            SOURCES_PER_RECONCILIATION_BATCH,
+        )?;
+        if done_sources.is_empty() {
+            break;
+        }
+        if let Some(last) = done_sources.last() {
+            after.clone_from(&last.src_xorb);
+        }
+        for source in done_sources {
+            let Some(dest_json) = source.dest_xorbs else {
+                continue;
+            };
+            if dest_json.len() > MAX_DESTINATION_JSON_BYTES {
+                return Err(CrabError::Configuration {
+                    key: "xorb optimization reconciliation destination list".to_owned(),
+                    origin: format!(
+                        "journal destination list for {} exceeds the bounded reconciliation size",
+                        source.src_xorb
+                    ),
+                });
+            }
             let dests: Vec<String> =
-                serde_json::from_str(dest_json).map_err(|error| CrabError::CorruptObject {
+                serde_json::from_str(&dest_json).map_err(|error| CrabError::CorruptObject {
                     path: format!("xorb optimization journal source {}", source.src_xorb),
                     reason: format!("invalid destination xorb list: {error}"),
                 })?;
+            if dests.len() > MAX_DESTINATIONS_PER_SOURCE {
+                return Err(CrabError::Configuration {
+                    key: "xorb optimization reconciliation destination count".to_owned(),
+                    origin: format!(
+                        "journal source {} references {} destination xorbs; bounded reconciliation supports at most {MAX_DESTINATIONS_PER_SOURCE}",
+                        source.src_xorb,
+                        dests.len()
+                    ),
+                });
+            }
             if !dests.is_empty() {
-                entries_updated += 1;
-                src_to_dest.insert(source.src_xorb.clone(), dests);
+                entries_updated =
+                    entries_updated
+                        .checked_add(1)
+                        .ok_or_else(|| CrabError::Configuration {
+                            key: "xorb optimization reconciliation mapping count".to_owned(),
+                            origin: "journal mapping count overflow".to_owned(),
+                        })?;
+                if entries_updated > MAX_RECONCILIATION_MAPPING_ENTRIES {
+                    return Err(CrabError::Configuration {
+                        key: "xorb optimization reconciliation mapping count".to_owned(),
+                        origin: format!(
+                            "journal maps more than {MAX_RECONCILIATION_MAPPING_ENTRIES} source xorbs in one reconciliation"
+                        ),
+                    });
+                }
+                src_to_dest.insert(source.src_xorb, dests);
             }
         }
     }
@@ -119,7 +173,9 @@ fn parse_hash(value: &str, path: &str) -> Result<MerkleHash> {
 /// Read and validate one xorb before using its chunk metadata in a shard.
 async fn load_xorb(store: &Store, router: &StoreLayout, hash: MerkleHash) -> Result<XorbParser> {
     let path = router.xorb_path(&hash);
-    let (bytes, _) = store.get_with_etag(&path).await?;
+    let (bytes, _) = store
+        .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+        .await?;
     let parser = XorbParser::parse(bytes).map_err(CrabError::from)?;
     if parser.hash() != hash {
         return Err(CrabError::CorruptObject {
@@ -198,6 +254,7 @@ async fn load_mapping(
     cancel: &CancellationToken,
 ) -> Result<LoadedMapping> {
     let mut loaded = LoadedMapping::default();
+    let mut loaded_chunk_entries = 0usize;
 
     for (source_text, destination_texts) in mapping {
         check_cancelled(cancel)?;
@@ -205,6 +262,20 @@ async fn load_mapping(
         let source_path = router.xorb_path(&source_hash).to_string();
         let source_parser = load_xorb(store, router, source_hash).await?;
         let chunks = source_chunks(&source_parser, &source_path)?;
+        loaded_chunk_entries = loaded_chunk_entries
+            .checked_add(chunks.len())
+            .ok_or_else(|| CrabError::Configuration {
+                key: "xorb optimization reconciliation chunk metadata".to_owned(),
+                origin: "source chunk metadata count overflows usize".to_owned(),
+            })?;
+        if loaded_chunk_entries > MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES {
+            return Err(CrabError::Configuration {
+                key: "xorb optimization reconciliation chunk metadata".to_owned(),
+                origin: format!(
+                    "loaded source chunk metadata exceeds {MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES} entries"
+                ),
+            });
+        }
         let source_hashes: HashSet<MerkleHash> = chunks.iter().map(|chunk| chunk.hash).collect();
         let mut refs = HashMap::new();
 
@@ -218,6 +289,20 @@ async fn load_mapping(
                 let destination_path = router.xorb_path(&destination_hash).to_string();
                 let destination_parser = load_xorb(store, router, destination_hash).await?;
                 let info = xorb_info(destination_hash, &destination_parser, &destination_path)?;
+                loaded_chunk_entries = loaded_chunk_entries
+                    .checked_add(info.chunks.len())
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: "xorb optimization reconciliation chunk metadata".to_owned(),
+                        origin: "destination chunk metadata count overflows usize".to_owned(),
+                    })?;
+                if loaded_chunk_entries > MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES {
+                    return Err(CrabError::Configuration {
+                        key: "xorb optimization reconciliation chunk metadata".to_owned(),
+                        origin: format!(
+                            "loaded destination chunk metadata exceeds {MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES} entries"
+                        ),
+                    });
+                }
                 loaded
                     .destination_infos
                     .insert(destination_hash, Arc::clone(&info));
@@ -278,6 +363,14 @@ async fn load_mapping(
         loaded
             .sources
             .insert(source_hash, SourcePlacement { chunks, refs });
+        if loaded.sources.len() as u64 > MAX_RECONCILIATION_MAPPING_ENTRIES {
+            return Err(CrabError::Configuration {
+                key: "xorb optimization reconciliation mapping count".to_owned(),
+                origin: format!(
+                    "reconciliation loaded more than {MAX_RECONCILIATION_MAPPING_ENTRIES} source xorbs"
+                ),
+            });
+        }
     }
 
     Ok(loaded)
@@ -515,7 +608,9 @@ fn rewrite_shard(
 
 async fn read_shard(store: &Store, router: &StoreLayout, hash: MerkleHash) -> Result<Bytes> {
     let path = router.shard_path(&hash);
-    let (body, _) = store.get_with_etag(&path).await?;
+    let (body, _) = store
+        .get_with_etag_bounded(&path, MAX_RECONCILIATION_SHARD_BYTES)
+        .await?;
     let actual_hash = crab_xet::hash::compute_data_hash(&body);
     if actual_hash != hash {
         return Err(CrabError::CorruptObject {
@@ -606,7 +701,9 @@ async fn upload_replacements(
             path.as_ref(),
         )
         .await?;
-        let (verified, _) = store.get_with_etag(&path).await?;
+        let (verified, _) = store
+            .get_with_etag_bounded(&path, MAX_RECONCILIATION_SHARD_BYTES)
+            .await?;
         let actual_hash = crab_xet::hash::compute_data_hash(&verified);
         if actual_hash != replacement.new_hash {
             return Err(CrabError::CorruptObject {
@@ -753,9 +850,13 @@ pub async fn finalize(
             });
         }
 
-        let shard_texts =
-            manifest::read_bulk_shard_list(store, router, &manifest_before.shard_index_hash)
-                .await?;
+        let shard_texts = manifest::read_bulk_shard_list_with_limit(
+            store,
+            router,
+            &manifest_before.shard_index_hash,
+            MAX_RECONCILIATION_MAPPING_ENTRIES,
+        )
+        .await?;
         let shard_hashes = shard_texts
             .iter()
             .map(|hash| parse_hash(hash, "manifest shard index"))

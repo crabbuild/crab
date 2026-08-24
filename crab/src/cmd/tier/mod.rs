@@ -26,14 +26,14 @@ pub enum TierCommand {
         #[arg(long)]
         apply: bool,
         /// Merge with existing non-crab rules instead of failing on conflict.
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         merge: bool,
         /// Show what would be done without making changes.
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         dry_run: bool,
         /// Output format: xml, json, or yaml.
-        #[arg(long, default_value = "xml")]
-        output: String,
+        #[arg(long, value_parser = ["xml", "json", "yaml"], conflicts_with_all = ["json", "jsonl"])]
+        output: Option<String>,
         /// Structured JSON output (single envelope with terminal result).
         #[arg(long, conflicts_with = "jsonl")]
         json: bool,
@@ -143,6 +143,7 @@ pub fn plan_output_mode(json: bool, jsonl: bool) -> OutputMode {
 /// For `Rollback`: calls `apply::rollback()` to restore a prior
 /// lifecycle configuration from a backup file.
 pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> Result<()> {
+    ctx.check_cancelled()?;
     #[cfg(feature = "otlp")]
     let _span = tracing::info_span!(
         "tier.plan",
@@ -157,7 +158,7 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             apply: should_apply,
             merge,
             dry_run,
-            output: _output,
+            output,
             ..
         } => {
             let tier_cfg = &ctx.config().tier;
@@ -180,12 +181,14 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             let crab_url = crate::tier::runtime::current_crab_url()?;
             let lifecycle_provider =
                 crate::tier::runtime::build_lifecycle_provider(ctx.config(), &crab_url).await?;
+            ctx.check_cancelled()?;
             let probe = crate::tier::runtime::probe_bucket(
                 ctx.config(),
                 &crab_url,
                 lifecycle_provider.as_ref(),
             )
             .await?;
+            ctx.check_cancelled()?;
 
             let tier_plan = plan::build(tier_cfg, &probe)?;
             info!(
@@ -205,34 +208,34 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
                     stream.emit_result(&payload);
                 }
                 OutputMode::Text => {
-                    println!("Tier plan for {:?}:", tier_plan.provider);
-                    for rule in &tier_plan.rules {
-                        println!(
-                            "  Rule {}: prefix={}, transitions={}",
-                            rule.id,
-                            rule.prefix,
-                            rule.transitions.len()
-                        );
-                        for t in &rule.transitions {
-                            println!("    → {:?} after {} days", t.to_class, t.days);
-                        }
-                        if let Some(min) = rule.min_object_size_bytes {
-                            println!("    min object size: {min} bytes");
-                        }
-                        if let Some(nc) = rule.noncurrent_expiration_days {
-                            println!("    noncurrent expiration: {nc} days");
-                        }
-                    }
+                    emit_text_plan(lifecycle_provider.as_ref(), &tier_plan, output.as_deref())?;
                 }
             }
 
             if should_apply {
-                let outcome = apply::apply(
-                    lifecycle_provider.as_ref(),
-                    &tier_plan,
-                    ApplyOpts { merge, dry_run },
-                )
-                .await?;
+                ctx.check_cancelled()?;
+                let outcome = if dry_run {
+                    // A dry-run is read-only, so cancellation may interrupt its provider reads.
+                    let cancel = ctx.cancel_token();
+                    tokio::select! {
+                        result = apply::apply(
+                            lifecycle_provider.as_ref(),
+                            &tier_plan,
+                            ApplyOpts { merge, dry_run },
+                        ) => result?,
+                        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                    }
+                } else {
+                    // Once a lifecycle mutation starts, let the provider CAS/verify sequence
+                    // finish; dropping it on cancellation can leave bucket state unknown.
+                    apply::apply(
+                        lifecycle_provider.as_ref(),
+                        &tier_plan,
+                        ApplyOpts { merge, dry_run },
+                    )
+                    .await?
+                };
+                ctx.check_cancelled()?;
 
                 if matches!(mode, OutputMode::Text) {
                     if dry_run {
@@ -250,6 +253,7 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             Ok(())
         }
         TierCommand::Rollback { path } => {
+            ctx.check_cancelled()?;
             info!(backup = %path, "rolling back lifecycle configuration");
             crate::replication::ensure_active_active_maintenance_admitted(
                 ctx.config(),
@@ -259,7 +263,10 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             let crab_url = crate::tier::runtime::current_crab_url()?;
             let lifecycle_provider =
                 crate::tier::runtime::build_lifecycle_provider(ctx.config(), &crab_url).await?;
+            ctx.check_cancelled()?;
+            // Rollback is a provider mutation; do not drop the future after the request starts.
             apply::rollback(lifecycle_provider.as_ref(), &path).await?;
+            ctx.check_cancelled()?;
             if matches!(mode, OutputMode::Text) {
                 println!("Rolled back lifecycle configuration from backup: {path}");
             }
@@ -267,4 +274,68 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             Ok(())
         }
     }
+}
+
+fn emit_text_plan(
+    provider: &dyn crate::tier::provider::LifecycleProvider,
+    plan: &crate::tier::provider::TierPlan,
+    output: Option<&str>,
+) -> Result<()> {
+    match output {
+        Some("xml") => {
+            let rendered = provider.render(plan)?;
+            if rendered.format != crate::tier::provider::Format::Xml {
+                return Err(CrabError::Configuration {
+                    key: "--output=xml is only valid for an XML lifecycle provider".to_owned(),
+                    origin: "tier plan".to_owned(),
+                });
+            }
+            println!(
+                "{}",
+                String::from_utf8(rendered.body).map_err(|error| {
+                    CrabError::Internal(format!("rendered lifecycle is not UTF-8: {error}"))
+                })?
+            );
+        }
+        Some("json") => println!(
+            "{}",
+            serde_json::to_string_pretty(&TierPlanPayload::from_plan(plan))
+                .map_err(|error| CrabError::Internal(format!("tier plan JSON: {error}")))?
+        ),
+        Some("yaml") => print!(
+            "{}",
+            serde_yaml::to_string(&TierPlanPayload::from_plan(plan))
+                .map_err(|error| CrabError::Internal(format!("tier plan YAML: {error}")))?
+        ),
+        None => {
+            println!("Tier plan for {:?}:", plan.provider);
+            for rule in &plan.rules {
+                println!(
+                    "  Rule {}: prefix={}, transitions={}",
+                    rule.id,
+                    rule.prefix,
+                    rule.transitions.len()
+                );
+                for transition in &rule.transitions {
+                    println!(
+                        "    → {:?} after {} days",
+                        transition.to_class, transition.days
+                    );
+                }
+                if let Some(minimum) = rule.min_object_size_bytes {
+                    println!("    min object size: {minimum} bytes");
+                }
+                if let Some(noncurrent) = rule.noncurrent_expiration_days {
+                    println!("    noncurrent expiration: {noncurrent} days");
+                }
+            }
+        }
+        Some(format) => {
+            return Err(CrabError::Configuration {
+                key: format!("unsupported tier plan output format '{format}'"),
+                origin: "tier plan".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }

@@ -11,7 +11,7 @@
 //! safety: a SIGINT mid-write leaves only a tempfile that the OS
 //! cleans up, never a half-written working-tree file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{Stdout, Write};
 use std::path::{Component, Path, PathBuf};
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::stream::{self, FuturesUnordered, StreamExt};
 use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::task::JoinHandle;
@@ -50,6 +50,7 @@ use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_types::pointer::{MAX_POINTER_SIZE, Pointer};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::FileDataSequenceEntry;
+use crab_xet::xorb::format::MAX_XORB_SIZE;
 
 /// Per-file hydration result sent through the progress channel.
 ///
@@ -546,6 +547,10 @@ pub struct ShardHydrator {
     /// Used by the delta-reconstruction path (`try_delta_reconstruct`)
     /// which fetches xorbs directly rather than via `FileReconstructor`.
     xorb_cache: tokio::sync::Mutex<std::collections::HashMap<MerkleHash, bytes::Bytes>>,
+    /// Tracks the total body bytes held by `xorb_cache`. This is updated only
+    /// while the cache mutex is held, so the atomic avoids a second lock for
+    /// the accounting field without allowing the cache to grow unbounded.
+    xorb_cache_bytes: AtomicU64,
     /// Optional perf counters. When set, shard-hint hit/miss events are recorded.
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// Shared concurrency controller used by [`FileReconstructor`] to
@@ -571,6 +576,11 @@ pub struct ShardHydrator {
 /// `AdaptiveConcurrencyController` stores the tag for logging.
 const HYDRATE_CONCURRENCY_TAG: &str = "crab-hydrate";
 const MAX_HYDRATE_FILE_CONCURRENCY: usize = 4;
+const MAX_PREFETCH_CANDIDATES: usize = 1_000_000;
+const MAX_GIT_INVENTORY_BYTES: usize = 512 * 1024 * 1024;
+const MAX_HYDRATE_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_HYDRATE_XORB_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_HYDRATE_XORB_CACHE_ENTRIES: usize = 4_096;
 
 fn hydrate_file_concurrency(download_concurrency: usize) -> usize {
     download_concurrency.clamp(1, MAX_HYDRATE_FILE_CONCURRENCY)
@@ -648,6 +658,7 @@ impl ShardHydrator {
             store,
             router,
             xorb_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            xorb_cache_bytes: AtomicU64::new(0),
             metrics: None,
             concurrency,
             buffer_semaphore: hydrate_buffer_semaphore(hydrate.prefetch_budget),
@@ -765,15 +776,33 @@ impl ShardHydrator {
         let file_index_lookup = self.shared_file_index_lookup();
         let result = async {
             let mut summary = CachePrefetchSummary::default();
-            for (path, ptr) in items {
-                error::check_cancelled(cancel)?;
-                match self.reconstruct_file(ptr, Some(&file_index_lookup)).await {
+            let mut results = stream::iter(items.iter())
+                .map(|(path, ptr)| {
+                    let file_index_lookup = file_index_lookup.clone();
+                    async move {
+                        let result = async {
+                            error::check_cancelled(cancel)?;
+                            self.reconstruct_to_writer_with(
+                                ptr,
+                                std::io::sink(),
+                                Some(&file_index_lookup),
+                                cancel,
+                            )
+                            .await
+                        }
+                        .await;
+                        (path, result)
+                    }
+                })
+                .buffer_unordered(self.file_concurrency);
+            while let Some((path, result)) = results.next().await {
+                match result {
                     Ok(bytes) => {
                         summary.prefetched += 1;
-                        summary.bytes_prefetched += bytes.len() as u64;
+                        summary.bytes_prefetched += bytes;
                         debug!(
                             path = %path.display(),
-                            bytes = bytes.len(),
+                            bytes,
                             "cache prefetch reconstructed selected pointer"
                         );
                     }
@@ -811,13 +840,6 @@ impl ShardHydrator {
             self.store.origin(),
             self.router.repo_prefix().to_owned(),
         )
-    }
-
-    fn store_client(
-        &self,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-    ) -> Arc<dyn xet_client::cas_client::Client> {
-        Arc::new(self.store_client_adapter(file_index_lookup, None))
     }
 
     fn store_client_for_pointer(
@@ -925,9 +947,11 @@ impl ShardHydrator {
         .await?;
         // CachingStore owns the local and remote cache read-through order.
         // Calling the origin directly here bypasses a warmed cache service.
-        let (data, _) = self.store.get_with_etag(&path).await?;
-        let mut cache = self.xorb_cache.lock().await;
-        cache.insert(*hash, data.clone());
+        let (data, _) = self
+            .store
+            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+            .await?;
+        self.cache_xorb(*hash, &data).await?;
         Ok(data)
     }
 
@@ -945,7 +969,11 @@ impl ShardHydrator {
             self.auto_restore,
         )
         .await?;
-        let (data, _) = self.store.origin().get_with_etag(&path).await?;
+        let (data, _) = self
+            .store
+            .origin()
+            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+            .await?;
 
         if let Err(e) = self.store.local_cache().put(&key, &data).await {
             warn!(
@@ -954,9 +982,36 @@ impl ShardHydrator {
                 "failed to rewrite repaired hydrate xorb cache entry"
             );
         }
-        let mut cache = self.xorb_cache.lock().await;
-        cache.insert(*hash, data.clone());
+        self.cache_xorb(*hash, &data).await?;
         Ok(data)
+    }
+
+    async fn cache_xorb(&self, hash: MerkleHash, data: &bytes::Bytes) -> Result<()> {
+        if data.len() > MAX_XORB_SIZE {
+            return Err(error::CrabError::CorruptObject {
+                path: self.router.xorb_path(&hash).to_string(),
+                reason: format!(
+                    "xorb body is {} bytes; the Xet format supports at most {MAX_XORB_SIZE} bytes",
+                    data.len()
+                ),
+            });
+        }
+
+        let mut cache = self.xorb_cache.lock().await;
+        let old_len = cache.get(&hash).map_or(0, bytes::Bytes::len) as u64;
+        let incoming_len = data.len() as u64;
+        let mut cached_bytes = self.xorb_cache_bytes.load(Relaxed).saturating_sub(old_len);
+        let replacing = cache.contains_key(&hash);
+        if (!replacing && cache.len() >= MAX_HYDRATE_XORB_CACHE_ENTRIES)
+            || cached_bytes.saturating_add(incoming_len) > MAX_HYDRATE_XORB_CACHE_BYTES
+        {
+            cache.clear();
+            cached_bytes = 0;
+        }
+        cache.insert(hash, data.clone());
+        self.xorb_cache_bytes
+            .store(cached_bytes.saturating_add(incoming_len), Relaxed);
+        Ok(())
     }
 
     async fn decode_xorb_with_cache_repair<T>(
@@ -989,7 +1044,10 @@ impl ShardHydrator {
         debug!(shard_hash = %hash.hex(), "downloading shard");
         // Keep shard reads on the same cache-aware path as xorb reads so
         // push-warmed immutable objects are reusable by new clones.
-        let (data, _) = self.store.get_with_etag(&obj_path).await?;
+        let (data, _) = self
+            .store
+            .get_with_etag_bounded(&obj_path, MAX_HYDRATE_SHARD_BYTES)
+            .await?;
 
         Ok(crab_xet::shard::ShardReader::from_bytes(data, *hash))
     }
@@ -1311,9 +1369,24 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
+        self.reconstruct_to_writer_with(ptr, writer, None, &CancellationToken::new())
+            .await
+    }
+
+    async fn reconstruct_to_writer_with<W>(
+        &self,
+        ptr: &Pointer,
+        writer: W,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        error::check_cancelled(cancel)?;
         let file_hash = MerkleHash::from(ptr.file_hash);
 
-        let client = self.store_client(None);
+        let client = self.store_client_for_pointer(file_index_lookup, ptr);
 
         self.preflight_shard_coverage(&client, ptr).await?;
 
@@ -1329,21 +1402,22 @@ impl ShardHydrator {
         let xet_context = new_xet_context()?;
         let reconstructor =
             xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
-                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore));
+                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
+                .with_cancellation_token(cancel.clone());
         let reconstructor = match self.chunk_cache.clone() {
             Some(cache) => reconstructor.with_chunk_cache(cache),
             None => reconstructor,
         };
 
-        reconstructor
-            .reconstruct_to_writer(writer)
-            .await
-            .map_err(|e| {
-                error::CrabError::Internal(format!(
-                    "file reconstruction failed for {}: {e}",
-                    file_hash.hex(),
-                ))
-            })?;
+        if let Err(e) = reconstructor.reconstruct_to_writer(writer).await {
+            if cancel.is_cancelled() {
+                return Err(error::CrabError::Cancelled);
+            }
+            return Err(error::CrabError::Internal(format!(
+                "file reconstruction failed for {}: {e}",
+                file_hash.hex(),
+            )));
+        }
 
         let (actual_hash, bytes_written) = {
             let mut guard = tap_state
@@ -1362,6 +1436,14 @@ impl ShardHydrator {
                 requested: crab_types::pointer::hex_encode(&ptr.file_hash),
                 actual: crab_types::pointer::hex_encode(&actual_hash),
             });
+        }
+        if bytes_written != ptr.size {
+            return Err(error::CrabError::Internal(format!(
+                "file reconstruction size mismatch for {}: expected {}, got {}",
+                file_hash.hex(),
+                ptr.size,
+                bytes_written,
+            )));
         }
 
         Ok(bytes_written)
@@ -3606,6 +3688,70 @@ pub fn resolve_git_pointer_prefetch_candidates(
     Ok(candidates)
 }
 
+/// Resolve unique Crab pointer files reachable from every local Git ref.
+///
+/// This is the `crab fetch --all` inventory path. It reads Git objects in two
+/// batch processes, filtering large blobs before materializing pointer bodies.
+pub fn resolve_all_ref_pointer_prefetch_candidates(
+    root: &Path,
+    include: &[String],
+    exclude: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<(PathBuf, Pointer)>> {
+    let include = if include.is_empty() {
+        vec!["**/*".to_owned()]
+    } else {
+        include.to_vec()
+    };
+    let filter = build_filter(&include, exclude)?;
+    let refs = git_refs(root)?;
+    let mut entries = Vec::new();
+    let mut seen_entries = HashSet::new();
+    for git_ref in refs {
+        error::check_cancelled(cancel)?;
+        for entry in git_tree_entries(root, &git_ref)? {
+            if filter.matches(&entry.path)
+                && seen_entries.insert((entry.oid.clone(), entry.path.clone()))
+            {
+                if entries.len() >= MAX_PREFETCH_CANDIDATES {
+                    return Err(error::CrabError::Configuration {
+                        key: "fetch candidate count".to_owned(),
+                        origin: format!(
+                            "reachable Git pointer inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+                        ),
+                    });
+                }
+                entries.push(entry);
+            }
+        }
+    }
+
+    let blobs = git_small_blobs(root, entries.iter().map(|entry| entry.oid.as_str()))?;
+    let mut candidates = Vec::new();
+    let mut seen_files = HashSet::new();
+    for entry in entries {
+        error::check_cancelled(cancel)?;
+        let Some(blob) = blobs.get(&entry.oid) else {
+            continue;
+        };
+        let Ok(pointer) = Pointer::parse(blob) else {
+            continue;
+        };
+        if seen_files.insert(pointer.file_hash) {
+            if candidates.len() >= MAX_PREFETCH_CANDIDATES {
+                return Err(error::CrabError::Configuration {
+                    key: "fetch candidate count".to_owned(),
+                    origin: format!(
+                        "reachable Crab pointer inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+                    ),
+                });
+            }
+            candidates.push((root.join(entry.path), pointer));
+        }
+    }
+    Ok(candidates)
+}
+
 fn emit_empty_hydrate_summary(mode: OutputMode) {
     let summary = HydrateSummary::default();
     let payload = HydrateSummaryPayload::from_summary(&summary, Duration::default());
@@ -3744,27 +3890,35 @@ fn collect_git_pointer_blobs(
     if entries.is_empty() {
         entries = git_head_tree_entries(root)?;
     }
+    let entries = entries
+        .into_iter()
+        .filter(|entry| filter.matches(&entry.path))
+        .filter(|entry| is_safe_repo_relative_path(Path::new(&entry.path)))
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_PREFETCH_CANDIDATES {
+        return Err(error::CrabError::Configuration {
+            key: "hydrate candidate count".to_owned(),
+            origin: format!(
+                "Git pointer inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+            ),
+        });
+    }
+    let blobs = git_small_blobs(root, entries.iter().map(|entry| entry.oid.as_str()))?;
+    let mut seen_paths: HashSet<PathBuf> = out.iter().map(|(path, _)| path.clone()).collect();
     for entry in entries {
         error::check_cancelled(cancel)?;
-        if !filter.matches(&entry.path) {
-            continue;
-        }
         let rel_path = Path::new(&entry.path);
-        if !is_safe_repo_relative_path(rel_path) {
-            debug!(path = %entry.path, "skipping unsafe Git path during index hydrate");
-            continue;
-        }
         let full_path = root.join(rel_path);
-        if out.iter().any(|(path, _)| path == &full_path) {
+        if seen_paths.contains(&full_path) {
             continue;
         }
         if matches!(mode, GitPointerCollectionMode::MissingOnly) && full_path.exists() {
             continue;
         }
-        let Some(blob) = git_small_blob(root, &entry.oid)? else {
+        let Some(blob) = blobs.get(&entry.oid) else {
             continue;
         };
-        let Ok(pointer) = Pointer::parse(&blob) else {
+        let Ok(pointer) = Pointer::parse(blob) else {
             continue;
         };
         if matches!(mode, GitPointerCollectionMode::MissingOnly)
@@ -3772,6 +3926,15 @@ fn collect_git_pointer_blobs(
         {
             std::fs::create_dir_all(parent).map_err(error::CrabError::Io)?;
         }
+        if out.len() >= MAX_PREFETCH_CANDIDATES {
+            return Err(error::CrabError::Configuration {
+                key: "hydrate candidate count".to_owned(),
+                origin: format!(
+                    "Git pointer inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+                ),
+            });
+        }
+        seen_paths.insert(full_path.clone());
         out.push((full_path, pointer));
     }
     Ok(())
@@ -3798,15 +3961,27 @@ fn git_index_entries(root: &Path) -> Result<Vec<GitBlobEntry>> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(parse_git_blob_records(
-        &output.stdout,
-        GitBlobRecordFormat::Index,
-    ))
+    if output.stdout.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git index inventory size".to_owned(),
+            origin: format!(
+                "Git index listing exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+    parse_git_blob_records(&output.stdout, GitBlobRecordFormat::Index)
 }
 
 fn git_head_tree_entries(root: &Path) -> Result<Vec<GitBlobEntry>> {
+    if !git_ref_exists(root, "HEAD")? {
+        return Ok(Vec::new());
+    }
+    git_tree_entries(root, "HEAD")
+}
+
+fn git_tree_entries(root: &Path, git_ref: &str) -> Result<Vec<GitBlobEntry>> {
     let output = Command::new("git")
-        .args(["ls-tree", "-r", "-z", "HEAD"])
+        .args(["ls-tree", "-r", "-z", git_ref])
         .current_dir(root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
@@ -3814,12 +3989,79 @@ fn git_head_tree_entries(root: &Path) -> Result<Vec<GitBlobEntry>> {
         .output()
         .map_err(error::CrabError::Io)?;
     if !output.status.success() {
-        return Ok(Vec::new());
+        return Err(error::CrabError::Internal(format!(
+            "`git ls-tree -r -z {git_ref}` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
-    Ok(parse_git_blob_records(
-        &output.stdout,
-        GitBlobRecordFormat::Tree,
-    ))
+    if output.stdout.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git tree inventory size".to_owned(),
+            origin: format!(
+                "Git tree listing exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+    parse_git_blob_records(&output.stdout, GitBlobRecordFormat::Tree)
+}
+
+fn git_refs(root: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)"])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .map_err(error::CrabError::Io)?;
+    if !output.status.success() {
+        return Err(error::CrabError::Internal(format!(
+            "`git for-each-ref` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    if output.stdout.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git ref inventory size".to_owned(),
+            origin: format!(
+                "Git ref listing exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+    let mut refs = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect::<Vec<_>>();
+    if git_ref_exists(root, "HEAD")? {
+        refs.push("HEAD".to_owned());
+    }
+    refs.sort();
+    refs.dedup();
+    if refs.len() > MAX_PREFETCH_CANDIDATES {
+        return Err(error::CrabError::Configuration {
+            key: "Git ref count".to_owned(),
+            origin: format!(
+                "Git ref inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+            ),
+        });
+    }
+    Ok(refs)
+}
+
+fn git_ref_exists(root: &Path, git_ref: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", git_ref])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(error::CrabError::Io)?;
+    Ok(status.success())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3828,7 +4070,15 @@ enum GitBlobRecordFormat {
     Tree,
 }
 
-fn parse_git_blob_records(bytes: &[u8], format: GitBlobRecordFormat) -> Vec<GitBlobEntry> {
+fn parse_git_blob_records(bytes: &[u8], format: GitBlobRecordFormat) -> Result<Vec<GitBlobEntry>> {
+    if bytes.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git blob inventory size".to_owned(),
+            origin: format!(
+                "Git blob listing exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
     let mut entries = Vec::new();
     for record in bytes
         .split(|byte| *byte == 0)
@@ -3845,54 +4095,178 @@ fn parse_git_blob_records(bytes: &[u8], format: GitBlobRecordFormat) -> Vec<GitB
             GitBlobRecordFormat::Tree if fields.len() >= 3 && fields[1] == "blob" => fields[2],
             GitBlobRecordFormat::Tree | GitBlobRecordFormat::Index => continue,
         };
+        if entries.len() >= MAX_PREFETCH_CANDIDATES {
+            return Err(error::CrabError::Configuration {
+                key: "Git blob entry count".to_owned(),
+                origin: format!(
+                    "Git blob inventory exceeds the safety limit of {MAX_PREFETCH_CANDIDATES}"
+                ),
+            });
+        }
         entries.push(GitBlobEntry {
             oid: oid.to_owned(),
             path,
         });
     }
-    entries
+    Ok(entries)
 }
 
-fn git_small_blob(root: &Path, oid: &str) -> Result<Option<Vec<u8>>> {
-    let size = Command::new("git")
-        .args(["cat-file", "-s", oid])
-        .current_dir(root)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .output()
-        .map_err(error::CrabError::Io)?;
-    if !size.status.success() {
-        return Err(error::CrabError::Internal(format!(
-            "`git cat-file -s {oid}` failed: {}",
-            String::from_utf8_lossy(&size.stderr)
-        )));
+fn git_small_blobs<'a>(
+    root: &Path,
+    oids: impl Iterator<Item = &'a str>,
+) -> Result<HashMap<String, Vec<u8>>> {
+    let mut oids = oids.map(str::to_owned).collect::<Vec<_>>();
+    oids.sort();
+    oids.dedup();
+    if oids.is_empty() {
+        return Ok(HashMap::new());
     }
-    let size = String::from_utf8_lossy(&size.stdout)
-        .trim()
-        .parse::<usize>()
-        .map_err(|e| {
-            error::CrabError::Internal(format!("`git cat-file -s {oid}` returned bad size: {e}"))
-        })?;
-    if size > MAX_POINTER_SIZE {
-        return Ok(None);
+    let input = format!("{}\n", oids.join("\n"));
+    if input.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git blob request size".to_owned(),
+            origin: format!(
+                "Git blob request exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
     }
 
-    let blob = Command::new("git")
-        .args(["cat-file", "-p", oid])
+    let mut check = Command::new("git")
+        .args([
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ])
         .current_dir(root)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .map_err(error::CrabError::Io)?;
-    if !blob.status.success() {
+    check
+        .stdin
+        .as_mut()
+        .ok_or_else(|| error::CrabError::Internal("git cat-file stdin unavailable".to_owned()))?
+        .write_all(input.as_bytes())
+        .map_err(error::CrabError::Io)?;
+    drop(check.stdin.take());
+    let checked = check.wait_with_output().map_err(error::CrabError::Io)?;
+    if !checked.status.success() {
         return Err(error::CrabError::Internal(format!(
-            "`git cat-file -p {oid}` failed: {}",
-            String::from_utf8_lossy(&blob.stderr)
+            "`git cat-file --batch-check` failed: {}",
+            String::from_utf8_lossy(&checked.stderr)
         )));
     }
-    Ok(Some(blob.stdout))
+    if checked.stdout.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git blob metadata response size".to_owned(),
+            origin: format!(
+                "Git blob metadata response exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+    let small_oids = String::from_utf8_lossy(&checked.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let oid = fields.next()?;
+            let kind = fields.next()?;
+            let size = fields.next()?.parse::<usize>().ok()?;
+            (kind == "blob" && size <= MAX_POINTER_SIZE).then(|| oid.to_owned())
+        })
+        .collect::<Vec<_>>();
+    if small_oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut batch = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(error::CrabError::Io)?;
+    let batch_input = format!("{}\n", small_oids.join("\n"));
+    if batch_input.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git blob request size".to_owned(),
+            origin: format!(
+                "Git blob request exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+    batch
+        .stdin
+        .as_mut()
+        .ok_or_else(|| error::CrabError::Internal("git cat-file stdin unavailable".to_owned()))?
+        .write_all(batch_input.as_bytes())
+        .map_err(error::CrabError::Io)?;
+    drop(batch.stdin.take());
+    let output = batch.wait_with_output().map_err(error::CrabError::Io)?;
+    if !output.status.success() {
+        return Err(error::CrabError::Internal(format!(
+            "`git cat-file --batch` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    if output.stdout.len() > MAX_GIT_INVENTORY_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "Git blob response size".to_owned(),
+            origin: format!(
+                "Git blob response exceeds the safety limit of {MAX_GIT_INVENTORY_BYTES} bytes"
+            ),
+        });
+    }
+
+    let mut blobs = HashMap::new();
+    let mut cursor = 0usize;
+    while cursor < output.stdout.len() {
+        let Some(header_len) = output.stdout[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        else {
+            return Err(error::CrabError::Internal(
+                "git cat-file batch response ended inside a header".to_owned(),
+            ));
+        };
+        let header_end = cursor + header_len;
+        let header = String::from_utf8_lossy(&output.stdout[cursor..header_end]);
+        let mut fields = header.split_whitespace();
+        let oid = fields.next().ok_or_else(|| {
+            error::CrabError::Internal("git cat-file returned an empty header".to_owned())
+        })?;
+        let kind = fields.next().ok_or_else(|| {
+            error::CrabError::Internal("git cat-file returned a malformed header".to_owned())
+        })?;
+        let size = fields
+            .next()
+            .ok_or_else(|| {
+                error::CrabError::Internal("git cat-file omitted object size".to_owned())
+            })?
+            .parse::<usize>()
+            .map_err(|e| {
+                error::CrabError::Internal(format!("git cat-file returned bad object size: {e}"))
+            })?;
+        let content_start = header_end + 1;
+        let content_end = content_start.checked_add(size).ok_or_else(|| {
+            error::CrabError::Internal("git cat-file object size overflow".to_owned())
+        })?;
+        if kind != "blob" || content_end >= output.stdout.len() {
+            return Err(error::CrabError::Internal(
+                "git cat-file returned a truncated or non-blob response".to_owned(),
+            ));
+        }
+        blobs.insert(
+            oid.to_owned(),
+            output.stdout[content_start..content_end].to_vec(),
+        );
+        cursor = content_end + 1;
+    }
+    Ok(blobs)
 }
 
 fn is_safe_repo_relative_path(path: &Path) -> bool {
@@ -3972,6 +4346,15 @@ fn git_show_ref(git_ref: &str) -> Result<String> {
         return Err(error::CrabError::Internal(format!(
             "`git show {git_ref}` failed: {stderr}"
         )));
+    }
+    if output.stdout.len() > crate::hydrate::manifest::MAX_MANIFEST_BYTES {
+        return Err(error::CrabError::Configuration {
+            key: "manifest-ref size".to_owned(),
+            origin: format!(
+                "git show output exceeds the safety limit of {} bytes",
+                crate::hydrate::manifest::MAX_MANIFEST_BYTES
+            ),
+        });
     }
 
     String::from_utf8(output.stdout).map_err(|e| {
@@ -4233,6 +4616,10 @@ fn walk_and_parse_pointers(
 
         // Must be in pointer state (unhydrated). Parse the pointer for
         // the hydration batch.
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() > crab_types::pointer::MAX_POINTER_SIZE as u64 {
+            continue;
+        }
         let content = std::fs::read(&path)?;
         let Ok(ptr) = Pointer::parse(&content) else {
             continue;
@@ -4962,6 +5349,42 @@ mod tests {
         let args = default_args();
         let config = Config::default();
         assert!(resolve_patterns(&args, &config).unwrap().is_none());
+    }
+
+    #[test]
+    fn all_ref_prefetch_inventory_filters_paths_and_deduplicates_file_hashes() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let main_pointer = sample_pointer(10);
+        std::fs::write(root.join("main.bin"), main_pointer.serialize()).unwrap();
+        run_git(root, &["add", "main.bin"]);
+        run_git(root, &["commit", "-m", "main pointer"]);
+        run_git(root, &["checkout", "-b", "feature"]);
+        let mut feature_pointer = sample_pointer(20);
+        feature_pointer.file_hash[0] ^= 0xff;
+        std::fs::write(root.join("feature.bin"), feature_pointer.serialize()).unwrap();
+        std::fs::write(root.join("large.dat"), vec![0u8; MAX_POINTER_SIZE + 1]).unwrap();
+        run_git(root, &["add", "feature.bin", "large.dat"]);
+        run_git(root, &["commit", "-m", "feature pointer"]);
+
+        let all = resolve_all_ref_pointer_prefetch_candidates(
+            root,
+            &["*.bin".to_owned()],
+            &[],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let main_only = resolve_all_ref_pointer_prefetch_candidates(
+            root,
+            &["*.bin".to_owned()],
+            &["feature.bin".to_owned()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(main_only.len(), 1);
+        assert_eq!(main_only[0].1.file_hash, main_pointer.file_hash);
     }
 
     #[tokio::test]

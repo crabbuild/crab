@@ -3,7 +3,11 @@
 use crate::core::config::Config;
 use crate::core::error::Result;
 
-pub use crab_cache::{XetChunkCacheHandle, XetChunkCacheStats};
+pub use crab_cache::{
+    XetChunkCacheHandle, XetChunkCachePruneStats, XetChunkCacheStats, XetChunkCacheVerifyStats,
+    prune_xet_chunk_cache, prune_xet_chunk_cache_with_cancel, verify_xet_chunk_cache,
+    verify_xet_chunk_cache_with_cancel, xet_chunk_cache_stats, xet_chunk_cache_stats_with_cancel,
+};
 
 /// Opens the shared xet-core chunk cache from CLI configuration.
 ///

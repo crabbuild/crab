@@ -15,6 +15,7 @@ Manage the local chunk cache.
 
 ```bash
 crab cache stats
+crab cache verify
 crab cache clean
 ```
 
@@ -30,7 +31,10 @@ For conceptual background, see [Local Cache](/docs/cli/storage/local-cache).
 
 ### stats
 
-Show cache size, hit rate, and entry count.
+Show the configured size limit, resident bytes, and entry count for the xet
+range cache, plus a size and object-count breakdown for Crab's local object
+cache. Range-cache entries are streamed on a blocking worker, so a large cache
+does not retain its complete file inventory or block the async runtime.
 
 ```bash
 crab cache stats
@@ -46,6 +50,13 @@ crab cache clean
 
 The current cache subcommands do not add command-specific selection flags;
 use `crab cache <command> --help` for global logging options.
+
+### verify
+
+Validate content-addressed chunks, shards, and xorbs plus xet range filenames,
+lengths, offset headers, and CRCs, then evict corrupt entries. Range entries are
+verified as they are scanned. I/O failures fail the command. For a non-mutating
+cleanup preview, use `crab optimize cache clean --dry-run`.
 
 ## Remote Cache Service
 

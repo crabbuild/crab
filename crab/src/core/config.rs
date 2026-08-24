@@ -2740,31 +2740,23 @@ pub fn build_metadb_config_from(
         cfg.cache_gc_grace = v;
     }
 
-    // Shared single-valued SlateDB tunables. file_index wins;
-    // chunk_index fills in any gap. When both are absent the struct
-    // default stands. Keeping the chunk_index values in the TOML
-    // surface lets operators declare them now so the future per-DB
-    // split is a no-op migration for the config file.
-    if let Some(v) = metadb_toml
-        .file_index
-        .compaction_threshold
-        .or(metadb_toml.chunk_index.db.compaction_threshold)
-    {
-        cfg.compaction_threshold = v;
+    if let Some(v) = metadb_toml.file_index.compaction_threshold {
+        cfg.file_index.compaction_threshold = v;
     }
-    if let Some(v) = metadb_toml
-        .file_index
-        .wal_flush_size
-        .or(metadb_toml.chunk_index.db.wal_flush_size)
-    {
-        cfg.wal_flush_size = v;
+    if let Some(v) = metadb_toml.file_index.wal_flush_size {
+        cfg.file_index.wal_flush_size = v;
     }
-    if let Some(v) = metadb_toml
-        .file_index
-        .bloom_bits_per_key
-        .or(metadb_toml.chunk_index.db.bloom_bits_per_key)
-    {
-        cfg.bloom_bits_per_key = v;
+    if let Some(v) = metadb_toml.file_index.bloom_bits_per_key {
+        cfg.file_index.bloom_bits_per_key = v;
+    }
+    if let Some(v) = metadb_toml.chunk_index.db.compaction_threshold {
+        cfg.chunk_index.compaction_threshold = v;
+    }
+    if let Some(v) = metadb_toml.chunk_index.db.wal_flush_size {
+        cfg.chunk_index.wal_flush_size = v;
+    }
+    if let Some(v) = metadb_toml.chunk_index.db.bloom_bits_per_key {
+        cfg.chunk_index.bloom_bits_per_key = v;
     }
 
     cfg
@@ -5209,11 +5201,10 @@ cache_gc_grace = 2
         let meta = cfg.build_metadb_config("org/my-repo");
         assert_eq!(meta.file_index_path, "org/my-repo/file_index_db/");
         assert_eq!(meta.chunk_index_path, ".crab/chunk_index_db/");
-        // Default compaction threshold lives on `MetaDbConfig::default`;
-        // TOML absent means the field is untouched.
-        assert_eq!(meta.compaction_threshold, 4);
-        assert_eq!(meta.wal_flush_size, 4 * 1024 * 1024);
-        assert_eq!(meta.bloom_bits_per_key, 10);
+        // Default engine tunables live on each metadata database.
+        assert_eq!(meta.file_index.compaction_threshold, 4);
+        assert_eq!(meta.file_index.wal_flush_size, 4 * 1024 * 1024);
+        assert_eq!(meta.file_index.bloom_bits_per_key, 10);
         assert_eq!(meta.cache_gc_grace, 3);
         assert_eq!(meta.in_memory_ceiling_bytes, 1024 * 1024 * 1024);
     }
@@ -5259,10 +5250,10 @@ cache_gc_grace = 5
         assert_eq!(meta.file_index_path, "toml/file_index_db/");
         assert_eq!(meta.chunk_index_path, "toml/chunk_index_db/");
 
-        // Shared-field tunables — file_index wins.
-        assert_eq!(meta.compaction_threshold, 8);
-        assert_eq!(meta.wal_flush_size, 8 * 1024 * 1024);
-        assert_eq!(meta.bloom_bits_per_key, 12);
+        // File-index engine tunables come from its TOML section.
+        assert_eq!(meta.file_index.compaction_threshold, 8);
+        assert_eq!(meta.file_index.wal_flush_size, 8 * 1024 * 1024);
+        assert_eq!(meta.file_index.bloom_bits_per_key, 12);
 
         // chunk_index-only — env overrides TOML.
         assert_eq!(meta.in_memory_ceiling_bytes, 256 * 1024 * 1024);
@@ -5273,10 +5264,7 @@ cache_gc_grace = 5
     }
 
     #[test]
-    fn build_metadb_config_chunk_index_fallback_for_shared_tunables() {
-        // When file_index omits a shared tunable, chunk_index's value
-        // is used. Documents the merging strategy today so a future
-        // split of the flat MetaDbConfig keeps known-good behavior.
+    fn build_metadb_config_applies_chunk_index_tunables() {
         let _guard = METADB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_metadb_env();
 
@@ -5286,9 +5274,9 @@ cache_gc_grace = 5
         cfg.metadb.chunk_index.db.bloom_bits_per_key = Some(15);
 
         let meta = cfg.build_metadb_config("org/my-repo");
-        assert_eq!(meta.compaction_threshold, 6);
-        assert_eq!(meta.wal_flush_size, 2 * 1024 * 1024);
-        assert_eq!(meta.bloom_bits_per_key, 15);
+        assert_eq!(meta.chunk_index.compaction_threshold, 6);
+        assert_eq!(meta.chunk_index.wal_flush_size, 2 * 1024 * 1024);
+        assert_eq!(meta.chunk_index.bloom_bits_per_key, 15);
     }
 
     #[test]

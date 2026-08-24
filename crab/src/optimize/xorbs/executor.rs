@@ -39,12 +39,14 @@ use crate::storage::store::Store;
 use crate::tier::restore::RestoreOrchestrator;
 use crab_storage::canonical_global_content_path;
 use crab_xet::xorb::builder::{FixedCompression, RunId, XorbBuilder};
-use crab_xet::xorb::format::CompressionScheme;
+use crab_xet::xorb::format::{CompressionScheme, MAX_XORB_SIZE};
 use crab_xet::xorb::parser::XorbParser;
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+const MAX_CORRUPT_REPORT_ENTRIES: usize = 1_024;
 
 /// Configuration for the xorb optimization executor.
 #[derive(Debug, Clone)]
@@ -233,7 +235,9 @@ pub async fn execute(
                     XorbStatus::Done => sources_done += 1,
                     XorbStatus::Corrupt => {
                         sources_corrupt += 1;
-                        corrupt_list.push(src_hash.clone());
+                        if corrupt_list.len() < MAX_CORRUPT_REPORT_ENTRIES {
+                            corrupt_list.push(src_hash.clone());
+                        }
                     }
                     XorbStatus::Skipped => sources_skipped += 1,
                 }
@@ -361,7 +365,10 @@ async fn process_single_xorb(
     // surface the real error if the object is truly inaccessible).
 
     // --- Step 3: Download source xorb (bounded by memory budget) ---
-    let src_bytes = match store.get_with_etag(&xorb_path).await {
+    let src_bytes = match store
+        .get_with_etag_bounded(&xorb_path, MAX_XORB_SIZE as u64)
+        .await
+    {
         Ok((bytes, _etag)) => bytes,
         Err(CrabError::NotFound { .. }) => {
             debug!(src_xorb = %src_hash, "source xorb not found; skipping");
@@ -461,6 +468,15 @@ async fn process_single_xorb(
         let dest_path = canonical_global_content_path("xorbs", &dest_hash);
         let dest_bytes = Bytes::copy_from_slice(&xorb_result.bytes);
         let written = dest_bytes.len() as u64;
+        if written > MAX_XORB_SIZE as u64 {
+            return Err(CrabError::Configuration {
+                key: "optimize xorbs destination size".to_owned(),
+                origin: format!(
+                    "destination xorb {dest_hash} is {written} bytes; bounded rewriting supports at most {} bytes",
+                    MAX_XORB_SIZE
+                ),
+            });
+        }
 
         // CAS put: if the xorb already exists (idempotent retry or
         // concurrent push wrote the same content), the put succeeds

@@ -53,6 +53,10 @@ pub enum WorkflowError {
     #[error("internal workflow error: {0}")]
     Internal(String),
 
+    /// The caller cancelled an in-progress workflow operation.
+    #[error("workflow operation cancelled")]
+    Cancelled,
+
     /// Experiment id string is not the canonical UUIDv7 form.
     #[error("experiment id {raw:?} is invalid: {reason}")]
     ExperimentIdInvalid {

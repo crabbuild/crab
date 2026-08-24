@@ -174,6 +174,26 @@ impl RefRegistry {
         self.complete_repos.insert(repo_prefix.to_owned());
     }
 
+    /// Replace one committed shard set while preserving concurrent candidates.
+    ///
+    /// Compaction passes the exact source set pinned before manifest CAS and
+    /// the exact replacement set committed by that CAS. Any other entries are
+    /// retained because they may protect an in-flight writer from GC.
+    pub fn reconcile_compaction(
+        &mut self,
+        repo_prefix: &str,
+        source_shards: &HashSet<String>,
+        replacement_shards: &[String],
+    ) {
+        self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
+        let entry = self.repos.entry(repo_prefix.to_owned()).or_default();
+        entry.retain(|hash| !source_shards.contains(hash));
+        entry.extend(replacement_shards.iter().cloned());
+        entry.sort();
+        entry.dedup();
+        self.complete_repos.insert(repo_prefix.to_owned());
+    }
+
     /// Mark bucket-wide repo discovery complete after a manifest repair scan.
     pub fn mark_coverage_complete(&mut self) {
         self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
@@ -792,6 +812,41 @@ pub async fn union_register_repo_shards(
     })
     .await
     .map(|record| record.generation)
+}
+
+/// Remove only the source shards replaced by a committed compaction.
+///
+/// Candidate roots added by concurrent writers remain registered. This may
+/// retain an extra root after a failed writer, but it cannot make live data
+/// collectible.
+#[cfg(feature = "storage")]
+pub async fn reconcile_compacted_repo_shards(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    source_shards: HashSet<String>,
+    replacement_shards: Vec<String>,
+) -> Result<u64> {
+    let registry_path = router.ref_registry_path();
+    let repo_prefix = router.repo_prefix().to_owned();
+    crab_storage::cas::cas_update_default::<RefRegistry, _>(
+        store,
+        registry_path.as_ref(),
+        |registry| {
+            let before = registry
+                .repos
+                .get(&repo_prefix)
+                .cloned()
+                .unwrap_or_default();
+            let was_complete = registry.complete_repos.contains(&repo_prefix);
+            registry.reconcile_compaction(&repo_prefix, &source_shards, &replacement_shards);
+            if registry.repos.get(&repo_prefix) != Some(&before) || !was_complete {
+                registry.generation += 1;
+            }
+        },
+    )
+    .await
+    .map(|registry| registry.generation)
+    .map_err(MetadataError::from)
 }
 
 /// Publish conservative workflow GC roots after immutable experiment
@@ -1469,6 +1524,48 @@ mod tests {
             store.get_with_etag(&target.ref_registry_path()).await,
             Err(crab_storage::StorageError::NotFound { .. })
         ));
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn compaction_reconciliation_preserves_concurrent_candidates() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        union_register_repo_shards(
+            &store,
+            &router,
+            vec!["source-a".to_owned(), "source-b".to_owned()],
+        )
+        .await
+        .unwrap();
+        union_register_repo_shards(&store, &router, vec!["concurrent".to_owned()])
+            .await
+            .unwrap();
+
+        reconcile_compacted_repo_shards(
+            &store,
+            &router,
+            HashSet::from(["source-a".to_owned(), "source-b".to_owned()]),
+            vec!["replacement".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        let (body, _) = store
+            .get_with_etag(&router.ref_registry_path())
+            .await
+            .unwrap();
+        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            registry.repos["org/models"],
+            vec!["concurrent".to_owned(), "replacement".to_owned()]
+        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ use crate::core::error::{CrabError, Result};
 /// Resolved LFS configuration.
 ///
 /// Built by layering defaults ← `.gitconfig` ← `.lfsconfig` ← env vars.
-/// Higher-priority sources override lower ones on a per-key basis.
+/// Higher-priority sources override lower ones on a per-key basis. Storage
+/// redirection is ignored in tracked `.lfsconfig` files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LfsConfig {
     /// Maximum concurrent upload/download transfers (1–100).
@@ -58,11 +59,21 @@ impl Default for LfsConfig {
 }
 
 impl LfsConfig {
+    /// Resolve the local LFS storage root against the common Git directory.
+    #[must_use]
+    pub fn storage_dir(&self, common_git_dir: &Path) -> PathBuf {
+        match self.lfs_dir.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => common_git_dir.join(path),
+            None => common_git_dir.join("lfs"),
+        }
+    }
+
     /// Resolve LFS configuration from all sources.
     ///
     /// Precedence (highest to lowest):
     /// 1. Environment variables (`GIT_LFS_*`)
-    /// 2. `.lfsconfig` in the repository root
+    /// 2. `.lfsconfig` in the repository root, except storage redirection
     /// 3. `.gitconfig` (local `.git/config` → global `~/.gitconfig` → system `/etc/gitconfig`)
     /// 4. Compiled defaults
     ///
@@ -85,7 +96,11 @@ impl LfsConfig {
         // Layer 2: .lfsconfig (overrides .gitconfig)
         let lfsconfig_path = repo_root.join(".lfsconfig");
         if lfsconfig_path.is_file() {
-            let values = parse_ini_lfs_section(&lfsconfig_path)?;
+            let mut values = parse_ini_lfs_section(&lfsconfig_path)?;
+            // A tracked file must not redirect local reads or destructive
+            // prune operations outside this repository's Git directory.
+            values.remove("storage");
+            values.remove("lfsdir");
             config.apply_ini_values(&values, &lfsconfig_path.display().to_string())?;
         }
 
@@ -128,6 +143,9 @@ impl LfsConfig {
             self.skip_download_errors = parse_bool(v, "lfs.skipdownloaderrors", origin)?;
         }
         if let Some(v) = values.get("lfsdir") {
+            self.lfs_dir = Some(PathBuf::from(v));
+        }
+        if let Some(v) = values.get("storage") {
             self.lfs_dir = Some(PathBuf::from(v));
         }
         if let Some(v) = values.get("transfer.maxbandwidth") {
@@ -511,7 +529,8 @@ mod tests {
     #[test]
     fn lfs_dir_override() {
         let dir = tempfile::tempdir().unwrap();
-        let lfsconfig = dir.path().join(".lfsconfig");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let lfsconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
         writeln!(f, "    lfsdir = /custom/lfs/path").unwrap();
@@ -519,6 +538,39 @@ mod tests {
 
         let config = LfsConfig::resolve(dir.path()).unwrap();
         assert_eq!(config.lfs_dir, Some(PathBuf::from("/custom/lfs/path")));
+    }
+
+    #[test]
+    fn standard_lfs_storage_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let lfsconfig = dir.path().join(".git/config");
+        let mut f = std::fs::File::create(&lfsconfig).unwrap();
+        writeln!(f, "[lfs]").unwrap();
+        writeln!(f, "    storage = relative-lfs-cache").unwrap();
+        drop(f);
+
+        let config = LfsConfig::resolve(dir.path()).unwrap();
+
+        assert_eq!(config.lfs_dir, Some(PathBuf::from("relative-lfs-cache")));
+        assert_eq!(
+            config.storage_dir(Path::new("/repo/.git")),
+            PathBuf::from("/repo/.git/relative-lfs-cache")
+        );
+    }
+
+    #[test]
+    fn tracked_lfsconfig_cannot_redirect_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let lfsconfig = dir.path().join(".lfsconfig");
+        let mut f = std::fs::File::create(&lfsconfig).unwrap();
+        writeln!(f, "[lfs]").unwrap();
+        writeln!(f, "    storage = /outside/repository").unwrap();
+        drop(f);
+
+        let config = LfsConfig::resolve(dir.path()).unwrap();
+
+        assert!(config.lfs_dir.is_none());
     }
 
     #[test]

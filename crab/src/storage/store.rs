@@ -186,9 +186,32 @@ impl Store {
             .map_err(CrabError::from)
     }
 
+    pub async fn get_with_etag_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(Bytes, ETag)> {
+        self.inner
+            .get_with_etag_bounded(path, max_bytes)
+            .await
+            .map_err(CrabError::from)
+    }
+
     pub async fn download_to_path(&self, path: &Path, dest: &std::path::Path) -> Result<u64> {
         self.inner
             .download_to_path(path, dest)
+            .await
+            .map_err(CrabError::from)
+    }
+
+    pub async fn download_to_path_bounded(
+        &self,
+        path: &Path,
+        dest: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<u64> {
+        self.inner
+            .download_to_path_bounded(path, dest, max_bytes)
             .await
             .map_err(CrabError::from)
     }
@@ -313,6 +336,30 @@ impl Store {
     ) -> Result<()> {
         self.inner
             .put_multipart_file_retry(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                part_size,
+                cancel,
+                on_part_done,
+            )
+            .await
+            .map_err(CrabError::from)
+    }
+
+    pub async fn put_multipart_file_retry_with_xet_hash(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
+        self.inner
+            .put_multipart_file_retry_with_xet_hash(
                 path,
                 file_path,
                 size,

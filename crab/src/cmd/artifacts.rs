@@ -8,6 +8,7 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 use fs4::fs_std::FileExt as LockFileExt;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
@@ -555,8 +556,9 @@ fn remote_context(root: &Path) -> Result<Option<(crate::workflow::WorkflowStore,
         Err(error) => return Err(error),
     }
     let config = crate::core::config::Config::resolve_for_repo(root)?;
+    let cancel = CancellationToken::new();
     let (store, prefix) = crate::cmd::lfs::block_on_runtime(
-        crate::cmd::workflow::build_remote_store_for(root, &config, None),
+        crate::cmd::workflow::build_remote_store_for(root, &config, None, &cancel),
     )?;
     Ok(Some((store, prefix)))
 }

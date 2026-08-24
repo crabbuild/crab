@@ -37,7 +37,12 @@ pub use crab_cache::{
 };
 pub use crab_vfs::ChunkCache;
 pub use hydrated_pointer::{HydratedEntry, HydratedPointerCache};
-pub use xet_chunk_cache::{XetChunkCacheHandle, XetChunkCacheStats, xet_chunk_cache_from_config};
+pub use xet_chunk_cache::{
+    XetChunkCacheHandle, XetChunkCachePruneStats, XetChunkCacheStats, XetChunkCacheVerifyStats,
+    prune_xet_chunk_cache, prune_xet_chunk_cache_with_cancel, verify_xet_chunk_cache,
+    verify_xet_chunk_cache_with_cancel, xet_chunk_cache_from_config, xet_chunk_cache_stats,
+    xet_chunk_cache_stats_with_cancel,
+};
 
 /// Return the bucket-global persistent chunk-index cache path.
 pub(crate) fn chunk_index_cache_path(cache_root: &Path, identity: &BucketIdentity) -> PathBuf {

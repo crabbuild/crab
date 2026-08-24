@@ -19,6 +19,15 @@ use crate::store::Store;
 /// Default maximum CAS attempts before returning `StateConflict`.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 10;
 
+/// Maximum JSON object size loaded or written by the default CAS loop.
+///
+/// CAS objects include shared ref registries and other coordination metadata.
+/// Keeping this limit in the storage layer prevents a malformed or unbounded
+/// coordination object from turning every CAS caller into an arbitrary-memory
+/// read. Callers with a smaller domain-specific limit should use
+/// [`cas_update_bounded`].
+pub const MAX_CAS_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+
 const CAS_BACKOFF_BASE: Duration = Duration::from_millis(50);
 const CAS_BACKOFF_CAP: Duration = Duration::from_millis(500);
 
@@ -37,6 +46,31 @@ where
     T: Serialize + for<'de> Deserialize<'de> + Default + Clone,
     F: Fn(&mut T),
 {
+    cas_update_bounded(store, path, max_attempts, MAX_CAS_OBJECT_BYTES, mutate).await
+}
+
+/// Updates one JSON object with an explicit read/write size ceiling.
+///
+/// Existing objects are rejected before their body is consumed when the
+/// provider advertises a size above `max_bytes`. Newly serialized values are
+/// checked before the conditional write as well, so a successful update can
+/// never create an object the next CAS attempt would refuse to read.
+///
+/// # Errors
+///
+/// Returns [`StorageError::CorruptObject`] when an existing or newly serialized
+/// object exceeds `max_bytes`.
+pub async fn cas_update_bounded<T, F>(
+    store: &Store,
+    path: &str,
+    max_attempts: u32,
+    max_bytes: u64,
+    mutate: F,
+) -> Result<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Default + Clone,
+    F: Fn(&mut T),
+{
     let obj_path = Path::from(path);
     let max = if max_attempts == 0 {
         DEFAULT_MAX_ATTEMPTS
@@ -45,7 +79,7 @@ where
     };
 
     for attempt in 0..max {
-        let (mut value, etag) = match store.get_with_etag(&obj_path).await {
+        let (mut value, etag) = match store.get_with_etag_bounded(&obj_path, max_bytes).await {
             Ok((body, etag)) => {
                 let parsed: T = serde_json::from_slice(&body).map_err(|source| {
                     StorageError::CorruptObject {
@@ -62,6 +96,15 @@ where
         mutate(&mut value);
         let new_body = serde_json::to_vec(&value)
             .map_err(|source| StorageError::Internal(format!("CAS serialize: {source}")))?;
+        let new_size = u64::try_from(new_body.len()).unwrap_or(u64::MAX);
+        if new_size > max_bytes {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: format!(
+                    "serialized CAS object is {new_size} bytes; bounded update supports at most {max_bytes} bytes"
+                ),
+            });
+        }
         let new_bytes = Bytes::from(new_body);
 
         let write_result = match etag {
@@ -173,6 +216,40 @@ mod tests {
 
         assert_eq!(result.generation, 2);
         assert_eq!(result.entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bounded_cas_rejects_oversized_existing_object() {
+        let store = memory_store();
+        let path = Path::from("repo/oversized-cas");
+        store
+            .put(&path, Bytes::from_static(b"0123456789"))
+            .await
+            .unwrap();
+
+        let error = cas_update_bounded::<TestManifest, _>(&store, path.as_ref(), 3, 9, |_| {})
+            .await
+            .expect_err("bounded CAS must reject an oversized existing object");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn bounded_cas_rejects_oversized_serialized_update() {
+        let store = memory_store();
+        let path = "repo/oversized-cas-write";
+
+        let error = cas_update_bounded::<TestManifest, _>(&store, path, 3, 8, |manifest| {
+            manifest.entries.push("0123456789".to_owned())
+        })
+        .await
+        .expect_err("bounded CAS must reject an oversized serialized update");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert!(matches!(
+            store.get_with_etag(&Path::from(path)).await,
+            Err(StorageError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

@@ -465,12 +465,12 @@ crab lfs prune [OPTIONS]
 | `--verbose`, `-v` | Print full object IDs in prune output |
 
 Prune protects objects referenced by the current checkout, stashes, other
-worktree checkouts, recent refs, recent commits, and commits not pushed to the
-configured prune remote. The recent window follows `lfs.fetchrecentrefsdays`,
-`lfs.fetchrecentremoterefs`, `lfs.fetchrecentcommitsdays`, and
-`lfs.pruneoffsetdays`. `--recent` disables recent protection. With `--force`,
-Crab follows Git LFS by also disabling recent protection while still preserving
-unpushed objects.
+worktree checkouts, the staged Git index, recent refs, recent commits, and
+commits not pushed to the configured prune remote. The recent window follows
+`lfs.fetchrecentrefsdays`, `lfs.fetchrecentremoterefs`,
+`lfs.fetchrecentcommitsdays`, and `lfs.pruneoffsetdays`. `--recent` disables
+only recent protection. `--force` skips the deletion confirmation; it does not
+change which objects are protected.
 
 With `--verify-remote`, prune HEAD-checks candidates in the configured LFS
 object store before deleting them locally. Reachable candidates are always
@@ -480,7 +480,19 @@ flag, prune only reasons about the local cache.
 
 With `--verify-remote`, Crab matches Git LFS and defaults
 `--when-unverified` to `halt`. Without remote verification, the option defaults
-to `continue` because no remote check can fail.
+to `continue` because no remote check can fail. When neither CLI override is
+present, `lfs.pruneverifyremotealways` and
+`lfs.pruneverifyunreachablealways` supply the verification defaults. Remote
+checks are bounded by `lfs.concurrenttransfers` and processed in bounded
+batches. Git revision and index discovery streams fixed-size object batches,
+and `cat-file --batch-check` excludes non-blob and oversized objects before
+their contents are read.
+
+Prune honors `lfs.storage`; a relative value is resolved inside the common Git
+directory, matching Git LFS. Do not prune when multiple repositories share one
+custom storage directory. Crab locks concurrent prune runs, rejects malformed
+or incomplete Git scans, validates each content-addressed object immediately
+before unlinking it, and exits nonzero if any deletion fails.
 
 ---
 
@@ -494,16 +506,25 @@ crab lfs convert --from xet --to lfs <PATH>
 crab lfs convert --rollback
 ```
 
-Direct conversion updates the index, working tree, and `.gitattributes` for
-matching paths. LFS-to-Crab conversion resolves the LFS object bytes, writes
-them into the working tree, and runs the native Crab add path so chunk data and
-metadata are staged together. Crab-to-LFS conversion verifies hydrated bytes,
-writes the local LFS object, uploads it to the configured LFS store, and stages
-the LFS pointer.
+Direct conversion requires a clean worktree and updates only indexed paths that
+match both the pattern and source pointer format. It preserves executable index
+modes. LFS-to-Crab conversion streams and verifies the LFS object bytes, writes
+them atomically into the working tree, and runs the native Crab add path so
+chunk data and metadata are staged together. Crab-to-LFS conversion streams and
+verifies hydrated bytes, atomically installs the local LFS object, uploads it to
+the configured LFS store, and stages the LFS pointer without collecting a large
+file in memory.
 
-Before changing files, Crab writes `.git/crab-lfs-convert-state.json`.
-`crab lfs convert --rollback` restores the previous index blobs and
-`.gitattributes` from that manifest.
+Conversion and rollback share an exclusive repository lock. Before changing
+files, Crab atomically writes `.git/crab-lfs-convert-state.json`; a new
+conversion replaces the prior completed conversion manifest. A failed
+conversion automatically rolls back. `crab lfs convert --rollback` preflights
+all affected files, refuses to overwrite post-conversion user edits, then
+restores exact `.gitattributes` bytes, index blobs, executable modes, and source
+pointer checkouts from the latest manifest. Candidate discovery streams the
+Git index in fixed-size batches and prefilters non-pointer-sized blobs before
+reading content; memory still scales with the matching files retained in the
+rollback manifest, not with every indexed file.
 
 ---
 
@@ -743,13 +764,18 @@ crab lfs dedup --crab-cache [--dry-run]
 Default dedup follows Git LFS semantics: it requires a clean working tree, no
 configured LFS extensions, and filesystem support for copy-on-write file
 cloning. It re-creates checked-out LFS files as copy-on-write clones of their
-objects under `.git/lfs/objects`.
+objects under the configured LFS storage directory. Before any replacement,
+Crab verifies every cache object and checkout against the indexed SHA-256 and
+size and rejects symlinks and non-regular files. `--dry-run` performs the same
+preflight without modifying files or requiring a copy-on-write probe.
 
 With `--crab-cache`, Crab runs its older cache cleanup mode. That mode removes
 only local LFS cache objects whose path SHA-256 matches their contents, whose
 size and Blake3 hash match a Crab pointer reachable from the index or local
 refs, and whose bytes are reconstructed identically from the local Crab staging
 area. Unverified objects are skipped and remain in the local LFS cache.
+Deletion failures make the command fail instead of reporting a partial cleanup
+as successful.
 
 ---
 

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
 use tracing::info;
 
 use crate::error::{MetadataError, Result};
@@ -32,10 +32,90 @@ pub struct PersistentChunkIndex {
     path: PathBuf,
 }
 
+/// Non-mutating summary of an existing persistent chunk index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistentChunkIndexStats {
+    /// Number of cached chunk-to-xorb mappings.
+    pub entry_count: u64,
+    /// Number of shard installation receipts.
+    pub installed_shard_count: u64,
+    /// Last remote GC generation observed by this cache.
+    pub cache_gc_generation: u64,
+}
+
 static SHARED_INDICES: OnceLock<Mutex<HashMap<PathBuf, Weak<PersistentChunkIndex>>>> =
     OnceLock::new();
 
 impl PersistentChunkIndex {
+    /// Inspect an existing index through a read-only SQLite connection.
+    ///
+    /// Returns `None` when the database file does not exist. Unlike
+    /// [`Self::open_or_create`], this never creates, migrates, repairs, or
+    /// replaces the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existing database cannot be read or does not
+    /// use the current persistent chunk-index schema.
+    pub fn inspect(path: &Path) -> Result<Option<PersistentChunkIndexStats>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(map_sqlite_err)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_sqlite_err)?;
+        let schema: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta_v1 WHERE key = ?1",
+                params![SCHEMA_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite_err)?;
+        if schema.as_deref() != Some(SCHEMA_VERSION) {
+            return Err(MetadataError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!("unexpected schema version {schema:?}"),
+            });
+        }
+        let count = |table: &str| -> Result<u64> {
+            let value: i64 = conn
+                .query_row(&format!("SELECT COUNT(1) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .map_err(map_sqlite_err)?;
+            u64::try_from(value).map_err(|error| {
+                MetadataError::Internal(format!("negative row count for {table}: {error}"))
+            })
+        };
+        let raw_generation: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta_v1 WHERE key = ?1",
+                params![CACHE_GC_GENERATION_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite_err)?;
+        let cache_gc_generation = match raw_generation {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|error| MetadataError::CorruptObject {
+                    path: path.display().to_string(),
+                    reason: format!("cache_gc_generation not a u64: {raw:?} ({error})"),
+                })?,
+            None => 0,
+        };
+        Ok(Some(PersistentChunkIndexStats {
+            entry_count: count("chunks_v1")?,
+            installed_shard_count: count("shards_v1")?,
+            cache_gc_generation,
+        }))
+    }
+
     /// Open or reuse the process-wide handle for an index path.
     ///
     /// SQLite permits multiple live connections, but sharing one handle per
@@ -901,6 +981,35 @@ mod tests {
         let idx = PersistentChunkIndex::open_or_create(&path).unwrap();
         assert_eq!(idx.get(&hash(10)).unwrap(), Some(xorb_ref(100, 0)));
         assert_eq!(idx.installed_shards().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn inspect_is_read_only_and_counts_without_loading_rows() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("chunk-index.sqlite");
+        let idx = PersistentChunkIndex::open_or_create(&path).unwrap();
+        idx.install_shard(
+            hash(1),
+            &[(hash(10), xorb_ref(100, 0)), (hash(11), xorb_ref(100, 1))],
+        )
+        .unwrap();
+        idx.set_cache_gc_generation(7).unwrap();
+        drop(idx);
+
+        let stats = PersistentChunkIndex::inspect(&path).unwrap().unwrap();
+
+        assert_eq!(stats.entry_count, 2);
+        assert_eq!(stats.installed_shard_count, 1);
+        assert_eq!(stats.cache_gc_generation, 7);
+    }
+
+    #[test]
+    fn inspect_missing_index_does_not_create_it() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("missing.sqlite");
+
+        assert_eq!(PersistentChunkIndex::inspect(&path).unwrap(), None);
+        assert!(!path.exists());
     }
 
     #[test]

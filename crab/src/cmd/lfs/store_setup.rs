@@ -37,11 +37,23 @@ pub async fn resolve_lfs_remote_for_operation_with_remote(
     operation: &str,
     remote: Option<&str>,
 ) -> Result<LfsRemoteContext> {
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    resolve_lfs_remote_for_operation_with_remote_from(operation, remote, &cwd).await
+}
+
+/// Resolve the LFS store using the worktree containing `repo_root`.
+pub async fn resolve_lfs_remote_for_operation_with_remote_from(
+    operation: &str,
+    remote: Option<&str>,
+    repo_root: &Path,
+) -> Result<LfsRemoteContext> {
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
+    let repo_root = &worktree.current_worktree_root;
     let url = match remote {
-        Some(name) => read_git_remote_url(name)?,
-        None => read_repo_remote_url()?,
+        Some(name) => read_git_remote_url_from(name, repo_root)?,
+        None => read_repo_remote_url_from(repo_root)?,
     };
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+    let config = crate::core::config::Config::resolve_for_repo(repo_root)?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
     let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
@@ -99,14 +111,9 @@ pub async fn resolve_lfs_remote_for_operation_with_remote(
         }
     };
 
-    let repo_root = std::env::current_dir()?;
-    let lfs_config = LfsConfig::resolve(&repo_root)?;
+    let lfs_config = LfsConfig::resolve(repo_root)?;
 
-    let git_dir = discover_git_dir()?;
-    let local_lfs_dir = lfs_config
-        .lfs_dir
-        .clone()
-        .unwrap_or_else(|| git_dir.join("lfs"));
+    let local_lfs_dir = lfs_config.storage_dir(&worktree.common_git_dir);
 
     Ok(LfsRemoteContext {
         store: lfs_store,
@@ -162,10 +169,22 @@ pub fn resolve_lfs_remote_for_operation_with_remote_sync(
     operation: &str,
     remote: Option<&str>,
 ) -> Result<LfsRemoteContext> {
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    resolve_lfs_remote_for_operation_with_remote_sync_from(operation, remote, &cwd)
+}
+
+/// Synchronous wrapper for resolving an operation-scoped LFS store from an explicit worktree.
+pub fn resolve_lfs_remote_for_operation_with_remote_sync_from(
+    operation: &str,
+    remote: Option<&str>,
+    repo_root: &Path,
+) -> Result<LfsRemoteContext> {
     let operation = operation.to_owned();
     let remote = remote.map(ToOwned::to_owned);
+    let repo_root = repo_root.to_owned();
     super::block_on_runtime(async move {
-        resolve_lfs_remote_for_operation_with_remote(&operation, remote.as_deref()).await
+        resolve_lfs_remote_for_operation_with_remote_from(&operation, remote.as_deref(), &repo_root)
+            .await
     })
 }
 
@@ -178,7 +197,15 @@ fn is_lfs_read_operation(operation: &str) -> bool {
 
 /// Read the remote URL from `.crab/config.toml`.
 pub(crate) fn read_repo_remote_url() -> Result<String> {
-    let config_path = std::path::PathBuf::from(".crab/config.toml");
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let repo_root =
+        crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?.current_worktree_root;
+    read_repo_remote_url_from(&repo_root)
+}
+
+pub(super) fn read_repo_remote_url_from(repo_root: &Path) -> Result<String> {
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
+    let config_path = worktree.shared_crab_dir.join("config.toml");
     if config_path.is_file() {
         let content =
             std::fs::read_to_string(&config_path).map_err(|e| CrabError::Configuration {
@@ -198,10 +225,7 @@ pub(crate) fn read_repo_remote_url() -> Result<String> {
         }
     }
 
-    let remote_path = crate::git::discover::resolve_crab_dir().map_or_else(
-        || std::path::PathBuf::from(".crab/remote"),
-        |d| d.join("remote"),
-    );
+    let remote_path = worktree.shared_crab_dir.join("remote");
     if remote_path.is_file() {
         let url = std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
             key: format!("failed to read .crab/remote: {e}"),
@@ -213,8 +237,9 @@ pub(crate) fn read_repo_remote_url() -> Result<String> {
         }
     }
 
-    let output = std::process::Command::new("git")
+    let output = git_command(repo_root)
         .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
         .output()
         .ok();
     if let Some(o) = output
@@ -232,12 +257,8 @@ pub(crate) fn read_repo_remote_url() -> Result<String> {
     })
 }
 
-fn read_git_remote_url(name: &str) -> Result<String> {
-    read_git_remote_url_from(name, Path::new("."))
-}
-
 fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {
-    let output = std::process::Command::new("git")
+    let output = git_command(repo_root)
         .args(["remote", "get-url", name])
         .current_dir(repo_root)
         .output()
@@ -264,9 +285,19 @@ fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {
     Ok(url)
 }
 
-/// Discover the .git directory.
-fn discover_git_dir() -> Result<PathBuf> {
-    crate::git::discover::discover_common_git_dir()
+fn git_command(repo_root: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .current_dir(repo_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
+        .env_remove("GIT_NAMESPACE");
+    command
 }
 
 /// Get the current user identity from git config for lock operations.

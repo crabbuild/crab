@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::OutputMode;
 use crate::core::pattern::build_filter;
 use crab_git::lfs_pointer::LfsPointer;
@@ -108,6 +108,18 @@ pub fn run_convert(
     Ok(())
 }
 
+/// Run conversion while honoring a caller's cancellation boundary.
+pub fn run_convert_with_cancel(
+    direction: ConvertDirection,
+    pattern: &str,
+    dry_run: bool,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    run_convert(direction, pattern, dry_run, repo_root)
+}
+
 /// Restore the index and `.gitattributes` from the last conversion manifest.
 pub fn run_rollback(repo_root: &Path) -> Result<()> {
     let manifest_path = manifest_path(repo_root)?;
@@ -141,6 +153,12 @@ pub fn run_rollback(repo_root: &Path) -> Result<()> {
     std::fs::remove_file(&manifest_path).map_err(CrabError::Io)?;
     eprintln!("convert: rolled back {} file(s)", manifest.files.len());
     Ok(())
+}
+
+/// Roll back a conversion while honoring a caller's cancellation boundary.
+pub fn run_rollback_with_cancel(repo_root: &Path, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    run_rollback(repo_root)
 }
 
 fn convert_lfs_to_crab(

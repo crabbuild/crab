@@ -8,12 +8,12 @@ and grouping profile for cost and performance optimization. This is not
 
 | Profile | Target xorb | Max xorbs/file | Group by | Compression |
 |---------|-------------|----------------|----------|-------------|
-| `ml` | 256 MiB | 4 | File | Zstd(3) |
-| `dataset` | 64 MiB | unlimited | Directory | Zstd(5) |
-| `code` | 16 MiB | unlimited | Hash | Zstd(9) |
+| `ml` | 256 MiB | — | — | LZ4 |
+| `dataset` | 64 MiB | — | — | LZ4 |
+| `code` | 16 MiB | — | — | LZ4 |
 
-When `--profile` is omitted, Crab scans the file index and selects a
-profile from median file size:
+When `--profile` is omitted, Crab scans the live xorb inventory and selects a
+profile from median source-object size:
 
 - p50 > 100 MiB: `ml`
 - p50 >= 1 MiB: `dataset`
@@ -26,9 +26,7 @@ Custom profiles live in `.crab/config.toml`:
 ```toml
 [optimize.xorbs.profiles.my-profile]
 target_xorb_bytes = 134217728   # 128 MiB
-max_xorbs_per_file = 8
-group_by = "file"
-compression = "zstd:5"
+compression = "lz4"
 ```
 
 Custom profiles live under the same command namespace as `crab optimize xorbs`.
@@ -42,9 +40,10 @@ crab optimize xorbs --profile ml --dry-run
 crab optimize xorbs --profile ml --dry-run --json
 ```
 
-`--dry-run` is the supported optimization path today. It lists the live
-source xorbs, obtains their sizes and storage classes, and produces an
-estimate without writing remote objects.
+`--dry-run` lists the live source xorbs, obtains their sizes and storage
+classes, and produces an estimate without writing remote objects. The
+inventory is disk-backed and bounded; malformed manifests fail closed before
+unbounded download or HEAD fan-out.
 
 Apply the rewrite:
 
@@ -52,9 +51,10 @@ Apply the rewrite:
 crab optimize xorbs --profile ml --apply
 ```
 
-Apply currently fails closed after configuration validation. The executor can
-write destination xorbs, but the file-index/shard manifest reconciliation
-needed for readers to resolve those destinations is not implemented yet.
+Apply writes immutable destination xorbs, records progress in a WAL journal,
+and reconciles file-index and shard metadata through a manifest CAS. If the
+process is interrupted, rerun with `--resume`; uploaded immutable objects are
+safe to reuse and old objects remain eligible for normal garbage collection.
 
 Resume an interrupted run:
 
@@ -81,7 +81,6 @@ Archive-class source xorbs are restored before processing when included:
 
 - `--include-cold=false`: skip archive xorbs.
 - `--restore-tier=<tier>`: restore tier for archive sources.
-- `--output-class=<class>`: storage class for destination xorbs.
 
 ## Structured Output
 

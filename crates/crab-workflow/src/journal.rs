@@ -638,6 +638,57 @@ impl Journal {
         }
         Ok(out)
     }
+
+    /// Return every stage row while refusing to materialize an oversized
+    /// journal in memory.
+    pub fn all_stage_rows_with_limit(
+        &self,
+        run_id: Uuid,
+        max_rows: usize,
+    ) -> Result<Vec<StageRunRow>> {
+        let limit = i64::try_from(max_rows)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| CrabError::Configuration {
+                key: "workflow journal stage row limit".to_owned(),
+                origin: "limit cannot be represented by SQLite".to_owned(),
+            })?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT run_id, stage_name, attempt, state, stage_hash, pid,
+                        exit_code, signal, timed_out, started_at, updated_at,
+                        stderr_tail, payload_json
+                 FROM stage_runs
+                 WHERE run_id = ?1
+                 ORDER BY stage_name, attempt
+                 LIMIT ?2",
+            )
+            .map_err(|source| CrabError::WorkflowJournalOpen {
+                path: self.path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![run_id.to_string(), limit], Self::map_stage_row)
+            .map_err(|source| CrabError::WorkflowJournalOpen {
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut out = Vec::with_capacity(max_rows.min(1024));
+        for row in rows {
+            out.push(row.map_err(|source| CrabError::WorkflowJournalOpen {
+                path: self.path.clone(),
+                source,
+            })?);
+        }
+        if out.len() > max_rows {
+            return Err(CrabError::Configuration {
+                key: "workflow journal stage row count".to_owned(),
+                origin: format!("journal {run_id} contains more than {max_rows} stage rows"),
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// Map a rusqlite error to the appropriate `CrabError`. Detects

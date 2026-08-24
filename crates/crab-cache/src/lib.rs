@@ -27,7 +27,8 @@ pub use error::{CacheError, Result};
 pub use key::CacheKey;
 #[cfg(feature = "local-cache")]
 pub use local_cache::{
-    CacheStats, CachedXorbCandidate, LocalCache, PruneObjectKind, PruneOptions, PruneStats,
+    CacheStats, CachedXorbCandidate, LocalCache, MAX_CACHE_CHUNK_BYTES, MAX_CACHE_MANIFEST_BYTES,
+    MAX_CACHE_SHARD_BYTES, MAX_CACHE_STAGE_BYTES, PruneObjectKind, PruneOptions, PruneStats,
     PrunedCacheObject, VerifyReport,
 };
 pub use path_class::cache_key_for_path;
@@ -41,6 +42,12 @@ pub use service::{
     CacheServiceLimits, CacheServiceMode, DedupQueryResult, KnownChunk,
 };
 #[cfg(feature = "local-cache")]
-pub use shard_hints::{SHARD_HINTS_FILENAME, ShardHintCache, default_path as shard_hints_path};
+pub use shard_hints::{
+    MAX_SHARD_HINTS_BYTES, SHARD_HINTS_FILENAME, ShardHintCache, default_path as shard_hints_path,
+};
 #[cfg(feature = "xet-chunk-cache")]
-pub use xet_chunk_cache::{XetChunkCacheHandle, XetChunkCacheStats};
+pub use xet_chunk_cache::{
+    XetChunkCacheHandle, XetChunkCachePruneStats, XetChunkCacheStats, XetChunkCacheVerifyStats,
+    prune_xet_chunk_cache, prune_xet_chunk_cache_with_cancel, verify_xet_chunk_cache,
+    verify_xet_chunk_cache_with_cancel, xet_chunk_cache_stats, xet_chunk_cache_stats_with_cancel,
+};

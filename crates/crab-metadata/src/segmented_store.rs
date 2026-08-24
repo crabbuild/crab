@@ -15,6 +15,8 @@ use crate::segmented::{
 
 const MAX_SEGMENT_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STREAMED_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BOUNDED_METADATA_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_METADATA_RECORDS: u64 = 1_000_000;
 
 fn content_hash(path: &object_store::path::Path, value: &str) -> Result<[u8; 32]> {
     blake3::Hash::from_hex(value)
@@ -61,16 +63,81 @@ pub async fn read_records<T: for<'de> Deserialize<'de>>(
     kind: SegmentKind,
     index_hash: &str,
 ) -> Result<Vec<T>> {
+    read_records_with_limit(store, router, kind, index_hash, MAX_METADATA_RECORDS).await
+}
+
+/// Read records while enforcing a cardinality and byte budget before bodies
+/// are downloaded or decoded.
+pub async fn read_records_with_limit<T: for<'de> Deserialize<'de>>(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    kind: SegmentKind,
+    index_hash: &str,
+    max_records: u64,
+) -> Result<Vec<T>> {
     let index = read_index(store, router, kind, index_hash).await?;
-    let mut out = Vec::with_capacity(index.total_records as usize);
+    if index.total_records > max_records {
+        return Err(MetadataError::CorruptObject {
+            path: index_relative_path(kind, index_hash),
+            reason: format!(
+                "{} metadata index declares {} records, exceeding safety limit {max_records}",
+                kind.as_str(),
+                index.total_records
+            ),
+        });
+    }
+    if index.total_bytes > MAX_BOUNDED_METADATA_BYTES {
+        return Err(MetadataError::CorruptObject {
+            path: index_relative_path(kind, index_hash),
+            reason: format!(
+                "{} metadata index declares {} bytes, exceeding bounded read limit of {MAX_BOUNDED_METADATA_BYTES} bytes",
+                kind.as_str(),
+                index.total_bytes
+            ),
+        });
+    }
+    let capacity = usize::try_from(index.total_records).unwrap_or(0);
+    let mut out = Vec::with_capacity(capacity);
     for segment in &index.segments {
+        if segment.bytes > MAX_BOUNDED_METADATA_BYTES {
+            return Err(MetadataError::CorruptObject {
+                path: segment.path.clone(),
+                reason: format!(
+                    "{} metadata segment declares {} bytes, exceeding bounded read limit of {MAX_BOUNDED_METADATA_BYTES} bytes",
+                    kind.as_str(),
+                    segment.bytes
+                ),
+            });
+        }
         let path = router.repo_path(&segment.path);
         let expected = content_hash(&path, &segment.hash)?;
-        let body = store.verify(&path, &expected).await?;
+        let body = read_verified_bounded(store, &path, &expected).await?;
         let mut records = parse_segment_records::<T>(kind, segment, &body, path.as_ref())?;
         out.append(&mut records);
     }
     Ok(out)
+}
+
+async fn read_verified_bounded(
+    store: &Store,
+    path: &object_store::path::Path,
+    expected: &[u8; 32],
+) -> Result<Bytes> {
+    let (body, _) = store
+        .get_with_etag_bounded(path, MAX_BOUNDED_METADATA_BYTES)
+        .await?;
+    let actual = *blake3::hash(&body).as_bytes();
+    if actual != *expected {
+        return Err(MetadataError::CorruptObject {
+            path: path.as_ref().to_owned(),
+            reason: format!(
+                "expected blake3 {}, got {}",
+                blake3::Hash::from_bytes(*expected).to_hex(),
+                blake3::Hash::from_bytes(actual).to_hex()
+            ),
+        });
+    }
+    Ok(body)
 }
 
 /// Visit records in an ordered segment index without retaining the complete

@@ -15,5 +15,5 @@ pub mod shard_sync;
 // without poking into submodules.
 pub use metadb::{
     CacheDriftOutcome, ChunkIndexStore, Db, DbTarget, FileIndexStore, MetaDb, MetaDbConfig,
-    MetaDbGuard, PushWriteReceipt, SystemKeySnapshot, Transaction, XorbRef,
+    MetaDbEngineConfig, MetaDbGuard, PushWriteReceipt, SystemKeySnapshot, Transaction, XorbRef,
 };

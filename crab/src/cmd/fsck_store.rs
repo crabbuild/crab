@@ -29,6 +29,10 @@ use crab_storage::repo_pack_path;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 
+const MAX_FSCK_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
+const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
+
 /// Store-backed fsck checker that queries real object storage.
 pub struct StoreChecker {
     store: Store,
@@ -123,7 +127,11 @@ impl StoreChecker {
             };
             let shard_path = self.router.global_path("shards", shard_hex);
             let path = Path::from(shard_path.as_ref());
-            let body = match self.store.get_with_etag(&path).await {
+            let body = match self
+                .store
+                .get_with_etag_bounded(&path, MAX_FSCK_SHARD_BYTES)
+                .await
+            {
                 Ok((body, _)) => body,
                 Err(CrabError::NotFound { .. }) => continue,
                 Err(e) => return Err(e),
@@ -373,7 +381,11 @@ impl FsckChecker for StoreChecker {
             let ref_keys = self.list_keys("refs").await?;
             for ref_key in &ref_keys {
                 let path = Path::from(ref_key.as_str());
-                match self.store.get_with_etag(&path).await {
+                match self
+                    .store
+                    .get_with_etag_bounded(&path, MAX_FSCK_REF_BYTES)
+                    .await
+                {
                     Ok((body, _)) => {
                         let sha = String::from_utf8_lossy(&body).trim().to_string();
                         if sha.is_empty() {
@@ -414,7 +426,11 @@ impl FsckChecker for StoreChecker {
             let mut checked_xorbs = HashSet::new();
             for shard_hash in &shard_list.entries {
                 let shard_path = self.router.global_path("shards", shard_hash);
-                let body = match self.store.get_with_etag(&shard_path).await {
+                let body = match self
+                    .store
+                    .get_with_etag_bounded(&shard_path, MAX_FSCK_SHARD_BYTES)
+                    .await
+                {
                     Ok((body, _etag)) => body,
                     Err(CrabError::NotFound { .. }) => {
                         issues.push(FsckIssue::orphan_shard(shard_hash));
@@ -485,7 +501,11 @@ impl FsckChecker for StoreChecker {
                     continue;
                 }
                 let path = Path::from(lock_key.as_str());
-                match self.store.get_with_etag(&path).await {
+                match self
+                    .store
+                    .get_with_etag_bounded(&path, MAX_FSCK_LOCK_BYTES)
+                    .await
+                {
                     Ok((body, _)) => {
                         if let Ok(payload) = serde_json::from_slice::<PushLockPayload>(&body)
                             && payload.is_expired_at(now_unix)
@@ -609,7 +629,11 @@ impl StoreRepairer {
 
         let shard_path = self.router.global_path("shards", &shard_hash.hex());
         let path = Path::from(shard_path.as_ref());
-        let body = match self.store.get_with_etag(&path).await {
+        let body = match self
+            .store
+            .get_with_etag_bounded(&path, MAX_FSCK_SHARD_BYTES)
+            .await
+        {
             Ok((body, _)) => body,
             Err(CrabError::NotFound { .. }) => return Ok(false),
             Err(e) => return Err(e),

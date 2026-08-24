@@ -328,10 +328,10 @@ impl LifecycleProvider for S3LifecycleProvider {
     }
 
     async fn put(&self, doc: &RenderedLifecycle, _guard: Option<Guard>) -> Result<PutOutcome> {
-        // S3 PutBucketLifecycleConfiguration does not support
-        // conditional writes (no If-Match header). The CAS retry logic
-        // in apply.rs handles conflict detection by re-reading after
-        // each put.
+        // S3 PutBucketLifecycleConfiguration does not support conditional
+        // writes (no If-Match header). The tier apply boundary rejects this
+        // provider for mutation; this method remains available to the raw
+        // provider API, whose caller owns any last-writer-wins trade-off.
         //
         // We build SDK-typed `LifecycleRule`s from our `TierPlan` rules
         // rather than sending raw XML, because the SDK serializes the
@@ -361,11 +361,37 @@ impl LifecycleProvider for S3LifecycleProvider {
         })
     }
 
+    async fn delete(&self, _guard: Option<Guard>) -> Result<PutOutcome> {
+        self.client
+            .delete_bucket_lifecycle()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|e| map_s3_service_error("DeleteBucketLifecycle", &e.into_service_error()))?;
+        Ok(PutOutcome {
+            new_guard: Guard::None,
+            applied_at: now_rfc3339(),
+        })
+    }
+
+    fn equivalent(
+        &self,
+        current: &RenderedLifecycle,
+        intended: &RenderedLifecycle,
+    ) -> Result<bool> {
+        if current.format != Format::Xml || intended.format != Format::Xml {
+            return Ok(false);
+        }
+        let current = serialize_lifecycle_rules_to_xml(&parse_xml_to_sdk_rules(&current.body)?)?;
+        let intended = serialize_lifecycle_rules_to_xml(&parse_xml_to_sdk_rules(&intended.body)?)?;
+        Ok(current == intended)
+    }
+
     async fn cas_guard(&self) -> Result<Option<Guard>> {
         // S3 lifecycle API does not support conditional writes (no ETag
-        // on lifecycle configuration). Return Guard::None; the CAS
-        // retry logic in apply.rs handles conflict detection by
-        // re-reading the lifecycle after each put.
+        // on lifecycle configuration). Returning Guard::None lets callers
+        // report that capability, while tier apply/rollback fail closed
+        // before any lifecycle mutation.
         Ok(Some(Guard::None))
     }
 }

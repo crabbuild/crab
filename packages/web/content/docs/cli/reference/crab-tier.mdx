@@ -19,9 +19,17 @@ crab tier [OPTIONS] <COMMAND>
 
 ## Description
 
-`crab tier` manages bucket lifecycle rules. It currently exposes `plan` to
-generate a lifecycle plan and `rollback` to restore a prior configuration from
-a backup file.
+`crab tier` manages bucket lifecycle rules. `plan` produces a human summary or
+explicit XML, JSON, or YAML output; `--apply --dry-run` remains read-only.
+Lifecycle mutation requires a provider conditional-write guard and verified
+read-back. The S3 lifecycle API has no conditional write, so the CLI fails
+closed before an S3 mutation; GCS and Azure also fail closed until their safe
+prefix-preserving adapters are wired. `rollback` rejects provider or policy
+drift, restores the previous configuration, and deletes the lifecycle when
+none existed before apply. The prior policy backup is stored in the
+repository's shared `.crab/tier/backups` directory and synced before provider
+mutation, including when the command starts in a subdirectory. Invalid Crab
+configuration fails closed.
 
 For conceptual background, see [Storage Tiers](/docs/cli/storage/storage-tiers).
 

@@ -464,6 +464,24 @@ where
     .await
 }
 
+/// Read a shard index while enforcing a caller-provided record limit.
+pub async fn read_bulk_shard_list_with_limit(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    hash: &str,
+    max_records: u64,
+) -> Result<Vec<String>> {
+    let entries = segmented_store::read_records_with_limit::<ShardSegmentEntry>(
+        store,
+        router,
+        SegmentKind::Shard,
+        hash,
+        max_records,
+    )
+    .await?;
+    Ok(entries.into_iter().map(|entry| entry.shard_hash).collect())
+}
+
 /// Read the segmented pack-index object and parse it into pack records.
 pub async fn read_bulk_pack_list(
     store: &Store,
@@ -473,6 +491,27 @@ pub async fn read_bulk_pack_list(
     let packs =
         segmented_store::read_records::<PackManifestEntry>(store, router, SegmentKind::Pack, hash)
             .await?;
+    for pack in &packs {
+        validate_pack_manifest_entry(pack)?;
+    }
+    Ok(packs)
+}
+
+/// Read a pack index while enforcing a caller-provided record limit.
+pub async fn read_bulk_pack_list_with_limit(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    hash: &str,
+    max_records: u64,
+) -> Result<Vec<PackManifestEntry>> {
+    let packs = segmented_store::read_records_with_limit::<PackManifestEntry>(
+        store,
+        router,
+        SegmentKind::Pack,
+        hash,
+        max_records,
+    )
+    .await?;
     for pack in &packs {
         validate_pack_manifest_entry(pack)?;
     }

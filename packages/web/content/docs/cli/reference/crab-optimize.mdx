@@ -23,8 +23,8 @@ crab optimize [OPTIONS] <COMMAND>
 |------------|---------|
 | `plan` | Build a combined cost optimization plan |
 | `apply` | Apply the combined cost optimization workflow |
-| `xorbs` | Rewrite content-addressed xorbs to a target size, grouping, compression, and storage-class profile |
-| `packs` | Consolidate remote Git pack files; grouped home for `crab repack` |
+| `xorbs` | Consolidate the repository's live content-addressed xorbs to a target size and Xet compression profile |
+| `packs` | Consolidate the canonical Git pack inventory with full graph and generation-evidence validation; grouped home for `crab repack` |
 | `shards` | Compact metadata shards; grouped home for `crab compact` |
 | `tiers` | Plan, apply, or roll back lifecycle tiering rules; grouped home for `crab tier` |
 | `cache` | Inspect, verify, prune, clean, or warm the local object cache |
@@ -44,16 +44,66 @@ crab optimize packs --dry-run
 crab optimize shards --repo org/models --bucket my-bucket --dry-run
 crab optimize tiers plan
 crab optimize cache prune
+crab optimize cache clean --dry-run
+crab optimize cache warm --include '*.safetensors' --dry-run
 crab optimize indexes diagnose --deep
+crab optimize indexes compact --db both
 crab optimize lfs dedup
+crab optimize workflow-cache push --all
 crab optimize workflow-cache journal-gc
 crab optimize replicas status
 crab optimize repo --json
 ```
 
+`--profile` is valid only with `--include-xorbs`. Crab validates the named
+Xorb profile before inventory or mutation begins, so an unknown profile fails
+without touching remote storage.
+
 `crab optimize repo` and `crab doctor --cost` require a configured Crab remote
 and currently use live inventory. The explicit provider-report source is
 reserved until report discovery and freshness metadata are wired.
+
+The `tiers` group preserves lifecycle-provider safety: plan and dry-run remain
+available, while apply and rollback require a qualified conditional-write
+adapter. The current S3 lifecycle API has no conditional write; GCS and Azure
+also fail closed until their prefix-preserving adapters are qualified.
+
+Index rebuild and compaction acquire renewable maintenance leases. Rebuild
+fails closed on incomplete shard, xorb, or pack proof; compaction waits for
+SlateDB's current size-tiered scheduler work to drain. Local index statistics
+are non-mutating, and cache clear preserves the SQLite schema and GC cursor.
+
+LFS optimization verifies content before deduplication or deletion. Conversion
+streams large objects, preserves index modes, writes an atomic rollback
+manifest, automatically rolls back a failed operation, and scans large Git
+indexes in fixed-size batches. Deduplication and prune stream Git object
+discovery and reject large non-pointer blobs before reading their contents.
+Prune protects staged pointers and recent or unpushed objects, honors
+`lfs.storage`, and uses bounded remote verification; `--force` skips
+confirmation but does not weaken recent-object protection. Optimize-owned LFS,
+cache-clean, and journal-GC work honors Ctrl-C between bounded scan, verify, and
+mutation units; failed conversions always run their rollback manifest cleanup.
+
+Xorb source-shard inventory is disk-backed: each canonical Xet shard is
+downloaded to a bounded maintenance workspace, hash-verified, and parsed
+through its file-info stream before the temporary file is removed. This keeps
+large-repository planning from retaining several full metadata shards in heap
+memory at once.
+
+For Xet-backed large files, use both storage layers when needed: `shards`
+compacts the metadata that maps file/chunk identities to storage, while
+`xorbs` rewrites the content-addressed chunk containers to the selected size
+and compression profile. There is no separate whole-file rewrite because a
+file's durable representation is its canonical shard metadata plus the
+referenced xorbs; the same path covers datasets, models, and other large Xet
+objects. `indexes rebuild|compact` repairs or compacts the acceleration layer
+without changing canonical shard or xorb bytes.
+
+`crab optimize workflow-cache push --all` exits nonzero when any local entry
+cannot be validated or uploaded. Journal GC never removes in-flight or
+symlinked run directories and reports partial deletion failures. Combined
+`optimize apply` is serialized per repository, stops at the first failed step,
+and keeps child-process output memory bounded for large reports.
 
 ## Related Commands
 

@@ -1,4 +1,4 @@
-//! CAS-guarded lifecycle apply, backup writer, and rollback stub.
+//! Guarded lifecycle apply, verified read-back, backup writer, and rollback.
 //!
 //! [`apply`] writes a pre-apply backup, then submits the rendered
 //! lifecycle document through the provider's CAS-guarded `put`. On CAS
@@ -6,8 +6,6 @@
 //! retries up to 3 times before failing with
 //! `TierLifecycleConflict [CRAB-E0300]`.
 //!
-//! [`rollback`] is a placeholder — task 5.4 will flesh it out.
-
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +23,8 @@ use super::provider::{Format, Guard, LifecycleProvider, Provider, RenderedLifecy
 
 /// Maximum number of CAS retry attempts before giving up.
 const MAX_CAS_RETRIES: u32 = 3;
+const PROVIDER_VERIFY_ATTEMPTS: u32 = 3;
+const MAX_LIFECYCLE_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 static BACKUP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Options controlling the apply behavior.
@@ -34,7 +34,7 @@ pub struct ApplyOpts {
     /// crab-managed rules.
     pub merge: bool,
     /// When `true`, skip the actual `put` call and return early after
-    /// conflict detection and backup.
+    /// conflict detection.
     pub dry_run: bool,
 }
 
@@ -75,6 +75,10 @@ impl From<&Guard> for GuardSummary {
 pub(crate) struct BackupPayload {
     pub(crate) provider: String,
     pub(crate) rendered_existing: Option<String>,
+    #[serde(default)]
+    pub(crate) rendered_applied: Option<String>,
+    #[serde(default)]
+    pub(crate) applied_rule_ids: Vec<String>,
     pub(crate) cas_guard: String,
     pub(crate) saved_at: String,
 }
@@ -84,10 +88,11 @@ pub(crate) struct BackupPayload {
 /// Flow:
 /// 1. Fetch existing lifecycle and CAS guard.
 /// 2. Detect conflicts; respect `opts.merge`.
-/// 3. Write backup to `.crab/tier/backups/<ts>-pre-apply.json`.
-/// 4. Call `prov.put(new_doc, guard)` with the CAS guard.
-/// 5. On success: emit audit record, return `ApplyOutcome`.
-/// 6. On CAS mismatch: re-read, re-detect, retry up to 3 times.
+/// 3. Reject providers that cannot supply a conditional-write guard.
+/// 4. Write backup to `.crab/tier/backups/<ts>-pre-apply.json`.
+/// 5. Call `prov.put(new_doc, guard)` with the CAS guard.
+/// 6. On success: emit audit record, return `ApplyOutcome`.
+/// 7. On CAS mismatch: re-read, re-detect, retry up to 3 times.
 pub async fn apply(
     prov: &dyn LifecycleProvider,
     plan: &TierPlan,
@@ -109,32 +114,34 @@ pub async fn apply(
         let guard = prov.cas_guard().await?;
 
         // Step 2: detect conflicts.
-        let doc_to_apply = resolve_conflicts(&existing, &new_rendered, &opts)?;
+        let doc_to_apply = resolve_conflicts(existing.as_ref(), &new_rendered, &opts)?;
 
-        // Step 3: write backup.
-        let backup_path = write_backup(
-            existing.as_ref(),
-            guard.as_ref(),
-            &format!("{:?}", prov.kind()),
-        )?;
-
-        // Dry-run: skip the actual put.
+        // Dry-run must remain read-only, including the local worktree.
         if opts.dry_run {
             info!("dry-run: skipping put call");
             return Ok(ApplyOutcome {
                 new_guard: guard
                     .as_ref()
-                    .map(GuardSummary::from)
-                    .unwrap_or(GuardSummary::None),
+                    .map_or(GuardSummary::None, GuardSummary::from),
                 applied_at: now_rfc3339_millis(),
-                backup_path: Some(backup_path),
+                backup_path: None,
             });
         }
+
+        require_conditional_guard(prov.kind(), guard.as_ref())?;
+
+        // Persist recovery data before the provider mutation.
+        let backup_path = write_backup(
+            existing.as_ref(),
+            &doc_to_apply,
+            guard.as_ref(),
+            &format!("{:?}", prov.kind()),
+        )?;
 
         // Step 4: attempt the CAS-guarded put.
         match prov.put(&doc_to_apply, guard.clone()).await {
             Ok(outcome) => {
-                // Step 5: audit + return.
+                verify_present(prov, &doc_to_apply, &backup_path).await?;
                 let apply_outcome = ApplyOutcome {
                     new_guard: GuardSummary::from(&outcome.new_guard),
                     applied_at: outcome.applied_at,
@@ -145,6 +152,9 @@ pub async fn apply(
                 return Ok(apply_outcome);
             }
             Err(e) if is_cas_mismatch(&e) => {
+                if let Err(error) = std::fs::remove_file(&backup_path) {
+                    warn!(error = %error, path = %backup_path, "failed to remove unused CAS backup");
+                }
                 // Step 6: CAS mismatch — retry.
                 if attempt >= MAX_CAS_RETRIES {
                     warn!(
@@ -162,7 +172,6 @@ pub async fn apply(
                     max = MAX_CAS_RETRIES,
                     "CAS mismatch, re-reading and retrying"
                 );
-                continue;
             }
             Err(e) => return Err(e),
         }
@@ -171,11 +180,11 @@ pub async fn apply(
 
 /// Detect conflicts and optionally merge, returning the document to apply.
 fn resolve_conflicts(
-    existing: &Option<RenderedLifecycle>,
+    existing: Option<&RenderedLifecycle>,
     new: &RenderedLifecycle,
     opts: &ApplyOpts,
 ) -> Result<RenderedLifecycle> {
-    let Some(existing) = existing.as_ref() else {
+    let Some(existing) = existing else {
         return Ok(new.clone());
     };
 
@@ -236,6 +245,7 @@ fn is_cas_mismatch(err: &CrabError) -> bool {
 /// Returns the backup file path on success.
 fn write_backup(
     existing: Option<&RenderedLifecycle>,
+    applied: &RenderedLifecycle,
     guard: Option<&Guard>,
     provider: &str,
 ) -> Result<String> {
@@ -243,11 +253,37 @@ fn write_backup(
     // Replace colons in the timestamp for filesystem compatibility.
     let safe_ts = ts.replace(':', "-");
 
-    let backup_dir = PathBuf::from(".crab/tier/backups");
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
+    let backup_dir = worktree.shared_crab_dir.join("tier/backups");
     std::fs::create_dir_all(&backup_dir)?;
 
     let rendered_existing = existing
-        .map(|r| String::from_utf8(r.body.clone()).unwrap_or_else(|_| "<binary>".to_string()));
+        .map(|rendered| {
+            String::from_utf8(rendered.body.clone()).map_err(|error| {
+                CrabError::Internal(format!(
+                    "existing lifecycle is not UTF-8 and cannot be backed up: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    let rendered_applied = String::from_utf8(applied.body.clone()).map_err(|error| {
+        CrabError::Internal(format!(
+            "rendered lifecycle is not UTF-8 and cannot be backed up: {error}"
+        ))
+    })?;
+    if rendered_applied.len() > MAX_LIFECYCLE_DOCUMENT_BYTES
+        || rendered_existing
+            .as_ref()
+            .is_some_and(|body| body.len() > MAX_LIFECYCLE_DOCUMENT_BYTES)
+    {
+        return Err(CrabError::Configuration {
+            key: "tier lifecycle document size".to_owned(),
+            origin: format!(
+                "lifecycle documents must be at most {MAX_LIFECYCLE_DOCUMENT_BYTES} bytes"
+            ),
+        });
+    }
 
     let guard_str = match guard {
         Some(Guard::Etag(e)) => format!("etag:{e}"),
@@ -258,6 +294,8 @@ fn write_backup(
     let payload = BackupPayload {
         provider: provider.to_string(),
         rendered_existing,
+        rendered_applied: Some(rendered_applied),
+        applied_rule_ids: applied.rule_ids.clone(),
         cas_guard: guard_str,
         saved_at: ts,
     };
@@ -281,8 +319,14 @@ fn write_backup(
             Err(err) => return Err(err.into()),
         };
         file.write_all(json.as_bytes())?;
+        file.sync_all()?;
 
-        let path_str = backup_path.to_string_lossy().to_string();
+        let path_str = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| backup_path.strip_prefix(cwd).ok().map(PathBuf::from))
+            .unwrap_or(backup_path)
+            .to_string_lossy()
+            .to_string();
         debug!(path = %path_str, "wrote pre-apply backup");
         return Ok(path_str);
     }
@@ -296,54 +340,94 @@ fn write_backup(
 ///
 /// Reads the backup JSON at `backup_path`, extracts the
 /// `rendered_existing` content, and restores it via `prov.put()`.
-/// When the backup indicates no prior lifecycle existed, this is a
-/// no-op (the bucket had no lifecycle before the apply).
+/// When the backup indicates no prior lifecycle existed, the policy created by
+/// apply is deleted after the current provider state passes drift validation.
 ///
 /// Emits an audit record on successful rollback.
 pub async fn rollback(prov: &dyn LifecycleProvider, backup_path: &str) -> Result<()> {
-    let raw = std::fs::read_to_string(backup_path).map_err(|e| {
+    let metadata = std::fs::metadata(backup_path).map_err(|error| {
         CrabError::Internal(format!(
-            "failed to read backup file '{}': {}",
-            backup_path, e
+            "failed to read backup file '{backup_path}': {error}"
+        ))
+    })?;
+    if metadata.len() > MAX_LIFECYCLE_DOCUMENT_BYTES as u64 * 2 {
+        return Err(CrabError::Configuration {
+            key: "tier backup size".to_owned(),
+            origin: format!(
+                "tier backup files must be at most {} bytes",
+                MAX_LIFECYCLE_DOCUMENT_BYTES as u64 * 2
+            ),
+        });
+    }
+    let raw = std::fs::read_to_string(backup_path).map_err(|error| {
+        CrabError::Internal(format!(
+            "failed to read backup file '{backup_path}': {error}"
         ))
     })?;
 
-    let payload: BackupPayload = serde_json::from_str(&raw).map_err(|e| {
+    let payload: BackupPayload = serde_json::from_str(&raw).map_err(|error| {
         CrabError::Internal(format!(
-            "failed to parse backup file '{}': {}",
-            backup_path, e
+            "failed to parse backup file '{backup_path}': {error}"
         ))
     })?;
 
-    match payload.rendered_existing {
-        Some(body) => {
-            // Reconstruct a RenderedLifecycle from the backup body.
-            // The format is inferred from the provider: S3 uses XML,
-            // GCS and Azure use JSON.
-            let format = match prov.kind() {
-                Provider::S3 => Format::Xml,
-                Provider::Gcs | Provider::Azure => Format::Json,
-            };
-            let restored = RenderedLifecycle {
-                format,
-                body: body.into_bytes(),
-                rule_ids: Vec::new(),
-            };
+    let provider = format!("{:?}", prov.kind());
+    if payload.provider != provider {
+        return Err(CrabError::Configuration {
+            key: format!(
+                "tier backup targets provider {}, current repository uses {provider}",
+                payload.provider
+            ),
+            origin: backup_path.to_owned(),
+        });
+    }
 
-            let guard = prov.cas_guard().await?;
-            prov.put(&restored, guard).await?;
+    if let Some(applied) = payload.rendered_applied.as_ref() {
+        let current = prov
+            .get()
+            .await?
+            .ok_or_else(|| CrabError::TierLifecycleConflict {
+                prefix: ".crab/xorbs/".to_owned(),
+                existing_id: "missing-current-lifecycle".to_owned(),
+                new_id: payload
+                    .applied_rule_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
+            })?;
+        let intended = RenderedLifecycle {
+            format: lifecycle_format(prov.kind()),
+            body: applied.as_bytes().to_vec(),
+            rule_ids: payload.applied_rule_ids.clone(),
+        };
+        if !prov.equivalent(&current, &intended)? {
+            return Err(CrabError::TierLifecycleConflict {
+                prefix: ".crab/xorbs/".to_owned(),
+                existing_id: current
+                    .rule_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "provider-lifecycle-drift".to_owned()),
+                new_id: intended.rule_ids.first().cloned().unwrap_or_default(),
+            });
+        }
+    }
 
-            info!(backup = %backup_path, "lifecycle rolled back to pre-apply state");
-        }
-        None => {
-            // The bucket had no lifecycle before the apply — nothing to
-            // restore. A future enhancement could call a provider
-            // `delete_lifecycle` method, but for V1 we log and return.
-            info!(
-                backup = %backup_path,
-                "backup indicates no prior lifecycle; rollback is a no-op"
-            );
-        }
+    let guard = prov.cas_guard().await?;
+    require_conditional_guard(prov.kind(), guard.as_ref())?;
+    if let Some(body) = payload.rendered_existing {
+        let restored = RenderedLifecycle {
+            format: lifecycle_format(prov.kind()),
+            body: body.into_bytes(),
+            rule_ids: Vec::new(),
+        };
+        prov.put(&restored, guard).await?;
+        verify_present(prov, &restored, backup_path).await?;
+        info!(backup = %backup_path, "lifecycle rolled back to pre-apply state");
+    } else {
+        prov.delete(guard).await?;
+        verify_absent(prov, backup_path).await?;
+        info!(backup = %backup_path, "lifecycle created by apply was deleted");
     }
 
     audit_shim::record(
@@ -358,10 +442,66 @@ pub async fn rollback(prov: &dyn LifecycleProvider, backup_path: &str) -> Result
     Ok(())
 }
 
+async fn verify_present(
+    prov: &dyn LifecycleProvider,
+    intended: &RenderedLifecycle,
+    backup_path: &str,
+) -> Result<()> {
+    for attempt in 1..=PROVIDER_VERIFY_ATTEMPTS {
+        if let Some(current) = prov.get().await?
+            && prov.equivalent(&current, intended)?
+        {
+            return Ok(());
+        }
+        if attempt < PROVIDER_VERIFY_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 100)).await;
+        }
+    }
+    Err(CrabError::Internal(format!(
+        "lifecycle provider read-back differs from requested policy; inspect or restore from {backup_path}"
+    )))
+}
+
+async fn verify_absent(prov: &dyn LifecycleProvider, backup_path: &str) -> Result<()> {
+    for attempt in 1..=PROVIDER_VERIFY_ATTEMPTS {
+        if prov.get().await?.is_none() {
+            return Ok(());
+        }
+        if attempt < PROVIDER_VERIFY_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 100)).await;
+        }
+    }
+    Err(CrabError::Internal(format!(
+        "lifecycle provider still returns a policy after rollback delete; inspect {backup_path}"
+    )))
+}
+
+/// Refuse lifecycle mutations when the provider explicitly reports that it
+/// cannot guard the replacement. A read/verify sequence cannot prevent an
+/// external writer from winning between the read and the unconditional PUT.
+fn require_conditional_guard(provider: Provider, guard: Option<&Guard>) -> Result<()> {
+    if matches!(guard, Some(Guard::None)) {
+        return Err(CrabError::TierProviderUnsupported {
+            provider: format!(
+                "{provider:?} lifecycle mutation requires a provider conditional-write guard"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn lifecycle_format(provider: Provider) -> Format {
+    match provider {
+        Provider::S3 => Format::Xml,
+        Provider::Gcs | Provider::Azure => Format::Json,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tier::provider::{Format, Guard, PutOutcome, RenderedLifecycle, TierPlan};
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -373,6 +513,7 @@ mod tests {
         existing: Mutex<Option<RenderedLifecycle>>,
         guard: Mutex<Option<Guard>>,
         put_calls: AtomicU32,
+        delete_calls: AtomicU32,
         /// When > 0, the first N put calls return CasConflict.
         cas_failures: AtomicU32,
     }
@@ -383,6 +524,7 @@ mod tests {
                 existing: Mutex::new(None),
                 guard: Mutex::new(None),
                 put_calls: AtomicU32::new(0),
+                delete_calls: AtomicU32::new(0),
                 cas_failures: AtomicU32::new(0),
             }
         }
@@ -392,6 +534,17 @@ mod tests {
                 existing: Mutex::new(Some(existing)),
                 guard: Mutex::new(Some(guard)),
                 put_calls: AtomicU32::new(0),
+                delete_calls: AtomicU32::new(0),
+                cas_failures: AtomicU32::new(0),
+            }
+        }
+
+        fn with_unguarded_first_write() -> Self {
+            Self {
+                existing: Mutex::new(None),
+                guard: Mutex::new(Some(Guard::None)),
+                put_calls: AtomicU32::new(0),
+                delete_calls: AtomicU32::new(0),
                 cas_failures: AtomicU32::new(0),
             }
         }
@@ -403,6 +556,10 @@ mod tests {
 
         fn put_count(&self) -> u32 {
             self.put_calls.load(Ordering::SeqCst)
+        }
+
+        fn delete_count(&self) -> u32 {
+            self.delete_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -426,7 +583,7 @@ mod tests {
             Ok(self.existing.lock().unwrap().clone())
         }
 
-        async fn put(&self, _doc: &RenderedLifecycle, _guard: Option<Guard>) -> Result<PutOutcome> {
+        async fn put(&self, doc: &RenderedLifecycle, _guard: Option<Guard>) -> Result<PutOutcome> {
             self.put_calls.fetch_add(1, Ordering::SeqCst);
 
             let remaining = self.cas_failures.load(Ordering::SeqCst);
@@ -438,8 +595,20 @@ mod tests {
                 });
             }
 
+            *self.existing.lock().unwrap() = Some(doc.clone());
+            *self.guard.lock().unwrap() = Some(Guard::Etag("new-etag".to_string()));
+
             Ok(PutOutcome {
                 new_guard: Guard::Etag("new-etag".to_string()),
+                applied_at: now_rfc3339_millis(),
+            })
+        }
+
+        async fn delete(&self, _guard: Option<Guard>) -> Result<PutOutcome> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            *self.existing.lock().unwrap() = None;
+            Ok(PutOutcome {
+                new_guard: Guard::None,
                 applied_at: now_rfc3339_millis(),
             })
         }
@@ -612,22 +781,35 @@ mod tests {
             .expect("dry-run should succeed");
 
         assert_eq!(prov.put_count(), 0, "dry-run should not call put");
-        assert!(outcome.backup_path.is_some());
+        assert!(outcome.backup_path.is_none());
+    }
 
-        if let Some(path) = &outcome.backup_path {
-            cleanup_backup(path);
-        }
+    #[tokio::test]
+    async fn apply_rejects_provider_without_conditional_guard() {
+        let prov = MockProvider::with_unguarded_first_write();
+
+        let err = apply(&prov, &simple_plan(), default_opts())
+            .await
+            .expect_err("unguarded lifecycle mutation must fail closed");
+
+        assert!(matches!(
+            err,
+            CrabError::TierProviderUnsupported { provider }
+                if provider.contains("conditional-write guard")
+        ));
+        assert_eq!(prov.put_count(), 0);
     }
 
     #[tokio::test]
     async fn backup_path_format_is_correct() {
         // Use write_backup directly to avoid parallel-test races on the
         // shared backup directory.
-        let path = write_backup(None, None, "S3").expect("write_backup should succeed");
+        let applied = xml_rendered(&["crab-xorbs-to-ia"]);
+        let path = write_backup(None, &applied, None, "S3").expect("write_backup should succeed");
 
         assert!(
-            path.starts_with(".crab/tier/backups/"),
-            "backup path should start with .crab/tier/backups/, got: {path}"
+            path.starts_with(".crab/tier/backups/") || std::path::Path::new(&path).is_absolute(),
+            "backup path should identify the shared tier backup, got: {path}"
         );
         assert!(
             path.ends_with("-pre-apply.json"),
@@ -702,6 +884,8 @@ mod tests {
             rendered_existing: Some(
                 "<LifecycleConfiguration>old</LifecycleConfiguration>".to_string(),
             ),
+            rendered_applied: None,
+            applied_rule_ids: Vec::new(),
             cas_guard: "etag:abc123".to_string(),
             saved_at: "2026-04-27T20:00:00.000Z".to_string(),
         };
@@ -720,11 +904,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_with_no_existing_lifecycle_is_noop() {
+    async fn rollback_with_no_existing_lifecycle_deletes_applied_policy() {
         let prov = MockProvider::new();
         let backup = BackupPayload {
             provider: "S3".to_string(),
             rendered_existing: None,
+            rendered_applied: None,
+            applied_rule_ids: Vec::new(),
             cas_guard: "none".to_string(),
             saved_at: "2026-04-27T20:00:00.000Z".to_string(),
         };
@@ -734,7 +920,49 @@ mod tests {
             .await
             .expect("rollback should succeed");
 
-        assert_eq!(prov.put_count(), 0, "no-op rollback should not call put");
+        assert_eq!(prov.put_count(), 0, "delete rollback should not call put");
+        assert_eq!(prov.delete_count(), 1, "rollback should delete lifecycle");
+        cleanup_backup(&path);
+    }
+
+    #[tokio::test]
+    async fn apply_then_rollback_deletes_new_policy() {
+        let prov = MockProvider::new();
+        let outcome = apply(&prov, &simple_plan(), default_opts())
+            .await
+            .expect("apply should succeed");
+        let path = outcome
+            .backup_path
+            .expect("apply should write recovery data");
+
+        rollback(&prov, &path)
+            .await
+            .expect("rollback should delete the applied policy");
+
+        assert_eq!(prov.put_count(), 1);
+        assert_eq!(prov.delete_count(), 1);
+        assert!(prov.get().await.expect("read provider").is_none());
+        cleanup_backup(&path);
+    }
+
+    #[tokio::test]
+    async fn rollback_rejects_provider_drift_after_apply() {
+        let prov = MockProvider::new();
+        let outcome = apply(&prov, &simple_plan(), default_opts())
+            .await
+            .expect("apply should succeed");
+        let path = outcome
+            .backup_path
+            .expect("apply should write recovery data");
+        *prov.existing.lock().unwrap() = Some(xml_rendered(&["user-new-policy"]));
+
+        let result = rollback(&prov, &path).await;
+
+        assert!(matches!(
+            result,
+            Err(CrabError::TierLifecycleConflict { .. })
+        ));
+        assert_eq!(prov.delete_count(), 0);
         cleanup_backup(&path);
     }
 
