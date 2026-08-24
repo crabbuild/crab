@@ -727,13 +727,14 @@ class ProtocolV2PartialCloneSmoke:
         )
 
     def store_snapshot(self, stage: str) -> dict[str, int]:
+        repository_prefix = f"{REMOTE_PREFIX}/{self.run_id}/"
         record = self.run_aws(
             [
                 "list-objects-v2",
                 "--bucket",
                 self.args.bucket,
                 "--prefix",
-                f"{REMOTE_PREFIX}/{self.run_id}/",
+                repository_prefix,
                 "--output",
                 "json",
             ],
@@ -741,14 +742,40 @@ class ProtocolV2PartialCloneSmoke:
         )
         payload = json.loads(self.stdout(record) or "{}")
         items = payload.get("Contents", [])
+        canonical_items = []
+        generated_cache_items = []
+        for item in items:
+            target = (
+                generated_cache_items
+                if self.is_generated_pack_cache_key(
+                    str(item.get("Key", "")), repository_prefix
+                )
+                else canonical_items
+            )
+            target.append(item)
         snapshot = {
             "stage": stage,
             "objects": len(items),
             "bytes": sum(int(item.get("Size", 0)) for item in items),
+            "canonical_objects": len(canonical_items),
+            "canonical_bytes": sum(int(item.get("Size", 0)) for item in canonical_items),
+            "generated_cache_objects": len(generated_cache_items),
+            "generated_cache_bytes": sum(
+                int(item.get("Size", 0)) for item in generated_cache_items
+            ),
         }
         self.report["store_snapshots"].append(snapshot)
         self.write_report()
         return snapshot
+
+    @staticmethod
+    def is_generated_pack_cache_key(key: str, repository_prefix: str) -> bool:
+        if not key.startswith(repository_prefix):
+            return False
+        relative = key[len(repository_prefix) :]
+        return relative.startswith("generated-packs/") or relative.startswith(
+            "locks/internal/generated-pack-"
+        )
 
     def storage_telemetry(self) -> dict[str, int]:
         requests = 0
@@ -1269,8 +1296,9 @@ class ProtocolV2PartialCloneSmoke:
                 "object_type_filter": object_type_supported,
                 "object_type_probe_error": object_type_probe_error or None,
             },
-            "remote_unchanged": after["objects"] == before["objects"]
-            and after["bytes"] == before["bytes"],
+            "remote_unchanged": after["canonical_objects"]
+            == before["canonical_objects"]
+            and after["canonical_bytes"] == before["canonical_bytes"],
             "before": before,
             "after": after,
         }
