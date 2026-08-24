@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::io::{SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2424,6 +2424,7 @@ fn is_missing_object_error(stderr: &str) -> bool {
     stderr.contains("Not a valid commit name")
         || stderr.contains("not our ref")
         || stderr.contains("bad revision")
+        || stderr.contains("bad object")
 }
 
 /// Determine whether `new` is a descendant of `old` by shelling out
@@ -8186,41 +8187,17 @@ impl PushPipeline {
         // Evidence precedes the active marker so a sibling compactor can prove
         // the ref without this client's ODB. Only repositories outside the
         // synchronous proof profile may intentionally commit without it.
-        let uploaded_packs = self
-            .uploaded_packs
-            .lock()
-            .await
-            .iter()
-            .map(|uploaded| uploaded.entry.clone())
-            .collect::<Vec<_>>();
-        let visibility = if let Some(capacity) = git_visibility_capacity_exceeded(
-            current_snapshot
-                .journal
-                .packs
-                .iter()
-                .chain(uploaded_packs.iter()),
-            manifest.refs.len(),
-        )? {
-            GitVisibilityPublication::CompletePackOnly(capacity)
-        } else {
-            ensure_current_git_visibility(
-                store,
-                &self.router,
-                self.config.lock_ttl,
-                self.config.max_cas_retries,
-                &self.cancel,
-            )
-            .await?
-        };
+        let visibility = ensure_current_git_visibility(
+            store,
+            &self.router,
+            self.config.lock_ttl,
+            self.config.max_cas_retries,
+            &self.cancel,
+        )
+        .await?;
         match visibility {
             GitVisibilityPublication::Published => {
-                self.publish_ref_visibility_edits(
-                    store,
-                    &current_snapshot.manifest,
-                    &current,
-                    &mut edits,
-                )
-                .await?;
+                self.publish_ref_visibility_edits(store, &mut edits).await?;
             }
             GitVisibilityPublication::CompletePackOnly(capacity) => {
                 warn!(
@@ -8414,28 +8391,11 @@ impl PushPipeline {
     async fn publish_ref_visibility_edits(
         &self,
         store: &crate::storage::store::Store,
-        compacted: &Manifest,
-        prior: &Manifest,
         edits: &mut [crate::metadata::manifest::RefJournalEdit],
     ) -> Result<()> {
         let storage = store.as_storage();
         let storage_router =
             crab_storage::StoreLayout::new(storage.clone(), self.router.repo_prefix().to_owned());
-        let compacted_visibility = if compacted.refs.is_empty() {
-            None
-        } else {
-            match crab_metadata::git_visibility::read_for_manifest(
-                storage,
-                &storage_router,
-                compacted,
-            )
-            .await
-            {
-                Ok(Some(read)) => Some(read.index),
-                Ok(None) => None,
-                Err(error) => return Err(CrabError::from(error)),
-            }
-        };
         let plans = edits
             .iter()
             .enumerate()
@@ -8446,16 +8406,6 @@ impl PushPipeline {
                         edit.ref_name.clone(),
                         edit.old_oid.clone(),
                         new_oid.clone(),
-                        prior.peeled_refs.get(&edit.ref_name).cloned(),
-                        edit.peeled_oid.clone(),
-                        edit.old_oid
-                            .as_ref()
-                            .filter(|old_oid| compacted.refs.get(&edit.ref_name) == Some(*old_oid))
-                            .and_then(|_| {
-                                compacted_visibility
-                                    .as_ref()
-                                    .and_then(|index| index.objects_for_ref(&edit.ref_name))
-                            }),
                     )
                 })
             })
@@ -8464,51 +8414,17 @@ impl PushPipeline {
             return Ok(());
         }
 
+        let started = Instant::now();
         let git_dir = self.common_git_dir()?;
         let evidence = tokio::task::spawn_blocking(move || {
             let mut evidence = Vec::with_capacity(plans.len());
-            for (index, ref_name, old_oid, new_oid, old_peeled, new_peeled, known_old) in plans {
-                let new = visibility_closure_for_ref(
-                    &git_dir,
-                    &ref_name,
-                    &new_oid,
-                    new_peeled.as_deref(),
-                )?;
-                let old = match known_old {
-                    Some(objects) => Ok(Some(objects.into_iter().collect::<BTreeSet<_>>())),
-                    None => old_oid
-                        .as_deref()
-                        .map(|old_oid| {
-                            visibility_closure_for_ref(
-                                &git_dir,
-                                &ref_name,
-                                old_oid,
-                                old_peeled.as_deref(),
-                            )
-                        })
-                        .transpose(),
+            for (index, ref_name, old_oid, new_oid) in plans {
+                let Some(edit) = visibility_edit_for_ref(&git_dir, old_oid.as_deref(), &new_oid)?
+                else {
+                    evidence.push((index, ref_name, None));
+                    continue;
                 };
-                let (edit, old_error) = match old {
-                    Ok(Some(old)) => (
-                        crab_metadata::git_visibility::GitVisibilityEdit::delta(
-                            old_oid, new_oid, &old, &new,
-                        ),
-                        None,
-                    ),
-                    Ok(None) => (
-                        crab_metadata::git_visibility::GitVisibilityEdit::replacement(
-                            old_oid, new_oid, &new,
-                        ),
-                        None,
-                    ),
-                    Err(error) => (
-                        crab_metadata::git_visibility::GitVisibilityEdit::replacement(
-                            old_oid, new_oid, &new,
-                        ),
-                        Some(error.to_string()),
-                    ),
-                };
-                evidence.push((index, ref_name, edit, old_error));
+                evidence.push((index, ref_name, Some(edit)));
             }
             Ok::<_, CrabError>(evidence)
         })
@@ -8517,20 +8433,42 @@ impl PushPipeline {
             CrabError::Internal(format!("Git visibility evidence join failed: {error}"))
         })??;
 
-        for (index, ref_name, evidence, old_error) in evidence {
-            if let Some(error) = old_error {
+        let mut added_objects = 0u64;
+        let mut removed_objects = 0u64;
+        let mut published_updates = 0u64;
+        let mut deferred_updates = 0u64;
+        for (index, ref_name, evidence) in evidence {
+            let Some(evidence) = evidence else {
+                deferred_updates = deferred_updates.saturating_add(1);
                 warn!(
                     %ref_name,
-                    %error,
-                    "prior ref closure is unavailable; publishing complete replacement evidence"
+                    maximum_objects = crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+                    "ref visibility delta exceeds the synchronous profile or crosses a shallow boundary; exact reads await owner repair"
                 );
-            }
+                continue;
+            };
+            added_objects = added_objects.saturating_add(evidence.added.len() as u64);
+            removed_objects = removed_objects.saturating_add(evidence.removed.len() as u64);
             let hash =
                 crab_metadata::git_visibility::upload_edit(storage, &storage_router, &evidence)
                     .await
                     .map_err(CrabError::from)?;
             edits[index].visibility_evidence_hash = Some(hash);
+            published_updates = published_updates.saturating_add(1);
         }
+        info!(
+            target: "crab::git::visibility",
+            telemetry_event = "operation_summary",
+            operation = "visibility_delta",
+            outcome = "Success",
+            duration_ms = started.elapsed().as_millis() as u64,
+            logical_objects = added_objects.saturating_add(removed_objects),
+            added_objects,
+            removed_objects,
+            published_updates,
+            deferred_updates,
+            "remote Git operation summary"
+        );
         Ok(())
     }
 
@@ -16157,34 +16095,140 @@ pub(crate) async fn build_git_visibility_index_from_storage_git_dir(
     Ok(index)
 }
 
-fn visibility_closure_for_ref(
+fn visibility_edit_for_ref(
     git_dir: &Path,
-    ref_name: &str,
-    oid: &str,
-    peeled_oid: Option<&str>,
-) -> Result<BTreeSet<String>> {
-    let refs = vec![(ref_name.to_owned(), oid.to_owned())];
-    let peeled_refs = peeled_oid
-        .map(|peeled| BTreeMap::from([(ref_name.to_owned(), peeled.to_owned())]))
-        .unwrap_or_default();
-    let mut closures = crab_git::walk::walk_reachable_by_ref_bounded(
+    old_oid: Option<&str>,
+    new_oid: &str,
+) -> Result<Option<crab_metadata::git_visibility::GitVisibilityEdit>> {
+    let maximum =
+        usize::try_from(crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS)
+            .map_err(|_| {
+                CrabError::Internal("Git visibility limit does not fit usize".to_owned())
+            })?;
+    let Some(added) = enumerate_visibility_difference(git_dir, new_oid, old_oid, maximum)? else {
+        return Ok(None);
+    };
+    let Some(old_oid) = old_oid else {
+        return Ok(Some(
+            crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                new_oid.to_owned(),
+                added,
+            ),
+        ));
+    };
+    let Some(removed) = enumerate_visibility_difference(
         git_dir,
-        &refs,
-        &peeled_refs,
-        crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize,
-    )
-    .map_err(CrabError::from)?;
-    let closure = closures.remove(ref_name).ok_or_else(|| {
-        CrabError::Internal(format!(
-            "Git visibility walk did not return requested ref {ref_name}"
-        ))
-    })?;
-    let mut objects = BTreeSet::new();
-    objects.extend(closure.commits.iter().map(sha1_hex));
-    objects.extend(closure.trees.iter().map(sha1_hex));
-    objects.extend(closure.blobs.iter().map(sha1_hex));
-    objects.extend(closure.tags.iter().map(sha1_hex));
-    Ok(objects)
+        old_oid,
+        Some(new_oid),
+        maximum.saturating_sub(added.len()),
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
+            Some(old_oid.to_owned()),
+            new_oid.to_owned(),
+            added,
+            removed,
+        ),
+    ))
+}
+
+fn enumerate_visibility_difference(
+    git_dir: &Path,
+    include: &str,
+    exclude: Option<&str>,
+    maximum: usize,
+) -> Result<Option<Vec<String>>> {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["rev-list", "--objects"])
+        .arg(include);
+    if let Some(exclude) = exclude {
+        command.arg("--not").arg(exclude);
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(CrabError::Io)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CrabError::Internal("git rev-list stdout unavailable".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CrabError::Internal("git rev-list stderr unavailable".to_owned()))?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = BufReader::new(stderr)
+            .take(1024 * 1024)
+            .read_to_end(&mut bytes);
+        bytes
+    });
+
+    let mut objects = Vec::new();
+    let mut exceeded = false;
+    let mut operation_error = None;
+    for line in BufReader::new(stdout).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                operation_error = Some(CrabError::Io(error));
+                let _ = child.kill();
+                break;
+            }
+        };
+        if objects.len() == maximum {
+            exceeded = true;
+            let _ = child.kill();
+            break;
+        }
+        let Some(oid) = line.split_whitespace().next() else {
+            operation_error = Some(CrabError::Internal(
+                "git rev-list returned an empty visibility row".to_owned(),
+            ));
+            let _ = child.kill();
+            break;
+        };
+        let oid = match gix_hash::ObjectId::from_hex(oid.as_bytes()) {
+            Ok(oid) => oid,
+            Err(error) => {
+                operation_error = Some(CrabError::Internal(format!(
+                    "git rev-list returned invalid visibility object id: {error}"
+                )));
+                let _ = child.kill();
+                break;
+            }
+        };
+        objects.push(oid.to_hex().to_string());
+    }
+    let status = child.wait().map_err(CrabError::Io)?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| CrabError::Internal("git rev-list stderr reader panicked".to_owned()))?;
+    if let Some(error) = operation_error {
+        return Err(error);
+    }
+    if exceeded {
+        return Ok(None);
+    }
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        if is_missing_object_error(&stderr) {
+            return Ok(None);
+        }
+        return Err(CrabError::Internal(format!(
+            "git rev-list failed while building visibility evidence: {stderr}"
+        )));
+    }
+    objects.sort_unstable();
+    objects.dedup();
+    Ok(Some(objects))
 }
 
 fn sha1_hex(oid: &[u8; 20]) -> String {
@@ -18287,7 +18331,7 @@ mod tests {
         guard.close().await.expect("close writer");
     }
 
-    use crate::test::git_repo::GitDirGuard;
+    use crate::test::git_repo::{CleanGitEnvGuard, GitDirGuard};
 
     fn pack_manifest_entry_with_tips(ref_tips: Vec<String>) -> PackManifestEntry {
         let pack_id = "a".repeat(64);
@@ -18333,6 +18377,76 @@ mod tests {
                 .expect("count exact owner proof")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn visibility_edit_enumerates_only_changed_reachability() {
+        let _guard = CleanGitEnvGuard::new();
+        let repo = tempfile::tempdir().expect("create Git repository");
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output is UTF-8")
+                .trim()
+                .to_owned()
+        };
+        run_git(&["init", "--initial-branch=main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("tracked.txt"), "first\n").expect("write first file");
+        run_git(&["add", "tracked.txt"]);
+        run_git(&["commit", "-m", "first"]);
+        let old_oid = run_git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("tracked.txt"), "second\n").expect("write second file");
+        run_git(&["commit", "-am", "second"]);
+        let new_oid = run_git(&["rev-parse", "HEAD"]);
+        let git_dir = repo.path().join(".git");
+
+        let old = enumerate_visibility_difference(&git_dir, &old_oid, None, 100)
+            .expect("enumerate old closure")
+            .expect("old closure fits");
+        let new = enumerate_visibility_difference(&git_dir, &new_oid, None, 100)
+            .expect("enumerate new closure")
+            .expect("new closure fits");
+        let edit = visibility_edit_for_ref(&git_dir, Some(&old_oid), &new_oid)
+            .expect("build visibility edit")
+            .expect("incremental evidence fits");
+
+        assert!(edit.added.len() < new.len());
+        assert_eq!(
+            edit.apply(Some(&old)).expect("apply exact delta"),
+            new,
+            "incremental evidence must reconstruct the complete new closure"
+        );
+        assert!(
+            enumerate_visibility_difference(&git_dir, &new_oid, Some(&old_oid), 0)
+                .expect("bounded enumeration")
+                .is_none(),
+            "an oversized edit must defer instead of publishing partial evidence"
+        );
+        assert!(
+            enumerate_visibility_difference(&git_dir, &new_oid, Some(&"1".repeat(40)), 100,)
+                .expect("missing shallow-boundary object defers")
+                .is_none()
+        );
+
+        run_git(&["tag", "-a", "release", "-m", "release", &new_oid]);
+        let tag_oid = run_git(&["rev-parse", "refs/tags/release"]);
+        let replacement = visibility_edit_for_ref(&git_dir, None, &tag_oid)
+            .expect("build tag replacement")
+            .expect("tag replacement fits");
+        assert!(replacement.replaces);
+        assert!(replacement.added.contains(&tag_oid));
+        assert!(replacement.added.contains(&new_oid));
     }
 
     #[tokio::test]
@@ -18648,6 +18762,7 @@ mod tests {
         ));
         assert!(is_missing_object_error("error: not our ref old000"));
         assert!(is_missing_object_error("fatal: bad revision 'old000^@'"));
+        assert!(is_missing_object_error("fatal: bad object old000"));
     }
 
     #[test]

@@ -65,15 +65,49 @@ impl GitVisibilityEdit {
         }
     }
 
+    /// Build normalized evidence from exact added and removed object sets.
+    #[must_use]
+    pub fn from_delta_objects(
+        old_oid: Option<String>,
+        new_oid: String,
+        mut added: Vec<String>,
+        mut removed: Vec<String>,
+    ) -> Self {
+        added.sort_unstable();
+        added.dedup();
+        removed.sort_unstable();
+        removed.dedup();
+        Self {
+            version: GIT_VISIBILITY_EDIT_VERSION,
+            old_oid,
+            new_oid,
+            replaces: false,
+            added,
+            removed,
+        }
+    }
+
     /// Build normalized evidence that replaces an unavailable prior closure.
     #[must_use]
     pub fn replacement(old_oid: Option<String>, new_oid: String, new: &BTreeSet<String>) -> Self {
+        Self::from_replacement_objects(old_oid, new_oid, new.iter().cloned().collect())
+    }
+
+    /// Build normalized replacement evidence from a complete object list.
+    #[must_use]
+    pub fn from_replacement_objects(
+        old_oid: Option<String>,
+        new_oid: String,
+        mut added: Vec<String>,
+    ) -> Self {
+        added.sort_unstable();
+        added.dedup();
         Self {
             version: GIT_VISIBILITY_EDIT_VERSION,
             old_oid,
             new_oid,
             replaces: true,
-            added: new.iter().cloned().collect(),
+            added,
             removed: Vec::new(),
         }
     }
@@ -2016,6 +2050,20 @@ mod tests {
                 .unwrap(),
             new.into_iter().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn ref_edit_normalizes_exact_delta_objects() {
+        let edit = GitVisibilityEdit::from_delta_objects(
+            Some("1".repeat(40)),
+            "2".repeat(40),
+            vec!["4".repeat(40), "3".repeat(40), "4".repeat(40)],
+            vec!["1".repeat(40), "1".repeat(40)],
+        );
+
+        assert_eq!(edit.added, ["3".repeat(40), "4".repeat(40)]);
+        assert_eq!(edit.removed, ["1".repeat(40)]);
+        assert!(edit.validate().is_ok());
     }
 
     #[test]

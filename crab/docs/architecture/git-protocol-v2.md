@@ -98,16 +98,22 @@ current manifest, migration treats it as an abandoned candidate and rebuilds
 the digest-bound proof; malformed bodies still fail closed as corruption.
 
 Each direct ref update uploads content-addressed visibility evidence before its
-journal marker becomes visible. Fast-forward and ordinary updates encode only
-the object IDs added to or removed from the prior ref closure; a writer that
-cannot read the prior local closure publishes a complete replacement. The
-single journal-compaction owner applies the ordered evidence and uploads the
+journal marker becomes visible. When the compacted generation already has an
+exact proof, updates enumerate only objects reachable from the new tip but not
+the old tip and vice versa. This keeps ordinary large-repository pushes bounded
+by changed reachability rather than total history. New refs publish a bounded
+complete replacement because they have no prior closure. The single
+journal-compaction owner applies ordered evidence and uploads the next
 generation proof before advancing the compacted manifest. Concurrent writers
 therefore do not need one another's pack bodies or local Git object databases.
-Transient evidence or proof publication failures abort before the ref becomes
-visible. Repositories whose conservative per-ref proof bound exceeds the
-synchronous 100,000-entry profile explicitly remain on complete-pack fetch
-instead of turning a proof failure into a successful push.
+
+Evidence upload failures abort before the ref becomes visible. A delta larger
+than the synchronous 100,000-object profile, or one crossing a shallow-client
+boundary, may commit without derived evidence; protocol v2 is then withheld
+until the owner reconstructs the exact generation. An initial repository whose
+proof exceeds that synchronous profile similarly remains on complete-pack
+fetch until owner publication. Total repository size does not by itself defer
+evidence after an exact base proof exists.
 The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.

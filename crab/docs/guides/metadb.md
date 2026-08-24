@@ -104,7 +104,11 @@ locator writer lease, reuses one SlateDB writer across manifest generations,
 publishes immutable reader checkpoints, and repairs the generation-bound Git
 visibility proof. Push and upload-pack clients detect its repository lease and
 leave locator repair to it; complete-pack fetch remains the safe fallback while
-a newly committed generation is being indexed.
+a newly committed generation is being indexed. After the owner establishes an
+exact large-repository proof, ordinary pushes derive the next proof from
+bounded old-tip/new-tip reachability differences. Full pack materialization is
+reserved for an absent proof, an oversized rewrite, or a shallow-boundary
+handoff rather than repeated after every small push.
 
 ```bash
 crab metadb owner

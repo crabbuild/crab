@@ -51,8 +51,11 @@ a listener or require a Crab service. Repositories without a current locator
 and visibility proof remain on the legacy complete-pack path. That legacy path
 downloads and installs the immutable packs named by the manifest, then lets
 local Git satisfy the fetch; it is retained for older Git clients, repositories
-above the synchronous 100,000-object proof profile, and recovery while derived
-proof coverage is unavailable.
+whose initial proof or one ref update exceeds the synchronous 100,000-object
+profile, and recovery while derived proof coverage is unavailable. Once the
+owner has published an exact large-repository proof, ordinary pushes preserve
+it with bounded reachability differences; total repository size alone does not
+return later generations to the complete-pack path.
 
 The current visibility proof uses one binary object dictionary with
 sparse-or-bitmap per-ref closures. Fresh exact-ref fetches plan from closure
