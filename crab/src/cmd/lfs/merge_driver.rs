@@ -5,7 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 
-use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 use crate::core::error::{CrabError, Result};
@@ -170,9 +169,10 @@ fn resolve_lfs_content(
 ) -> Result<Vec<u8>> {
     let oid_hex = hex_encode(&pointer.oid);
     let local_lfs_dir = local_lfs_dir(repo_root, read_remote.or(write_remote))?;
-    let local_path = local_object_path(&local_lfs_dir, &oid_hex);
-    if local_path.is_file() {
-        return fs::read(&local_path).map_err(CrabError::Io);
+    match crate::lfs::cache::read_pointer(&local_lfs_dir, pointer) {
+        Ok(Some(content)) => return Ok(content),
+        Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => {}
+        Err(error) => return Err(error),
     }
 
     let Some(remote) = read_remote else {
@@ -186,12 +186,12 @@ fn resolve_lfs_content(
     let content = super::block_on_runtime(async {
         remote
             .store
-            .get(&pointer.oid)
+            .verify(&pointer.oid)
             .await
             .map(|bytes| bytes.to_vec())
             .map_err(CrabError::from)
     })?;
-    write_local_object(&local_lfs_dir, &oid_hex, &content)?;
+    crate::lfs::cache::install_bytes(&local_lfs_dir, &pointer.oid, pointer.size, &content)?;
     Ok(content)
 }
 
@@ -207,14 +207,15 @@ fn clean_merged_content(
     let oid: [u8; 32] = Sha256::digest(content).into();
     let oid_hex = hex_encode(&oid);
     let local_lfs_dir = local_lfs_dir(repo_root, write_remote)?;
-    write_local_object(&local_lfs_dir, &oid_hex, content)?;
+    let local_path =
+        crate::lfs::cache::install_bytes(&local_lfs_dir, &oid, content.len() as u64, content)?;
 
     if let Some(remote) = write_remote {
-        let content_bytes = Bytes::copy_from_slice(content);
+        let upload_path = local_path.clone();
         if let Err(error) = super::block_on_runtime(async {
             remote
                 .store
-                .put(&oid, content_bytes)
+                .put_stream(&oid, &upload_path)
                 .await
                 .map_err(CrabError::from)
         }) {
@@ -249,25 +250,6 @@ fn local_lfs_dir(repo_root: &Path, remote: Option<&LfsRemoteContext>) -> Result<
     } else {
         repo_root.join(git_dir).join("lfs")
     })
-}
-
-fn local_object_path(local_lfs_dir: &Path, oid_hex: &str) -> PathBuf {
-    local_lfs_dir
-        .join("objects")
-        .join(&oid_hex[..2])
-        .join(&oid_hex[2..4])
-        .join(oid_hex)
-}
-
-fn write_local_object(local_lfs_dir: &Path, oid_hex: &str, content: &[u8]) -> Result<()> {
-    let local_path = local_object_path(local_lfs_dir, oid_hex);
-    if local_path.is_file() {
-        return Ok(());
-    }
-    if let Some(parent) = local_path.parent() {
-        fs::create_dir_all(parent).map_err(CrabError::Io)?;
-    }
-    fs::write(local_path, content).map_err(CrabError::Io)
 }
 
 fn merge_program_replacements(

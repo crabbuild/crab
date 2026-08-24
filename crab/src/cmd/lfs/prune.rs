@@ -38,12 +38,18 @@ pub fn run_lfs_prune(options: LfsPruneOptions) -> Result<()> {
 
 fn resolve_prune_options(options: LfsPruneOptions) -> Result<crate::lfs::prune::PruneOptions> {
     let verify_remote = options.verify_remote && !options.no_verify_remote;
+    if verify_remote && options.no_verify_unreachable {
+        return Err(CrabError::Configuration {
+            key: "--no-verify-unreachable".to_owned(),
+            origin: "--verify-remote verifies every prune candidate".to_owned(),
+        });
+    }
     let when_unverified =
         resolve_when_unverified(options.when_unverified.as_deref(), verify_remote)?;
 
     Ok(crate::lfs::prune::PruneOptions {
         verify_remote,
-        verify_unreachable: options.verify_unreachable && !options.no_verify_unreachable,
+        verify_unreachable: verify_remote || options.verify_unreachable,
         when_unverified,
         dry_run: options.dry_run,
         force: options.force,
@@ -58,9 +64,16 @@ fn resolve_when_unverified(
 ) -> Result<crate::lfs::prune::WhenUnverified> {
     match value {
         Some("halt") => Ok(crate::lfs::prune::WhenUnverified::Halt),
+        Some("continue") if verify_remote => Err(CrabError::Configuration {
+            key: "--when-unverified".to_owned(),
+            origin: "--verify-remote is fail-closed; use halt".to_owned(),
+        }),
         Some("continue") => Ok(crate::lfs::prune::WhenUnverified::Continue),
-        None if verify_remote => Ok(crate::lfs::prune::WhenUnverified::Halt),
-        None => Ok(crate::lfs::prune::WhenUnverified::Continue),
+        None => Ok(if verify_remote {
+            crate::lfs::prune::WhenUnverified::Halt
+        } else {
+            crate::lfs::prune::WhenUnverified::Continue
+        }),
         Some(value) => Err(CrabError::Configuration {
             key: "--when-unverified".to_owned(),
             origin: format!("expected halt or continue, got {value}"),
@@ -116,10 +129,33 @@ mod tests {
 
         let resolved = resolve_prune_options(options).unwrap();
 
+        assert!(resolved.verify_unreachable);
         assert_eq!(
             resolved.when_unverified,
             crate::lfs::prune::WhenUnverified::Halt
         );
+    }
+
+    #[test]
+    fn resolve_prune_options_rejects_unreachable_verification_bypass() {
+        let mut options = options();
+        options.verify_remote = true;
+        options.no_verify_unreachable = true;
+
+        let err = resolve_prune_options(options).unwrap_err();
+
+        assert!(err.to_string().contains("--no-verify-unreachable"));
+    }
+
+    #[test]
+    fn resolve_prune_options_rejects_continue_with_remote_verification() {
+        let mut options = options();
+        options.verify_remote = true;
+        options.when_unverified = Some("continue".to_owned());
+
+        let err = resolve_prune_options(options).unwrap_err();
+
+        assert!(err.to_string().contains("fail-closed"));
     }
 
     #[test]

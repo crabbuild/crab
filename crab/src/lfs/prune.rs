@@ -16,13 +16,14 @@
 //!   `rev-list --all --objects` and `cat-file --batch`.
 //!
 //! Supports `--dry-run` (report only), `--force` (skip confirmation), and
-//! `--verify-remote` (HEAD-check each candidate before local deletion).
+//! `--verify-remote` (download and verify each candidate before local deletion).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::error::{CrabError, Result};
 use crab_git::lfs_pointer::LfsPointer;
+use crab_lfs::LfsError;
 
 /// Summary of a prune operation.
 #[derive(Debug, Clone)]
@@ -60,7 +61,11 @@ impl PruneOptions {
         Self {
             verify_remote,
             verify_unreachable: true,
-            when_unverified: WhenUnverified::Continue,
+            when_unverified: if verify_remote {
+                WhenUnverified::Halt
+            } else {
+                WhenUnverified::Continue
+            },
             dry_run,
             force,
             verbose: false,
@@ -83,7 +88,7 @@ pub enum WhenUnverified {
 ///
 /// # Flags
 ///
-/// - `verify_remote`: when true, only prunes candidates present remotely.
+/// - `verify_remote`: when true, only prunes candidates whose remote bytes match the OID.
 /// - `dry_run`: when true, reports what would be pruned without deleting.
 /// - `force`: when true, skips the confirmation prompt.
 pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
@@ -149,8 +154,7 @@ pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
     }
 
     if options.verify_remote {
-        let (verified, skipped) =
-            verify_remote_candidates(&candidates, &referenced, options.verify_unreachable)?;
+        let (verified, skipped) = verify_remote_candidates(&candidates)?;
         if skipped > 0 {
             println!("crab lfs prune: kept {skipped} object(s) missing remotely");
             if options.when_unverified == WhenUnverified::Halt {
@@ -328,24 +332,21 @@ fn collect_local_objects(lfs_objects_dir: &Path) -> Result<Vec<LocalObject>> {
 
 fn verify_remote_candidates<'a>(
     candidates: &[&'a LocalObject],
-    referenced: &HashSet<String>,
-    verify_unreachable: bool,
 ) -> Result<(Vec<&'a LocalObject>, u64)> {
     let ctx = crate::cmd::lfs::store_setup::resolve_lfs_remote_for_operation_sync("prune")?;
     let mut verified = Vec::new();
     let mut skipped = 0u64;
 
     for candidate in candidates {
-        if !referenced.contains(&candidate.oid_hex) && !verify_unreachable {
-            verified.push(*candidate);
-            continue;
-        }
-
         let oid = parse_hex32(&candidate.oid_hex)?;
-        let exists = crate::cmd::lfs::block_on_runtime(async {
-            ctx.store.exists(&oid).await.map_err(CrabError::from)
+        let valid = crate::cmd::lfs::block_on_runtime(async {
+            match ctx.store.verify(&oid).await {
+                Ok(_) => Ok(true),
+                Err(LfsError::ObjectMissing { .. } | LfsError::ObjectCorrupt { .. }) => Ok(false),
+                Err(error) => Err(CrabError::from(error)),
+            }
         })?;
-        if exists {
+        if valid {
             verified.push(*candidate);
         } else {
             skipped += 1;

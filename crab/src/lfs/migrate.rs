@@ -668,7 +668,7 @@ fn lfs_pointer_for_content(
         .map_err(|e| mig_err(format!("failed to upload {context}: {e}")))?;
     }
 
-    cache_lfs_object(&oid, content);
+    cache_lfs_object(&oid, content.len() as u64, content)?;
     Ok(pointer.serialize())
 }
 
@@ -1638,7 +1638,7 @@ fn migrate_import_no_rewrite(
             .map_err(|e| mig_err(format!("failed to upload {rel_path}: {e}")))?;
         }
 
-        cache_lfs_object(&oid, &data);
+        cache_lfs_object(&oid, data.len() as u64, &data)?;
         std::fs::write(&abs_path, pointer.serialize())
             .map_err(|e| mig_err(format!("failed to write pointer for {rel_path}: {e}")))?;
         converted.push(rel_path);
@@ -2289,7 +2289,7 @@ fn resolve_lfs_content(
     let oid_hex = hex_encode(&pointer.oid);
 
     // Try local cache first.
-    if let Some(local) = try_local_lfs_cache(&oid_hex) {
+    if let Some(local) = try_local_lfs_cache(&pointer)? {
         return Ok(local);
     }
 
@@ -2298,10 +2298,11 @@ fn resolve_lfs_content(
         let store = Arc::clone(&ctx.store);
         let oid = pointer.oid;
         let content = crate::cmd::lfs::block_on_runtime(async move {
-            store.get(&oid).await.map_err(CrabError::from)
+            store.verify(&oid).await.map_err(CrabError::from)
         })
         .map(|b| b.to_vec())
         .map_err(|e| mig_err(format!("failed to download LFS object {oid_hex}: {e}")))?;
+        cache_lfs_object(&pointer.oid, pointer.size, &content)?;
         return Ok(content);
     }
 
@@ -2724,41 +2725,17 @@ fn collect_pointer_info(
 // Local cache helpers
 // ---------------------------------------------------------------------------
 
-fn cache_lfs_object(oid: &[u8; 32], content: &[u8]) {
-    let oid_hex = hex_encode(oid);
-    let git_dir = crate::git::discover::discover_common_git_dir().ok();
-
-    if let Some(git_dir) = git_dir {
-        let local_path = git_dir
-            .join("lfs")
-            .join("objects")
-            .join(&oid_hex[..2])
-            .join(&oid_hex[2..4])
-            .join(&oid_hex);
-
-        if !local_path.is_file() {
-            if let Some(parent) = local_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&local_path, content);
-        }
-    }
+fn cache_lfs_object(oid: &[u8; 32], size: u64, content: &[u8]) -> Result<()> {
+    let git_dir = crate::git::discover::discover_common_git_dir()?;
+    crate::lfs::cache::install_bytes(&git_dir.join("lfs"), oid, size, content)?;
+    Ok(())
 }
 
-fn try_local_lfs_cache(oid_hex: &str) -> Option<Vec<u8>> {
-    let git_dir = crate::git::discover::discover_common_git_dir().ok()?;
-
-    let local_path = git_dir
-        .join("lfs")
-        .join("objects")
-        .join(&oid_hex[..2])
-        .join(&oid_hex[2..4])
-        .join(oid_hex);
-
-    if local_path.is_file() {
-        std::fs::read(&local_path).ok()
-    } else {
-        None
+fn try_local_lfs_cache(pointer: &LfsPointer) -> Result<Option<Vec<u8>>> {
+    let git_dir = crate::git::discover::discover_common_git_dir()?;
+    match crate::lfs::cache::read_pointer(&git_dir.join("lfs"), pointer) {
+        Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
+        result => result,
     }
 }
 

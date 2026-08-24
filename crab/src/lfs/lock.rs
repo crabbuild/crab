@@ -135,7 +135,7 @@ impl LockManager {
             }
             Err(CrabError::CasConflict { .. }) => {
                 // Object already exists — check if expired or same owner.
-                let (existing_body, _etag) = self.store.get_with_etag(&obj_path).await?;
+                let (existing_body, etag) = self.store.get_with_etag(&obj_path).await?;
                 let existing: LockRecord = serde_json::from_slice(&existing_body)
                     .map_err(|e| CrabError::Internal(format!("lock deserialize: {e}")))?;
 
@@ -144,12 +144,11 @@ impl LockManager {
                     debug!(path = %path, "replacing expired lock held by {}", existing.owner);
                     let new_body = serde_json::to_vec(&record)
                         .map_err(|e| CrabError::Internal(format!("lock serialize: {e}")))?;
-                    // Delete then put (best-effort atomic replacement).
-                    match self.force_unlock(path).await {
-                        Ok(()) | Err(CrabError::NotFound { .. }) => {}
-                        Err(e) => return Err(e),
-                    }
-                    self.store.put(&obj_path, Bytes::from(new_body)).await?;
+                    // The inspected expired record must still be current.
+                    // A delete/create gap could erase a racing new owner.
+                    self.store
+                        .update(&obj_path, Bytes::from(new_body), etag)
+                        .await?;
                     return Ok(record);
                 }
 
@@ -344,9 +343,13 @@ impl LockManager {
 
             match self.store.get_with_etag(&obj_path).await {
                 Ok((body, _)) => {
-                    if let Ok(record) = serde_json::from_slice::<LockRecord>(&body)
-                        && record.owner != owner
-                    {
+                    let record = serde_json::from_slice::<LockRecord>(&body).map_err(|error| {
+                        CrabError::CorruptObject {
+                            path: key,
+                            reason: format!("invalid LFS lock record: {error}"),
+                        }
+                    })?;
+                    if !Self::is_expired(&record) && record.owner != owner {
                         conflicts.push(record);
                     }
                 }
@@ -554,6 +557,69 @@ mod tests {
         let paths = vec!["a.bin".to_string(), "b.bin".to_string()];
         let conflicts = mgr.check_conflicts(&paths, "alice").await.unwrap();
         assert!(conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_lock_is_replaced_atomically() {
+        let store = memory_store();
+        let mgr = lock_manager(&store);
+        mgr.lock_with_expiry("model.bin", "alice", Some(Duration::ZERO))
+            .await
+            .unwrap();
+
+        let replacement = mgr.lock("model.bin", "bob").await.unwrap();
+
+        assert_eq!(replacement.owner, "bob");
+        assert_eq!(mgr.list().await.unwrap(), vec![replacement]);
+    }
+
+    #[tokio::test]
+    async fn expired_lock_is_not_a_push_conflict() {
+        let store = memory_store();
+        let mgr = lock_manager(&store);
+        mgr.lock_with_expiry("model.bin", "alice", Some(Duration::ZERO))
+            .await
+            .unwrap();
+
+        let conflicts = mgr
+            .check_conflicts(&["model.bin".to_owned()], "bob")
+            .await
+            .unwrap();
+
+        assert!(conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_identity_does_not_bypass_active_lock() {
+        let store = memory_store();
+        let mgr = lock_manager(&store);
+        mgr.lock("model.bin", "alice").await.unwrap();
+
+        let conflicts = mgr
+            .check_conflicts(&["model.bin".to_owned()], "")
+            .await
+            .unwrap();
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].owner, "alice");
+    }
+
+    #[tokio::test]
+    async fn corrupt_lock_record_fails_conflict_check_closed() {
+        let store = memory_store();
+        let mgr = lock_manager(&store);
+        let path = object_store::path::Path::from(mgr.lock_path("model.bin"));
+        store
+            .put(&path, Bytes::from_static(b"invalid"))
+            .await
+            .unwrap();
+
+        let error = mgr
+            .check_conflicts(&["model.bin".to_owned()], "bob")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
     }
 
     #[tokio::test]

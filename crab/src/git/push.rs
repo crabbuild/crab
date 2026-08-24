@@ -15177,6 +15177,35 @@ impl PushPipeline {
             None
         };
 
+        // LFS objects are dependencies of the Git refs just like xorbs and
+        // packs. Publish and re-verify them at this shared boundary before
+        // either native or remote-helper pushes can make a ref visible.
+        if let (Some(store), Some((sha_map, decisions))) = (self.store.as_ref(), preflight.as_ref())
+        {
+            let tips: Vec<String> = self
+                .specs
+                .iter()
+                .filter(|spec| {
+                    !spec.src.is_empty()
+                        && matches!(
+                            decisions.get(&spec.dst),
+                            Some(RefUpdateDecision::Proceed { .. })
+                        )
+                })
+                .filter_map(|spec| sha_map.get(&spec.src).cloned())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let publication = crate::lfs::publication::publish_reachable(
+                store.as_storage().clone(),
+                self.router.repo_prefix().to_owned(),
+                self.common_git_dir()?,
+                tips,
+            )
+            .await;
+            self.at_stage(PushFailureStage::Preflight, publication)?;
+        }
+
         // Steps 1–4: data preparation (classify phase)
         let classify_result = async {
             self.enumerate_pointers().await?;
@@ -18068,7 +18097,7 @@ mod tests {
         guard.close().await.expect("close writer");
     }
 
-    use crate::test::git_repo::{GitDirGuard, TEST_GIT_REPO};
+    use crate::test::git_repo::GitDirGuard;
 
     fn pack_manifest_entry_with_tips(ref_tips: Vec<String>) -> PackManifestEntry {
         let pack_id = "a".repeat(64);

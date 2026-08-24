@@ -9,8 +9,10 @@ meta:
 
 # LFS Compatibility
 
-Use `crab lfs` when you need to interoperate with Git LFS pointers, hooks, or
-transfer-agent tooling while storing objects through Crab.
+Use `crab lfs` when you need Git LFS pointers, hooks, or transfer-agent tooling
+while storing objects through Crab. LFS and Crab-native Xet files can coexist
+in one repository: choose the storage format explicitly with committed
+`.gitattributes` rules.
 
 ## When to Use It
 
@@ -21,10 +23,20 @@ transfer-agent tooling while storing objects through Crab.
 | You need LFS-style tracking rules | `crab lfs track <pattern>` |
 | You are migrating history | `crab lfs migrate import` or `export` |
 | You need lock compatibility | `crab lfs lock`, `unlock`, `locks` |
+| Large files change rarely or are not versioned as datasets | LFS attributes |
+| Large files have many versions that should deduplicate by chunk | Crab/Xet attributes |
 
-For new Crab-native repositories, prefer `crab track`, `crab add`, and
-`crab hydrate`. Use the LFS layer for compatibility rather than as the primary
-Crab workflow.
+Crab does not guess between LFS and Xet from file size, extension, or content.
+The matching `.gitattributes` rule is authoritative. For example:
+
+```gitattributes
+assets/releases/** filter=lfs diff=lfs merge=lfs -text
+datasets/** filter=crab diff=crab merge=crab -text
+```
+
+Commit `.gitattributes` before adding files. A single `git add` may include
+paths from both groups: LFS paths bypass Xet staging, while Xet paths use
+chunking and xorb storage.
 
 ## Common Commands
 
@@ -71,6 +83,12 @@ configuration, remote objects, and checkout behavior agree for another client.
 - Tracking rules live in `.gitattributes`; commit those changes.
 - Transfer-agent setup is Git config, so CI and collaborators may need
   `crab lfs install`.
+- A Crab push verifies and publishes every reachable LFS object before making
+  its Git ref visible. Missing or corrupt local and remote objects stop the
+  push rather than publishing an incomplete ref.
+- `crab lfs prune --verify-remote` downloads and verifies every candidate and
+  is fail-closed. It does not delete an object that is missing or corrupt on
+  the remote.
 - Run `crab lfs <subcommand> --help` for exact flags before migration work.
 
 For the current command list, see the [crab lfs reference](/docs/cli/reference/crab-lfs).

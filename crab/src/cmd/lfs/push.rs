@@ -263,23 +263,21 @@ pub fn run_lfs_pre_push() -> Result<()> {
     super::block_on_runtime(async {
         // Check lock conflicts.
         let owner = git_user_identity().unwrap_or_default();
-        if !owner.is_empty() {
-            let lock_store = crate::storage::Store::from_storage(ctx.store.store().clone());
-            let lock_mgr = LockManager::lfs(lock_store, &ctx.prefix);
-            let paths: Vec<String> = pointers.iter().map(|(p, _)| p.clone()).collect();
-            let conflicts = lock_mgr.check_conflicts(&paths, &owner).await?;
-            if !conflicts.is_empty() {
-                for c in &conflicts {
-                    eprintln!(
-                        "pre-push: lock conflict on {} (locked by {})",
-                        c.path, c.owner
-                    );
-                }
-                return Err(CrabError::LfsLockConflict {
-                    path: conflicts[0].path.clone(),
-                    owner: conflicts[0].owner.clone(),
-                });
+        let lock_store = crate::storage::Store::from_storage(ctx.store.store().clone());
+        let lock_mgr = LockManager::lfs(lock_store, &ctx.prefix);
+        let paths: Vec<String> = pointers.iter().map(|(p, _)| p.clone()).collect();
+        let conflicts = lock_mgr.check_conflicts(&paths, &owner).await?;
+        if !conflicts.is_empty() {
+            for c in &conflicts {
+                eprintln!(
+                    "pre-push: lock conflict on {} (locked by {})",
+                    c.path, c.owner
+                );
             }
+            return Err(CrabError::LfsLockConflict {
+                path: conflicts[0].path.clone(),
+                owner: conflicts[0].owner.clone(),
+            });
         }
 
         // Upload missing objects.
@@ -336,7 +334,7 @@ pub(crate) fn collect_lfs_object_ids_from_range_in(
     Ok(object_ids)
 }
 
-fn collect_pointers_from_range_in(
+pub(crate) fn collect_pointers_from_range_in(
     repo_dir: &Path,
     local_shas: &[String],
     remote_shas: &[String],
@@ -350,8 +348,7 @@ fn collect_pointers_from_range_in(
         args.push(format!("^{sha}"));
     }
 
-    let output = Command::new("git")
-        .current_dir(repo_dir)
+    let output = git_command_in(repo_dir)
         .args(&args)
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to run git rev-list: {e}")))?;
@@ -510,8 +507,7 @@ fn batch_read_pointers_in(
 }
 
 fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
-        .current_dir(repo_dir)
+    let mut child = git_command_in(repo_dir)
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -559,8 +555,7 @@ fn ls_tree_ref(ref_name: &str) -> Result<Vec<(String, String)>> {
 }
 
 fn ls_tree_ref_in(repo_dir: &Path, ref_name: &str) -> Result<Vec<(String, String)>> {
-    let output = Command::new("git")
-        .current_dir(repo_dir)
+    let output = git_command_in(repo_dir)
         .args(["ls-tree", "-r", ref_name])
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to run git ls-tree: {e}")))?;
@@ -576,6 +571,19 @@ fn ls_tree_ref_in(repo_dir: &Path, ref_name: &str) -> Result<Vec<(String, String
     }
 
     Ok(parse_ls_tree_output(&output.stdout))
+}
+
+fn git_command_in(repo_dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    // Git sets these variables when invoking a remote helper. The scan owns
+    // an explicit repository directory; inherited relative values would be
+    // resolved again after changing directory and point at `.git/.git`.
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .current_dir(repo_dir);
+    command
 }
 
 fn ls_tree_refs(refs: &[String]) -> Result<Vec<(String, String)>> {
@@ -801,5 +809,21 @@ mod tests {
         let stdout = cat_file_batch_stdout(dir.path(), cat_file_input).unwrap();
         let text = String::from_utf8_lossy(&stdout);
         assert_eq!(text.matches(" blob ").count(), 2048);
+    }
+
+    #[test]
+    fn repository_commands_clear_remote_helper_git_context() {
+        let command = git_command_in(Path::new("repo/.git"));
+        let overrides: std::collections::HashMap<_, _> = command.get_envs().collect();
+
+        assert_eq!(overrides.get(std::ffi::OsStr::new("GIT_DIR")), Some(&None));
+        assert_eq!(
+            overrides.get(std::ffi::OsStr::new("GIT_WORK_TREE")),
+            Some(&None)
+        );
+        assert_eq!(
+            overrides.get(std::ffi::OsStr::new("GIT_COMMON_DIR")),
+            Some(&None)
+        );
     }
 }

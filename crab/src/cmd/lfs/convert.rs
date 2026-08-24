@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
 use crate::core::pattern::build_filter;
-use crab_git::lfs_pointer::{LfsPointer, hex_encode};
+use crab_git::lfs_pointer::LfsPointer;
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_types::pointer::Pointer;
 
@@ -184,11 +184,8 @@ fn convert_crab_to_lfs(
         };
         let content = resolve_crab_content(repo_root, &candidate.path, pointer)?;
         let oid: [u8; 32] = Sha256::digest(&content).into();
-        let local_path = local_lfs_object_path(&ctx.local_lfs_dir, &oid);
-        if let Some(parent) = local_path.parent() {
-            std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
-        }
-        std::fs::write(&local_path, &content).map_err(CrabError::Io)?;
+        let local_path =
+            crate::lfs::cache::install_bytes(&ctx.local_lfs_dir, &oid, pointer.size, &content)?;
         drop(content);
         super::block_on_runtime(async {
             ctx.store
@@ -259,11 +256,11 @@ fn resolve_lfs_content(repo_root: &Path, rel_path: &str, pointer: &LfsPointer) -
     }
 
     let git_dir = discover_git_dir(repo_root)?;
-    let local = local_lfs_object_path(&git_dir.join("lfs"), &pointer.oid);
-    if local.is_file() {
-        let content = std::fs::read(&local).map_err(CrabError::Io)?;
-        verify_lfs_bytes(rel_path, pointer, &content)?;
-        return Ok(content);
+    let lfs_dir = git_dir.join("lfs");
+    match crate::lfs::cache::read_pointer(&lfs_dir, pointer) {
+        Ok(Some(content)) => return Ok(content),
+        Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => {}
+        Err(error) => return Err(error),
     }
 
     let ctx = resolve_lfs_remote_for_operation_sync("download")?;
@@ -275,6 +272,7 @@ fn resolve_lfs_content(repo_root: &Path, rel_path: &str, pointer: &LfsPointer) -
     })?
     .to_vec();
     verify_lfs_bytes(rel_path, pointer, &content)?;
+    crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content)?;
     Ok(content)
 }
 
@@ -476,15 +474,6 @@ fn write_blob_to_index(repo_root: &Path, rel_path: &str, blob: &[u8]) -> Result<
 
 fn discover_git_dir(repo_root: &Path) -> Result<PathBuf> {
     crate::git::discover::discover_common_git_dir_from(repo_root)
-}
-
-fn local_lfs_object_path(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
-    let oid_hex = hex_encode(oid);
-    lfs_dir
-        .join("objects")
-        .join(&oid_hex[..2])
-        .join(&oid_hex[2..4])
-        .join(&oid_hex)
 }
 
 fn format_size(bytes: u64) -> String {
