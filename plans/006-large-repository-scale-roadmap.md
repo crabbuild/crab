@@ -882,7 +882,7 @@ environment dumps, or credentials.
 | 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `d5090649` | Catalog-bound V5 visibility is fail-closed and generation-bound; 1,000-push layer/publication drift gate pending |
 | 4 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Split graph append, rebuild, compaction, ancestry, and shallow paths pass focused tests; Kubernetes differential/performance gate pending |
 | 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | — | `9bb558a6` | Bounded owner, selected-suffix repack, telemetry, and GC classes implemented; 10,000-push and interruption matrix pending |
-| 6 | PARTIAL | PR #75 | — | `9bb558a6` | 50-cold/100-warm clone fanout controls and bounded partial-clone LFS publication implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
+| 6 | PARTIAL | PR #75 | Local protocol report at `b7749b2e` | `0a8b5c8f`, `b7749b2e` | 50-cold/100-warm clone fanout controls and bounded partial-clone LFS publication implemented; full concurrency, fault, cache-server, provider, and canary gates pending |
 
 ### Current branch verification evidence
 
@@ -895,6 +895,11 @@ The following proof was run with
 - `cargo test -p crab-remote-git --locked`: 138 passed;
 - focused split-graph, shallow, fetch-admission, generation-owner, repack, GC,
   schema, and report-verifier suites passed;
+- the RustFS protocol-v2 smoke at `b7749b2e` passed 251 real Git commands
+  and 76 checks; its incomplete-ODB push completed without hydrating any
+  remote object (`0` read requests and `0` fetched bytes), and all canonical
+  repository object counts and bytes remained unchanged across the filter
+  matrix while generated cache artifacts increased;
 - production-library clippy for `crab-metadata`, `crab-git`,
   `crab-remote-git`, and `crab-read` passed with warnings denied.
 
