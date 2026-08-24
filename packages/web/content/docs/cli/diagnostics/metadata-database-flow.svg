@@ -17,13 +17,13 @@
     <rect x="32" y="52" width="208" height="290" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
     <text x="56" y="82" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#64748B" letter-spacing="0.6">PUSH &amp; HYDRATE</text>
 
-    <rect x="56" y="112" width="160" height="64" rx="13" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
-    <text x="136" y="141" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#0F172A">crab push</text>
-    <text x="136" y="161" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">write metadata</text>
+    <rect x="56" y="119" width="160" height="64" rx="13" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <text x="136" y="148" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#0F172A">crab push</text>
+    <text x="136" y="168" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">write metadata</text>
 
-    <rect x="56" y="218" width="160" height="64" rx="13" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
-    <text x="136" y="247" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#0F172A">crab hydrate</text>
-    <text x="136" y="267" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">read metadata</text>
+    <rect x="56" y="231" width="160" height="64" rx="13" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="1.5"/>
+    <text x="136" y="260" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#0F172A">crab hydrate</text>
+    <text x="136" y="280" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">read metadata</text>
   </g>
 
   <g id="database-panel">
@@ -45,15 +45,15 @@
     <rect x="670" y="52" width="258" height="290" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
     <text x="694" y="82" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="700" fill="#64748B" letter-spacing="0.6">REMOTE OBJECTS</text>
 
-    <rect x="700" y="112" width="198" height="76" rx="13" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
-    <text x="799" y="141" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Shards</text>
-    <text x="799" y="161" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">file metadata + refs</text>
-    <text x="799" y="178" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#0284C7">.crab/shards/</text>
+    <rect x="700" y="113" width="198" height="76" rx="13" fill="#F0F9FF" stroke="#0284C7" stroke-width="1.5"/>
+    <text x="799" y="142" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Shards</text>
+    <text x="799" y="162" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">file metadata + refs</text>
+    <text x="799" y="179" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#0284C7">.crab/shards/</text>
 
-    <rect x="700" y="224" width="198" height="76" rx="13" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
-    <text x="799" y="253" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Xorbs</text>
-    <text x="799" y="273" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">deduplicated chunks</text>
-    <text x="799" y="290" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#10B981">.crab/xorbs/</text>
+    <rect x="700" y="225" width="198" height="76" rx="13" fill="#ECFDF5" stroke="#10B981" stroke-width="1.5"/>
+    <text x="799" y="254" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#0F172A">Xorbs</text>
+    <text x="799" y="274" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748B">deduplicated chunks</text>
+    <text x="799" y="291" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="10" fill="#10B981">.crab/xorbs/</text>
   </g>
 
   <g id="cache-panel">
@@ -68,10 +68,10 @@
   </g>
 
   <g id="connections" fill="none" stroke="#64748B" stroke-width="1.5">
-    <line x1="216" y1="144" x2="300" y2="144" marker-end="url(#arrowhead)"/>
-    <path d="M 216 152 H 252 V 263 H 300" marker-end="url(#arrowhead)"/>
-    <path d="M 216 250 H 252 V 152 H 300" marker-end="url(#arrowhead)"/>
-    <path d="M 216 258 H 300" marker-end="url(#arrowhead)"/>
+    <path d="M 216 151 H 244 V 263"/>
+    <path d="M 216 263 H 260 V 151"/>
+    <line x1="216" y1="151" x2="300" y2="151" marker-end="url(#arrowhead)"/>
+    <line x1="216" y1="263" x2="300" y2="263" marker-end="url(#arrowhead)"/>
     <line x1="610" y1="151" x2="700" y2="151" marker-end="url(#arrowhead)"/>
     <line x1="610" y1="263" x2="700" y2="263" marker-end="url(#arrowhead)"/>
     <path d="M 455 306 V 350 H 455 V 430" stroke-dasharray="5,4" marker-end="url(#arrowhead-dashed)"/>
