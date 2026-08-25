@@ -320,23 +320,41 @@ impl PushAdmissionTicket {
         if self.repo_fence.is_some() {
             return Ok(());
         }
-        if let Some(global_domain) = self.global_domain.as_deref() {
-            match GcFenceLease::acquire_writer(&self.store, global_domain, self.lease_ttl).await {
-                Ok(fence) => self.global_fence = Some(fence),
-                Err(error) => return Err(error),
-            }
-        }
-        match GcFenceLease::acquire_writer(&self.store, &self.repo_domain(), self.lease_ttl).await {
-            Ok(fence) => {
-                self.repo_fence = Some(fence);
+        let repo_domain = self.repo_domain();
+        let global_domain = self.global_domain.clone();
+        let store = Arc::clone(&self.store);
+        let lease_ttl = self.lease_ttl;
+        // The bucket and repository fences protect disjoint GC domains; keep
+        // both safety claims while allowing their object-store CAS to overlap.
+        let (global_result, repo_result) = tokio::join!(
+            async {
+                match global_domain.as_deref() {
+                    Some(domain) => GcFenceLease::acquire_writer(&store, domain, lease_ttl)
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            },
+            GcFenceLease::acquire_writer(&store, &repo_domain, lease_ttl),
+        );
+
+        match (global_result, repo_result) {
+            (Ok(global_fence), Ok(repo_fence)) => {
+                self.global_fence = global_fence;
+                self.repo_fence = Some(repo_fence);
                 Ok(())
             }
-            Err(error) => {
-                if let Some(fence) = self.global_fence.take() {
+            (Ok(global_fence), Err(error)) => {
+                if let Some(fence) = global_fence {
                     fence.release().await?;
                 }
                 Err(error)
             }
+            (Err(error), Ok(repo_fence)) => {
+                repo_fence.release().await?;
+                Err(error)
+            }
+            (Err(error), Err(_repo_error)) => Err(error),
         }
     }
 
@@ -549,6 +567,45 @@ mod tests {
 
         light.release().await.unwrap();
         first.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn global_and_repository_fences_are_released_with_admission() {
+        let store = memory_store();
+        let ttl = Duration::from_secs(60);
+        let mut ticket = PushAdmissionTicket::new_weighted_with_global(
+            &store,
+            "org/repo",
+            Some("bucket"),
+            1,
+            1,
+            ttl,
+        )
+        .unwrap();
+        assert!(ticket.try_admit().await.unwrap());
+
+        assert!(matches!(
+            GcFenceLease::acquire_sweep(&store, "bucket", ttl).await,
+            Err(CoordinationError::GcFenceHeld { .. })
+        ));
+        assert!(matches!(
+            GcFenceLease::acquire_sweep(&store, "org/repo", ttl).await,
+            Err(CoordinationError::GcFenceHeld { .. })
+        ));
+
+        ticket.release().await.unwrap();
+        GcFenceLease::acquire_sweep(&store, "bucket", ttl)
+            .await
+            .unwrap()
+            .release()
+            .await
+            .unwrap();
+        GcFenceLease::acquire_sweep(&store, "org/repo", ttl)
+            .await
+            .unwrap()
+            .release()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -125,6 +125,22 @@ pub(crate) async fn upsert_pack_metadata(
         return Ok(metadata);
     }
 
+    // A newly generated content-addressed pack normally has no sidecar yet;
+    // create-first avoids a guaranteed read on the first publication.
+    let metadata = PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips: requested_tips.iter().cloned().collect(),
+        object_count,
+    };
+    let body = serde_json::to_vec(&metadata).map_err(|error| {
+        CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
+    })?;
+    match store.create_strict(path, Bytes::from(body)).await {
+        Ok(()) => return Ok(metadata),
+        Err(CrabError::CasConflict { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
     for _ in 0..max_retries.max(1) {
         match store.get_with_etag(path).await {
             Ok((body, etag)) => {
@@ -7990,6 +8006,58 @@ impl PushPipeline {
         )))
     }
 
+    async fn try_publish_initial_manifest(
+        &self,
+        manifest: &Manifest,
+        bulk: &BulkData,
+        current: &crate::metadata::manifest::RepositorySnapshot,
+        admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<bool> {
+        let eligible = self.config.protected_push.is_none()
+            && self.config.active_active_replication.is_none()
+            && current.manifest.generation == 0
+            && current.manifest.refs.is_empty()
+            && current.manifest.shard_index_hash.is_empty()
+            && current.manifest.pack_index_hash.is_empty()
+            && current.journal.refs.is_empty()
+            && current.journal.packs.is_empty()
+            && current.journal.shards.is_empty()
+            && current.journal.transactions.is_empty()
+            && current.journal.visible_heads.is_empty()
+            && manifest.generation == 1
+            && !manifest.refs.is_empty();
+        if !eligible {
+            return Ok(false);
+        }
+
+        let anchor = committed_manifest_anchor(manifest)?;
+        let git_dir = self.common_git_dir()?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("initial manifest requires a store".to_owned()))?;
+
+        // The candidate indexes and the complete visibility proof are
+        // independent immutable objects. Publish both before the manifest
+        // CAS so the manifest remains the only visibility boundary.
+        tokio::try_join!(
+            upload_segmented_bulk(store, &self.router, bulk),
+            publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router),
+        )?;
+        let new_etag =
+            write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
+
+        *self.manifest_etag.lock().await = Some(new_etag);
+        *self.committed_manifest_anchor.lock().await = anchor;
+        self.git_visibility_published
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(signal) = admission_commit.take() {
+            let _ = signal.send(());
+        }
+        self.stop_heartbeat_and_release_lock().await;
+        Ok(true)
+    }
+
     /// Commit independently locked refs through one atomic journal transaction.
     #[tracing::instrument(
         level = "info",
@@ -8006,7 +8074,7 @@ impl PushPipeline {
     async fn commit_ref_journal(
         &self,
         mut manifest: Manifest,
-        _bulk: BulkData,
+        bulk: BulkData,
         sha_map: &HashMap<String, String>,
         mut decisions: HashMap<String, RefUpdateDecision>,
         admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
@@ -8087,6 +8155,13 @@ impl PushPipeline {
             (manifest, _) = self
                 .apply_decisions_with_sha_map(&decisions, false, sha_map)
                 .await?;
+        }
+        if !had_conflicts
+            && self
+                .try_publish_initial_manifest(&manifest, &bulk, &current_snapshot, admission_commit)
+                .await?
+        {
+            return Ok(decisions);
         }
         let mut edits = Vec::new();
         let lock_holders = {
@@ -12282,8 +12357,9 @@ impl PushPipeline {
                             ))
                         })??;
                     let remote_idx_path = self.router.pack_index_path(&pack_sha);
-                    store
-                        .put_multipart_file_retry(
+                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
+                    tokio::try_join!(
+                        store.put_multipart_file_retry(
                             &remote_idx_path,
                             &installed.idx_path,
                             idx_size,
@@ -12291,11 +12367,8 @@ impl PushPipeline {
                             8 * 1024 * 1024,
                             &self.cancel,
                             None,
-                        )
-                        .await?;
-                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
-                    store
-                        .put_multipart_file_retry(
+                        ),
+                        store.put_multipart_file_retry(
                             &remote_rev_path,
                             &installed.rev_path,
                             rev_size,
@@ -12303,20 +12376,39 @@ impl PushPipeline {
                             8 * 1024 * 1024,
                             &self.cancel,
                             None,
-                        )
-                        .await?;
+                        ),
+                    )?;
                 }
 
+                let origin_entry = PackManifestEntry {
+                    pack_id: pack_sha.clone(),
+                    size: packed.pack_size,
+                    content_hash: pack_sha.clone(),
+                    ref_tips: ref_tips.clone(),
+                    object_count: packed.object_count,
+                };
                 let meta_path = self.router.pack_metadata_path(&pack_sha);
-                let metadata = upsert_pack_metadata(
-                    store,
-                    &meta_path,
-                    &pack_sha,
-                    packed.object_count,
-                    ref_tips.clone(),
-                    self.config.max_cas_retries,
-                )
-                .await?;
+                // The pack body is verified and durable; its immutable index
+                // evidence, metadata, and origin receipt can now publish in parallel.
+                let (metadata, _) = tokio::try_join!(
+                    upsert_pack_metadata(
+                        store,
+                        &meta_path,
+                        &pack_sha,
+                        packed.object_count,
+                        ref_tips.clone(),
+                        self.config.max_cas_retries,
+                    ),
+                    async {
+                        crab_metadata::pack_origin::record_verified_pack_origin(
+                            store.as_storage(),
+                            self.router.repo_prefix(),
+                            &origin_entry,
+                        )
+                        .await
+                        .map_err(CrabError::from)
+                    },
+                )?;
                 let entry = PackManifestEntry {
                     pack_id: pack_sha.clone(),
                     size: packed.pack_size,
@@ -12324,12 +12416,6 @@ impl PushPipeline {
                     ref_tips: metadata.ref_tips,
                     object_count: packed.object_count,
                 };
-                crab_metadata::pack_origin::record_verified_pack_origin(
-                    store.as_storage(),
-                    self.router.repo_prefix(),
-                    &entry,
-                )
-                .await?;
                 info!(
                     pack_id = %pack_sha,
                     pack_bytes = packed.pack_size,
@@ -19045,6 +19131,13 @@ mod tests {
         }
     }
 
+    fn non_initial_empty_manifest() -> Manifest {
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.seal_git_validation();
+        manifest
+    }
+
     #[test]
     fn locked_manifest_noop_covers_equal_update_and_missing_delete() {
         let update = make_spec("refs/heads/main");
@@ -19406,10 +19499,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn initial_push_publishes_manifest_without_ref_journal_state() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("initial-manifest-fast-path");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create initial manifest");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.expect("read base");
+        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .expect("evaluate refs");
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .expect("build candidate");
+
+        let mut admission_commit = None;
+        pipeline
+            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
+            .await
+            .expect("publish initial manifest");
+
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read committed manifest");
+        assert_eq!(
+            manifest.refs.get("refs/heads/main"),
+            sha_map.get("refs/heads/main")
+        );
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .expect("read initial ref head");
+        assert!(head.etag.is_none());
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        assert!(
+            crab_metadata::ref_journal::list_active_transactions(
+                store.as_storage(),
+                &storage_router
+            )
+            .await
+            .expect("list active transactions")
+            .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn late_journal_writer_waits_for_compactor_handoff_after_commit() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-busy-compactor");
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -19495,13 +19658,9 @@ mod tests {
     async fn compactor_defers_locator_publication_to_claimed_same_ref_successor() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-locator-successor");
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
         let pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/main")],
@@ -19695,13 +19854,9 @@ mod tests {
             ));
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
 
         let result = PushPipeline::new(
             PushConfig::default(),
@@ -19745,7 +19900,7 @@ mod tests {
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
