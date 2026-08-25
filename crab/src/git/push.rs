@@ -8228,12 +8228,11 @@ impl PushPipeline {
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
-        // Locator rows and their receipt are repairable acceleration state, so
-        // leave them to the next push or the metadb repair/owner path on a
-        // fresh repository instead of extending creation latency with a
-        // second SlateDB publication.
+        // The common post-CAS path publishes exact locator coverage now that
+        // the manifest is durable, so a fresh repository is clone-ready
+        // without requiring the first reader to perform repair.
         self.locator_publication_deferred
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(signal) = admission_commit.take() {
             let _ = signal.send(());
         }
