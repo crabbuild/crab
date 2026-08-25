@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crab_metadata::git_visibility::GitVisibilityIndex;
+use crab_metadata::manifest_store::read_manifest;
+use crab_metadata::ref_journal::list_active_transactions;
 use crab_read::{
     FetchAdmissionPolicy, UploadPackFilter, UploadPackRequest, combine_upload_pack_filters,
     parse_upload_pack_filter, plan_upload_pack,
@@ -157,23 +159,58 @@ pub async fn snapshot_available(
     // If exact locator coverage lags, omit v2 and let Git use the
     // already-advertised complete-pack fetch path. Rebuilding it here makes
     // every dependent hot-ref generation pay the full locator publication cost.
-    let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
+    let Ok(Some((generation, available))) =
+        catalog_visibility_snapshot(store, prefix, cancellation).await
+    else {
         return false;
     };
-    match repository.catalog_visibility_available(cancellation).await {
-        Ok(true) => true,
-        Ok(false) => repair_snapshot_availability(store, prefix, repository, cancellation).await,
-        Err(error) if visibility_index_needs_repair(&error) => {
-            repair_snapshot_availability(store, prefix, repository, cancellation).await
-        }
-        Err(_) => false,
+    if available {
+        return true;
     }
+    repair_snapshot_availability(store, prefix, generation, cancellation).await
+}
+
+async fn catalog_visibility_snapshot(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<Option<(u64, bool)>> {
+    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+    let active_transactions = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
+        result = list_active_transactions(store, &layout) => result.map_err(RemoteGitError::Metadata)?,
+    };
+    let (manifest, _) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
+        result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
+    };
+    if !active_transactions.is_empty() {
+        return Ok(None);
+    }
+    if manifest.refs.is_empty() {
+        return Ok(Some((manifest.generation, true)));
+    }
+    let pack_index_hash = manifest.pack_index_hash.clone();
+    let available = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
+        result = crab_metadata::git_visibility::catalog_bound_available(
+            store,
+            &layout,
+            manifest.generation,
+            &pack_index_hash,
+            &manifest.git_validation_digest,
+        ) => result.map_err(RemoteGitError::Metadata)?,
+    };
+    Ok(Some((manifest.generation, available)))
 }
 
 async fn repair_snapshot_availability(
     store: &crab_storage::Store,
     prefix: &str,
-    repository: RemoteGitRepository,
+    generation: u64,
     cancellation: &CancellationToken,
 ) -> bool {
     let repair_store = crate::storage::Store::from_storage(store.clone());
@@ -187,20 +224,19 @@ async fn repair_snapshot_availability(
     match Box::pin(super::push::repair_git_visibility_if_current(
         &repair_store,
         &repair_layout,
-        repository.generation(),
+        generation,
         LOCATOR_READ_REPAIR_LOCK_TTL,
         cancellation,
     ))
     .await
     {
         Ok(Some(super::push::GitVisibilityPublication::Published)) => {
-            let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
+            let Ok(Some((_, available))) =
+                catalog_visibility_snapshot(store, prefix, cancellation).await
+            else {
                 return false;
             };
-            repository
-                .catalog_visibility_available(cancellation)
-                .await
-                .is_ok_and(|available| available)
+            available
         }
         Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => false,
         Err(error) => {
@@ -1431,6 +1467,23 @@ mod tests {
         assert!(
             options.operation_limits().max_response_bytes
                 < options.operation_limits().max_inflated_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_snapshot_short_circuits_empty_repositories() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .expect("create empty manifest");
+
+        assert_eq!(
+            catalog_visibility_snapshot(&store, "org/repo", &CancellationToken::new())
+                .await
+                .expect("read empty capability snapshot"),
+            Some((manifest.generation, true))
         );
     }
 
