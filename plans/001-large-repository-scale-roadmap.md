@@ -90,7 +90,8 @@ recovery gap found by the released-shape RustFS lifecycle while preserving the
 push acknowledgement boundary.
 
 Implemented on the current branch (qualification evidence at `04655f3b`; latest
-admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`):
+admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`;
+capability-admission fix at `3bd7a02b`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
