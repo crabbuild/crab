@@ -4,7 +4,6 @@ import {
   ArrowRight,
   BookOpen,
   Briefcase,
-  CheckCircle2,
   Clock,
   GitBranch,
   Layers,
@@ -28,7 +27,6 @@ import {
   type BlogPostMeta,
 } from "@/lib/blog"
 import { getBlogPosts } from "@/lib/blog-posts"
-import { cn } from "@/lib/utils"
 import { createPageMetadata } from "@/lib/metadata"
 
 export const metadata = createPageMetadata({
@@ -52,9 +50,6 @@ const pathIcons: Record<BlogLearningPathKey, typeof BookOpen> = {
   "core-internals": Network,
   "advanced-operations": Layers,
 }
-
-const SEQUENCE_COLUMN_COUNT = 4
-const PATH_PREVIEW_COUNT = 2
 
 const categoryIcons: Record<BlogPostMeta["category"], typeof Package> = {
   Product: Package,
@@ -190,9 +185,9 @@ export default function BlogIndexPage() {
                   Follow the sequence
                 </h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                  Each step has a job: orient, try, inspect, then operate.
-                  Migration now lives with the operational material because it
-                  depends on the same storage, cost, and consistency concepts.
+                  Move from orientation to hands-on work, then into internals
+                  and operations. Every guide is shown in reading order, so you
+                  can see the complete route before you begin.
                 </p>
               </div>
               <div className="rounded-md border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
@@ -208,16 +203,13 @@ export default function BlogIndexPage() {
             </div>
           </Reveal>
 
-          <ol className="grid gap-4 lg:grid-cols-4">
+          <ol>
             {BLOG_LEARNING_PATHS.map((path, index) => (
-              <LearningPathCard
+              <LearningPathStep
                 key={path.key}
                 path={path}
                 posts={getPathPosts(path.key, posts)}
-                hasConnector={
-                  (index + 1) % SEQUENCE_COLUMN_COUNT !== 0 &&
-                  index < BLOG_LEARNING_PATHS.length - 1
-                }
+                isLast={index === BLOG_LEARNING_PATHS.length - 1}
               />
             ))}
           </ol>
@@ -297,124 +289,139 @@ export default function BlogIndexPage() {
   )
 }
 
-function LearningPathCard({
+function LearningPathStep({
   path,
   posts,
-  hasConnector,
+  isLast,
 }: {
   path: BlogLearningPath
   posts: BlogPostMeta[]
-  hasConnector: boolean
+  isLast: boolean
 }) {
   const Icon = pathIcons[path.key]
   const totalMinutes = posts.reduce(
     (minutes, post) => minutes + post.readingTimeMinutes,
     0
   )
-  const visiblePosts = posts.slice(0, PATH_PREVIEW_COUNT)
-  const hiddenPosts = posts.slice(PATH_PREVIEW_COUNT)
-  const hiddenPostCount = posts.length - visiblePosts.length
   const pathHref = getPathFilterHref(path.key)
 
   return (
-    <li
-      className={cn(
-        "relative",
-        hasConnector &&
-          "lg:after:absolute lg:after:top-6 lg:after:left-[calc(100%+0.25rem)] lg:after:h-px lg:after:w-3 lg:after:bg-border"
-      )}
-    >
-      <div className="flex h-full flex-col rounded-lg border border-border bg-card p-4 shadow-sm transition-all hover:shadow-card-hover hover:ring-1 hover:ring-primary/20">
-        <div className="flex items-start justify-between gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Icon size={18} aria-hidden="true" />
-          </span>
-          <span className="rounded-full bg-muted px-2 py-1 text-[0.68rem] font-medium tracking-wide text-muted-foreground uppercase">
-            Step {path.order}
-          </span>
-        </div>
+    <li className="grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 pb-5 last:pb-0 sm:grid-cols-[3rem_minmax(0,1fr)] sm:gap-5">
+      <div className="flex flex-col items-center" aria-hidden="true">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-background text-sm font-semibold text-primary shadow-sm sm:h-12 sm:w-12">
+          {path.order}
+        </span>
+        {!isLast && <span className="mt-2 w-px flex-1 bg-border" />}
+      </div>
 
-        <h3 className="mt-4 text-base leading-snug font-semibold">
-          {path.label}
-        </h3>
-        <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
-          {path.description}
-        </p>
-
-        <div className="mt-4 grid grid-cols-2 gap-3 border-y border-border py-3">
-          <PathMetric label="Guides" value={String(posts.length)} />
-          <PathMetric label="Read" value={`${totalMinutes}m`} />
-        </div>
-
-        <div className="mt-3 text-xs">
-          <div className="text-[0.68rem] font-semibold tracking-wide text-muted-foreground uppercase">
-            For
+      <article className="overflow-hidden rounded-xl border border-border bg-card shadow-sm lg:grid lg:grid-cols-[18rem_minmax(0,1fr)]">
+        <div className="border-b border-border bg-muted/20 p-5 sm:p-6 lg:border-r lg:border-b-0">
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Icon size={18} aria-hidden="true" />
+            </span>
+            <span className="text-[0.68rem] font-semibold tracking-wide text-muted-foreground uppercase">
+              Step {path.order} of {BLOG_LEARNING_PATHS.length}
+            </span>
           </div>
-          <div className="mt-1 font-medium text-foreground">
+
+          <h3 className="mt-5 text-xl leading-tight font-semibold">
+            {path.label}
+          </h3>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            {path.description}
+          </p>
+
+          <div className="mt-5 grid grid-cols-2 gap-4 border-y border-border py-4">
+            <PathMetric label="Guides" value={String(posts.length)} />
+            <PathMetric label="Read time" value={`${totalMinutes} min`} />
+          </div>
+
+          <div className="mt-4 text-[0.68rem] font-semibold tracking-wide text-muted-foreground uppercase">
+            Best for
+          </div>
+          <div className="mt-1 text-sm font-medium text-foreground">
             {path.audience}
           </div>
+
+          <Link
+            href={pathHref}
+            className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-primary transition-colors hover:text-primary-hover focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            Explore this path
+            <ArrowRight size={14} aria-hidden="true" />
+          </Link>
         </div>
 
-        <div className="mt-4">
-          <div className="text-[0.68rem] font-semibold tracking-wide text-muted-foreground uppercase">
-            Guides
+        <div className="min-w-0">
+          <div className="border-b border-border px-5 py-4 sm:flex sm:items-center sm:justify-between sm:gap-4 sm:px-6">
+            <div>
+              <div className="text-sm font-semibold text-foreground">
+                Guides in this step
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Read from top to bottom for the intended progression.
+              </p>
+            </div>
+            <span className="mt-2 block text-xs font-medium text-muted-foreground sm:mt-0">
+              {posts.length} guide{posts.length === 1 ? "" : "s"}
+            </span>
           </div>
-          <div className="mt-2 space-y-1.5">
-            {visiblePosts.map((post) => (
-              <PathPostLink key={post.slug} post={post} />
+
+          <ol className="divide-y divide-border">
+            {posts.map((post, index) => (
+              <li key={post.slug}>
+                <PathPostLink post={post} sequenceNumber={index + 1} />
+              </li>
             ))}
-            {hiddenPostCount > 0 && (
-              <details className="group rounded-md">
-                <summary className="cursor-pointer list-none rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden">
-                  <span className="group-open:hidden">
-                    +{hiddenPostCount} more guide
-                    {hiddenPostCount === 1 ? "" : "s"}
-                  </span>
-                  <span className="hidden group-open:inline">
-                    Hide extra guides
-                  </span>
-                </summary>
-                <div className="mt-1 space-y-1.5">
-                  {hiddenPosts.map((post) => (
-                    <PathPostLink key={post.slug} post={post} />
-                  ))}
-                </div>
-              </details>
-            )}
-          </div>
+          </ol>
         </div>
-
-        <Link
-          href={pathHref}
-          className="mt-auto inline-flex items-center gap-1 pt-4 text-xs font-medium text-primary transition-colors hover:text-primary-hover"
-        >
-          View full path
-          <ArrowRight size={12} />
-        </Link>
-      </div>
+      </article>
     </li>
   )
 }
 
-function PathPostLink({ post }: { post: BlogPostMeta }) {
+function PathPostLink({
+  post,
+  sequenceNumber,
+}: {
+  post: BlogPostMeta
+  sequenceNumber: number
+}) {
   return (
     <Link
       href={`/blog/${post.slug}`}
-      className="group flex min-w-0 gap-2 rounded-md p-1.5 transition-colors hover:bg-muted"
+      className="group grid min-w-0 grid-cols-[2rem_minmax(0,1fr)] gap-3 px-5 py-4 transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center sm:px-6"
     >
-      <CheckCircle2
-        size={14}
-        className="mt-0.5 shrink-0 text-primary"
-        aria-hidden="true"
-      />
-      <span className="min-w-0 text-xs leading-5">
-        <span className="line-clamp-2 font-medium break-words group-hover:text-primary">
+      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+        {sequenceNumber}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm leading-5 font-semibold text-foreground transition-colors group-hover:text-primary">
           {post.title}
         </span>
-        <span className="mt-0.5 flex items-center gap-1 text-muted-foreground">
-          <Clock size={11} />
+        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+          {post.description}
+        </span>
+        <span className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.68rem] font-medium text-muted-foreground sm:hidden">
+          <span>{post.level}</span>
+          <span className="flex items-center gap-1">
+            <Clock size={11} aria-hidden="true" />
+            {post.readingTimeMinutes} min
+          </span>
+        </span>
+      </span>
+      <span className="hidden items-center gap-4 pl-4 text-xs text-muted-foreground sm:flex">
+        <span>{post.level}</span>
+        <span className="flex items-center gap-1 whitespace-nowrap">
+          <Clock size={12} aria-hidden="true" />
           {post.readingTimeMinutes} min
         </span>
+        <ArrowRight
+          size={14}
+          className="text-primary transition-transform group-hover:translate-x-0.5"
+          aria-hidden="true"
+        />
       </span>
     </Link>
   )
