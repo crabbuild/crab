@@ -8051,6 +8051,13 @@ impl PushPipeline {
         *self.committed_manifest_anchor.lock().await = anchor;
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The manifest and complete Git-visibility proof are authoritative.
+        // Locator rows and their receipt are repairable acceleration state, so
+        // leave them to the next push or the metadb repair/owner path on a
+        // fresh repository instead of extending creation latency with a
+        // second SlateDB publication.
+        self.locator_publication_deferred
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(signal) = admission_commit.take() {
             let _ = signal.send(());
         }
@@ -19540,6 +19547,12 @@ mod tests {
             .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
             .await
             .expect("publish initial manifest");
+        assert!(
+            pipeline
+                .locator_publication_deferred
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "generation-zero publication should defer repairable locator acceleration"
+        );
 
         let (manifest, _) = read_manifest(&store, &router)
             .await
@@ -20017,6 +20030,18 @@ mod tests {
             .await
             .expect("read pushed manifest");
         let covered_generation = manifest.generation;
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                covered_generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair deferred initial locator"),
+            "the explicit repair path should publish the deferred initial locator"
+        );
         let storage_router =
             crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
         let visibility = crab_metadata::git_visibility::read(
@@ -20173,6 +20198,18 @@ mod tests {
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read pushed manifest");
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                manifest.generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair deferred initial locator"),
+            "the explicit repair path should publish the deferred initial locator"
+        );
         let visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
