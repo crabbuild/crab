@@ -556,7 +556,16 @@ impl SessionCache {
 }
 
 fn resolve_remote_helper_config() -> Result<crate::core::config::Config> {
-    let mut config = crate::core::config::Config::resolve_local()?;
+    // Git may launch a nested promisor helper while a push is still running.
+    // That helper can start outside the worktree, so resolve the shared repo
+    // config from Git's explicit directory instead of trusting its cwd.
+    let repo_root = super::discover::discover_git_dir()
+        .ok()
+        .map(|git_dir| repo_root_from_git_dir(&git_dir));
+    let mut config = repo_root.as_deref().map_or_else(
+        crate::core::config::Config::resolve_local,
+        crate::core::config::Config::resolve_for_repo,
+    )?;
     if let Ok(cwd) = std::env::current_dir()
         && let Some(project) = crate::core::project_config::ProjectConfig::discover(&cwd)
     {
@@ -5300,6 +5309,41 @@ mod tests {
             config.contains("lazy = false"),
             "helper must not overwrite explicit checkout policy: {config}"
         );
+    }
+
+    #[test]
+    fn remote_helper_config_uses_git_dir_when_cwd_is_outside_worktree() {
+        let _git_env = CleanGitEnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .expect("run git init");
+        assert!(init.success());
+        let config_path = repo.join(".crab/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[uploadpack]\nallowReachableSHA1InWant = true\n",
+        )
+        .unwrap();
+
+        let saved_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&outside).unwrap();
+        // SAFETY: `CleanGitEnvGuard` serializes process-global Git env access.
+        unsafe {
+            std::env::set_var("GIT_DIR", repo.join(".git"));
+            std::env::set_var("GIT_WORK_TREE", &repo);
+        }
+        let config = resolve_remote_helper_config().expect("resolve helper config");
+        std::env::set_current_dir(saved_cwd).unwrap();
+
+        assert!(config.uploadpack_allow_reachable_sha_in_want);
     }
 
     #[test]
