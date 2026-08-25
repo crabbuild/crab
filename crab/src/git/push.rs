@@ -5829,8 +5829,8 @@ async fn publish_pack_locator_inventory(
             writer.write_locations(binding, &entries).await?;
         }
     }
-    writer.flush_objects().await?;
-
+    // The manifest check is independent of locator durability. Keep object
+    // rows pending so set_coverage flushes them with the coverage marker.
     let (after, _) = read_manifest(store, router).await?;
     if after.generation != anchor.generation
         || after.pack_index_hash != anchor.pack_index_hash.hex()
@@ -21834,6 +21834,7 @@ mod tests {
         .await
         .expect("publish locators");
         assert_eq!(stats.object_rows_written, 1);
+        assert_eq!(stats.flushes, 2);
         assert!(stats.coverage_updated);
 
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(

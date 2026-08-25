@@ -760,18 +760,14 @@ async fn ensure_initial_manifest(
     router: &crate::storage::StoreLayout,
     head: &str,
 ) -> Result<()> {
-    match crate::metadata::manifest::read_manifest(store, router).await {
-        Ok(_) => Ok(()),
-        Err(CrabError::NotFound { .. }) => {
-            match create_initial_manifest(store, router, head).await {
-                Ok(()) => Ok(()),
-                Err(CrabError::CasConflict { .. }) => {
-                    crate::metadata::manifest::read_manifest(store, router)
-                        .await
-                        .map(|_| ())
-                }
-                Err(error) => Err(error),
-            }
+    // New repositories are the hot path: create-first avoids a discovery GET.
+    // A conflict proves another initializer won, so adopt its manifest.
+    match create_initial_manifest(store, router, head).await {
+        Ok(()) => Ok(()),
+        Err(CrabError::CasConflict { .. }) => {
+            crate::metadata::manifest::read_manifest(store, router)
+                .await
+                .map(|_| ())
         }
         Err(error) => Err(error),
     }

@@ -375,7 +375,9 @@ impl PushAdmissionTicket {
 
     fn repo_domain(&self) -> String {
         self.prefix
-            .strip_suffix("/internal/push-admission/slots")
+            // GC fences are keyed by the repository root, not the nested
+            // admission-slot object prefix.
+            .strip_suffix("/locks/internal/push-admission/slots")
             .unwrap_or(&self.prefix)
             .to_owned()
     }

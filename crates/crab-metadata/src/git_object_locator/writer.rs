@@ -165,15 +165,6 @@ impl GitObjectLocatorWriter {
             {
                 return Err((db, error));
             }
-            if let Err(source) = db.flush().await {
-                return Err((
-                    db,
-                    MetadataError::SlateDbWrite {
-                        db: DB_LABEL.to_owned(),
-                        source,
-                    },
-                ));
-            }
             metadata
         };
 
@@ -189,7 +180,9 @@ impl GitObjectLocatorWriter {
             metadata,
             bindings,
             stats: LocatorWriteStats::default(),
-            writes_durable: true,
+            // The first metadata batch can share the first binding or
+            // coverage flush; no reader checkpoint exists before that point.
+            writes_durable: false,
         })
     }
 
