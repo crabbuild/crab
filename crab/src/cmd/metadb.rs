@@ -587,6 +587,14 @@ async fn generation_owner_sample(
     let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
     let (locator_advanced, catalog) =
         maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel).await?;
+    // The owner is also the repair path for imports and Git-only pushes that
+    // had no post-CAS MetaDb writer. Once locator coverage is current, publish
+    // the receipt so doctor and GC can distinguish complete derived state from
+    // a silently unverified generation. Empty repositories have no index
+    // anchor and therefore do not need a receipt.
+    if anchor.is_some() {
+        write_generation_index_receipt(store, router, &manifest).await?;
+    }
     if locator_advanced {
         return Ok(GenerationOwnerSample {
             generation,
@@ -3364,32 +3372,42 @@ async fn diagnose_acceleration_health(
         "metadata/generation-receipts/{:020}.json",
         manifest.generation
     ));
-    let generation_receipt_valid = match storage.get_with_etag(&receipt_path).await {
-        Ok((body, _)) => {
-            serde_json::from_slice::<crab_metadata::receipts::GenerationIndexReceipt>(&body)
-                .map_err(|error| error.to_string())
-                .and_then(|receipt| {
-                    receipt
-                        .validate(
-                            manifest.generation,
-                            shard_index_hash.into(),
-                            pack_index_hash.into(),
-                        )
-                        .map_err(|error| error.to_string())
-                })
-                .map(|()| true)
-                .unwrap_or_else(|error| {
-                    notes.push(format!("generation-index receipt invalid: {error}"));
-                    false
-                })
-        }
-        Err(crab_storage::StorageError::NotFound { .. }) => {
-            notes.push("generation-index receipt missing; run `crab metadb rebuild`".to_owned());
-            false
-        }
-        Err(error) => {
-            notes.push(format!("generation-index receipt unreadable: {error}"));
-            false
+    let generation_receipt_valid = if manifest.refs.is_empty()
+        && manifest.shard_index_hash.is_empty()
+        && manifest.pack_index_hash.is_empty()
+    {
+        // An empty repository has no file or Git object indexes to bind, so a
+        // generation receipt would be both unnecessary and unrepresentable.
+        true
+    } else {
+        match storage.get_with_etag(&receipt_path).await {
+            Ok((body, _)) => {
+                serde_json::from_slice::<crab_metadata::receipts::GenerationIndexReceipt>(&body)
+                    .map_err(|error| error.to_string())
+                    .and_then(|receipt| {
+                        receipt
+                            .validate(
+                                manifest.generation,
+                                shard_index_hash.into(),
+                                pack_index_hash.into(),
+                            )
+                            .map_err(|error| error.to_string())
+                    })
+                    .map(|()| true)
+                    .unwrap_or_else(|error| {
+                        notes.push(format!("generation-index receipt invalid: {error}"));
+                        false
+                    })
+            }
+            Err(crab_storage::StorageError::NotFound { .. }) => {
+                notes
+                    .push("generation-index receipt missing; run `crab metadb rebuild`".to_owned());
+                false
+            }
+            Err(error) => {
+                notes.push(format!("generation-index receipt unreadable: {error}"));
+                false
+            }
         }
     };
     let (

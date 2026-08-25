@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -14,6 +15,7 @@ use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
 const REF_JOURNAL_VERSION: u32 = 1;
 const MAX_REF_HEADS: usize = 1_000_000;
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_000_000;
+const REF_JOURNAL_READ_CONCURRENCY: usize = 32;
 
 /// One expected-old ref edit committed by a journal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -456,22 +458,36 @@ pub async fn materialize_ref_journal(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut transactions = BTreeMap::new();
-    while let Some(transaction_id) = pending.pop_first() {
-        if transactions.contains_key(&transaction_id) {
-            continue;
+    while let Some(first_transaction_id) = pending.pop_first() {
+        let mut batch = vec![first_transaction_id];
+        while batch.len() < REF_JOURNAL_READ_CONCURRENCY {
+            let Some(transaction_id) = pending.pop_first() else {
+                break;
+            };
+            batch.push(transaction_id);
         }
-        if transactions.len() == MAX_REF_HEADS {
+        let loaded = futures_util::stream::iter(batch.into_iter().map(|transaction_id| async {
+            let transaction = read_transaction(store, router, &transaction_id).await?;
+            Ok::<_, MetadataError>((transaction_id, transaction))
+        }))
+        .buffer_unordered(REF_JOURNAL_READ_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        if transactions.len().saturating_add(loaded.len()) > MAX_REF_HEADS {
             return Err(MetadataError::Internal(
                 "ref journal transaction limit exceeded".to_owned(),
             ));
         }
-        let transaction = read_transaction(store, router, &transaction_id).await?;
-        for parent in transaction.parents.values().flatten() {
-            if !transactions.contains_key(parent) && !compacted.contains(parent) {
-                pending.insert(parent.clone());
+        for (transaction_id, transaction) in &loaded {
+            transactions.insert(transaction_id.clone(), transaction.clone());
+        }
+        for (_transaction_id, transaction) in loaded {
+            for parent in transaction.parents.values().flatten() {
+                if !transactions.contains_key(parent) && !compacted.contains(parent) {
+                    pending.insert(parent.clone());
+                }
             }
         }
-        transactions.insert(transaction_id, transaction);
     }
 
     let order = transaction_order(&transactions)?;
