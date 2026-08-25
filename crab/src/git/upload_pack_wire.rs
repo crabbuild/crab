@@ -276,11 +276,10 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let repository = open_repository(store, prefix, cancellation).await?;
-    let visibility = repository
-        .visibility_index(cancellation)
-        .await
-        .map_err(remote_error)?;
+    // Catalog-bound admission materializes the large visibility dictionary;
+    // retain that proof instead of reopening SlateDB for the same helper.
+    let (repository, visibility) =
+        open_repository_with_visibility(store, prefix, cancellation).await?;
     let visible_ref_names = visible_ref_names(&repository, hidden_ref_patterns)?;
 
     // The remote-helper positive response is one raw blank line. Only after
@@ -437,18 +436,18 @@ fn validate_fetch_wants(
     Ok(())
 }
 
-pub(crate) async fn open_repository(
+pub(crate) async fn open_repository_with_visibility(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
-) -> Result<RemoteGitRepository> {
+) -> Result<(RemoteGitRepository, GitVisibilityIndex)> {
     let mut last_indexing = None;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
         let open = open_repository_snapshot(store, prefix, cancellation).await;
         let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
             Ok(repository) => match repository.visibility_index(cancellation).await {
-                Ok(_) => return Ok(repository),
+                Ok(visibility) => return Ok((repository, visibility)),
                 Err(error) if visibility_index_needs_repair(&error) => {
                     let generation = repository.generation();
                     visibility_error = Some(error);

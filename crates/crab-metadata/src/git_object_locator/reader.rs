@@ -29,6 +29,11 @@ const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
 const MAX_SCAN_AMPLIFICATION: usize = 2;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
+// Catalog reads materialize one immutable dense dictionary. A larger
+// read-ahead window and more fetch tasks keep that sequential transfer from
+// degenerating into one object-store round trip per SlateDB block.
+const CATALOG_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
+const CATALOG_SCAN_FETCH_TASKS: usize = 8;
 // One cache is private to one short-lived reader process. This keeps 32
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
@@ -428,8 +433,11 @@ impl GitObjectLocatorSession {
         let capacity = usize::try_from(expected)
             .map_err(|_| corrupt("metadata", "catalog object count cannot be represented"))?;
         let mut objects = Vec::with_capacity(capacity);
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(CATALOG_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(CATALOG_SCAN_FETCH_TASKS);
         let mut rows = reader
-            .scan_prefix([ORDINAL_FAMILY], ..)
+            .scan_prefix_with_options([ORDINAL_FAMILY], .., &options)
             .await
             .map_err(read_error)?;
         while let Some(row) = rows.next().await.map_err(read_error)? {

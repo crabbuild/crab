@@ -2423,7 +2423,7 @@ async fn try_fetch_exact_shallow_closure(
             entry.sha
         ))
     })?;
-    let repository = crate::git::upload_pack_wire::open_repository(
+    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
         store.as_storage(),
         router.repo_prefix(),
         cancel,
@@ -2446,9 +2446,6 @@ async fn try_fetch_exact_shallow_closure(
     let Some(selection) = selection else {
         return Ok(None);
     };
-    let visibility = repository.visibility_index(cancel).await.map_err(|error| {
-        CrabError::Protocol(format!("shallow fetch visibility proof failed: {error}"))
-    })?;
     let authorization_digest = visibility.authorization_digest_for_refs([entry.ref_name.as_str()]);
     let request_digest = shallow_fetch_request_digest(tip, depth, &selection.shallow);
     let cache_key = repository.generated_pack_cache_key(
@@ -2529,11 +2526,12 @@ async fn fetch_promisor_objects(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let repository =
-        crate::git::upload_pack_wire::open_repository(store.as_storage(), prefix, cancel).await?;
-    let visibility = repository.visibility_index(cancel).await.map_err(|error| {
-        CrabError::Protocol(format!("promisor visibility proof failed: {error}"))
-    })?;
+    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
+        store.as_storage(),
+        prefix,
+        cancel,
+    )
+    .await?;
     let visible_refs =
         crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
     let request = crab_read::UploadPackRequest {

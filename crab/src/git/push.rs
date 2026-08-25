@@ -21309,7 +21309,7 @@ mod tests {
         .await
         .expect("acquire generation owner");
         assert!(
-            crate::git::upload_pack_wire::open_repository(
+            crate::git::upload_pack_wire::open_repository_with_visibility(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
@@ -21320,7 +21320,7 @@ mod tests {
         );
         owner.release().await.expect("release generation owner");
 
-        let repository = crate::git::upload_pack_wire::open_repository(
+        let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
             store.as_storage(),
             repo_prefix,
             &CancellationToken::new(),
