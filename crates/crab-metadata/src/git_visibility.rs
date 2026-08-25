@@ -2024,22 +2024,20 @@ mod storage {
         pack_index_hash: &str,
         git_validation_digest: &str,
     ) -> Result<bool> {
-        let path = router.git_visibility_catalog_path(git_validation_digest);
-        let body = match read_bounded(store, &path).await {
-            Ok(body) => body,
-            Err(crate::error::MetadataError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => return Ok(false),
-            Err(error) => return Err(error),
+        let Some(identity) = read_catalog_identity(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await?
+        else {
+            return Ok(false);
         };
-        let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
-            crate::error::MetadataError::CorruptObject {
-                path: path.as_ref().to_owned(),
-                reason: format!("invalid catalog visibility index JSON: {error}"),
-            }
-        })?;
-        let identity =
-            catalog_identity(&stored, generation, pack_index_hash, git_validation_digest)?;
+        if catalog_checkpoint_marker_matches(store, router, identity).await? {
+            return Ok(true);
+        }
         let session = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
             Arc::clone(store.inner()),
             router.repo_prefix(),
@@ -2049,7 +2047,35 @@ mod storage {
         .await?;
         let matches = session.catalog_identity() == Some(identity);
         session.close().await?;
+        if matches {
+            write_catalog_checkpoint_marker(store, router, identity).await?;
+        }
         Ok(matches)
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn read_catalog_identity(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<Option<crate::git_object_locator::GitObjectCatalogIdentity>> {
+        let path = router.git_visibility_catalog_path(git_validation_digest);
+        let body = match read_bounded(store, &path).await {
+            Ok(body) => body,
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid catalog visibility index JSON: {error}"),
+            }
+        })?;
+        catalog_identity(&stored, generation, pack_index_hash, git_validation_digest).map(Some)
     }
 
     #[cfg(feature = "remote-index")]
@@ -2080,14 +2106,68 @@ mod storage {
         pack_index_hash: &str,
         git_validation_digest: &str,
     ) -> Result<bool> {
-        catalog_bound_exists_for_identity(
+        let Some(identity) = read_catalog_identity(
             store,
             router,
             generation,
             pack_index_hash,
             git_validation_digest,
         )
-        .await
+        .await?
+        else {
+            return Ok(false);
+        };
+        catalog_checkpoint_marker_matches(store, router, identity).await
+    }
+
+    /// Check the post-checkpoint marker without opening the large SlateDB catalog.
+    #[cfg(feature = "remote-index")]
+    async fn catalog_checkpoint_marker_matches(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        identity: crate::git_object_locator::GitObjectCatalogIdentity,
+    ) -> Result<bool> {
+        let path = ObjectPath::from(crate::git_object_locator::catalog_checkpoint_marker_path(
+            router.repo_prefix(),
+            identity.catalog_digest,
+        ));
+        let body = match store.get_with_etag(&path).await {
+            Ok((body, _)) => body,
+            Err(StorageError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let marker: crate::git_object_locator::CatalogCheckpointMarker =
+            serde_json::from_slice(&body).map_err(|error| {
+                crate::error::MetadataError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: format!("invalid catalog checkpoint marker JSON: {error}"),
+                }
+            })?;
+        Ok(marker.matches_identity(identity))
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn write_catalog_checkpoint_marker(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        identity: crate::git_object_locator::GitObjectCatalogIdentity,
+    ) -> Result<()> {
+        let path = ObjectPath::from(crate::git_object_locator::catalog_checkpoint_marker_path(
+            router.repo_prefix(),
+            identity.catalog_digest,
+        ));
+        let body = serde_json::to_vec(
+            &crate::git_object_locator::CatalogCheckpointMarker::for_identity(identity),
+        )
+        .map_err(|error| {
+            crate::error::MetadataError::Internal(format!(
+                "catalog checkpoint marker serialize: {error}"
+            ))
+        })?;
+        store
+            .put(&path, Bytes::from(body))
+            .await
+            .map_err(Into::into)
     }
 
     async fn read_digest_bound(
@@ -3027,6 +3107,7 @@ mod tests {
         use crab_storage::{Store, StoreLayout};
         use crab_xet::hash::MerkleHash;
         use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
 
         use crate::git_object_locator::{
             GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitObjectLocatorWriter,
@@ -3114,12 +3195,46 @@ mod tests {
             })
             .await
             .expect("publish catalog coverage");
+        let catalog_identity = writer.catalog_identity().expect("catalog identity");
         writer.close().await.expect("close catalog writer");
 
         assert!(
             ensure_catalog_bound(&store, &router, &manifest)
                 .await
                 .expect("migrate catalog proof")
+        );
+        assert!(
+            catalog_bound_available(
+                &store,
+                &router,
+                manifest.generation,
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+            )
+            .await
+            .expect("checkpoint marker is available")
+        );
+        let marker_path =
+            ObjectPath::from(crate::git_object_locator::catalog_checkpoint_marker_path(
+                router.repo_prefix(),
+                catalog_identity.catalog_digest,
+            ));
+        store.delete(&marker_path).await.expect("remove marker");
+        assert!(
+            !catalog_bound_available(
+                &store,
+                &router,
+                manifest.generation,
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+            )
+            .await
+            .expect("missing marker is a failed readiness check")
+        );
+        assert!(
+            ensure_catalog_bound(&store, &router, &manifest)
+                .await
+                .expect("repair missing checkpoint marker")
         );
         assert!(
             catalog_bound_available(

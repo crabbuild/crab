@@ -55,6 +55,15 @@ pub enum MetadataError {
         source: slatedb::Error,
     },
 
+    /// Object-store transport failed while publishing or checking remote-index metadata.
+    #[cfg(feature = "remote-index")]
+    #[error("metadata object-store operation failed: {source}")]
+    ObjectStore {
+        /// Preserved object-store source error.
+        #[source]
+        source: object_store::Error,
+    },
+
     /// SlateDB metadata reader could not read a key.
     #[cfg(any(feature = "file-index-reader", feature = "remote-index"))]
     #[error("metadata database read failed for {db}: {source}")]

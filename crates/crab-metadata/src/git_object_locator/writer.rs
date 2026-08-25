@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use crab_xet::hash::MerkleHash;
-use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
     GarbageCollectorOptions, Settings, WriteOptions,
@@ -69,6 +70,7 @@ pub struct LocatorWriteStats {
 pub struct GitObjectLocatorWriter {
     db: slatedb::Db,
     path: String,
+    repo_prefix: String,
     store: Arc<dyn ObjectStore>,
     initial_coverage: Option<GitLocatorCoverage>,
     metadata: LocatorMetadata,
@@ -121,7 +123,7 @@ impl GitObjectLocatorWriter {
                 source,
             })?;
 
-        let open_result = Self::load_or_initialize(db, path, store).await;
+        let open_result = Self::load_or_initialize(db, path, repo_prefix.to_owned(), store).await;
         match open_result {
             Ok(writer) => Ok(writer),
             Err((db, operation)) => close_after_error(db, operation).await,
@@ -131,6 +133,7 @@ impl GitObjectLocatorWriter {
     async fn load_or_initialize(
         db: slatedb::Db,
         path: String,
+        repo_prefix: String,
         store: Arc<dyn ObjectStore>,
     ) -> std::result::Result<Self, (slatedb::Db, MetadataError)> {
         let value = match db.get(METADATA_KEY).await {
@@ -188,9 +191,20 @@ impl GitObjectLocatorWriter {
                         .any(|record| record.committed_generation > identity.generation)
             },
         );
+        let checkpoint_required = if catalog_dirty {
+            false
+        } else if let Some(identity) = metadata.identity {
+            match catalog_checkpoint_marker_exists(&store, &repo_prefix, identity).await {
+                Ok(present) => !present,
+                Err(error) => return Err((db, error)),
+            }
+        } else {
+            false
+        };
         Ok(Self {
             db,
             path,
+            repo_prefix,
             store,
             initial_coverage: coverage(metadata),
             metadata,
@@ -198,7 +212,7 @@ impl GitObjectLocatorWriter {
             empty_catalog_binding: None,
             replacement_ordinals: None,
             catalog_dirty,
-            checkpoint_required: false,
+            checkpoint_required,
             stats: LocatorWriteStats::default(),
             // The first metadata batch can share the first binding or
             // coverage flush; no reader checkpoint exists before that point.
@@ -672,10 +686,14 @@ impl GitObjectLocatorWriter {
             return Ok(());
         }
         self.flush_objects().await?;
-        let name = match (self.metadata.identity, self.catalog_dirty) {
-            (Some(identity), false) => super::catalog_checkpoint_name(identity.catalog_digest),
-            _ => super::UNPUBLISHED_CHECKPOINT_NAME.to_owned(),
+        let published_identity = match (self.metadata.identity, self.catalog_dirty) {
+            (Some(identity), false) => Some(identity),
+            _ => None,
         };
+        let name = published_identity.map_or_else(
+            || super::UNPUBLISHED_CHECKPOINT_NAME.to_owned(),
+            |identity| super::catalog_checkpoint_name(identity.catalog_digest),
+        );
         let checkpoint = self
             .db
             .create_checkpoint(
@@ -692,6 +710,24 @@ impl GitObjectLocatorWriter {
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
+
+        if let Some(identity) = published_identity {
+            let marker_path = ObjectPath::from(super::catalog_checkpoint_marker_path(
+                &self.repo_prefix,
+                identity.catalog_digest,
+            ));
+            let marker_body =
+                serde_json::to_vec(&super::CatalogCheckpointMarker::for_identity(identity))
+                    .map_err(|error| {
+                        MetadataError::Internal(format!(
+                            "catalog checkpoint marker serialize: {error}"
+                        ))
+                    })?;
+            self.store
+                .put(&marker_path, Bytes::from(marker_body).into())
+                .await
+                .map_err(|source| MetadataError::ObjectStore { source })?;
+        }
         self.checkpoint_required = false;
         if let Err(error) =
             retire_old_catalog_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint, &name)
@@ -742,13 +778,30 @@ impl GitObjectLocatorWriter {
     }
 }
 
+async fn catalog_checkpoint_marker_exists(
+    store: &Arc<dyn ObjectStore>,
+    repo_prefix: &str,
+    identity: GitObjectCatalogIdentity,
+) -> Result<bool> {
+    let path = ObjectPath::from(super::catalog_checkpoint_marker_path(
+        repo_prefix,
+        identity.catalog_digest,
+    ));
+    match store.head(&path).await {
+        Ok(_) => Ok(true),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
+        Err(source) => Err(MetadataError::ObjectStore { source }),
+    }
+}
+
 async fn retire_old_catalog_checkpoints(
     path: &str,
     store: Arc<dyn ObjectStore>,
     current: &slatedb::CheckpointCreateResult,
     current_name: &str,
 ) -> Result<()> {
-    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
+    let admin =
+        slatedb::admin::AdminBuilder::new(ObjectPath::from(path), Arc::clone(&store)).build();
     let checkpoints =
         admin
             .list_checkpoints(None)
@@ -773,8 +826,25 @@ async fn retire_old_catalog_checkpoints(
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
+        if let Some(digest) = checkpoint
+            .name
+            .as_deref()
+            .and_then(catalog_digest_from_checkpoint_name)
+        {
+            let marker_path =
+                ObjectPath::from(format!("{}checkpoints/{}.json", path, digest.hex()));
+            match store.delete(&marker_path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(source) => return Err(MetadataError::ObjectStore { source }),
+            }
+        }
     }
     Ok(())
+}
+
+fn catalog_digest_from_checkpoint_name(name: &str) -> Option<MerkleHash> {
+    name.strip_prefix(super::READER_CHECKPOINT_PREFIX)
+        .and_then(|digest| MerkleHash::from_hex(digest).ok())
 }
 
 fn catalog_digest(
@@ -1500,6 +1570,19 @@ mod tests {
             checkpoint.name.as_deref() == Some(second_name.as_str())
                 && checkpoint.expire_time.is_none()
         }));
+        let first_marker = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            first_identity.catalog_digest,
+        ));
+        let second_marker = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            second_identity.catalog_digest,
+        ));
+        assert!(matches!(
+            store.head(&first_marker).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        assert!(store.head(&second_marker).await.is_ok());
 
         let second_reader =
             super::super::GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")

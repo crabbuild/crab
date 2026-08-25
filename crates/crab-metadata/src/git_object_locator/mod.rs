@@ -9,11 +9,51 @@ pub use writer::{GitObjectLocatorWriter, LocatorSweepStats, LocatorWriteStats};
 
 const READER_CHECKPOINT_PREFIX: &str = "crab-git-catalog-";
 const UNPUBLISHED_CHECKPOINT_NAME: &str = "crab-git-unpublished";
+const CATALOG_CHECKPOINT_MARKER_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CatalogCheckpointMarker {
+    version: u32,
+    generation: u64,
+    pack_index_hash: String,
+    object_count: u64,
+    catalog_digest: String,
+}
+
+impl CatalogCheckpointMarker {
+    #[must_use]
+    pub(crate) fn for_identity(identity: GitObjectCatalogIdentity) -> Self {
+        Self {
+            version: CATALOG_CHECKPOINT_MARKER_VERSION,
+            generation: identity.generation,
+            pack_index_hash: identity.pack_index_hash.to_string(),
+            object_count: identity.object_count,
+            catalog_digest: identity.catalog_digest.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn matches_identity(&self, identity: GitObjectCatalogIdentity) -> bool {
+        self.version == CATALOG_CHECKPOINT_MARKER_VERSION
+            && self.generation == identity.generation
+            && self.pack_index_hash == identity.pack_index_hash.to_string()
+            && self.object_count == identity.object_count
+            && self.catalog_digest == identity.catalog_digest.to_string()
+    }
+}
 
 use crab_xet::hash::MerkleHash;
 
 fn catalog_checkpoint_name(digest: MerkleHash) -> String {
     format!("{READER_CHECKPOINT_PREFIX}{}", digest.hex())
+}
+
+pub(crate) fn catalog_checkpoint_marker_path(repo_prefix: &str, digest: MerkleHash) -> String {
+    format!(
+        "{}checkpoints/{}.json",
+        git_object_locator_path(repo_prefix),
+        digest.hex()
+    )
 }
 
 /// Dense, stable position assigned to one Git object in the catalog.
