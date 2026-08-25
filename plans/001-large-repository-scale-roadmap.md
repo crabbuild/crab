@@ -25,6 +25,34 @@
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
 - **Current draft PR**: https://github.com/crabbuild/crab-oss/pull/75
 
+### 2026-08-25 execution update
+
+The current branch includes two additional bounded fixes that must be
+qualified before this roadmap can claim acceptance:
+
+- `crates/crab-metadata/src/git_visibility.rs` now uses the immutable
+  post-checkpoint marker for readiness, so a healthy catalog check does not
+  open SlateDB or scan the object locator. The legacy ensure path still
+  backfills that marker before publication, and the marker is bound to the
+  catalog generation and validation digest.
+- `crab/src/git/upload_pack_wire.rs` now admits one repository together with
+  its catalog-bound `GitVisibilityIndex`. Upload-pack, exact shallow fetch,
+  and promisor fetch reuse that proof instead of reopening and materializing
+  the same visibility dictionary. Catalog ordinal scans use bounded read-ahead
+  and parallel fetch tasks to avoid one object-store round trip per block.
+
+The c412 baseline qualification
+`local-k8s-marker-c412-1-20260825` was run against Kubernetes revision
+`b3bc2ac5` and external local RustFS before the final handoff change. Its
+server-side incremental fetch was bounded (zero-millisecond visibility
+planning, 72 ms response operation, and 4 ms pack generation), but the full
+clone helper still spent roughly 90 seconds before its first request because
+the old path opened the visibility dictionary twice. That report is useful
+diagnostic evidence only; the post-handoff binary must produce the final
+acceptance report below. The remaining O(N) operation is one full immutable
+OID dictionary materialization per helper, which is still a large-team SLO
+gate even after the duplicate load is removed.
+
 ### Current execution state
 
 The implementation work for Phases 1 through 5 is assembled on one draft
@@ -96,6 +124,13 @@ Implemented on the current branch:
   already-shallow requests;
 - generated-pack cache descriptors that distinguish requested object count
   from the larger self-contained pack count required by delta bases.
+- an immutable catalog-readiness marker that makes healthy admission checks
+  metadata-only while preserving generation and validation-digest binding;
+- one catalog-bound visibility-index handoff across upload-pack, exact
+  shallow-fetch, and promisor-fetch paths, removing duplicate full catalog
+  materialization per helper;
+- catalog ordinal scan read-ahead and bounded fetch parallelism for the one
+  remaining immutable dictionary load.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;
@@ -139,6 +174,16 @@ Still required before the roadmap is DONE:
   cleared: the 100-push report records a missing generation-index receipt and
   incomplete bucket-registry discovery. These diagnostics cannot be treated
   as harmless while claiming production readiness.
+- a persisted compact catalog/sidecar or lazy ordinal lookup path is still
+  required to remove the remaining O(N) visibility dictionary materialization
+  from every upload-pack process; the current change only removes the second
+  copy and makes the one scan bounded;
+- cold and warm full-clone response-pack SLOs remain open: the Kubernetes
+  repository still generates a roughly 1.2 GB response pack, so cache hits and
+  pack-count bounds alone do not prove large-team clone fanout is affordable;
+- provider-specific range-request, interruption, retry, cache-server fanout,
+  owner failover, and sustained canary evidence remain required for every
+  supported object-store backend.
 
 ## Outcome
 

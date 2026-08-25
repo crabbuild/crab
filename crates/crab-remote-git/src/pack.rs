@@ -442,7 +442,7 @@ impl RemoteGitRepository {
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
         })?;
-        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+        let locations = crab_git::pack_locator::PackLocationIter::open(
             generated.index_path(),
             generated.reverse_index_path(),
             generated.pack_size,
@@ -451,7 +451,7 @@ impl RemoteGitRepository {
             source: crab_git::repack::RepackError::from(source),
         })?;
         let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
-        while let Some(location) = locations.next() {
+        for location in locations {
             let location = location.map_err(|source| Error::ResponsePackConsolidation {
                 source: crab_git::repack::RepackError::from(source),
             })?;

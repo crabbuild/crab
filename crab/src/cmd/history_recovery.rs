@@ -577,13 +577,10 @@ async fn apply_verified_history(
         &storage_router,
     )
     .await
-    .map_or_else(
-        |error| {
-            warn!(%error, generation = restored.generation, "history restored; shallow closure acceleration requires repair");
-            false
-        },
-        |rebuilt| rebuilt,
-    );
+    .unwrap_or_else(|error| {
+        warn!(%error, generation = restored.generation, "history restored; shallow closure acceleration requires repair");
+        false
+    });
     let acceleration_rebuilt = locator_rebuilt && visibility_rebuilt && shallow_closure_rebuilt;
     Ok((restored, acceleration_rebuilt))
 }

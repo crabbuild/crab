@@ -1992,11 +1992,7 @@ mod storage {
         .await?;
         let catalog = session.all_object_ids_and_close().await?;
         let index = stored.into_index(catalog)?;
-        index.validate_identity(
-            generation,
-            &pack_index_hash.to_string(),
-            git_validation_digest,
-        )?;
+        index.validate_identity(generation, pack_index_hash, git_validation_digest)?;
         Ok((index, GitVisibilityFormat::V5))
     }
 
@@ -2438,7 +2434,7 @@ mod storage {
                     });
                 }
                 let (existing, _) = store
-                    .get_with_etag_bounded(&path, MAX_GIT_VISIBILITY_INDEX_BYTES)
+                    .get_with_etag_bounded(path, MAX_GIT_VISIBILITY_INDEX_BYTES)
                     .await?;
                 if existing.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
                     return Err(crate::error::MetadataError::CorruptObject {

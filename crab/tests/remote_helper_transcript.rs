@@ -372,7 +372,7 @@ mod delete_ref {
     use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
     use crab::git::push_state::PushState;
     use crab::git::remote_helper::PushSpec;
-    use crab::metadata::manifest::read_manifest;
+    use crab::metadata::manifest::{Manifest, read_repository_snapshot};
     use crab::storage::StoreLayout;
     use crab::storage::store::Store;
 
@@ -494,6 +494,13 @@ mod delete_ref {
         StoreLayout::new(store, prefix.to_owned())
     }
 
+    async fn read_visible_manifest(store: &Store, router: &StoreLayout) -> Manifest {
+        read_repository_snapshot(store, router)
+            .await
+            .expect("repository snapshot must be readable")
+            .materialized_manifest()
+    }
+
     fn push_spec(src: &str, dst: &str) -> PushSpec {
         PushSpec {
             force: false,
@@ -570,9 +577,7 @@ mod delete_ref {
         assert_ok(&create, "refs/heads/main");
         assert_ok(&create, "refs/heads/feature");
 
-        let (after_create, _) = read_manifest(&store, &router)
-            .await
-            .expect("manifest must exist after create push");
+        let after_create = read_visible_manifest(&store, &router).await;
         assert!(
             after_create.refs.contains_key("refs/heads/feature"),
             "feature ref expected in manifest after create; refs={:?}",
@@ -589,9 +594,7 @@ mod delete_ref {
         .await;
         assert_ok(&delete, "refs/heads/feature");
 
-        let (after_delete, _) = read_manifest(&store, &router)
-            .await
-            .expect("manifest must exist after delete push");
+        let after_delete = read_visible_manifest(&store, &router).await;
         assert!(
             !after_delete.refs.contains_key("refs/heads/feature"),
             "feature ref must be gone from manifest; refs={:?}",
@@ -630,9 +633,7 @@ mod delete_ref {
         .await;
         assert_ok(&seed, "refs/heads/main");
 
-        let (before, _) = read_manifest(&store, &router)
-            .await
-            .expect("manifest must exist after seed push");
+        let before = read_visible_manifest(&store, &router).await;
 
         // Delete a ref that was never created. The outcome must be
         // Ok and the manifest must be unchanged.
@@ -645,9 +646,7 @@ mod delete_ref {
         .await;
         assert_ok(&delete, "refs/heads/never-existed");
 
-        let (after, _) = read_manifest(&store, &router)
-            .await
-            .expect("manifest must still exist after noop delete");
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(
             before.refs, after.refs,
             "noop delete must not change the ref map"
@@ -751,10 +750,7 @@ mod delete_ref {
         assert_ok(&seed, "refs/heads/main");
         assert_ok(&seed, "refs/heads/old");
 
-        let (seed_manifest, _) = read_manifest(&store, &router)
-            .await
-            .expect("seed manifest read");
-        let seed_generation = seed_manifest.generation;
+        let _seed_manifest = read_visible_manifest(&store, &router).await;
 
         // Mixed batch: delete `old`, create `new`.
         let mixed = run_batch(
@@ -770,9 +766,15 @@ mod delete_ref {
         assert_ok(&mixed, "refs/heads/old");
         assert_ok(&mixed, "refs/heads/new");
 
-        let (after, _) = read_manifest(&store, &router)
+        let after_snapshot = read_repository_snapshot(&store, &router)
             .await
-            .expect("manifest read after mixed batch");
+            .expect("post-mixed repository snapshot must be readable");
+        assert_eq!(
+            after_snapshot.journal.transactions.len(),
+            1,
+            "delete + create must commit in one journal transaction"
+        );
+        let after = after_snapshot.materialized_manifest();
 
         assert!(
             !after.refs.contains_key("refs/heads/old"),
@@ -790,13 +792,8 @@ mod delete_ref {
             after.refs
         );
 
-        // Both changes must land in a single generation bump — a
-        // one-batch CAS, not two sequential CAS operations.
-        assert_eq!(
-            after.generation,
-            seed_generation + 1,
-            "delete + create must commit in one manifest generation"
-        );
+        // Both changes must land in one journal transaction, not two
+        // sequential ref updates.
     }
 }
 
@@ -1195,7 +1192,7 @@ mod atomic_push {
     use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
     use crab::git::push_state::PushState;
     use crab::git::remote_helper::PushSpec;
-    use crab::metadata::manifest::read_manifest;
+    use crab::metadata::manifest::{Manifest, read_repository_snapshot};
     use crab::storage::StoreLayout;
     use crab::storage::store::Store;
 
@@ -1341,6 +1338,13 @@ mod atomic_push {
         StoreLayout::new(store, prefix.to_owned())
     }
 
+    async fn read_visible_manifest(store: &Store, router: &StoreLayout) -> Manifest {
+        read_repository_snapshot(store, router)
+            .await
+            .expect("repository snapshot must be readable")
+            .materialized_manifest()
+    }
+
     fn push_spec(src: &str, dst: &str) -> PushSpec {
         PushSpec {
             force: false,
@@ -1439,9 +1443,7 @@ mod atomic_push {
             seed.outcomes
         );
 
-        let (seed_manifest, _) = read_manifest(&store, &router)
-            .await
-            .expect("seed manifest read");
+        let seed_manifest = read_visible_manifest(&store, &router).await;
         let seed_generation = seed_manifest.generation;
         let seed_main = seed_manifest
             .refs
@@ -1485,9 +1487,7 @@ mod atomic_push {
         // After an atomic rollback, the remote manifest must be
         // identical to the seed — no new generation bump, main
         // still points at the original SHA.
-        let (after, _) = read_manifest(&store, &router)
-            .await
-            .expect("post-atomic manifest read");
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(
             after.generation, seed_generation,
             "atomic rollback must not bump the manifest generation"
@@ -1536,10 +1536,7 @@ mod atomic_push {
             seed.outcomes
         );
 
-        let (seed_manifest, _) = read_manifest(&store, &router)
-            .await
-            .expect("seed manifest read");
-        let seed_generation = seed_manifest.generation;
+        let seed_manifest = read_visible_manifest(&store, &router).await;
         let seed_main = seed_manifest
             .refs
             .get("refs/heads/main")
@@ -1556,8 +1553,8 @@ mod atomic_push {
         assert_ne!(divergent_main, seed_main);
 
         // Non-atomic push of the non-FF main alongside the FF-ok
-        // feature. main gets Rejected, feature commits, and the
-        // manifest bumps exactly one generation.
+        // feature. main gets Rejected, while feature commits in one
+        // journal transaction.
         let result = run_batch_atomic(
             store.clone(),
             router.clone(),
@@ -1585,14 +1582,15 @@ mod atomic_push {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router)
+        let after_snapshot = read_repository_snapshot(&store, &router)
             .await
-            .expect("post-batch manifest read");
+            .expect("post-batch repository snapshot must be readable");
         assert_eq!(
-            after.generation,
-            seed_generation + 1,
-            "non-atomic partial commit must bump the manifest generation exactly once"
+            after_snapshot.journal.transactions.len(),
+            1,
+            "non-atomic partial commit must publish one journal transaction"
         );
+        let after = after_snapshot.materialized_manifest();
         assert_eq!(
             after.refs.get("refs/heads/main"),
             Some(&seed_main),
@@ -1842,7 +1840,7 @@ mod receive_policy {
     use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
     use crab::git::push_state::PushState;
     use crab::git::remote_helper::PushSpec;
-    use crab::metadata::manifest::read_manifest;
+    use crab::metadata::manifest::{Manifest, read_repository_snapshot};
     use crab::storage::StoreLayout;
     use crab::storage::store::Store;
 
@@ -2002,6 +2000,13 @@ mod receive_policy {
         }
     }
 
+    async fn read_visible_manifest(store: &Store, router: &StoreLayout) -> Manifest {
+        read_repository_snapshot(store, router)
+            .await
+            .expect("repository snapshot must be readable")
+            .materialized_manifest()
+    }
+
     /// Drive `run_native_push` once. The caller mutates `push_cfg` to
     /// flip the policy knob under test before calling.
     async fn run_batch(
@@ -2068,9 +2073,7 @@ mod receive_policy {
             seed.outcomes
         );
 
-        let (seed_manifest, _) = read_manifest(&store, &router)
-            .await
-            .expect("seed manifest read");
+        let seed_manifest = read_visible_manifest(&store, &router).await;
         let seed_generation = seed_manifest.generation;
         assert!(seed_manifest.refs.contains_key("refs/heads/feature"));
 
@@ -2098,9 +2101,7 @@ mod receive_policy {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router)
-            .await
-            .expect("post-delete manifest read");
+        let after = read_visible_manifest(&store, &router).await;
         // Non-atomic mode bumps the manifest generation by one for
         // every batch that reaches `apply_decisions` — even when every
         // spec is rejected, the empty-Proceed set still produces a
@@ -2146,7 +2147,7 @@ mod receive_policy {
             seed.outcomes
         );
 
-        let (seed_manifest, _) = read_manifest(&store, &router).await.unwrap();
+        let seed_manifest = read_visible_manifest(&store, &router).await;
         let seed_main = seed_manifest.refs["refs/heads/main"].clone();
 
         // Divergent amend — new SHA that is not a descendant of the
@@ -2177,7 +2178,7 @@ mod receive_policy {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router).await.unwrap();
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(
             after.refs["refs/heads/main"], seed_main,
             "manifest main must still point at the seed SHA; refs={:?}",
@@ -2216,7 +2217,7 @@ mod receive_policy {
             "seed main must succeed; outcomes={:?}",
             seed.outcomes
         );
-        let (seed_manifest, _) = read_manifest(&store, &router).await.unwrap();
+        let seed_manifest = read_visible_manifest(&store, &router).await;
         assert_eq!(seed_manifest.head, "refs/heads/main");
 
         // Advance main so the second push is a non-trivial update
@@ -2244,7 +2245,7 @@ mod receive_policy {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router).await.unwrap();
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(
             after.refs["refs/heads/main"], seed_manifest.refs["refs/heads/main"],
             "refuse must leave main pointed at the seed SHA; refs={:?}",
@@ -2303,7 +2304,7 @@ mod receive_policy {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router).await.unwrap();
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(
             after.refs["refs/heads/main"], advanced,
             "warn mode must let the advance land; refs={:?}",
@@ -2363,7 +2364,7 @@ mod receive_policy {
             ),
         }
 
-        let (after, _) = read_manifest(&store, &router).await.unwrap();
+        let after = read_visible_manifest(&store, &router).await;
         assert_eq!(after.refs["refs/heads/main"], advanced);
     }
 }

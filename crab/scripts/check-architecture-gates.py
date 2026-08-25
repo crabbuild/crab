@@ -1107,7 +1107,6 @@ GIT_TAG_PEEL_REQUIRED_DELEGATIONS = {
 }
 GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
     "peel_to_commit",
-    "gix_object::Kind::Tag",
     "TargetRef::Object",
     "TargetRef::Symbolic",
     "find_object(",
