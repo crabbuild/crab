@@ -89,7 +89,7 @@ by the real Git compatibility jobs while preserving the push acknowledgement
 boundary.
 
 Implemented on the current branch (qualification evidence at `04655f3b`; latest
-admission hardening at `0ba86693`):
+admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -141,6 +141,9 @@ admission hardening at `0ba86693`):
   actually loses rows;
 - qualification-verifier coverage for abbreviated build revisions, with the
   acceptance rule shared by the live harness and the standalone verifier.
+- protocol-v2 qualification now settles the expected post-push admission repair
+  before taking the filter-matrix baseline, keeping the steady-state
+  read-only remote assertion strict.
 
 Still required before the roadmap is DONE:
 
@@ -1051,6 +1054,13 @@ transcript suite (`42` tests), architecture gates, split-crate behavior gates,
 strict split-crate clippy checks, metadata tests, and remote-Git tests. The
 full workspace test/clippy gates are not claimed green here; unrelated baseline
 failures/warnings outside the touched surfaces remain separate cleanup work.
+
+The latest qualification-contract follow-up (`0a8e4aa8`) additionally passes
+the Python E2E harness suite (`30` tests). Its post-push terminal fetch proves
+that the generation-owner admission path completes the expected locator and
+visibility repair before the filter matrix, so later filtered reads are
+measured against a stable canonical remote rather than conflating repair with
+steady-state read behavior.
 
 The focused proof for committed `04655f3b` is:
 
