@@ -721,9 +721,10 @@ fn scan_for_large_files(
 
 /// Create the initial unified manifest for a new repository.
 ///
-/// Uploads empty segmented shard/pack indexes, then creates the
-/// manifest pointer at `{repo}/manifest` with generation 0, empty refs,
-/// and the given HEAD symref target.
+/// Creates the manifest pointer at `{repo}/manifest` with generation 0,
+/// empty refs, empty index hashes, and the given HEAD symref target.
+/// Empty index hashes are the canonical zero-state representation; the first
+/// committed push publishes real segmented indexes.
 ///
 /// Uses `create_manifest` (If-None-Match: *) so a concurrent init doesn't
 /// clobber an existing manifest.
@@ -737,24 +738,9 @@ pub async fn create_initial_manifest(
     router: &crate::storage::StoreLayout,
     head: &str,
 ) -> Result<()> {
-    use crate::metadata::manifest::{
-        BulkData, Manifest, compact_pack_index, compact_shard_index, create_manifest,
-        upload_segmented_bulk,
-    };
+    use crate::metadata::manifest::{Manifest, create_manifest};
 
-    let (empty_shard_hash, _shard_index, shard_write) = compact_shard_index(0, &[])?;
-    let (empty_pack_hash, _pack_index, pack_write) = compact_pack_index(0, &[])?;
-    let bulk = BulkData {
-        shard_index: shard_write,
-        pack_index: pack_write,
-    };
-    upload_segmented_bulk(store, router, &bulk).await?;
-
-    // Build the generation-0 manifest.
-    let mut manifest = Manifest::default_for_repo(head);
-    manifest.shard_index_hash = empty_shard_hash;
-    manifest.pack_index_hash = empty_pack_hash;
-    manifest.seal_git_validation();
+    let manifest = Manifest::default_for_repo(head);
 
     // Create the manifest pointer with If-None-Match: * semantics.
     create_manifest(store, router, &manifest).await?;
@@ -1749,7 +1735,7 @@ storage_provider = "azure"
 
     #[tokio::test]
     async fn init_creates_valid_manifest_that_read_manifest_can_parse() {
-        use crate::metadata::manifest::{read_bulk_pack_list, read_bulk_shard_list, read_manifest};
+        use crate::metadata::manifest::read_manifest;
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1773,21 +1759,10 @@ storage_provider = "azure"
         assert_eq!(manifest.generation, 0);
         assert_eq!(manifest.head, "refs/heads/main");
         assert!(manifest.refs.is_empty());
-        assert!(!manifest.shard_index_hash.is_empty());
-        assert!(!manifest.pack_index_hash.is_empty());
+        assert!(manifest.shard_index_hash.is_empty());
+        assert!(manifest.pack_index_hash.is_empty());
         assert!(manifest.commit_graph_hash.is_none());
         assert!(manifest.ref_registry_hash.is_none());
-
-        // Verify the bulk objects are readable and empty.
-        let shards = read_bulk_shard_list(&store, &router, &manifest.shard_index_hash)
-            .await
-            .expect("shard-list should be readable");
-        assert!(shards.is_empty());
-
-        let packs = read_bulk_pack_list(&store, &router, &manifest.pack_index_hash)
-            .await
-            .expect("pack-list should be readable");
-        assert!(packs.is_empty());
     }
 
     #[tokio::test]

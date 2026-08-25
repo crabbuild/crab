@@ -438,14 +438,13 @@ impl GitObjectLocatorWriter {
         Ok(stats)
     }
 
-    /// Mark one immutable manifest inventory fully covered after object flush.
+    /// Mark one immutable manifest inventory fully covered with one durability flush.
     pub async fn set_coverage(&mut self, coverage: GitLocatorCoverage) -> Result<()> {
         if coverage.generation == 0 {
             return Err(MetadataError::Internal(
                 "Git locator coverage generation must be non-zero".to_owned(),
             ));
         }
-        self.flush_objects().await?;
         let metadata = LocatorMetadata {
             next_pack_slot: self.metadata.next_pack_slot,
             coverage: Some(coverage),
@@ -457,6 +456,9 @@ impl GitObjectLocatorWriter {
         )
         .await?;
         self.writes_durable = false;
+        // Object rows and their coverage marker share the same active
+        // memtable, so one flush makes the marker impossible to observe
+        // without the rows it covers.
         self.flush_objects().await?;
         self.metadata = metadata;
         self.stats.coverage_updated = true;
@@ -469,10 +471,11 @@ impl GitObjectLocatorWriter {
     /// long-lived exclusive owner can then serve multiple manifest generations
     /// from one SlateDB session while readers open only immutable checkpoints.
     pub async fn publish_checkpoint(&mut self) -> Result<()> {
+        self.flush_objects().await?;
         let checkpoint = self
             .db
             .create_checkpoint(
-                CheckpointScope::All,
+                CheckpointScope::Durable,
                 &CheckpointOptions {
                     name: Some(super::READER_CHECKPOINT_NAME.to_owned()),
                     ..CheckpointOptions::default()
@@ -483,7 +486,6 @@ impl GitObjectLocatorWriter {
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
-        self.stats.flushes = self.stats.flushes.saturating_add(1);
         remove_old_reader_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint).await
     }
 
@@ -762,7 +764,7 @@ mod tests {
     use object_store::path::Path as ObjectPath;
 
     use super::*;
-    use crate::git_object_locator::GitObjectLocation;
+    use crate::git_object_locator::{GitObjectLocation, GitObjectLookup, GitPackInventoryEntry};
     use crab_xet::hash::MerkleHash;
 
     fn hash(seed: u64) -> MerkleHash {
@@ -1162,6 +1164,66 @@ mod tests {
             .expect("reopen writer");
         assert_eq!(reopened.coverage(), Some(coverage));
         reopened.close().await.expect("close reopened writer");
+    }
+
+    #[tokio::test]
+    async fn coverage_batches_pending_object_rows_into_one_durability_flush() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let coverage = GitLocatorCoverage {
+            generation: 3,
+            pack_index_hash: hash(9),
+        };
+        let mut writer = GitObjectLocatorWriter::open(store, "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack(1)]).await.expect("bind pack")[0];
+        writer
+            .write_locations(binding, &[entry(1)])
+            .await
+            .expect("write location");
+        let before_coverage = writer.stats.flushes;
+
+        writer.set_coverage(coverage).await.expect("set coverage");
+
+        assert_eq!(writer.stats.flushes, before_coverage + 1);
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_publishes_dirty_object_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let pack = pack(1);
+        let object = entry(1);
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(binding, &[object])
+            .await
+            .expect("write location");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish checkpoint");
+
+        let reader = super::super::GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+        let inventory = std::collections::HashMap::from([(
+            pack.pack_id,
+            GitPackInventoryEntry {
+                pack_id: pack.pack_id,
+                object_count: pack.object_count,
+                pack_size: pack.pack_size,
+            },
+        )]);
+        assert!(matches!(
+            reader.lookup_batch(&[object.oid], &inventory).await,
+            Ok(lookups) if matches!(lookups.as_slice(), [GitObjectLookup::Hit(locator)] if locator.location == object.location)
+        ));
+        reader.close().await.expect("close reader");
+        writer.close().await.expect("close writer");
     }
 
     #[tokio::test]
