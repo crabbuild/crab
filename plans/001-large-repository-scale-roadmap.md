@@ -58,12 +58,14 @@ isolated RustFS prefix was empty after cleanup. This is still a smoke report,
 not evidence from current `HEAD` and not the required 1,000-push report; the
 latest rebased source must repeat the qualification before it can be accepted.
 
-A separate 1,000-push replay, `local-k8s-full-history-a926-1000-20260825`, is
-running against the same Kubernetes revision with the pre-rebase binary built
-from `a926fe9d`. At the latest roadmap update it had completed 532 replay
-pushes without a harness error. Its result is deliberately not counted as a
-pass until it finishes and the full profile is repeated with the committed
-latest binary.
+A separate 1,000-push replay, `local-k8s-full-history-a926-1000-20260825`, has
+completed against the same Kubernetes revision and isolated RustFS with the
+pre-rebase binary built from `a926fe9d`. The report is `ok`, the standalone
+verifier passes with `--allow-smoke`, all 1,001 pushes (seed plus 1,000
+replays) completed, correctness and cleanup checks passed, and the run-owned
+remote prefix is empty. It is strong long-history/load evidence, but it is not
+current-HEAD acceptance; the full profile and repeatability run must still be
+repeated with the installed binary built from `036df853`.
 
 Implemented on the current branch:
 
@@ -114,9 +116,11 @@ Implemented on the current branch:
 Still required before the roadmap is DONE:
 
 - a publishable full-profile Kubernetes/RustFS report from the current branch;
-- the 1,000-push growth and latency comparison for catalog and graph layers;
+- the current-HEAD 1,000-push growth and latency comparison for catalog and
+  graph layers; the completed pre-rebase run is evidence, not the final gate;
 - a repeated full-profile report built from the current rebased `HEAD`, not
-  only the pre-rebase binaries used by the completed smoke and running replay;
+  only the pre-rebase binaries used by the completed smoke and 1,000-push
+  replay;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
 - a publishable full-profile qualification report from the committed latest
@@ -971,12 +975,12 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | `local-k8s-history-chain-100b-20260825` (100-push smoke; prefix cleaned); `local-k8s-full-history-a926-1000-20260825` (running) | `793f6b43` source; live reports use pre-rebase `1e9ac756`/`a926fe9d` | The completed 100-push report is verifier-green with exact correctness checks, but it is not built from current `HEAD`; the 1,000-push replay is still running and the current-binary repeatability gate is open |
+| 0 | PARTIAL | PR #75 | `local-k8s-history-chain-100b-20260825` (100-push smoke; prefix cleaned); `local-k8s-full-history-a926-1000-20260825` (1,000-push report; prefix cleaned) | `793f6b43` source; live reports use pre-rebase `1e9ac756`/`a926fe9d` | Both reports are verifier-green with exact correctness/cleanup checks, but neither is built from current `HEAD`; current-binary full-profile and repeatability gates remain open |
 | 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
-| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | The 100-push smoke consolidated 11 packs to 2 with 1,264,812,786 active bytes; cold full clone transferred 1,241,522,108 bytes in 181.352 s pack generation, warm clone was a 208 ms cache hit, filtered clone transferred 198,715,382 bytes, and depth-1/10/100/1,000 transferred 49,318,431/94,912,761/814,844,514/1,241,871,926 bytes. The report uses pre-rebase code; current-binary and reference-pack SLO evidence remain pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | The 100-push owner completed six passes, including `ref_journal_compaction`, catalog advances, commit-graph rebuild, and geometric repack; active packs fell 11→2. Owner convergence took 676.232 s and peaked at 1.87 GB RSS, so the logarithmic artifact shape is promising but maintenance latency is an open bottleneck |
-| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | Exact depth-1/10/100/1,000 plans and clone/fsck checks passed again; 100-push planner times were 125/16/344/448 ms and used 2/7/3/3/3 storage requests for the measured profiles, but 10,000-pair differential, latest-binary repeatability, and sustained SLO evidence remain pending |
-| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `9bb558a6`, `7dac3d75`, `793f6b43` | The 100-push owner completed six passes and reduced active packs 11→2; post-repack maintenance completed. The report still marks `repair_required` because the generation-index receipt is missing and bucket-registry discovery is incomplete; interruption, 10,000-push, and GC matrix remain pending |
+| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | The 1,000-push report consolidated the final inventory to 2 active packs with 1,263,069,674 active bytes; cold full clone transferred 1,240,981,438 bytes in 134.561 s pack generation, warm clone was a 307 ms cache hit, blobless clone transferred 198,746,774 bytes, and depth-1/10/100/1,000 transferred 49,108,396/91,467,386/812,827,443/1,240,938,129 bytes. The report uses pre-rebase code; current-binary and reference-pack SLO evidence remain pending |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | The 1,000-push owner retained 2 active packs and completed six passes at checkpoints 10/100/1,000; checkpoint-1/10/100/1,000 owner convergence was 192.870/445.348/723.410/2,580.374 s and peak child RSS was 944 MB/960 MB/1.015 GB/1.975 GB. Artifact count is bounded, but maintenance latency and memory are a measured large-team bottleneck |
+| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | Exact depth-1/10/100/1,000 plans and clone/fsck checks passed on the 1,000-push report; planner times were 13/19/3,813/471 ms and storage requests were 6,187/7,276/3/3. Incremental fetch at push 1/10/100/1,000 planned 37/420/4,810/38,745 objects with 2/6/33/225 requests. The report is pre-rebase; 10,000-pair differential, current-binary repeatability, and sustained SLO evidence remain pending |
+| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `9bb558a6`, `7dac3d75`, `793f6b43` | The 1,000-push owner completed its bounded maintenance sequence and ended with 2 active packs. Every acceleration checkpoint still reports `repair_required` because the generation-index receipt is missing and bucket-registry discovery is incomplete; interruption, 10,000-push, and GC matrix remain pending |
 | 6 | PARTIAL | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `0a8b5c8f`, `b7749b2e`, `7dac3d75`, `793f6b43` + working tree | Single-client correctness and warm-cache checks pass, but current-binary replay, shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
 ### Current branch verification evidence
@@ -1263,17 +1267,48 @@ window, persists it through the schema migration, and uses sorted/deduplicated
 visibility positions. Regression tests cover the 100-edit history and exact
 planning beyond the former 64-transition boundary.
 
-### Current 1,000-push qualification (running)
+### 1,000-push qualification
 
 Run profile: `local-k8s-full-history-a926-1000-20260825`, same Kubernetes
 revision and isolated RustFS, 1,000 replay pushes, release binary built from
-pre-rebase commit `a926fe9d`. At the time of this update, the report is still
-`running` after 532 pushes with no harness error. It is useful load evidence,
-but it cannot close the gate because it is not current `HEAD` and has not
-completed its full clone, shallow, incremental, cleanup, and verifier checks.
-The report also already shows owner convergence taking 192.870 s at
-checkpoint 1, 445.348 s at checkpoint 10, and 723.410 s at checkpoint 100;
-the resulting catalog/graph/repack cost is an explicit optimization target.
+pre-rebase commit `a926fe9d`. The report status is `ok`; the standalone
+verifier passes with `--allow-smoke`, all 1,001 pushes (seed plus 1,000
+replays) completed, the full/filtered/shallow/incremental correctness checks
+passed, and cleanup removed the local worktrees and run-owned remote prefix.
+The correctness fingerprint is
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The final inventory had 2 active packs and 1,263,069,674 active bytes.
+  Owner actions at checkpoints 10/100/1,000 were
+  `ref_journal_compaction`, `catalog_advance`, `commit_graph_rebuild`,
+  `geometric_repack`, `catalog_advance`, and `none`; the checkpoint-1 owner
+  omitted the repack because it was not due.
+- Owner convergence took 192,870/445,348/723,410/2,580,374 ms at
+  checkpoints 1/10/100/1,000 and peaked at 944,160,768/959,594,496/
+  1,014,546,432/1,974,976,512 bytes of child RSS. The 43-minute,
+  approximately 1.975-GB checkpoint-1,000 owner is the dominant measured
+  large-team bottleneck; it is evidence for optimization, not an accepted
+  production SLO.
+- Cold full clone generated 1,240,981,438 response bytes in 134,561 ms of
+  pack generation with two storage requests; the warm clone was a 307 ms
+  verified cache hit. `blob:none` generated 198,746,774 response bytes in
+  89,404 ms. Depth-1/10/100/1,000 generated
+  49,108,396/91,467,386/812,827,443/1,240,938,129 response bytes in
+  20,544/30,377/139,482/119,581 ms, with 6,187/7,276/3/3 storage requests.
+- Incremental fetch after pushes 1/10/100/1,000 planned
+  37/420/4,810/38,745 logical objects and generated
+  22,589/454,861/5,805,513/39,942,282 response bytes using 2/6/33/225
+  storage requests. Server operation time was 166/422/695/2,504 ms.
+- Every acceleration checkpoint reported current locator, visibility, and
+  commit-graph artifacts, but also `generation_receipt_valid: false` and
+  `repair_required: true`; the notes identify a missing generation-index
+  receipt and incomplete bucket-registry discovery. This remains an explicit
+  production-readiness gap and destructive bucket GC stayed disabled.
+
+This closes the pre-rebase 1,000-push load/correctness evidence, not the final
+acceptance gate. The same full profile must be repeated from current `HEAD`
+`036df853`, followed by an independent repeatability run and the remaining
+differential, fault, concurrency, provider, and rollout gates.
 
 ## Final done criteria
 
