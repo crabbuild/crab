@@ -32,7 +32,7 @@ const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 const REPACK_DISK_RESERVE: u64 = 1024 * 1024 * 1024;
 const MAX_PACKS_PER_OPERATION: u64 = 1_000_000;
 const MAX_REPACK_DOWNLOAD_CONCURRENCY: usize = 16;
-const MAX_PACK_INDEX_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_REPACK_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 /// Configuration for the repack operation.
 #[derive(Debug, Clone)]
 pub struct RepackConfig {
@@ -686,20 +686,13 @@ async fn download_source_packs(
             if cancel.is_cancelled() {
                 return Err(CrabError::Cancelled);
             }
-            if pack.size > MAX_PACK_INDEX_BYTES {
-                return Err(CrabError::Configuration {
-                    key: "repack pack size".to_owned(),
-                    origin: format!(
-                        "pack {} is {} bytes; bounded repack supports at most {MAX_PACK_INDEX_BYTES}",
-                        pack.pack_id, pack.size
-                    ),
-                });
-            }
             let (pack_size, _) = tokio::select! {
                 result = async {
+                    // The committed manifest supplies the exact body bound;
+                    // disk admission above limits aggregate temporary space.
                     tokio::try_join!(
-                        store.download_to_path_bounded(&pack_path, &local_pack, MAX_PACK_INDEX_BYTES),
-                        store.download_to_path_bounded(&index_path, &local_index, MAX_PACK_INDEX_BYTES)
+                        store.download_to_path_bounded(&pack_path, &local_pack, pack.size),
+                        store.download_to_path_bounded(&index_path, &local_index, MAX_REPACK_INDEX_BYTES)
                     )
                 } => result?,
                 () = cancel.cancelled() => return Err(CrabError::Cancelled),
@@ -771,11 +764,11 @@ fn validate_pack_inventory(router: &StoreLayout, packs: &[PackManifestEntry]) ->
                 ),
             });
         }
-        if pack.size == 0 || pack.size > MAX_PACK_INDEX_BYTES {
+        if pack.size == 0 {
             return Err(CrabError::Configuration {
                 key: "repack pack size".to_owned(),
                 origin: format!(
-                    "pack {} has invalid size {}; expected 1..={MAX_PACK_INDEX_BYTES}",
+                    "pack {} has invalid size {}; expected a non-zero manifest size",
                     pack.pack_id, pack.size
                 ),
             });
@@ -1009,6 +1002,23 @@ mod tests {
         assert_eq!(updated.shard_index_hash, manifest.shard_index_hash);
         assert_eq!(updated.commit_graph_hash, None);
         assert_eq!(updated.ref_registry_hash, manifest.ref_registry_hash);
+    }
+
+    #[test]
+    fn repack_inventory_accepts_pack_bodies_larger_than_index_limit() {
+        let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(backend);
+        let router = StoreLayout::new(store, "org/repack-test".to_owned());
+        let pack_id = "a".repeat(64);
+        let packs = vec![PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: MAX_REPACK_INDEX_BYTES + 1,
+            content_hash: pack_id,
+            ref_tips: Vec::new(),
+            object_count: 1,
+        }];
+
+        validate_pack_inventory(&router, &packs).expect("large pack body is valid inventory");
     }
 
     #[test]
