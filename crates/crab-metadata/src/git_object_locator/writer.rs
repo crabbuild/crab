@@ -1371,6 +1371,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sweep_after_rewriting_all_objects_preserves_dense_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let original = writer.bind_packs(&[pack(1)]).await.expect("bind original")[0];
+        writer
+            .write_locations(original, &[entry(1)])
+            .await
+            .expect("write original location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("cover original pack");
+
+        let repacked = writer.bind_packs(&[pack(2)]).await.expect("bind repacked")[0];
+        let mut moved = entry(1);
+        moved.location.pack_offset = 24;
+        moved.location.entry_len = 80;
+        writer
+            .write_locations(repacked, &[moved])
+            .await
+            .expect("write repacked location");
+        let sweep = writer
+            .sweep_unreferenced(&HashSet::from([repacked.pack_slot]))
+            .await
+            .expect("sweep original pack");
+
+        assert_eq!(sweep.object_rows_deleted, 0);
+        assert_eq!(sweep.pack_rows_deleted, 1);
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect("cover repacked pack");
+        assert_eq!(
+            writer
+                .catalog_identity()
+                .expect("catalog identity")
+                .object_count,
+            1
+        );
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
     async fn checkpoints_publish_multiple_generations_without_closing_writer() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")

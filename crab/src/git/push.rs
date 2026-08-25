@@ -5896,87 +5896,12 @@ async fn acquire_current_git_locator_lock(
     }
 }
 
-async fn publish_pack_locator_inventory(
+async fn write_locator_pack_evidence(
     writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
-    store: &Store,
-    router: &StoreLayout,
-    local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
-    anchor: CommittedManifestAnchor,
-    current_packs: &[PackManifestEntry],
-    populate_kind_metadata: bool,
-) -> Result<bool> {
-    let mut pack_records = Vec::with_capacity(current_packs.len());
-    for pack in current_packs {
-        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed pack id is invalid for locator publication: {error}"
-            ))
-        })?;
-        pack_records.push(crab_metadata::git_object_locator::GitPackLocatorRecord {
-            pack_id,
-            committed_generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-            object_count: pack.object_count,
-            pack_size: pack.size,
-        });
-    }
-    let bindings = writer.bind_packs(&pack_records).await?;
-    let retained_slots = bindings
-        .iter()
-        .map(|binding| binding.pack_slot)
-        .collect::<HashSet<_>>();
-    let sweep = writer.sweep_unreferenced(&retained_slots).await?;
-    if sweep.pack_rows_deleted != 0 {
-        writer.replace_object_catalog().await?;
-    }
-    debug!(
-        object_rows_deleted = sweep.object_rows_deleted,
-        pack_rows_deleted = sweep.pack_rows_deleted,
-        "swept stale Git locator rows"
-    );
-    // Object keys are OIDs, so an interrupted newer pack can replace a covered
-    // row. Deleting any stale-slot object invalidates every covered-pack shortcut.
-    let covered = if sweep.object_rows_deleted == 0 {
-        bindings
-            .iter()
-            .filter(|binding| writer.binding_has_covered_objects(**binding))
-            .map(|binding| binding.record.pack_id)
-            .collect::<HashSet<_>>()
-    } else {
-        HashSet::new()
-    };
-    let mut evidence = Vec::new();
-    for pack in current_packs {
-        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed pack id is invalid for locator publication: {error}"
-            ))
-        })?;
-        // Pack bytes are immutable. Sweeping an obsolete slot removes only
-        // rows owned by that slot; covered retained packs remain valid and do
-        // not need another full index scan.
-        if covered.contains(&pack_id) {
-            continue;
-        }
-        let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
-            validate_locator_pack_evidence(
-                pack,
-                &local.idx_path,
-                &local.rev_path,
-                &local.git_sha1,
-                &local.idx_path.display().to_string(),
-            )?;
-            local
-        } else {
-            download_locator_pack_evidence(store, router, pack, populate_kind_metadata).await?
-        };
-        evidence.push(pack_evidence);
-    }
-    let bindings = bindings
-        .into_iter()
-        .map(|binding| (binding.record.pack_id, binding))
-        .collect::<HashMap<_, _>>();
-    for pack_evidence in &evidence {
+    bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
+    evidence: &[LocatorPackEvidence],
+) -> Result<()> {
+    for pack_evidence in evidence {
         let binding = *bindings.get(&pack_evidence.pack_id).ok_or_else(|| {
             CrabError::Internal("locator evidence has no current manifest pack binding".to_owned())
         })?;
@@ -6022,8 +5947,119 @@ async fn publish_pack_locator_inventory(
             writer.write_locations(binding, &entries).await?;
         }
     }
-    // The manifest check is independent of locator durability. Keep object
-    // rows pending so set_coverage flushes them with the coverage marker.
+    Ok(())
+}
+
+async fn publish_pack_locator_inventory(
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    store: &Store,
+    router: &StoreLayout,
+    local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
+    anchor: CommittedManifestAnchor,
+    current_packs: &[PackManifestEntry],
+    populate_kind_metadata: bool,
+) -> Result<bool> {
+    let mut pack_records = Vec::with_capacity(current_packs.len());
+    for pack in current_packs {
+        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+            CrabError::Internal(format!(
+                "committed pack id is invalid for locator publication: {error}"
+            ))
+        })?;
+        pack_records.push(crab_metadata::git_object_locator::GitPackLocatorRecord {
+            pack_id,
+            committed_generation: anchor.generation,
+            pack_index_hash: anchor.pack_index_hash,
+            object_count: pack.object_count,
+            pack_size: pack.size,
+        });
+    }
+    let bindings = writer.bind_packs(&pack_records).await?;
+    let retained_slots = bindings
+        .iter()
+        .map(|binding| binding.pack_slot)
+        .collect::<HashSet<_>>();
+    // Publish current-pack rows before sweeping stale slots. A repack can move
+    // every OID to a new slot without changing the object universe; sweeping
+    // first would mistake that valid rewrite for an object-set change and
+    // trigger a full dense-ordinal catalog rebuild.
+    let covered = bindings
+        .iter()
+        .filter(|binding| writer.binding_has_covered_objects(**binding))
+        .map(|binding| binding.record.pack_id)
+        .collect::<HashSet<_>>();
+    let mut evidence = Vec::new();
+    for pack in current_packs {
+        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+            CrabError::Internal(format!(
+                "committed pack id is invalid for locator publication: {error}"
+            ))
+        })?;
+        // Pack bytes are immutable. Sweeping an obsolete slot removes only
+        // rows owned by that slot; covered retained packs remain valid and do
+        // not need another full index scan.
+        if covered.contains(&pack_id) {
+            continue;
+        }
+        let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
+            validate_locator_pack_evidence(
+                pack,
+                &local.idx_path,
+                &local.rev_path,
+                &local.git_sha1,
+                &local.idx_path.display().to_string(),
+            )?;
+            local
+        } else {
+            download_locator_pack_evidence(store, router, pack, populate_kind_metadata).await?
+        };
+        evidence.push(pack_evidence);
+    }
+    let bindings = bindings
+        .into_iter()
+        .map(|binding| (binding.record.pack_id, binding))
+        .collect::<HashMap<_, _>>();
+    write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
+
+    let sweep = writer.sweep_unreferenced(&retained_slots).await?;
+    if sweep.object_rows_deleted != 0 {
+        // Only deleting an object proves that the dense ordinal universe
+        // changed. Rebuild then replay every current pack, including packs
+        // that were covered before the sweep.
+        writer.replace_object_catalog().await?;
+        for pack in current_packs {
+            let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+                CrabError::Internal(format!(
+                    "committed pack id is invalid for locator publication: {error}"
+                ))
+            })?;
+            if evidence.iter().any(|item| item.pack_id == pack_id) {
+                continue;
+            }
+            let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
+                validate_locator_pack_evidence(
+                    pack,
+                    &local.idx_path,
+                    &local.rev_path,
+                    &local.git_sha1,
+                    &local.idx_path.display().to_string(),
+                )?;
+                local
+            } else {
+                download_locator_pack_evidence(store, router, pack, populate_kind_metadata).await?
+            };
+            evidence.push(pack_evidence);
+        }
+        write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
+    }
+    debug!(
+        object_rows_deleted = sweep.object_rows_deleted,
+        pack_rows_deleted = sweep.pack_rows_deleted,
+        catalog_rebuilt = sweep.object_rows_deleted != 0,
+        "swept stale Git locator rows"
+    );
+    writer.flush_objects().await?;
+
     let (after, _) = read_manifest(store, router).await?;
     if after.generation != anchor.generation
         || after.pack_index_hash != anchor.pack_index_hash.hex()
