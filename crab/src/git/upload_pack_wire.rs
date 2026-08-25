@@ -83,8 +83,18 @@ pub async fn snapshot_available(
     // If exact locator coverage lags, omit v2 and let Git use the
     // already-advertised complete-pack fetch path. Rebuilding it here makes
     // every dependent hot-ref generation pay the full locator publication cost.
-    let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
-        return false;
+    let repository = match open_repository_snapshot(store, prefix, cancellation).await {
+        Ok(repository) => repository,
+        // Repository creation intentionally defers locator acceleration until
+        // the first protocol-v2 reader. Repair only that initial generation;
+        // later lag still falls back without making hot-ref discovery rebuild.
+        Err(RemoteGitError::RepositoryIndexing { required: 1, .. }) => {
+            let Ok(repository) = open_repository(store, prefix, cancellation).await else {
+                return false;
+            };
+            repository
+        }
+        Err(_) => return false,
     };
     match repository.visibility_index(cancellation).await {
         Ok(_) => true,
