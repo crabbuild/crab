@@ -91,9 +91,9 @@ fn dag_args() -> RunArgs {
     }
 }
 
-/// Diamond DAG: A → {B, C} → D
-/// B and C each sleep for 500ms. With parallelism=2, total time
-/// should be ~500ms (not ~1000ms).
+/// Diamond DAG: A → {B, C} → D.
+/// B and C use a release barrier so the test proves overlap without
+/// depending on a wall-clock margin on a loaded runner.
 #[tokio::test(flavor = "multi_thread")]
 async fn diamond_dag_parallel_execution() {
     let (_lock, _guard) = EnabledGuard::new();
@@ -111,13 +111,13 @@ async fn diamond_dag_parallel_execution() {
     outs:
       - a.out
   b:
-    cmd: "sleep 0.5 && cp a.out b.out"
+    cmd: "printf started > b.started; while [ ! -f release ]; do sleep 0.01; done; cp a.out b.out"
     deps:
       - a.out
     outs:
       - b.out
   c:
-    cmd: "sleep 0.5 && cp a.out c.out"
+    cmd: "printf started > c.started; while [ ! -f release ]; do sleep 0.01; done; cp a.out c.out"
     deps:
       - a.out
     outs:
@@ -136,23 +136,43 @@ async fn diamond_dag_parallel_execution() {
     let prev_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(root).unwrap();
 
-    let start = Instant::now();
     let mut args = dag_args();
     args.parallelism = Some(2);
-    let result = run_in(&args, root, OutputMode::Text).await;
-    let elapsed = start.elapsed();
+    let b_started = root.join("b.started");
+    let c_started = root.join("c.started");
+    let release = root.join("release");
+
+    let mut run = Box::pin(run_in(&args, root, OutputMode::Text));
+    let mut marker_wait = Box::pin(async {
+        loop {
+            if b_started.is_file() && c_started.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let mut marker_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+    let mut completed = None;
+    let both_started = tokio::select! {
+        result = &mut run => {
+            completed = Some(result);
+            false
+        }
+        () = &mut marker_wait => true,
+        () = &mut marker_timeout => false,
+    };
+    fs::write(&release, b"release").unwrap();
+    let result = match completed {
+        Some(result) => result,
+        None => run.await,
+    };
 
     std::env::set_current_dir(&prev_cwd).unwrap();
 
     assert!(result.is_ok(), "DAG run failed: {:?}", result.err());
-
-    // With parallelism=2, B and C run concurrently. Total time
-    // should be significantly less than 1000ms (serial would be
-    // ~1000ms for B+C). Allow some overhead.
     assert!(
-        elapsed < Duration::from_millis(900),
-        "Expected parallel execution (< 900ms), got {:?}",
-        elapsed
+        both_started,
+        "both independent stages must start before the release barrier"
     );
 
     // Verify outputs exist.
