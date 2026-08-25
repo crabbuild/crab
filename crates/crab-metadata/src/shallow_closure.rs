@@ -192,6 +192,30 @@ pub fn build_shallow_closure_write(
     })
 }
 
+/// Rebind an existing closure to a new manifest identity without rebuilding its entries.
+pub fn rebind_shallow_closure_write(
+    descriptor: &ShallowClosureDescriptor,
+    generation: u64,
+    pack_index_hash: String,
+    git_validation_digest: String,
+) -> Result<ShallowClosureWrite> {
+    let rebound = ShallowClosureDescriptor {
+        version: descriptor.version,
+        generation,
+        pack_index_hash,
+        git_validation_digest,
+        entries: descriptor.entries.clone(),
+    };
+    rebound.validate()?;
+    let descriptor_bytes = serde_json::to_vec(&rebound).map_err(|source| {
+        MetadataError::Internal(format!("shallow closure descriptor encode: {source}"))
+    })?;
+    Ok(ShallowClosureWrite {
+        descriptor_bytes,
+        entries: Vec::new(),
+    })
+}
+
 /// Decode and validate one binary shallow closure entry.
 pub fn decode_shallow_closure_entry(bytes: &[u8], path: &str) -> Result<ShallowClosureEntry> {
     if bytes.len() < ENTRY_HEADER_BYTES || &bytes[..8] != ENTRY_MAGIC {
@@ -360,7 +384,27 @@ pub async fn upload_shallow_closure(
         "shallow closure Git validation digest",
         "shallow closure",
     )?;
+    let descriptor_path = router.shallow_closure_path(git_validation_digest);
+    let descriptor =
+        decode_shallow_closure_descriptor(&write.descriptor_bytes, descriptor_path.as_ref())?;
+    if descriptor.git_validation_digest != git_validation_digest {
+        return Err(MetadataError::CorruptObject {
+            path: descriptor_path.to_string(),
+            reason: "shallow closure descriptor digest does not match its destination".to_owned(),
+        });
+    }
+    let mut provided = BTreeSet::new();
     for entry in &write.entries {
+        if !descriptor
+            .entries
+            .iter()
+            .any(|reference| reference.hash == entry.reference.hash)
+        {
+            return Err(MetadataError::CorruptObject {
+                path: entry.reference.path.clone(),
+                reason: "shallow closure entry is absent from its descriptor".to_owned(),
+            });
+        }
         let path = router.repo_path(&entry.reference.path);
         let expected = decode_hash(&entry.reference.hash, path.as_ref())?;
         match store.head(&path).await {
@@ -375,18 +419,43 @@ pub async fn upload_shallow_closure(
             }
             Err(error) => return Err(MetadataError::from(error)),
         }
+        provided.insert(entry.reference.hash.clone());
     }
-    let path = router.shallow_closure_path(git_validation_digest);
-    match store.get_with_etag(&path).await {
+    for reference in &descriptor.entries {
+        if provided.contains(&reference.hash) {
+            continue;
+        }
+        let path = router.repo_path(&reference.path);
+        match store.head(&path).await {
+            Ok(metadata) if metadata.size == reference.bytes => {}
+            Ok(metadata) => {
+                return Err(MetadataError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "shallow closure entry length mismatch: expected {}, got {}",
+                        reference.bytes, metadata.size
+                    ),
+                });
+            }
+            Err(crab_storage::StorageError::NotFound { .. }) => {
+                return Err(MetadataError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "shallow closure entry is missing".to_owned(),
+                });
+            }
+            Err(error) => return Err(MetadataError::from(error)),
+        }
+    }
+    match store.get_with_etag(&descriptor_path).await {
         Ok((bytes, _)) if bytes == write.descriptor_bytes => Ok(()),
         Ok(_) => Err(MetadataError::CorruptObject {
-            path: path.to_string(),
+            path: descriptor_path.to_string(),
             reason: "existing shallow closure descriptor differs from the requested generation"
                 .to_owned(),
         }),
         Err(crab_storage::StorageError::NotFound { .. }) => store
             .put(
-                &path,
+                &descriptor_path,
                 bytes::Bytes::copy_from_slice(&write.descriptor_bytes),
             )
             .await
@@ -629,6 +698,34 @@ mod tests {
         assert!(decoded.validate().is_ok());
     }
 
+    #[test]
+    fn rebind_preserves_content_addressed_entries() {
+        let write = build_shallow_closure_write(
+            1,
+            hash(1),
+            hash(2),
+            vec![ShallowClosureEntry {
+                tip: oid(1),
+                depth: 1,
+                object_ids: vec![oid(1)],
+                shallow: vec![],
+            }],
+        )
+        .expect("build write");
+        let descriptor = decode_shallow_closure_descriptor(&write.descriptor_bytes, "descriptor")
+            .expect("decode descriptor");
+
+        let rebound =
+            rebind_shallow_closure_write(&descriptor, 2, hash(3), hash(4)).expect("rebind write");
+        assert!(rebound.entries.is_empty());
+        let decoded = decode_shallow_closure_descriptor(&rebound.descriptor_bytes, "descriptor")
+            .expect("decode rebound descriptor");
+        assert_eq!(decoded.generation, 2);
+        assert_eq!(decoded.pack_index_hash, hash(3));
+        assert_eq!(decoded.git_validation_digest, hash(4));
+        assert_eq!(decoded.entries, descriptor.entries);
+    }
+
     #[cfg(feature = "storage")]
     #[tokio::test]
     async fn storage_round_trip_rejects_a_stale_descriptor_and_corrupt_entry() {
@@ -650,6 +747,11 @@ mod tests {
         upload_shallow_closure(&store, &router, &hash(2), &write)
             .await
             .expect("upload closure");
+        let rebound = rebind_shallow_closure_write(&descriptor(&write), 8, hash(3), hash(4))
+            .expect("rebind closure");
+        upload_shallow_closure(&store, &router, &hash(4), &rebound)
+            .await
+            .expect("upload rebound closure");
         let descriptor = load_shallow_closure_descriptor(
             &store,
             &router,
@@ -692,5 +794,10 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    fn descriptor(write: &ShallowClosureWrite) -> ShallowClosureDescriptor {
+        decode_shallow_closure_descriptor(&write.descriptor_bytes, "descriptor")
+            .expect("decode descriptor")
     }
 }

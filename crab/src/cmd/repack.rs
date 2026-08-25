@@ -267,6 +267,7 @@ async fn run_repack_locked(
     let bytes_read = selected_packs.iter().map(|pack| pack.size).sum();
     let visibility = read_current_visibility(store, router, &manifest).await?;
     let commit_graph = read_current_commit_graph(store, router, &manifest).await?;
+    let shallow_closure = read_current_shallow_closure(store, router, &manifest).await?;
 
     std::fs::create_dir_all(&config.workspace_root).map_err(CrabError::Io)?;
     let required_space = bytes_read
@@ -399,6 +400,27 @@ async fn run_repack_locked(
         )
         .await?;
         committed.commit_graph_hash = Some(write.descriptor_hash);
+    }
+    if let Some(shallow_closure) = shallow_closure {
+        let write = crab_metadata::shallow_closure::rebind_shallow_closure_write(
+            &shallow_closure,
+            committed.generation,
+            committed.pack_index_hash.clone(),
+            committed.git_validation_digest.clone(),
+        )
+        .map_err(CrabError::from)?;
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        crab_metadata::shallow_closure::upload_shallow_closure(
+            store.as_storage(),
+            &storage_router,
+            &committed.git_validation_digest,
+            &write,
+        )
+        .await
+        .map_err(CrabError::from)?;
     }
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
     let visibility_expected = visibility.is_some();
@@ -598,6 +620,28 @@ async fn read_current_commit_graph(
         });
     }
     Ok(Some(graph))
+}
+
+async fn read_current_shallow_closure(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<Option<crab_metadata::shallow_closure::ShallowClosureDescriptor>> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(None);
+    }
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    crab_metadata::shallow_closure::load_shallow_closure_descriptor(
+        store.as_storage(),
+        &storage_router,
+        &manifest.git_validation_digest,
+        manifest.generation,
+        &manifest.pack_index_hash,
+        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 fn rebind_visibility(
