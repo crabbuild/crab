@@ -59,7 +59,7 @@ pub struct LocatorWriteStats {
     pub object_rows_written: u64,
     /// Approximate logical key and value bytes submitted.
     pub logical_bytes_written: u64,
-    /// Explicit durability flushes completed.
+    /// Explicit object/memtable flushes completed.
     pub flushes: u64,
     /// Whether this session durably advanced exact inventory coverage.
     pub coverage_updated: bool,
@@ -627,7 +627,6 @@ impl GitObjectLocatorWriter {
                 "Git locator coverage generation must be non-zero".to_owned(),
             ));
         }
-        self.flush_objects().await?;
         let identity = GitObjectCatalogIdentity {
             generation: coverage.generation,
             pack_index_hash: coverage.pack_index_hash,
@@ -672,6 +671,7 @@ impl GitObjectLocatorWriter {
         if !self.checkpoint_required {
             return Ok(());
         }
+        self.flush_objects().await?;
         let name = match (self.metadata.identity, self.catalog_dirty) {
             (Some(identity), false) => super::catalog_checkpoint_name(identity.catalog_digest),
             _ => super::UNPUBLISHED_CHECKPOINT_NAME.to_owned(),
@@ -692,7 +692,6 @@ impl GitObjectLocatorWriter {
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
-        self.stats.flushes = self.stats.flushes.saturating_add(1);
         self.checkpoint_required = false;
         if let Err(error) =
             retire_old_catalog_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint, &name)

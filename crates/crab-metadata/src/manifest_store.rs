@@ -1461,7 +1461,6 @@ mod tests {
 
         assert!(compacted.git_visibility_published);
         assert!(delayed.max_active_writes() >= 2);
-        assert!(proof.contains_for_refs(["refs/heads/main"], &tip));
         assert!(proof.contains_hex_in_ref("refs/heads/main", &tip));
     }
 

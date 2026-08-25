@@ -2321,13 +2321,7 @@ mod storage {
                         ),
                     });
                 }
-                let (existing, _) = decode_digest_bound(&existing, &path)?;
-                existing.validate_identity(
-                    index.generation,
-                    &index.pack_index_hash,
-                    &index.git_validation_digest,
-                )?;
-                if existing == *index {
+                if existing == body {
                     return Ok(());
                 }
                 Err(crate::error::MetadataError::CorruptObject {

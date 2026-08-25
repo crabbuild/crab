@@ -1,6 +1,6 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -18,7 +18,7 @@ use crate::git::push::{
     CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
 };
 use crate::metadata::manifest::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_manifest,
+    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_bulk_pack_list, read_manifest,
     upload_segmented_bulk, write_manifest_cas,
 };
 use crate::storage::StoreLayout;
@@ -264,7 +264,7 @@ async fn run_repack_locked(
     let (stable_packs, selected_packs) = packs.split_at(selected_at);
     let stable_packs = stable_packs.to_vec();
     let selected_packs = selected_packs.to_vec();
-    let bytes_read = selected_packs.iter().map(|pack| pack.size).sum();
+    let bytes_read: u64 = selected_packs.iter().map(|pack| pack.size).sum();
     let visibility = read_current_visibility(store, router, &manifest).await?;
     let commit_graph = read_current_commit_graph(store, router, &manifest).await?;
     let shallow_closure = read_current_shallow_closure(store, router, &manifest).await?;
@@ -1268,6 +1268,7 @@ mod tests {
                 dry_run: false,
                 download_concurrency: 2,
                 max_cas_retries: 4,
+                ..RepackConfig::default()
             },
             &CancellationToken::new(),
         )

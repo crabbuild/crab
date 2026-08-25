@@ -6058,8 +6058,6 @@ async fn publish_pack_locator_inventory(
         catalog_rebuilt = sweep.object_rows_deleted != 0,
         "swept stale Git locator rows"
     );
-    writer.flush_objects().await?;
-
     let (after, _) = read_manifest(store, router).await?;
     if after.generation != anchor.generation
         || after.pack_index_hash != anchor.pack_index_hash.hex()
