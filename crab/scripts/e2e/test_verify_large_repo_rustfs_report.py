@@ -268,6 +268,18 @@ class ReportVerificationTests(unittest.TestCase):
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)
         self.assertEqual(result.replay_count, 3)
 
+    def test_abbreviated_binary_revision_is_accepted(self) -> None:
+        report = valid_report()
+        report["provenance"]["crab_build"]["git_sha"] = OID[:7]
+        result = VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+        self.assertEqual(result.source_revision, OID)
+
+    def test_binary_revision_that_does_not_prefix_source_is_rejected(self) -> None:
+        report = valid_report()
+        report["provenance"]["crab_build"]["git_sha"] = "d" * 7
+        with self.assertRaisesRegex(VERIFY.VerificationError, "binary revision"):
+            VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+
     def test_smoke_report_cannot_satisfy_full_gate(self) -> None:
         with self.assertRaisesRegex(VERIFY.VerificationError, "smoke report"):
             VERIFY.verify_report(self.write("report.json", valid_report()))

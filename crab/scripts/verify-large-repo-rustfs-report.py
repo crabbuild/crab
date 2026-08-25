@@ -180,8 +180,14 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
         )
     crab_build = provenance.get("crab_build")
     require(isinstance(crab_build, dict), "missing provenance.crab_build")
+    binary_git_sha = crab_build.get("git_sha")
+    source_git_sha = provenance["crab_source_revision"]
     require(
-        crab_build.get("git_sha") == provenance["crab_source_revision"],
+        isinstance(binary_git_sha, str)
+        and len(binary_git_sha) >= 7
+        and binary_git_sha != "unknown"
+        and re.fullmatch(r"[0-9a-f]+", binary_git_sha) is not None
+        and source_git_sha.startswith(binary_git_sha),
         "Crab binary revision does not match source revision",
     )
     for field in ("crab_version", "git_sha", "build_timestamp"):
