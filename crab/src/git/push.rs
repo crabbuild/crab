@@ -20915,6 +20915,15 @@ mod tests {
             result.outcomes.get("refs/heads/main"),
             Some(&RefPushOutcome::Ok)
         );
+        assert!(
+            !crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "protocol v2 must remain withheld while the generation owner protects the active journal"
+        );
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read committed manifest");
@@ -21123,13 +21132,13 @@ mod tests {
         );
         assert_eq!(interrupted_snapshot.journal.transactions.len(), 1);
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must remain withheld while admission can compact the active journal"
+            "protocol v2 must remain available while terminal admission can compact an orphaned journal"
         );
         let unchanged = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
@@ -21247,6 +21256,15 @@ mod tests {
             .await
             .expect("read pending journal state");
         assert_eq!(pending.journal.transactions.len(), 1);
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "protocol v2 must remain available while terminal admission can compact an orphaned journal"
+        );
 
         let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
             store.as_storage(),

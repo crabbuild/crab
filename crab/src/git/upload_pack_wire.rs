@@ -176,15 +176,10 @@ async fn capability_snapshot_is_stable(
     };
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-    let active_transactions =
-        crab_metadata::ref_journal::list_active_transactions(store, &layout).await?;
-    if !active_transactions.is_empty() {
-        tracing::debug!(
-            transactions = active_transactions.len(),
-            "protocol-v2 capability withheld while ref-journal admission is unsettled"
-        );
-        return Ok(false);
-    }
+    let active_marker_present = store
+        .list_prefix_bounded(&layout.ref_journal_active_prefix(), 1)
+        .await?
+        .map_or(true, |objects| !objects.is_empty());
     let owner_active =
         match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
             Ok(active) => active,
@@ -193,7 +188,14 @@ async fn capability_snapshot_is_stable(
                 return Ok(false);
             }
         };
-    Ok(!owner_active)
+    if owner_active {
+        tracing::debug!(
+            active_marker_present,
+            "protocol-v2 capability withheld while generation-owner admission is active"
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
