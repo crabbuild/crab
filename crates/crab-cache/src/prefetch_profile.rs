@@ -4,6 +4,7 @@
 //! warming and eager hydration decisions.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 
 use globset::Glob;
@@ -14,6 +15,7 @@ use crate::{CacheError, Result};
 
 /// File name of the prefetch profile config inside a repo's shared `.crab/`.
 pub const PREFETCH_TOML_FILE: &str = "prefetch.toml";
+const MAX_PREFETCH_CONFIG_BYTES: usize = 8 * 1024 * 1024;
 
 /// Parsed prefetch configuration with profiles indexed by name.
 ///
@@ -45,8 +47,22 @@ pub fn load_prefetch_from_crab_dir(crab_dir: &Path) -> Result<PrefetchConfig> {
 /// optional. Malformed TOML, unsupported versions, and invalid glob patterns
 /// are hard errors.
 pub fn load_prefetch_path(path: &Path) -> Result<PrefetchConfig> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let contents = match std::fs::File::open(path) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take((MAX_PREFETCH_CONFIG_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_PREFETCH_CONFIG_BYTES {
+                return Err(CacheError::PrefetchParse {
+                    reason: format!(
+                        "prefetch.toml exceeds the safety limit of {MAX_PREFETCH_CONFIG_BYTES} bytes"
+                    ),
+                });
+            }
+            String::from_utf8(bytes).map_err(|error| CacheError::PrefetchParse {
+                reason: format!("prefetch.toml is not valid UTF-8: {error}"),
+            })?
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             debug!(path = %path.display(), "prefetch.toml not found, using empty config");
             return Ok(PrefetchConfig {
@@ -62,6 +78,14 @@ pub fn load_prefetch_path(path: &Path) -> Result<PrefetchConfig> {
 /// Parses a prefetch TOML string.
 pub fn parse_prefetch(contents: &str) -> Result<PrefetchConfig> {
     const SUPPORTED_VERSION: u32 = 1;
+
+    if contents.len() > MAX_PREFETCH_CONFIG_BYTES {
+        return Err(CacheError::PrefetchParse {
+            reason: format!(
+                "prefetch.toml exceeds the safety limit of {MAX_PREFETCH_CONFIG_BYTES} bytes"
+            ),
+        });
+    }
 
     let raw: RawPrefetchFile =
         toml::from_str(contents).map_err(|error| CacheError::PrefetchParse {
@@ -297,6 +321,15 @@ paths = ["*.rs"]
 "#;
         assert!(matches!(
             parse_prefetch(toml),
+            Err(CacheError::PrefetchParse { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_prefetch_config_is_rejected() {
+        let contents = "x".repeat(MAX_PREFETCH_CONFIG_BYTES + 1);
+        assert!(matches!(
+            parse_prefetch(&contents),
             Err(CacheError::PrefetchParse { .. })
         ));
     }

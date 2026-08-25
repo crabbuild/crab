@@ -13,15 +13,18 @@
 //! write. A v1→v1 identity migration scaffolds the ladder.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::stage::OutKind;
 use crate::stage_cache_entry::{
-    decode_b3_hash, validate_stage_cache_entry, validate_stage_cache_entry_at,
+    MAX_STAGE_CACHE_ARTIFACT_BYTES, MAX_STAGE_CACHE_ENTRY_BYTES, decode_b3_hash,
+    validate_stage_cache_entry, validate_stage_cache_entry_at,
 };
 pub use crate::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_MAX_SUPPORTED, ENTRY_SCHEMA_VERSION, StageCacheEntry,
@@ -145,10 +148,12 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
         return Ok(None);
     }
     let path = entry_path(cache_root, hash);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
+    let bytes = match read_stage_cache_file_bounded(&path, &hash.as_hex()) {
+        Ok(bytes) => bytes,
+        Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
 
     let raw: serde_json::Value =
@@ -216,6 +221,15 @@ pub fn write_local(cache_root: &Path, entry: &StageCacheEntry) -> Result<()> {
         })?;
     }
     let bytes = canonical_json(entry)?;
+    if bytes.len() > MAX_STAGE_CACHE_ENTRY_BYTES {
+        return Err(CrabError::CacheEntryInvalid {
+            stage_hash: entry.stage_hash.as_hex(),
+            detail: format!(
+                "stage cache manifest is {} bytes; safety limit is {MAX_STAGE_CACHE_ENTRY_BYTES}",
+                bytes.len()
+            ),
+        });
+    }
     match atomic_write(&path, &bytes) {
         Ok(()) => Ok(()),
         Err(CrabError::Io(e)) if is_permission_or_readonly(&e) => {
@@ -261,7 +275,7 @@ pub fn store_local_xorbs<'a>(
                 } else {
                     base.join(&out.path)
                 };
-                let bytes = std::fs::read(&source).map_err(CrabError::Io)?;
+                let bytes = read_artifact_file_bounded(&source, &out.file_hash)?;
                 write_local_xorb(cache_root, &out.file_hash, &bytes)?;
             }
             OutKind::Directory => {
@@ -277,7 +291,8 @@ pub fn store_local_xorbs<'a>(
                     if entry.kind == "dir" {
                         continue;
                     }
-                    let bytes = std::fs::read(root.join(&entry.path)).map_err(CrabError::Io)?;
+                    let path = root.join(&entry.path);
+                    let bytes = read_artifact_file_bounded(&path, &entry.hash)?;
                     write_local_xorb(cache_root, &entry.hash, &bytes)?;
                 }
             }
@@ -293,25 +308,25 @@ pub fn read_local_xorb(cache_root: &Path, xorb_hash: &str) -> Result<Option<Vec<
     }
 
     let path = local_xorb_path(cache_root, xorb_hash)?;
-    let bytes = match std::fs::read(&path) {
+    let bytes = match read_artifact_file_bounded(&path, xorb_hash) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
+        Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
-
-    let actual = format!("b3:{}", blake3::hash(&bytes).to_hex());
-    if actual != xorb_hash {
-        return Err(CrabError::CacheEntryCorrupt {
-            stage_hash: String::new(),
-            path: path.display().to_string(),
-            expected: xorb_hash.to_owned(),
-            actual,
-        });
-    }
     Ok(Some(bytes))
 }
 
 fn write_local_xorb(cache_root: &Path, xorb_hash: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.len() as u64 > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: xorb_hash.to_owned(),
+            expected: format!("at most {MAX_STAGE_CACHE_ARTIFACT_BYTES} bytes"),
+            actual: format!("{} bytes", bytes.len()),
+        });
+    }
     let path = local_xorb_path(cache_root, xorb_hash)?;
     if path.exists() {
         return Ok(());
@@ -341,6 +356,70 @@ fn write_local_xorb(cache_root: &Path, xorb_hash: &str, bytes: &[u8]) -> Result<
         }
         Err(other) => Err(other),
     }
+}
+
+fn read_artifact_file_bounded(path: &Path, expected_hash: &str) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path).map_err(CrabError::Io)?;
+    if metadata.len() > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: path.display().to_string(),
+            expected: format!("{expected_hash} and at most {MAX_STAGE_CACHE_ARTIFACT_BYTES} bytes"),
+            actual: format!("{} bytes", metadata.len()),
+        });
+    }
+
+    let file = std::fs::File::open(path).map_err(CrabError::Io)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_STAGE_CACHE_ARTIFACT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(CrabError::Io)?;
+    if bytes.len() as u64 > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: path.display().to_string(),
+            expected: format!("{expected_hash} and at most {MAX_STAGE_CACHE_ARTIFACT_BYTES} bytes"),
+            actual: format!("{} bytes", bytes.len()),
+        });
+    }
+    let actual_hash = format!("b3:{}", blake3::hash(&bytes).to_hex());
+    if actual_hash != expected_hash {
+        return Err(CrabError::CacheEntryCorrupt {
+            stage_hash: String::new(),
+            path: path.display().to_string(),
+            expected: expected_hash.to_owned(),
+            actual: actual_hash,
+        });
+    }
+    Ok(bytes)
+}
+
+fn read_stage_cache_file_bounded(path: &Path, stage_hash: &str) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path).map_err(CrabError::Io)?;
+    if metadata.len() > MAX_STAGE_CACHE_ENTRY_BYTES as u64 {
+        return Err(CrabError::CacheEntryInvalid {
+            stage_hash: stage_hash.to_owned(),
+            detail: format!(
+                "stage cache manifest is {} bytes; safety limit is {MAX_STAGE_CACHE_ENTRY_BYTES}",
+                metadata.len()
+            ),
+        });
+    }
+
+    let file = std::fs::File::open(path).map_err(CrabError::Io)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_STAGE_CACHE_ENTRY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(CrabError::Io)?;
+    if bytes.len() > MAX_STAGE_CACHE_ENTRY_BYTES {
+        return Err(CrabError::CacheEntryInvalid {
+            stage_hash: stage_hash.to_owned(),
+            detail: format!(
+                "stage cache manifest is larger than the safety limit of {MAX_STAGE_CACHE_ENTRY_BYTES} bytes"
+            ),
+        });
+    }
+    Ok(bytes)
 }
 
 fn local_xorb_path(cache_root: &Path, xorb_hash: &str) -> Result<PathBuf> {
@@ -686,6 +765,25 @@ fn remote_xorb_path(prefix: &str, xorb_hash: &str) -> ObjectPath {
     ObjectPath::from(format!("{prefix}/workflow/xorbs/{xorb_hash}.xorb"))
 }
 
+async fn get_remote_bounded(store: &Store, path: &ObjectPath, max_bytes: u64) -> Result<Bytes> {
+    let metadata = store.head(path).await?;
+    if metadata.size > max_bytes {
+        return Err(CrabError::CacheEntryInvalid {
+            stage_hash: String::new(),
+            detail: format!(
+                "remote workflow cache object {} is {} bytes; safety limit is {max_bytes}",
+                path, metadata.size
+            ),
+        });
+    }
+    let (bytes, _) = store
+        .as_storage()
+        .get_with_etag_bounded(path, max_bytes)
+        .await
+        .map_err(CrabError::from)?;
+    Ok(bytes)
+}
+
 fn remote_ref_path(prefix: &str, stage_hash: &StageHash) -> ObjectPath {
     let hex = stage_hash.as_hex();
     ObjectPath::from(format!("{prefix}/refs/crab/stages/{hex}"))
@@ -814,6 +912,15 @@ async fn push_remote_inner(
     // Step 2: Upload the manifest JSON.
     let manifest_path = remote_manifest_path(prefix, stage_hash);
     let manifest_bytes = canonical_json(entry)?;
+    if manifest_bytes.len() > MAX_STAGE_CACHE_ENTRY_BYTES {
+        return Err(CrabError::CacheEntryInvalid {
+            stage_hash: stage_hash.as_hex(),
+            detail: format!(
+                "stage cache manifest is {} bytes; safety limit is {MAX_STAGE_CACHE_ENTRY_BYTES}",
+                manifest_bytes.len()
+            ),
+        });
+    }
     store
         .put(&manifest_path, Bytes::from(manifest_bytes))
         .await?;
@@ -999,14 +1106,29 @@ fn xorb_bytes_for_remote_push(
     xorb_hash: &str,
     local_path: &Path,
 ) -> Result<Option<Vec<u8>>> {
-    if let Some(bytes) = read_local_xorb(cache_root, xorb_hash)? {
-        return Ok(Some(bytes));
-    }
-
-    let bytes = match std::fs::read(local_path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
+    let bytes = if let Some(bytes) = read_local_xorb(cache_root, xorb_hash)? {
+        bytes
+    } else {
+        let metadata = match std::fs::metadata(local_path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(CrabError::Io(e)),
+        };
+        if metadata.len() > MAX_STAGE_CACHE_ARTIFACT_BYTES {
+            return Err(CrabError::CacheEntryCorrupt {
+                stage_hash: stage_hash.as_hex(),
+                path: local_path.display().to_string(),
+                expected: format!("at most {MAX_STAGE_CACHE_ARTIFACT_BYTES} bytes"),
+                actual: format!("{} bytes", metadata.len()),
+            });
+        }
+        match read_artifact_file_bounded(local_path, xorb_hash) {
+            Ok(bytes) => bytes,
+            Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
     };
 
     let actual = format!("b3:{}", blake3::hash(&bytes).to_hex());
@@ -1054,25 +1176,26 @@ pub async fn pull_remote_with_artifact_stores(
 ) -> Result<Option<StageCacheEntry>> {
     // Step 1: Download the manifest.
     let manifest_path = remote_manifest_path(prefix, stage_hash);
-    let manifest_bytes = match store.get_with_etag(&manifest_path).await {
-        Ok((bytes, _)) => bytes,
-        Err(CrabError::NotFound { .. }) => {
-            debug!(stage_hash = %stage_hash, "remote cache miss: manifest not found");
-            return Ok(None);
-        }
-        Err(CrabError::Storage(ref e)) if is_not_found_storage(e) => {
-            debug!(stage_hash = %stage_hash, "remote cache miss: manifest not found (storage)");
-            return Ok(None);
-        }
-        Err(e) => {
-            debug!(
-                stage_hash = %stage_hash,
-                error = %e,
-                "remote cache pull failed during manifest download"
-            );
-            return Ok(None);
-        }
-    };
+    let manifest_bytes =
+        match get_remote_bounded(store, &manifest_path, MAX_STAGE_CACHE_ENTRY_BYTES as u64).await {
+            Ok(bytes) => bytes,
+            Err(CrabError::NotFound { .. }) => {
+                debug!(stage_hash = %stage_hash, "remote cache miss: manifest not found");
+                return Ok(None);
+            }
+            Err(CrabError::Storage(ref e)) if is_not_found_storage(e) => {
+                debug!(stage_hash = %stage_hash, "remote cache miss: manifest not found (storage)");
+                return Ok(None);
+            }
+            Err(e) => {
+                debug!(
+                    stage_hash = %stage_hash,
+                    error = %e,
+                    "remote cache pull failed during manifest download"
+                );
+                return Ok(None);
+            }
+        };
 
     // Step 2: Parse and verify the manifest.
     let entry: StageCacheEntry = match serde_json::from_slice(&manifest_bytes) {
@@ -1119,8 +1242,14 @@ pub async fn pull_remote_with_artifact_stores(
         match out.kind {
             OutKind::File | OutKind::Stdout => {
                 let xorb_path = remote_xorb_path(target.prefix, &out.file_hash);
-                let xorb_bytes = match target.store.get_with_etag(&xorb_path).await {
-                    Ok((bytes, _)) => bytes,
+                let xorb_bytes = match get_remote_bounded(
+                    target.store,
+                    &xorb_path,
+                    MAX_STAGE_CACHE_ARTIFACT_BYTES,
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
                     Err(e) => {
                         debug!(
                             stage_hash = %stage_hash,
@@ -1177,8 +1306,14 @@ pub async fn pull_remote_with_artifact_stores(
                             continue;
                         }
                         let file_xorb_path = remote_xorb_path(target.prefix, &tree_entry.hash);
-                        let file_bytes = match target.store.get_with_etag(&file_xorb_path).await {
-                            Ok((bytes, _)) => bytes,
+                        let file_bytes = match get_remote_bounded(
+                            target.store,
+                            &file_xorb_path,
+                            MAX_STAGE_CACHE_ARTIFACT_BYTES,
+                        )
+                        .await
+                        {
+                            Ok(bytes) => bytes,
                             Err(e) => {
                                 debug!(
                                     stage_hash = %stage_hash,
@@ -1279,7 +1414,14 @@ pub async fn push_all_local(
     prefix: &str,
     cache_root: &Path,
 ) -> Result<PushAllResult> {
-    push_all_local_with_artifact_stores(store, prefix, None, cache_root).await
+    push_all_local_with_artifact_stores_and_cancel(
+        store,
+        prefix,
+        None,
+        cache_root,
+        &CancellationToken::new(),
+    )
+    .await
 }
 
 pub async fn push_all_local_with_artifact_stores(
@@ -1288,6 +1430,29 @@ pub async fn push_all_local_with_artifact_stores(
     artifact_stores: Option<&RemoteArtifactStores>,
     cache_root: &Path,
 ) -> Result<PushAllResult> {
+    push_all_local_with_artifact_stores_and_cancel(
+        store,
+        prefix,
+        artifact_stores,
+        cache_root,
+        &CancellationToken::new(),
+    )
+    .await
+}
+
+/// Scan and push local stage cache entries while honoring cancellation.
+pub async fn push_all_local_with_artifact_stores_and_cancel(
+    store: &Store,
+    prefix: &str,
+    artifact_stores: Option<&RemoteArtifactStores>,
+    cache_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<PushAllResult> {
+    const MAX_LOCAL_STAGE_CACHE_ENTRIES: usize = 1_000_000;
+
+    if cancel.is_cancelled() {
+        return Err(CrabError::Cancelled);
+    }
     let stages_dir = cache_root.join("stages");
     let mut pushed = 0u32;
     let mut skipped = 0u32;
@@ -1303,7 +1468,11 @@ pub async fn push_all_local_with_artifact_stores(
 
     // Walk the 2-char shard directories.
     let shards = std::fs::read_dir(&stages_dir).map_err(CrabError::Io)?;
+    let mut scanned_entries = 0usize;
     for shard_entry in shards {
+        if cancel.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
         let shard_entry = shard_entry.map_err(CrabError::Io)?;
         let shard_path = shard_entry.path();
         if !shard_path.is_dir() {
@@ -1312,6 +1481,9 @@ pub async fn push_all_local_with_artifact_stores(
 
         let files = std::fs::read_dir(&shard_path).map_err(CrabError::Io)?;
         for file_entry in files {
+            if cancel.is_cancelled() {
+                return Err(CrabError::Cancelled);
+            }
             let file_entry = file_entry.map_err(CrabError::Io)?;
             let file_path = file_entry.path();
             let Some(ext) = file_path.extension() else {
@@ -1320,51 +1492,66 @@ pub async fn push_all_local_with_artifact_stores(
             if ext != "json" {
                 continue;
             }
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > MAX_LOCAL_STAGE_CACHE_ENTRIES {
+                return Err(CrabError::Configuration {
+                    key: "workflow cache entry count".to_owned(),
+                    origin: format!(
+                        "local stage cache contains more than {MAX_LOCAL_STAGE_CACHE_ENTRIES} entries"
+                    ),
+                });
+            }
 
             // Read and parse the entry.
-            let bytes = match std::fs::read(&file_path) {
-                Ok(b) => b,
-                Err(_) => {
-                    errors += 1;
+            let bytes = match read_stage_cache_file_bounded(&file_path, "") {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(path = %file_path.display(), error = %error, "failed to read local stage cache entry");
+                    errors = errors.saturating_add(1);
                     continue;
                 }
             };
             let entry: StageCacheEntry = match serde_json::from_slice(&bytes) {
                 Ok(e) => e,
-                Err(_) => {
-                    errors += 1;
+                Err(error) => {
+                    warn!(path = %file_path.display(), error = %error, "failed to parse local stage cache entry");
+                    errors = errors.saturating_add(1);
                     continue;
                 }
             };
 
-            if validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root)).is_err() {
-                errors += 1;
+            if let Err(error) =
+                validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root))
+            {
+                warn!(path = %file_path.display(), error = %error, "local stage cache entry failed validation");
+                errors = errors.saturating_add(1);
                 continue;
             }
 
             if !entry.remote_push_enabled() {
-                skipped += 1;
+                skipped = skipped.saturating_add(1);
                 continue;
             }
 
-            match push_remote_with_artifact_stores(
-                store,
-                prefix,
-                artifact_stores,
-                &entry,
-                cache_root,
-            )
-            .await
-            {
-                Ok(true) => pushed += 1,
-                Ok(false) => skipped += 1,
+            match tokio::select! {
+                result = push_remote_with_artifact_stores(
+                    store,
+                    prefix,
+                    artifact_stores,
+                    &entry,
+                    cache_root,
+                ) => result,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            } {
+                Ok(true) => pushed = pushed.saturating_add(1),
+                Ok(false) => skipped = skipped.saturating_add(1),
                 Err(e) => {
                     warn!(
                         stage = %entry.stage_name,
                         error = %e,
                         "failed to push stage cache entry to remote"
                     );
-                    errors += 1;
+                    errors = errors.saturating_add(1);
                 }
             }
         }
@@ -1460,6 +1647,22 @@ mod tests {
         assert_eq!(result.errors, 0);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_all_reports_malformed_local_entries() {
+        let tmp = TempDir::new().unwrap();
+        let shard = tmp.path().join("stages/aa");
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join("broken.json"), b"not json").unwrap();
+        let store = crate::WorkflowStore::new(Arc::new(object_store::memory::InMemory::new()));
+
+        let result = push_all_local(&store, "org/repo", tmp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(result.errors, 1);
+        assert_eq!(result.pushed, 0);
+    }
+
     #[test]
     fn read_missing_returns_none() {
         let tmp = TempDir::new().unwrap();
@@ -1472,6 +1675,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let error = read_local_xorb(tmp.path(), "../escape").unwrap_err();
         assert!(matches!(error, CrabError::Internal(_)));
+    }
+
+    #[test]
+    fn local_artifact_read_rejects_oversized_file_before_consuming_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oversized-artifact");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_STAGE_CACHE_ARTIFACT_BYTES + 1)
+            .unwrap();
+
+        let error = read_artifact_file_bounded(&path, "b3:expected").unwrap_err();
+
+        assert!(matches!(error, CrabError::CacheEntryCorrupt { .. }));
     }
 
     #[test]

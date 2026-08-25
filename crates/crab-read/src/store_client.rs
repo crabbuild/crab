@@ -9,6 +9,7 @@ use crab_cache_store::CachingStore;
 use crab_metadata::file_index_lookup::{FileIndexLookupSession, SharedFileIndexLookup};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::{MDBFileInfo, ShardReader};
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::SerializedXorbObject;
 use tracing::{debug, warn};
 use xet_client::cas_client::ShardUploadProgressCallback;
@@ -231,7 +232,9 @@ impl StoreClient {
                 let path = path;
                 async move {
                     debug!(shard_hash = %hash.hex(), "read store_client: downloading shard");
-                    let (data, _) = origin.get_with_etag(&path).await?;
+                    let (data, _) = origin
+                        .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
+                        .await?;
                     Ok::<_, ReadError>(data)
                 }
             })

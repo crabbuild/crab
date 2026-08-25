@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::config::Config;
@@ -734,9 +735,14 @@ async fn attach_remote_status(
     repo_root: &Path,
     config: &Config,
 ) -> Result<RemoteStatusSummary> {
-    let (store, prefix) =
-        crate::cmd::workflow::build_remote_store_for(repo_root, config, args.remote.as_deref())
-            .await?;
+    let cancel = CancellationToken::new();
+    let (store, prefix) = crate::cmd::workflow::build_remote_store_for(
+        repo_root,
+        config,
+        args.remote.as_deref(),
+        &cancel,
+    )
+    .await?;
     let remote_url =
         crate::cmd::workflow::read_crab_remote_url_for(repo_root, args.remote.as_deref())?;
     let cache_root = repo_root.join(".crab").join("cache");

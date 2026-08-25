@@ -19,6 +19,7 @@ use crab_types::pointer::Pointer;
 use crab_types::time::now_rfc3339_millis;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use serde::Serialize;
 
 use crate::error::{AuthServerError, Result};
@@ -375,7 +376,9 @@ async fn verify_crab_pointers_backed_by_view(
                         file_hash.hex()
                     ),
                 })?;
-        let (shard_bytes, _) = store.get_with_etag(&router.shard_path(&shard_hash)).await?;
+        let (shard_bytes, _) = store
+            .get_with_etag_bounded(&router.shard_path(&shard_hash), MAX_SHARD_SIZE_BYTES as u64)
+            .await?;
         let shard = ShardReader::from_bytes(shard_bytes, shard_hash);
         let file_info =
             shard
@@ -408,7 +411,9 @@ async fn verify_crab_pointers_backed_by_uploaded_view(
                 AuthServerError::Internal(format!("invalid uploaded view shard hash: {error}"))
             })?;
             let path = router.shard_path(&shard_hash);
-            let (bytes, _) = store.get_with_etag(&path).await?;
+            let (bytes, _) = store
+                .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
+                .await?;
             if crab_xet::hash::compute_data_hash(&bytes) != shard_hash {
                 return Err(AuthServerError::CorruptObject {
                     path: path.to_string(),

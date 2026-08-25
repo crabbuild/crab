@@ -11,6 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{MultipartUpload, ObjectMeta, ObjectStore};
+use tokio::io::AsyncReadExt;
 
 use crate::core::error::{CrabError, Result};
 
@@ -186,9 +187,32 @@ impl Store {
             .map_err(CrabError::from)
     }
 
+    pub async fn get_with_etag_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(Bytes, ETag)> {
+        self.inner
+            .get_with_etag_bounded(path, max_bytes)
+            .await
+            .map_err(CrabError::from)
+    }
+
     pub async fn download_to_path(&self, path: &Path, dest: &std::path::Path) -> Result<u64> {
         self.inner
             .download_to_path(path, dest)
+            .await
+            .map_err(CrabError::from)
+    }
+
+    pub async fn download_to_path_bounded(
+        &self,
+        path: &Path,
+        dest: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<u64> {
+        self.inner
+            .download_to_path_bounded(path, dest, max_bytes)
             .await
             .map_err(CrabError::from)
     }
@@ -301,6 +325,34 @@ impl Store {
             .map_err(CrabError::from)
     }
 
+    /// Verify a bounded in-memory object with its Xet data hash before a
+    /// retryable multipart upload.
+    pub async fn put_multipart_retry_with_xet_hash(
+        &self,
+        path: &Path,
+        data: Bytes,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
+        let actual_hash: [u8; 32] = crab_xet::hash::compute_data_hash(&data).into();
+        if actual_hash != expected_hash {
+            return Err(CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "in-memory Xet data hash {} does not match expected {}",
+                    crab_xet::hash::merkle_hex_from_bytes(&actual_hash),
+                    crab_xet::hash::merkle_hex_from_bytes(&expected_hash)
+                ),
+            });
+        }
+        self.inner
+            .put_multipart_retry(path, data, part_size, cancel, on_part_done)
+            .await
+            .map_err(CrabError::from)
+    }
+
     pub async fn put_multipart_file_retry(
         &self,
         path: &Path,
@@ -317,6 +369,76 @@ impl Store {
                 file_path,
                 size,
                 expected_hash,
+                part_size,
+                cancel,
+                on_part_done,
+            )
+            .await
+            .map_err(CrabError::from)
+    }
+
+    /// Verify a local file with the Xet data hash before uploading it as a
+    /// bounded, retryable multipart object.
+    pub async fn put_multipart_file_retry_with_xet_hash(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<()> {
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(CrabError::Io)?;
+        if metadata.len() != size {
+            return Err(CrabError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local file has {} bytes; upload expects {size}",
+                    metadata.len()
+                ),
+            });
+        }
+
+        let mut file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(CrabError::Io)?;
+        let mut xet_hasher = crab_xet::hash::HashedWrite::new(std::io::sink());
+        let mut blake3_hasher = blake3::Hasher::new();
+        let mut remaining = size;
+        let mut buffer = vec![0u8; part_size.max(1).min(1024 * 1024)];
+        while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(CrabError::Cancelled);
+            }
+            let want = remaining.min(buffer.len() as u64) as usize;
+            file.read_exact(&mut buffer[..want])
+                .await
+                .map_err(CrabError::Io)?;
+            std::io::Write::write_all(&mut xet_hasher, &buffer[..want]).map_err(CrabError::Io)?;
+            blake3_hasher.update(&buffer[..want]);
+            remaining -= want as u64;
+        }
+        let actual_hash: [u8; 32] = xet_hasher.hash().into();
+        if actual_hash != expected_hash {
+            return Err(CrabError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local Xet data hash {} does not match expected {}",
+                    crab_xet::hash::merkle_hex_from_bytes(&actual_hash),
+                    crab_xet::hash::merkle_hex_from_bytes(&expected_hash)
+                ),
+            });
+        }
+
+        self.inner
+            .put_multipart_file_retry(
+                path,
+                file_path,
+                size,
+                *blake3_hasher.finalize().as_bytes(),
                 part_size,
                 cancel,
                 on_part_done,

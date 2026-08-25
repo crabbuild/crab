@@ -11,6 +11,8 @@ use crab_coordination::PushLock;
 use crab_git::pack_locator::PackLocationIter;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::ShardReader;
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
+use crab_xet::xorb::format::MAX_XORB_SIZE;
 use crab_xet::xorb::parser::XorbParser;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -814,7 +816,9 @@ async fn verify_history(
             reason: format!("invalid shard hash: {error}"),
         })?;
         let path = router.shard_path(&hash);
-        let (bytes, _) = store.get_with_etag(&path).await?;
+        let (bytes, _) = store
+            .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
+            .await?;
         let actual = compute_data_hash(&bytes);
         if actual != hash {
             return Err(CrabError::CorruptObject {
@@ -854,7 +858,9 @@ async fn verify_history(
     for hash in &xorb_hashes {
         check_cancelled(cancel)?;
         let path = router.xorb_path(hash);
-        let (bytes, _) = store.get_with_etag(&path).await?;
+        let (bytes, _) = store
+            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+            .await?;
         let parser =
             XorbParser::parse(bytes.clone()).map_err(|error| CrabError::CorruptObject {
                 path: path.as_ref().to_owned(),

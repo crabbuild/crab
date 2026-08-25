@@ -19,6 +19,8 @@ use tracing::{debug, info, warn};
 use crate::cache::CacheKey;
 use crate::cache::LocalCache;
 use crate::core::error::{CrabError, Result};
+
+const MAX_BATCH_SHARD_BYTES: u64 = 512 * 1024 * 1024;
 use crab_cache_store::CachingStore;
 use crab_metadata::bloom_prefilter::{self, BloomCheck};
 use crab_types::pointer::Pointer;
@@ -414,7 +416,9 @@ async fn get_or_download_shard(
             let obj_path = obj_path;
             async move {
                 debug!(shard_hash = %hash.hex(), "batch: downloading shard");
-                let (data, _) = origin.get_with_etag(&obj_path).await?;
+                let (data, _) = origin
+                    .get_with_etag_bounded(&obj_path, MAX_BATCH_SHARD_BYTES)
+                    .await?;
                 Ok::<_, CrabError>(data)
             }
         })

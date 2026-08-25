@@ -23,14 +23,24 @@ crab metadb <SUBCOMMAND> [OPTIONS]
 | Command | Purpose |
 | --- | --- |
 | `diagnose` | Print `sys:*` key snapshots for one or both databases |
-| `rebuild` | Rebuild databases from durable shards under `.crab/shards/` |
+| `rebuild` | Validate manifest-named shards and packs, then rebuild generation-bound index evidence |
 | `owner` | Continuously publish Git locator checkpoints and visibility proofs |
-| `compact` | Request immediate database compaction |
-| `cache` | Inspect or wipe the local chunk-index cache |
+| `compact` | Run SlateDB's size-tiered compactor until current eligible work drains |
+| `cache` | Inspect or transactionally clear the local chunk-index cache |
 
 Use the subcommand's `--help` output for database selectors and cache-specific
-options. Rebuild and cache-wipe operations can be expensive; run diagnostics
+options. Rebuild and cache-clear operations can be expensive; run diagnostics
 first and keep a backup of the durable remote data.
+
+`compact` holds a renewable repository maintenance lease and exits non-zero on
+cancellation, an already-active compaction, or a new SlateDB compaction failure.
+`cache stats` is read-only; `cache clear` preserves the SQLite file, schema, and
+GC cursor while removing cached chunk and shard rows.
+
+`rebuild` streams each manifest-named Xet shard through a temporary maintenance
+file, verifies its content hash, and parses only the selected index sections.
+This keeps full shard bodies out of the rebuild process heap; selecting one
+database also avoids decoding the other index.
 
 ```bash
 crab metadb diagnose

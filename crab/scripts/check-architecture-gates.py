@@ -2876,11 +2876,27 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             "active-probe": ["dep:reqwest"],
             "local-cache": ["dep:filetime", "dep:rusqlite", "dep:tokio"],
             "remote-client": ["active-probe", "dep:tokio"],
-            "xet-chunk-cache": ["dep:tokio", "dep:xet-client", "dep:xet-runtime"],
+            "xet-chunk-cache": [
+                "dep:base64",
+                "dep:crc32fast",
+                "dep:tokio",
+                "dep:tokio-util",
+                "dep:xet-client",
+                "dep:xet-runtime",
+            ],
         },
     )
 
-    for name in ("filetime", "reqwest", "rusqlite", "tokio", "xet-client"):
+    for name in (
+        "base64",
+        "crc32fast",
+        "filetime",
+        "reqwest",
+        "rusqlite",
+        "tokio",
+        "tokio-util",
+        "xet-client",
+    ):
         dependency = normal_dependency(package, name)
         if dependency is None or not dependency["optional"]:
             violations.append(f"crab-cache: {name} must stay optional")
@@ -2961,7 +2977,14 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
                 "--depth",
                 "2",
             ],
-            required={"tokio", "xet-client", "xet-runtime"},
+            required={
+                "base64",
+                "crc32fast",
+                "tokio",
+                "tokio-util",
+                "xet-client",
+                "xet-runtime",
+            },
             forbidden={"crab-cache-server", "crab-storage", "filetime", "object_store", "rusqlite"},
         ),
     ]

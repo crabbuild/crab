@@ -68,12 +68,13 @@ use crab_xet::shard::{
     FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo,
     XorbChunkSequenceEntry, XorbChunkSequenceHeader,
 };
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::upload_concurrency::UploadConcurrency;
 use crab_xet::xorb::builder::{
     CHUNK_META_ENTRY_SIZE, FOOTER_SIZE, RunId, XORB_MAGIC, XorbBuilder, XorbResult,
 };
 use crab_xet::xorb::format::{
-    Chunk, ChunkMeta, ChunkPlacement, CompressionScheme, XorbHash, XorbRef,
+    Chunk, ChunkMeta, ChunkPlacement, CompressionScheme, MAX_XORB_SIZE, XorbHash, XorbRef,
 };
 use crab_xet::xorb::parser::{XorbParser, xorb_metadata_region};
 
@@ -354,7 +355,9 @@ async fn read_remote_shard_for_proof(
         }
     }
 
-    let (body, _) = store.get_with_etag(path).await?;
+    let (body, _) = store
+        .get_with_etag_bounded(path, MAX_SHARD_SIZE_BYTES as u64)
+        .await?;
     Ok(body)
 }
 
@@ -438,6 +441,12 @@ async fn remote_xorb_index(
     path: &ObjectPath,
     object_size: u64,
 ) -> Result<RemoteXorbIndex> {
+    if object_size > MAX_XORB_SIZE as u64 {
+        return Err(corrupt_xorb_index(
+            path,
+            format!("xorb is {object_size} bytes; format limit is {MAX_XORB_SIZE} bytes"),
+        ));
+    }
     if object_size < FOOTER_SIZE as u64 {
         return Err(corrupt_xorb_index(path, "xorb too small for footer"));
     }
@@ -4829,7 +4838,10 @@ async fn warm_uploaded_xorb_cache(
         let Some(store) = store.as_ref() else {
             return stats;
         };
-        let body = match store.get_with_etag(&path).await {
+        let body = match store
+            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+            .await
+        {
             Ok((body, _)) if body.len() as u64 == bytes => body,
             Ok((body, _)) => {
                 warn!(
@@ -4997,7 +5009,9 @@ async fn read_uploaded_xorb_payload_for_cache_warm(
                     "uploaded xorb cache warm has no payload or origin store".to_owned(),
                 ));
             };
-            let (bytes, _) = store.get_with_etag(path).await?;
+            let (bytes, _) = store
+                .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
+                .await?;
             bytes
         }
     };

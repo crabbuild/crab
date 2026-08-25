@@ -18,10 +18,12 @@
 //! bucket.
 
 use std::collections::HashMap;
+use std::io::Read;
 
 use bytes::Bytes;
 use tracing::warn;
 use xet_core_structures::metadata_shard::MDBShardFileHeader;
+use xet_core_structures::metadata_shard::file_structs::FileDataSequenceEntry;
 use xet_core_structures::metadata_shard::streaming_shard::{
     process_shard_file_info_section, process_shard_xorb_info_section,
 };
@@ -36,11 +38,27 @@ pub struct ExtractedFileRecipe {
     pub chunks: Vec<(MerkleHash, u64)>,
 }
 
+/// File recipes and chunk-index entries extracted from one metadata shard.
+pub type ExtractedFileAndChunkEntries = (Vec<ExtractedFileRecipe>, Vec<(MerkleHash, XorbRef)>);
+
 /// Magic bytes at the end of a v2 shard.
 const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
 
 /// Size of the v2 trailer: `bloom_offset (u64 LE)` + `magic (4 bytes)`.
 const SHARD_V2_TRAILER_SIZE: usize = 12;
+
+/// Maximum shard body accepted by the in-memory Xet readers.
+///
+/// Larger shards must be rejected by the object-store boundary before they
+/// reach these parsers. Keeping the same limit here also protects callers
+/// that already hold a `Bytes` value from spending unbounded CPU on it.
+pub const MAX_SHARD_SIZE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Maximum number of file records accepted from one shard.
+pub const MAX_SHARD_FILE_ENTRIES: usize = 1_000_000;
+
+/// Maximum number of chunk records accepted from one shard.
+pub const MAX_SHARD_CHUNK_ENTRIES: usize = 1_000_000;
 
 /// Strip the v2 bloom trailer from shard bytes, returning the v1 portion.
 ///
@@ -74,25 +92,57 @@ pub fn strip_v2_trailer(data: &[u8]) -> &[u8] {
 /// multi-shard operation (sync, rebuild, inventory).
 #[must_use]
 pub fn extract_chunk_entries_streaming(data: &Bytes) -> Vec<(MerkleHash, XorbRef)> {
+    if data.len() > MAX_SHARD_SIZE_BYTES {
+        warn!(
+            size = data.len(),
+            limit = MAX_SHARD_SIZE_BYTES,
+            "refusing to parse oversized shard for streaming chunk extraction"
+        );
+        return Vec::new();
+    }
     let v1_data = strip_v2_trailer(data);
     let mut cursor = std::io::Cursor::new(v1_data);
 
-    // Read and discard the shard header (version verification only).
-    if let Err(e) = MDBShardFileHeader::deserialize(&mut cursor) {
-        warn!(error = %e, "failed to parse shard header for streaming chunk extraction");
-        return Vec::new();
+    match extract_chunk_entries_from_reader(&mut cursor) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!(error = %e, "failed to parse shard for streaming chunk extraction");
+            Vec::new()
+        }
     }
+}
 
-    // Skip through the file-info section without collecting entries.
-    if let Err(e) = process_shard_file_info_section(&mut cursor, |_| Ok(())) {
-        warn!(error = %e, "failed to skip file-info section during streaming chunk extraction");
-        return Vec::new();
-    }
+/// Extract chunk-index entries from a reader without materializing the shard body.
+pub fn extract_chunk_entries_from_reader<R: Read>(
+    reader: &mut R,
+) -> Result<Vec<(MerkleHash, XorbRef)>> {
+    extract_chunk_entries_from_reader_with_limit(reader, MAX_SHARD_CHUNK_ENTRIES)
+}
 
-    // Stream through the xorb-info section, extracting chunk→XorbRef mappings.
+/// Extract chunk-index entries while enforcing a record-count cap.
+pub fn extract_chunk_entries_from_reader_with_limit<R: Read>(
+    reader: &mut R,
+    max_entries: usize,
+) -> Result<Vec<(MerkleHash, XorbRef)>> {
+    MDBShardFileHeader::deserialize(reader).map_err(|error| XetError::CorruptObject {
+        path: "shard header".to_owned(),
+        reason: error.to_string(),
+    })?;
+    process_shard_file_info_section(reader, |_| Ok(())).map_err(|error| {
+        XetError::CorruptObject {
+            path: "shard file-info".to_owned(),
+            reason: error.to_string(),
+        }
+    })?;
+
     let mut entries = Vec::new();
-    if let Err(e) = process_shard_xorb_info_section(&mut cursor, |xorb_view| {
+    let mut over_limit = false;
+    process_shard_xorb_info_section(reader, |xorb_view| {
         let xorb_hash = xorb_view.xorb_hash();
+        if xorb_view.num_entries() > max_entries.saturating_sub(entries.len()) {
+            over_limit = true;
+            return Ok(());
+        }
         for idx in 0..xorb_view.num_entries() {
             let chunk = xorb_view.chunk(idx);
             entries.push((
@@ -105,63 +155,59 @@ pub fn extract_chunk_entries_streaming(data: &Bytes) -> Vec<(MerkleHash, XorbRef
             ));
         }
         Ok(())
-    }) {
-        warn!(error = %e, "failed to read xorb-info section during streaming chunk extraction");
-        return Vec::new();
+    })
+    .map_err(|error| XetError::CorruptObject {
+        path: "shard xorb-info".to_owned(),
+        reason: error.to_string(),
+    })?;
+    if over_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard xorb-info".to_owned(),
+            reason: format!("chunk entry count exceeds safety limit {max_entries}"),
+        });
     }
-
-    entries
+    Ok(entries)
 }
 
-/// Extract `(file_hash, shard_hash)` pairs from raw shard bytes via a
-/// streaming parse.
-///
-/// The `shard_hash` argument is the containing shard's content hash;
-/// callers typically parse it from the last segment of the shard
-/// object key (`.crab/shards/{first-two-hex}/{hex}`). Each file-info entry in the
-/// shard contributes one pair.
-///
-/// On any parse failure the helper logs a `warn!` and returns an
-/// empty vec.
-#[must_use]
-pub fn extract_file_entries_streaming(
-    data: &Bytes,
-    shard_hash: MerkleHash,
-) -> Vec<(MerkleHash, MerkleHash)> {
-    let v1_data = strip_v2_trailer(data);
-    let mut cursor = std::io::Cursor::new(v1_data);
-
-    if let Err(e) = MDBShardFileHeader::deserialize(&mut cursor) {
-        warn!(error = %e, "failed to parse shard header for streaming file extraction");
-        return Vec::new();
-    }
-
-    let mut entries = Vec::new();
-    if let Err(e) = process_shard_file_info_section(&mut cursor, |file_view| {
-        entries.push((file_view.file_hash(), shard_hash));
-        Ok(())
-    }) {
-        warn!(error = %e, "failed to read file-info section during streaming file extraction");
-        return Vec::new();
-    }
-
-    entries
+/// Extract file recipes and chunk-index entries in one bounded reader pass.
+pub fn extract_file_and_chunk_entries_from_reader<R: Read>(
+    reader: &mut R,
+) -> Result<ExtractedFileAndChunkEntries> {
+    extract_file_and_chunk_entries_from_reader_with_limits(
+        reader,
+        MAX_SHARD_FILE_ENTRIES,
+        MAX_SHARD_CHUNK_ENTRIES,
+    )
 }
 
-/// Extract exact ordered file recipes and reject incomplete shard terms.
-pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
-    let v1_data = strip_v2_trailer(data);
-    let mut cursor = std::io::Cursor::new(v1_data);
-    MDBShardFileHeader::deserialize(&mut cursor).map_err(|error| XetError::CorruptObject {
+/// Extract file recipes and chunk-index entries while enforcing per-section
+/// record limits. The parser continues to the section bookends after a limit
+/// is observed so malformed input is consumed and reported deterministically.
+pub fn extract_file_and_chunk_entries_from_reader_with_limits<R: Read>(
+    reader: &mut R,
+    max_file_entries: usize,
+    max_chunk_entries: usize,
+) -> Result<ExtractedFileAndChunkEntries> {
+    MDBShardFileHeader::deserialize(reader).map_err(|error| XetError::CorruptObject {
         path: "shard header".to_owned(),
         reason: error.to_string(),
     })?;
 
     let mut files = Vec::new();
-    process_shard_file_info_section(&mut cursor, |file_view| {
-        let terms = (0..file_view.num_entries())
+    let mut file_terms = 0usize;
+    let mut over_file_limit = false;
+    process_shard_file_info_section(reader, |file_view| {
+        let term_count = file_view.num_entries();
+        if files.len() >= max_file_entries
+            || term_count > max_chunk_entries.saturating_sub(file_terms)
+        {
+            over_file_limit = true;
+            return Ok(());
+        }
+        let terms = (0..term_count)
             .map(|index| file_view.entry(index))
             .collect::<Vec<_>>();
+        file_terms += term_count;
         files.push((file_view.file_hash(), terms));
         Ok(())
     })
@@ -170,15 +216,29 @@ pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
         reason: error.to_string(),
     })?;
 
-    let mut xorbs: HashMap<MerkleHash, Vec<(MerkleHash, u64)>> = HashMap::new();
-    process_shard_xorb_info_section(&mut cursor, |xorb_view| {
-        let chunks = (0..xorb_view.num_entries())
-            .map(|index| {
-                let chunk = xorb_view.chunk(index);
-                (chunk.chunk_hash, u64::from(chunk.unpacked_segment_bytes))
-            })
-            .collect();
-        xorbs.insert(xorb_view.xorb_hash(), chunks);
+    let mut xorbs = HashMap::new();
+    let mut chunk_entries = Vec::new();
+    let mut over_chunk_limit = false;
+    process_shard_xorb_info_section(reader, |xorb_view| {
+        let xorb_hash = xorb_view.xorb_hash();
+        if xorb_view.num_entries() > max_chunk_entries.saturating_sub(chunk_entries.len()) {
+            over_chunk_limit = true;
+            return Ok(());
+        }
+        let mut chunks = Vec::with_capacity(xorb_view.num_entries());
+        for index in 0..xorb_view.num_entries() {
+            let chunk = xorb_view.chunk(index);
+            chunks.push((chunk.chunk_hash, u64::from(chunk.unpacked_segment_bytes)));
+            chunk_entries.push((
+                chunk.chunk_hash,
+                XorbRef {
+                    xorb_hash,
+                    chunk_index: index as u32,
+                    uncompressed_size: chunk.unpacked_segment_bytes,
+                },
+            ));
+        }
+        xorbs.insert(xorb_hash, chunks);
         Ok(())
     })
     .map_err(|error| XetError::CorruptObject {
@@ -186,6 +246,26 @@ pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
         reason: error.to_string(),
     })?;
 
+    if over_file_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard file-info".to_owned(),
+            reason: format!("file entry count exceeds safety limit {max_file_entries}"),
+        });
+    }
+    if over_chunk_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard xorb-info".to_owned(),
+            reason: format!("chunk entry count exceeds safety limit {max_chunk_entries}"),
+        });
+    }
+
+    Ok((assemble_file_recipes(files, xorbs)?, chunk_entries))
+}
+
+fn assemble_file_recipes(
+    files: Vec<(MerkleHash, Vec<FileDataSequenceEntry>)>,
+    xorbs: HashMap<MerkleHash, Vec<(MerkleHash, u64)>>,
+) -> Result<Vec<ExtractedFileRecipe>> {
     files
         .into_iter()
         .map(|(file_hash, terms)| {
@@ -240,6 +320,216 @@ pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
             Ok(ExtractedFileRecipe { file_hash, chunks })
         })
         .collect()
+}
+
+/// Extract exact file recipes from a reader without materializing the shard body.
+pub fn extract_file_recipes_from_reader<R: Read>(
+    reader: &mut R,
+) -> Result<Vec<ExtractedFileRecipe>> {
+    extract_file_recipes_from_reader_with_limits(
+        reader,
+        MAX_SHARD_FILE_ENTRIES,
+        MAX_SHARD_CHUNK_ENTRIES,
+    )
+}
+
+/// Extract file recipes while enforcing a file-entry cap.
+pub fn extract_file_recipes_from_reader_with_limit<R: Read>(
+    reader: &mut R,
+    max_file_entries: usize,
+) -> Result<Vec<ExtractedFileRecipe>> {
+    extract_file_recipes_from_reader_with_limits(reader, max_file_entries, MAX_SHARD_CHUNK_ENTRIES)
+}
+
+/// Extract file recipes while enforcing file and chunk-entry caps.
+pub fn extract_file_recipes_from_reader_with_limits<R: Read>(
+    reader: &mut R,
+    max_file_entries: usize,
+    max_chunk_entries: usize,
+) -> Result<Vec<ExtractedFileRecipe>> {
+    MDBShardFileHeader::deserialize(reader).map_err(|error| XetError::CorruptObject {
+        path: "shard header".to_owned(),
+        reason: error.to_string(),
+    })?;
+
+    let mut files = Vec::new();
+    let mut file_terms = 0usize;
+    let mut over_file_limit = false;
+    process_shard_file_info_section(reader, |file_view| {
+        let term_count = file_view.num_entries();
+        if files.len() >= max_file_entries
+            || term_count > max_chunk_entries.saturating_sub(file_terms)
+        {
+            over_file_limit = true;
+            return Ok(());
+        }
+        let terms = (0..term_count)
+            .map(|index| file_view.entry(index))
+            .collect::<Vec<_>>();
+        file_terms += term_count;
+        files.push((file_view.file_hash(), terms));
+        Ok(())
+    })
+    .map_err(|error| XetError::CorruptObject {
+        path: "shard file-info".to_owned(),
+        reason: error.to_string(),
+    })?;
+
+    if over_file_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard file-info".to_owned(),
+            reason: format!(
+                "file recipe or term count exceeds safety limits ({max_file_entries} files, {max_chunk_entries} terms)"
+            ),
+        });
+    }
+
+    let mut xorbs = HashMap::new();
+    let mut chunk_entries = 0usize;
+    let mut over_chunk_limit = false;
+    process_shard_xorb_info_section(reader, |xorb_view| {
+        let entry_count = xorb_view.num_entries();
+        if entry_count > max_chunk_entries.saturating_sub(chunk_entries) {
+            over_chunk_limit = true;
+            return Ok(());
+        }
+        let chunks = (0..entry_count)
+            .map(|index| {
+                let chunk = xorb_view.chunk(index);
+                (chunk.chunk_hash, u64::from(chunk.unpacked_segment_bytes))
+            })
+            .collect();
+        chunk_entries += entry_count;
+        xorbs.insert(xorb_view.xorb_hash(), chunks);
+        Ok(())
+    })
+    .map_err(|error| XetError::CorruptObject {
+        path: "shard xorb-info".to_owned(),
+        reason: error.to_string(),
+    })?;
+
+    if over_chunk_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard xorb-info".to_owned(),
+            reason: format!("chunk entry count exceeds safety limit {max_chunk_entries}"),
+        });
+    }
+
+    assemble_file_recipes(files, xorbs)
+}
+
+/// Extract exact file recipes from raw shard bytes.
+pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
+    if data.len() > MAX_SHARD_SIZE_BYTES {
+        return Err(XetError::CorruptObject {
+            path: "shard".to_owned(),
+            reason: format!(
+                "body size {} exceeds safety limit {MAX_SHARD_SIZE_BYTES}",
+                data.len()
+            ),
+        });
+    }
+    let v1_data = strip_v2_trailer(data);
+    let mut cursor = std::io::Cursor::new(v1_data);
+    extract_file_recipes_from_reader(&mut cursor)
+}
+
+/// Extract `(file_hash, shard_hash)` pairs from raw shard bytes via a
+/// streaming parse.
+///
+/// The `shard_hash` argument is the containing shard's content hash;
+/// callers typically parse it from the last segment of the shard
+/// object key (`.crab/shards/{first-two-hex}/{hex}`). Each file-info entry in the
+/// shard contributes one pair.
+///
+/// On any parse failure the helper logs a `warn!` and returns an
+/// empty vec.
+#[must_use]
+pub fn extract_file_entries_streaming(
+    data: &Bytes,
+    shard_hash: MerkleHash,
+) -> Vec<(MerkleHash, MerkleHash)> {
+    if data.len() > MAX_SHARD_SIZE_BYTES {
+        warn!(
+            size = data.len(),
+            limit = MAX_SHARD_SIZE_BYTES,
+            "refusing to parse oversized shard for streaming file extraction"
+        );
+        return Vec::new();
+    }
+    let v1_data = strip_v2_trailer(data);
+    let mut cursor = std::io::Cursor::new(v1_data);
+
+    if let Err(e) = MDBShardFileHeader::deserialize(&mut cursor) {
+        warn!(error = %e, "failed to parse shard header for streaming file extraction");
+        return Vec::new();
+    }
+
+    let mut entries = Vec::new();
+    let mut over_limit = false;
+    if let Err(e) = process_shard_file_info_section(&mut cursor, |file_view| {
+        if entries.len() >= MAX_SHARD_FILE_ENTRIES {
+            over_limit = true;
+            return Ok(());
+        }
+        entries.push((file_view.file_hash(), shard_hash));
+        Ok(())
+    }) {
+        warn!(error = %e, "failed to read file-info section during streaming file extraction");
+        return Vec::new();
+    }
+
+    if over_limit {
+        warn!(
+            limit = MAX_SHARD_FILE_ENTRIES,
+            "shard file-info entry count exceeds streaming safety limit"
+        );
+        return Vec::new();
+    }
+
+    entries
+}
+
+/// Extract every xorb hash referenced by file-info terms from a reader.
+///
+/// The reader is consumed through the shard header and file-info section only;
+/// the full shard body never needs to be materialized in memory.
+pub fn extract_file_xorb_hashes_from_reader<R: Read>(reader: &mut R) -> Result<Vec<MerkleHash>> {
+    extract_file_xorb_hashes_from_reader_with_limit(reader, MAX_SHARD_CHUNK_ENTRIES)
+}
+
+/// Extract file-referenced xorbs while enforcing a caller-provided count cap.
+pub fn extract_file_xorb_hashes_from_reader_with_limit<R: Read>(
+    reader: &mut R,
+    max_hashes: usize,
+) -> Result<Vec<MerkleHash>> {
+    MDBShardFileHeader::deserialize(reader).map_err(|error| XetError::CorruptObject {
+        path: "shard header".to_owned(),
+        reason: error.to_string(),
+    })?;
+
+    let mut hashes = Vec::new();
+    let mut over_limit = false;
+    process_shard_file_info_section(reader, |file_view| {
+        let entries = file_view.num_entries();
+        if entries > max_hashes.saturating_sub(hashes.len()) {
+            over_limit = true;
+            return Ok(());
+        }
+        hashes.extend((0..entries).map(|index| file_view.entry(index).xorb_hash));
+        Ok(())
+    })
+    .map_err(|error| XetError::CorruptObject {
+        path: "shard file-info".to_owned(),
+        reason: error.to_string(),
+    })?;
+    if over_limit {
+        return Err(XetError::CorruptObject {
+            path: "shard file-info".to_owned(),
+            reason: format!("file-info xorb reference count exceeds safety limit {max_hashes}"),
+        });
+    }
+    Ok(hashes)
 }
 
 #[cfg(test)]
@@ -320,10 +610,46 @@ mod tests {
             );
         }
 
+        let mut reader = std::io::Cursor::new(bytes.as_ref());
+        let file_xorb_hashes = extract_file_xorb_hashes_from_reader(&mut reader).unwrap();
+        assert_eq!(
+            file_xorb_hashes,
+            vec![
+                MerkleHash::from([1, 1, 1, 1]),
+                MerkleHash::from([2, 2, 2, 2])
+            ]
+        );
+
+        let mut limited_reader = std::io::Cursor::new(bytes.as_ref());
+        let limited = extract_file_xorb_hashes_from_reader_with_limit(&mut limited_reader, 1);
+        assert!(
+            limited.is_err(),
+            "the per-shard xorb-reference cap must fail closed"
+        );
+
         let recipes = extract_file_recipes(&bytes).expect("extract recipes");
         assert_eq!(recipes.len(), 2);
         assert_eq!(recipes[0].chunks.len(), 1);
         assert_eq!(recipes[0].chunks[0].1, 1024);
+
+        let mut reader = std::io::Cursor::new(bytes.as_ref());
+        let (streamed_recipes, streamed_chunks) =
+            extract_file_and_chunk_entries_from_reader(&mut reader).unwrap();
+        assert_eq!(streamed_recipes, recipes);
+        assert_eq!(streamed_chunks, chunk_entries);
+
+        let mut limited_reader = std::io::Cursor::new(bytes.as_ref());
+        assert!(
+            extract_file_and_chunk_entries_from_reader_with_limits(&mut limited_reader, 1, 5)
+                .is_err()
+        );
+        let mut limited_reader = std::io::Cursor::new(bytes.as_ref());
+        assert!(
+            extract_file_and_chunk_entries_from_reader_with_limits(&mut limited_reader, 2, 4)
+                .is_err()
+        );
+        let mut limited_reader = std::io::Cursor::new(bytes.as_ref());
+        assert!(extract_file_recipes_from_reader_with_limits(&mut limited_reader, 2, 4).is_err());
     }
 
     #[test]

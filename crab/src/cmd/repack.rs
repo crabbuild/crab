@@ -1,6 +1,6 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -18,7 +18,7 @@ use crate::git::push::{
     CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
 };
 use crate::metadata::manifest::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_bulk_pack_list, read_manifest,
+    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_manifest,
     upload_segmented_bulk, write_manifest_cas,
 };
 use crate::storage::StoreLayout;
@@ -29,6 +29,10 @@ use crab_storage::{repo_pack_index_path, repo_pack_path, repo_pack_reverse_index
 use crab_xet::hash::MerkleHash;
 
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
+const REPACK_DISK_RESERVE: u64 = 1024 * 1024 * 1024;
+const MAX_PACKS_PER_OPERATION: u64 = 1_000_000;
+const MAX_REPACK_DOWNLOAD_CONCURRENCY: usize = 16;
+const MAX_PACK_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 /// Configuration for the repack operation.
 #[derive(Debug, Clone)]
 pub struct RepackConfig {
@@ -40,6 +44,8 @@ pub struct RepackConfig {
     pub download_concurrency: usize,
     /// Maximum CAS retries while repairing pack metadata sidecars.
     pub max_cas_retries: u32,
+    /// Parent directory for bounded, automatically removed repack files.
+    pub workspace_root: std::path::PathBuf,
 }
 
 impl Default for RepackConfig {
@@ -49,6 +55,7 @@ impl Default for RepackConfig {
             dry_run: false,
             download_concurrency: 8,
             max_cas_retries: 64,
+            workspace_root: crate::cache::default_cache_root().join("maintenance"),
         }
     }
 }
@@ -111,6 +118,15 @@ pub async fn run_repack(
     let start = Instant::now();
     check_cancelled(cancel)?;
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    if config.download_concurrency == 0 {
+        return Err(CrabError::Configuration {
+            key: "download_concurrency".to_owned(),
+            origin: "must be greater than zero".to_owned(),
+        });
+    }
+    let download_concurrency = config
+        .download_concurrency
+        .min(MAX_REPACK_DOWNLOAD_CONCURRENCY);
     let gc_writer = if config.dry_run {
         None
     } else {
@@ -127,7 +143,7 @@ pub async fn run_repack(
     let lock = match PushLock::acquire_internal(
         store.inner(),
         router.repo_prefix(),
-        crab_coordination::REPACK_RESOURCE,
+        crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
         config.lock_ttl,
     )
     .await
@@ -149,7 +165,15 @@ pub async fn run_repack(
         lock.ttl() / 3,
         operation_cancel.clone(),
     );
-    let result = run_repack_locked(store, &router, config, &operation_cancel, start).await;
+    let result = run_repack_locked(
+        store,
+        &router,
+        config,
+        download_concurrency,
+        &operation_cancel,
+        start,
+    )
+    .await;
     heartbeat.stop().await;
     let release_result = lock.release().await.map_err(CrabError::from);
     let gc_release_result = match gc_writer {
@@ -166,13 +190,27 @@ async fn run_repack_locked(
     store: &Store,
     router: &StoreLayout,
     config: &RepackConfig,
+    download_concurrency: usize,
     cancel: &CancellationToken,
     start: Instant,
 ) -> Result<RepackOutcome> {
     let (manifest, manifest_etag) = read_manifest(store, router).await?;
-    let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
+    let packs = tokio::select! {
+        result = crate::metadata::manifest::read_bulk_pack_list_with_limit(
+            store,
+            router,
+            &manifest.pack_index_hash,
+            MAX_PACKS_PER_OPERATION,
+        ) => result?,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    };
+    validate_pack_inventory(router, &packs)?;
     let packs_before = packs.len();
-    let bytes_before = packs.iter().map(|pack| pack.size).sum();
+    let bytes_before = packs.iter().try_fold(0u64, |total, pack| {
+        total
+            .checked_add(pack.size)
+            .ok_or_else(|| CrabError::Internal("pack inventory byte total overflow".to_owned()))
+    })?;
     if packs_before <= 1 {
         return Ok(outcome(
             packs_before,
@@ -193,7 +231,29 @@ async fn run_repack_locked(
     }
     let visibility = read_current_visibility(store, router, &manifest).await?;
 
-    let temp = tempfile::tempdir()?;
+    std::fs::create_dir_all(&config.workspace_root).map_err(CrabError::Io)?;
+    let required_space = bytes_before
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(REPACK_DISK_RESERVE))
+        .ok_or_else(|| CrabError::Internal("repack workspace size overflow".to_owned()))?;
+    let available = crate::workflow::cache::available_disk_space(&config.workspace_root)
+        .ok_or_else(|| CrabError::Configuration {
+            key: "repack workspace capacity".to_owned(),
+            origin: format!(
+                "cannot determine free disk space for {}; refusing a large-repository mutation",
+                config.workspace_root.display()
+            ),
+        })?;
+    if available < required_space {
+        return Err(CrabError::InsufficientSpace {
+            needed: required_space,
+            available,
+        });
+    }
+    let temp = tempfile::Builder::new()
+        .prefix("crab-repack-")
+        .tempdir_in(&config.workspace_root)
+        .map_err(CrabError::Io)?;
     let download_dir = temp.path().join("downloads");
     std::fs::create_dir_all(&download_dir)?;
     download_source_packs(
@@ -201,7 +261,7 @@ async fn run_repack_locked(
         router,
         &packs,
         &download_dir,
-        config.download_concurrency,
+        download_concurrency,
         cancel,
     )
     .await?;
@@ -456,16 +516,34 @@ async fn download_source_packs(
 ) -> Result<()> {
     let results = futures_util::stream::iter(packs.iter().cloned().map(|pack| {
         let store = store.clone();
+        let cancel = cancel.clone();
         let pack_path = repo_pack_path(router.repo_prefix(), &pack.pack_id);
         let index_path = repo_pack_index_path(router.repo_prefix(), &pack.pack_id);
         let local_pack = pack_dir.join(format!("pack-{}.pack", pack.pack_id));
         let local_index = pack_dir.join(format!("pack-{}.idx", pack.pack_id));
         let local_reverse_index = pack_dir.join(format!("pack-{}.rev", pack.pack_id));
         async move {
-            let (pack_size, _) = tokio::try_join!(
-                store.download_to_path(&pack_path, &local_pack),
-                store.download_to_path(&index_path, &local_index)
-            )?;
+            if cancel.is_cancelled() {
+                return Err(CrabError::Cancelled);
+            }
+            if pack.size > MAX_PACK_INDEX_BYTES {
+                return Err(CrabError::Configuration {
+                    key: "repack pack size".to_owned(),
+                    origin: format!(
+                        "pack {} is {} bytes; bounded repack supports at most {MAX_PACK_INDEX_BYTES}",
+                        pack.pack_id, pack.size
+                    ),
+                });
+            }
+            let (pack_size, _) = tokio::select! {
+                result = async {
+                    tokio::try_join!(
+                        store.download_to_path_bounded(&pack_path, &local_pack, MAX_PACK_INDEX_BYTES),
+                        store.download_to_path_bounded(&index_path, &local_index, MAX_PACK_INDEX_BYTES)
+                    )
+                } => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
             if pack_size != pack.size {
                 return Err(CrabError::CorruptObject {
                     path: pack_path.as_ref().to_owned(),
@@ -521,6 +599,31 @@ async fn download_source_packs(
     Ok(())
 }
 
+fn validate_pack_inventory(router: &StoreLayout, packs: &[PackManifestEntry]) -> Result<()> {
+    let mut ids = HashSet::with_capacity(packs.len());
+    for pack in packs {
+        if pack.pack_id.is_empty() || !ids.insert(pack.pack_id.clone()) {
+            return Err(CrabError::CorruptObject {
+                path: router.manifest_path().to_string(),
+                reason: format!(
+                    "pack inventory contains duplicate or empty id {}",
+                    pack.pack_id
+                ),
+            });
+        }
+        if pack.size == 0 || pack.size > MAX_PACK_INDEX_BYTES {
+            return Err(CrabError::Configuration {
+                key: "repack pack size".to_owned(),
+                origin: format!(
+                    "pack {} has invalid size {}; expected 1..={MAX_PACK_INDEX_BYTES}",
+                    pack.pack_id, pack.size
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn run_git(command: &mut Command, operation: &str) -> Result<()> {
     debug!(operation, command = ?command, "running git repack subprocess");
     let status = command.status()?;
@@ -546,9 +649,10 @@ async fn upload_generated_pack(
     generated: &crab_git::repack::GeometricRepackedPack,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    let pack_path = repo_pack_path(router.repo_prefix(), &generated.pack_id);
     store
         .put_multipart_file_retry(
-            &repo_pack_path(router.repo_prefix(), &generated.pack_id),
+            &pack_path,
             generated.pack_path(),
             generated.pack_size,
             generated.pack_hash,
@@ -557,9 +661,19 @@ async fn upload_generated_pack(
             None,
         )
         .await?;
+    verify_remote_file(
+        store,
+        &pack_path,
+        generated.pack_size,
+        generated.pack_hash,
+        cancel,
+    )
+    .await?;
+
+    let index_path = repo_pack_index_path(router.repo_prefix(), &generated.pack_id);
     store
         .put_multipart_file_retry(
-            &repo_pack_index_path(router.repo_prefix(), &generated.pack_id),
+            &index_path,
             generated.index_path(),
             generated.index_size,
             generated.index_hash,
@@ -568,9 +682,19 @@ async fn upload_generated_pack(
             None,
         )
         .await?;
+    verify_remote_file(
+        store,
+        &index_path,
+        generated.index_size,
+        generated.index_hash,
+        cancel,
+    )
+    .await?;
+
+    let reverse_path = repo_pack_reverse_index_path(router.repo_prefix(), &generated.pack_id);
     store
         .put_multipart_file_retry(
-            &repo_pack_reverse_index_path(router.repo_prefix(), &generated.pack_id),
+            &reverse_path,
             generated.reverse_index_path(),
             generated.reverse_index_size,
             generated.reverse_index_hash,
@@ -578,7 +702,41 @@ async fn upload_generated_pack(
             cancel,
             None,
         )
-        .await
+        .await?;
+    verify_remote_file(
+        store,
+        &reverse_path,
+        generated.reverse_index_size,
+        generated.reverse_index_hash,
+        cancel,
+    )
+    .await
+}
+
+async fn verify_remote_file(
+    store: &Store,
+    path: &object_store::path::Path,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let mut hasher = blake3::Hasher::new();
+    let actual_size = tokio::select! {
+        result = store.stream_to_writer(path, &mut hasher) => result?,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    };
+    let actual_hash = *hasher.finalize().as_bytes();
+    if actual_size != expected_size || actual_hash != expected_hash {
+        return Err(CrabError::CorruptObject {
+            path: path.to_string(),
+            reason: format!(
+                "remote repack object verification failed: expected {expected_size} bytes and {}, got {actual_size} bytes and {}",
+                blake3::Hash::from_bytes(expected_hash).to_hex(),
+                blake3::Hash::from_bytes(actual_hash).to_hex()
+            ),
+        });
+    }
+    Ok(())
 }
 
 async fn ensure_remote_reverse_index(
@@ -588,8 +746,29 @@ async fn ensure_remote_reverse_index(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let path = repo_pack_reverse_index_path(router.repo_prefix(), &generated.pack_id);
-    match store.head(&path).await {
-        Ok(_) => Ok(()),
+    match tokio::select! {
+        result = store.head(&path) => result,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    } {
+        Ok(meta) => {
+            if meta.size != generated.reverse_index_size {
+                return Err(CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "existing reverse index has {} bytes, expected {}",
+                        meta.size, generated.reverse_index_size
+                    ),
+                });
+            }
+            verify_remote_file(
+                store,
+                &path,
+                generated.reverse_index_size,
+                generated.reverse_index_hash,
+                cancel,
+            )
+            .await
+        }
         Err(CrabError::NotFound { .. }) => {
             store
                 .put_multipart_file_retry(
@@ -785,6 +964,7 @@ mod tests {
                 dry_run: false,
                 download_concurrency: 2,
                 max_cas_retries: 4,
+                workspace_root: crate::cache::default_cache_root().join("maintenance"),
             },
             &CancellationToken::new(),
         )
@@ -795,7 +975,12 @@ mod tests {
         let (committed, _) = read_manifest(&store, &router).await?;
         assert_eq!(committed.generation, 2);
         assert_eq!(committed.refs.get("refs/heads/main"), Some(&tip));
-        let replacement = read_bulk_pack_list(&store, &router, &committed.pack_index_hash).await?;
+        let replacement = crate::metadata::manifest::read_bulk_pack_list(
+            &store,
+            &router,
+            &committed.pack_index_hash,
+        )
+        .await?;
         assert_eq!(replacement.len(), outcome.packs_after);
         for pack in &replacement {
             store.head(&router.pack_path(&pack.pack_id)).await?;

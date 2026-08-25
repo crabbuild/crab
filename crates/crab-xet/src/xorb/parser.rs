@@ -10,7 +10,8 @@ use xet_core_structures::xorb_object::Chunk;
 
 use crate::error::{Result, XetError};
 use crate::xorb::format::{
-    CHUNK_META_ENTRY_SIZE, ChunkMeta, CompressionScheme, FOOTER_SIZE, XORB_MAGIC, XorbHash,
+    CHUNK_META_ENTRY_SIZE, ChunkMeta, CompressionScheme, FOOTER_SIZE, MAX_XORB_CHUNKS,
+    MAX_XORB_SIZE, XORB_MAGIC, XorbHash,
 };
 
 /// Byte range of the serialized xorb metadata section.
@@ -201,6 +202,7 @@ pub fn xorb_chunks_from_metadata(
 
 /// Verify a compressed chunk payload against its metadata.
 pub fn verify_compressed_chunk(meta: &ChunkMeta, compressed: &[u8]) -> Result<()> {
+    validate_chunk_size(meta.uncompressed_len)?;
     let _ = decompress_chunk_data(meta, compressed)?;
     Ok(())
 }
@@ -284,6 +286,11 @@ fn parse_xorb_footer(data_len: usize, footer: &[u8]) -> Result<ParsedXorbFooter>
     if data_len < FOOTER_SIZE {
         return Err(corrupt("xorb too small for footer"));
     }
+    if data_len > MAX_XORB_SIZE {
+        return Err(corrupt(format!(
+            "xorb exceeds maximum size of {MAX_XORB_SIZE} bytes"
+        )));
+    }
     if footer.len() != FOOTER_SIZE {
         return Err(corrupt("bad footer length"));
     }
@@ -308,6 +315,12 @@ fn parse_xorb_footer(data_len: usize, footer: &[u8]) -> Result<ParsedXorbFooter>
         .map_err(|_| corrupt("bad payload digest bytes"))?;
     let num_chunks_usize =
         usize::try_from(num_chunks).map_err(|_| corrupt("num_chunks does not fit usize"))?;
+    if num_chunks_usize > *MAX_XORB_CHUNKS {
+        return Err(corrupt(format!(
+            "xorb contains {num_chunks_usize} chunks; maximum is {}",
+            *MAX_XORB_CHUNKS
+        )));
+    }
     let metadata_len = num_chunks_usize
         .checked_mul(CHUNK_META_ENTRY_SIZE)
         .ok_or_else(|| corrupt("metadata size overflow"))?;
@@ -369,6 +382,7 @@ fn parse_xorb_metadata(
                 .try_into()
                 .map_err(|_| corrupt("bad uncompressed_len"))?,
         );
+        validate_chunk_size(uncompressed_len)?;
         cursor += 4;
 
         let scheme_byte = metadata[cursor];
@@ -403,6 +417,7 @@ fn parse_xorb_metadata(
 }
 
 fn decompress_chunk_data(meta: &ChunkMeta, compressed: &[u8]) -> Result<Chunk> {
+    validate_chunk_size(meta.uncompressed_len)?;
     let decompressed = meta
         .scheme
         .decompress_from_slice(compressed)
@@ -413,6 +428,14 @@ fn decompress_chunk_data(meta: &ChunkMeta, compressed: &[u8]) -> Result<Chunk> {
 
     let chunk = Chunk::new(Bytes::from(decompressed.into_owned()));
 
+    if chunk.data.len() != meta.uncompressed_len as usize {
+        return Err(corrupt(format!(
+            "decompressed chunk length {} does not match metadata length {}",
+            chunk.data.len(),
+            meta.uncompressed_len
+        )));
+    }
+
     if chunk.hash != meta.hash {
         return Err(XetError::CorruptObject {
             path: format!("chunk at offset {}", meta.offset),
@@ -421,6 +444,16 @@ fn decompress_chunk_data(meta: &ChunkMeta, compressed: &[u8]) -> Result<Chunk> {
     }
 
     Ok(chunk)
+}
+
+fn validate_chunk_size(uncompressed_len: u32) -> Result<()> {
+    if u64::from(uncompressed_len) <= MAX_XORB_SIZE as u64 {
+        return Ok(());
+    }
+    Err(corrupt(format!(
+        "chunk is {uncompressed_len} bytes; maximum is {} bytes",
+        MAX_XORB_SIZE
+    )))
 }
 
 fn decompress_chunk_bytes(meta: &ChunkMeta, compressed: Bytes) -> Result<Chunk> {
@@ -444,10 +477,10 @@ fn decompress_chunk_bytes(meta: &ChunkMeta, compressed: Bytes) -> Result<Chunk> 
     Ok(chunk)
 }
 
-fn corrupt(reason: &str) -> XetError {
+fn corrupt(reason: impl AsRef<str>) -> XetError {
     XetError::CorruptObject {
         path: "xorb".to_string(),
-        reason: reason.to_string(),
+        reason: reason.as_ref().to_string(),
     }
 }
 
@@ -659,6 +692,42 @@ mod tests {
         let mut bad = vec![0u8; FOOTER_SIZE];
         bad[FOOTER_SIZE - 4..].copy_from_slice(b"NOPE");
         assert!(XorbParser::parse(Bytes::from(bad)).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_chunk_count_beyond_xet_limit_before_allocating_metadata() {
+        let num_chunks = *MAX_XORB_CHUNKS + 1;
+        let metadata_len = num_chunks * CHUNK_META_ENTRY_SIZE;
+        let mut body = vec![0u8; metadata_len + FOOTER_SIZE];
+        body[metadata_len..metadata_len + 4].copy_from_slice(&(num_chunks as u32).to_le_bytes());
+        body[metadata_len + 4..metadata_len + 12].copy_from_slice(&0u64.to_le_bytes());
+        let footer_start = body.len() - FOOTER_SIZE;
+        body[footer_start + FOOTER_SIZE - 4..].copy_from_slice(XORB_MAGIC);
+
+        let error = match XorbParser::parse(Bytes::from(body)) {
+            Ok(_) => panic!("oversized chunk count must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("maximum is"));
+    }
+
+    #[test]
+    fn parse_rejects_uncompressed_chunk_larger_than_xorb_limit() {
+        let metadata_len = CHUNK_META_ENTRY_SIZE;
+        let mut body = vec![0u8; metadata_len + FOOTER_SIZE];
+        let oversized = (MAX_XORB_SIZE + 1) as u32;
+        body[40..44].copy_from_slice(&oversized.to_le_bytes());
+        body[metadata_len..metadata_len + 4].copy_from_slice(&1u32.to_le_bytes());
+        body[metadata_len + 4..metadata_len + 12].copy_from_slice(&0u64.to_le_bytes());
+        let footer_start = body.len() - FOOTER_SIZE;
+        body[footer_start + FOOTER_SIZE - 4..].copy_from_slice(XORB_MAGIC);
+
+        let error = match XorbParser::parse(Bytes::from(body)) {
+            Ok(_) => panic!("oversized chunk must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("chunk is"));
     }
 
     #[test]

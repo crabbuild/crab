@@ -36,11 +36,12 @@ use crab_cache::path_class::{PathClass, classify_path};
 use crab_cache::{CacheClient, CacheServiceCapabilities};
 use crab_cache::{
     CacheError, CacheKey, CacheObjectHead, CacheObjectRange, CacheServiceAuth, CacheServiceMode,
-    DedupQueryResult, LocalCache, cache_key_for_path, default_cache_root,
+    DedupQueryResult, LocalCache, MAX_CACHE_CHUNK_BYTES, MAX_CACHE_SHARD_BYTES, cache_key_for_path,
+    default_cache_root,
 };
 use crab_storage::{ETag, StorageError, Store};
 use crab_xet::hash::MerkleHash;
-use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE};
+use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
 use crab_xet::xorb::parser::{
     decode_chunk_range_bytes, xorb_chunks_from_metadata, xorb_metadata_region,
 };
@@ -442,6 +443,15 @@ impl CachingStore {
         } else {
             self.head(path).await?.size
         };
+        if object_len > MAX_XORB_SIZE as u64 {
+            return Err(CacheError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "xorb is {object_len} bytes; format limit is {MAX_XORB_SIZE} bytes"
+                ),
+            }
+            .into());
+        }
         let footer_len = FOOTER_SIZE as u64;
         if object_len < footer_len {
             return Err(CacheError::CorruptObject {
@@ -505,13 +515,18 @@ impl CachingStore {
             return self
                 .local_cache
                 .get_or_fetch_read_xorb_with(xorb_hash, || async move {
-                    let (data, _) = origin.get_with_etag(&path).await?;
+                    let (data, _) = origin
+                        .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+                        .await?;
                     Ok::<_, CacheStoreError>(data)
                 })
                 .await;
         }
 
-        let (data, _) = self.origin.get_with_etag(path).await?;
+        let (data, _) = self
+            .origin
+            .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
+            .await?;
         LocalCache::validate_bytes(&key, &data)?;
         if let Err(error) = self.local_cache.put_bytes(&key, data.clone()).await {
             tracing::warn!(
@@ -524,18 +539,59 @@ impl CachingStore {
     }
 
     async fn complete_xorb_without_install(&self, path: &Path) -> Result<Bytes> {
-        match self.get_cache_service_object_without_install(path).await {
+        match self.get_cache_service_xorb_bounded(path).await {
             Ok(Some(data)) => Ok(data),
-            Ok(None) => Ok(self.origin.get_with_etag(path).await?.0),
+            Ok(None) => Ok(self
+                .origin
+                .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
+                .await?
+                .0),
             Err(error) => {
                 tracing::warn!(
                     path = %path,
                     error = %error,
                     "cache service xorb read failed, falling back to origin",
                 );
-                Ok(self.origin.get_with_etag(path).await?.0)
+                Ok(self
+                    .origin
+                    .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
+                    .await?
+                    .0)
             }
         }
+    }
+
+    async fn get_cache_service_xorb_bounded(&self, path: &Path) -> Result<Option<Bytes>> {
+        let Some(head) = self.head_cache_service_object(path).await? else {
+            return Ok(None);
+        };
+        if head.size > MAX_XORB_SIZE as u64 {
+            return Err(CacheError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "cache-service xorb is {} bytes; format limit is {MAX_XORB_SIZE} bytes",
+                    head.size
+                ),
+            }
+            .into());
+        }
+        let Some(data) = self
+            .get_cache_service_object_without_install_limit(path, Some(MAX_XORB_SIZE as u64))
+            .await?
+        else {
+            return Ok(None);
+        };
+        if data.len() as u64 > MAX_XORB_SIZE as u64 {
+            return Err(CacheError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "cache-service xorb body is {} bytes; format limit is {MAX_XORB_SIZE} bytes",
+                    data.len()
+                ),
+            }
+            .into());
+        }
+        Ok(Some(data))
     }
 
     /// Whether a cache service is configured (regardless of mode).
@@ -611,6 +667,9 @@ impl CachingStore {
     /// Mutable paths (refs, manifests) skip the cache entirely and
     /// always get a real ETag from origin. See finding CR11-F3.
     pub async fn get_with_etag(&self, path: &Path) -> Result<(Bytes, ETag)> {
+        if let Some(max_bytes) = immutable_read_limit(path) {
+            return self.get_with_etag_bounded(path, max_bytes).await;
+        }
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
         if is_immutable {
@@ -673,6 +732,121 @@ impl CachingStore {
         Ok(result)
     }
 
+    /// Read an object while enforcing a maximum body size before consumption.
+    pub async fn get_with_etag_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(Bytes, ETag)> {
+        let max_bytes = immutable_read_limit(path).map_or(max_bytes, |limit| max_bytes.min(limit));
+        let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
+
+        if is_immutable && let Some(key) = cache_key_for_path(path.as_ref()) {
+            if let Some(size) = self.local_cache.cached_size(&key).await?
+                && size > max_bytes
+            {
+                return Err(CacheError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "cached object is {size} bytes; bounded read supports at most {max_bytes} bytes"
+                    ),
+                }
+                .into());
+            }
+            if let Ok(data) = self
+                .local_cache
+                .get_or_fetch_bounded_with(&key, max_bytes, || async {
+                    Err::<Bytes, CacheStoreError>(CacheStoreError::Storage(
+                        StorageError::NotFound {
+                            path: path.as_ref().to_owned(),
+                        },
+                    ))
+                })
+                .await
+            {
+                if data.len() as u64 > max_bytes {
+                    return Err(CacheError::CorruptObject {
+                        path: path.to_string(),
+                        reason: format!(
+                            "cached object body is {} bytes; bounded read supports at most {max_bytes} bytes",
+                            data.len()
+                        ),
+                    }
+                    .into());
+                }
+                return Ok((
+                    data,
+                    ETag {
+                        e_tag: None,
+                        version: None,
+                    },
+                ));
+            }
+
+            match self.head_cache_service_object(path).await {
+                Ok(Some(head)) if head.size > max_bytes => {
+                    return Err(CacheError::CorruptObject {
+                        path: path.to_string(),
+                        reason: format!(
+                            "cache-service object is {} bytes; bounded read supports at most {max_bytes} bytes",
+                            head.size
+                        ),
+                    }
+                    .into());
+                }
+                Ok(Some(_)) => match self.get_cache_service_object_bounded(path, max_bytes).await {
+                    Ok(Some(data)) => {
+                        if data.len() as u64 > max_bytes {
+                            return Err(CacheError::CorruptObject {
+                                path: path.to_string(),
+                                reason: format!(
+                                    "cache-service object body is {} bytes; bounded read supports at most {max_bytes} bytes",
+                                    data.len()
+                                ),
+                            }
+                            .into());
+                        }
+                        return Ok((
+                            data,
+                            ETag {
+                                e_tag: None,
+                                version: None,
+                            },
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        path = %path,
+                        error = %error,
+                        "cache service bounded read failed, falling back to origin"
+                    ),
+                },
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    path = %path,
+                    error = %error,
+                    "cache service bounded HEAD failed, falling back to origin"
+                ),
+            }
+        }
+
+        let result = self.origin.get_with_etag_bounded(path, max_bytes).await?;
+        if is_immutable
+            && let Some(key) = cache_key_for_path(path.as_ref())
+            && let Err(error) = self.local_cache.put_bytes(&key, result.0.clone()).await
+        {
+            if cache_integrity_error(&error) {
+                return Err(error.into());
+            }
+            tracing::warn!(
+                path = %path,
+                error = %error,
+                "failed to write bounded origin response to local cache"
+            );
+        }
+        Ok(result)
+    }
+
     /// Read an immutable object from the cache service without origin fallback.
     ///
     /// Returns `Ok(None)` when cache-service reads are not enabled. Any cache
@@ -694,10 +868,42 @@ impl CachingStore {
         }
     }
 
+    async fn get_cache_service_object_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<Bytes>> {
+        let Some(data) = self
+            .get_cache_service_object_without_install_limit(path, Some(max_bytes))
+            .await?
+        else {
+            return Ok(None);
+        };
+        #[cfg(feature = "remote-client")]
+        {
+            self.store_cache_service_response(path, &data).await?;
+            Ok(Some(data))
+        }
+        #[cfg(not(feature = "remote-client"))]
+        {
+            let _ = data;
+            Ok(None)
+        }
+    }
+
     /// Read an immutable object from the cache service without updating the
     /// local cache. Used by full-object hydrate reads that intentionally avoid
     /// installing a second local copy before reconstruction consumes the body.
     async fn get_cache_service_object_without_install(&self, path: &Path) -> Result<Option<Bytes>> {
+        self.get_cache_service_object_without_install_limit(path, immutable_read_limit(path))
+            .await
+    }
+
+    async fn get_cache_service_object_without_install_limit(
+        &self,
+        path: &Path,
+        max_bytes: Option<u64>,
+    ) -> Result<Option<Bytes>> {
         if classify_path(path.as_ref()) == PathClass::Mutable {
             return Ok(None);
         }
@@ -710,10 +916,15 @@ impl CachingStore {
             let Some(client) = &self.cache_client else {
                 return Ok(None);
             };
-            Ok(Some(client.get(path.as_ref()).await?))
+            let data = match max_bytes {
+                Some(max_bytes) => client.get_bounded(path.as_ref(), max_bytes).await?,
+                None => client.get(path.as_ref()).await?,
+            };
+            Ok(Some(data))
         }
         #[cfg(not(feature = "remote-client"))]
         {
+            let _ = max_bytes;
             Ok(None)
         }
     }
@@ -759,6 +970,24 @@ impl CachingStore {
         }
         if !self.cache_reads_enabled() {
             return Ok(None);
+        }
+        if let Some(max_bytes) = immutable_read_limit(path) {
+            let requested_bytes =
+                range
+                    .end
+                    .checked_sub(range.start)
+                    .ok_or_else(|| CacheError::Service {
+                        reason: format!("invalid cache range {}..{}", range.start, range.end),
+                    })?;
+            if requested_bytes > max_bytes {
+                return Err(CacheError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "cache range is {requested_bytes} bytes; bounded read supports at most {max_bytes} bytes"
+                    ),
+                }
+                .into());
+            }
         }
 
         #[cfg(feature = "remote-client")]
@@ -846,11 +1075,15 @@ impl CachingStore {
 
         let data = self
             .local_cache
-            .get_or_fetch_with(&key, || async {
-                Err(CacheStoreError::Storage(StorageError::NotFound {
-                    path: path.as_ref().to_string(),
-                }))
-            })
+            .get_or_fetch_bounded_with(
+                &key,
+                immutable_read_limit(path).unwrap_or(u64::MAX),
+                || async {
+                    Err(CacheStoreError::Storage(StorageError::NotFound {
+                        path: path.as_ref().to_string(),
+                    }))
+                },
+            )
             .await
             .ok()?;
         let total_size = data.len() as u64;
@@ -1701,6 +1934,15 @@ fn slice_cached_range(data: &Bytes, range: &Range<u64>) -> Option<Bytes> {
     Some(data.slice(start..end))
 }
 
+fn immutable_read_limit(path: &Path) -> Option<u64> {
+    match cache_key_for_path(path.as_ref())? {
+        CacheKey::Chunk(_) => Some(MAX_CACHE_CHUNK_BYTES),
+        CacheKey::Shard(_) => Some(MAX_CACHE_SHARD_BYTES),
+        CacheKey::Xorb(_) => Some(MAX_XORB_SIZE as u64),
+        CacheKey::Stage(_) | CacheKey::Manifest { .. } => None,
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
@@ -1926,6 +2168,33 @@ mod tests {
             service_client_cert: None,
             service_client_key: None,
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_read_rejects_oversized_origin_before_caching() {
+        let hash = "a".repeat(64);
+        let path = content_path("shards", &hash);
+        let origin = origin_store();
+        origin.put(&path, Bytes::from(vec![0u8; 32])).await.unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let store =
+            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let error = store.get_with_etag_bounded(&path, 8).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            CacheStoreError::Storage(StorageError::CorruptObject { .. })
+        ));
+        assert_eq!(
+            cache
+                .cached_size(&CacheKey::Shard(MerkleHash::from_hex(&hash).unwrap()))
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[cfg(feature = "remote-client")]

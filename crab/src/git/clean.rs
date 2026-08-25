@@ -1269,6 +1269,12 @@ impl CleanSession {
         self.repo_root = Some(root);
     }
 
+    /// Return the repository root bound to this filter session, when known.
+    #[must_use]
+    pub fn repo_root(&self) -> Option<&Path> {
+        self.repo_root.as_deref()
+    }
+
     /// Check whether an LFS-tracked path should be smudged under LFS fetch filters.
     #[must_use]
     pub fn should_lfs_smudge(&self, pathname: &str) -> bool {

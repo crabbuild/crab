@@ -31,6 +31,8 @@ use crate::core::project_config::ProjectConfig;
 use crate::core::style::CliStyle;
 use tokio_util::sync::CancellationToken;
 
+const MAX_CACHE_SERVICE_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Outcome of a single diagnostic check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -257,6 +259,9 @@ pub async fn run_cost_report(
     config: &Config,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err(CrabError::Cancelled);
+    }
     let remote_path = crate::git::discover::resolve_crab_dir()
         .map_or_else(|| PathBuf::from(".crab/remote"), |dir| dir.join("remote"));
     let remote =
@@ -281,6 +286,9 @@ pub async fn run_cost_report(
         cancel,
     )
     .await?;
+    if cancel.is_cancelled() {
+        return Err(CrabError::Cancelled);
+    }
 
     if mode == OutputMode::Json {
         emit_json("cost", "1.0", &report);
@@ -1088,6 +1096,34 @@ fn cache_service_url_scheme(base_url: &str) -> Option<String> {
         .map(|url| url.scheme().to_owned())
 }
 
+async fn read_cache_service_response_bounded(
+    response: reqwest::Response,
+) -> std::result::Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_CACHE_SERVICE_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "response exceeds the {MAX_CACHE_SERVICE_RESPONSE_BYTES}-byte safety limit"
+        ));
+    }
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "response body length overflow".to_owned())?;
+        if next_len > MAX_CACHE_SERVICE_RESPONSE_BYTES {
+            return Err(format!(
+                "response exceeds the {MAX_CACHE_SERVICE_RESPONSE_BYTES}-byte safety limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn collect_cache_service_http_probe(
     client: &reqwest::Client,
     url: String,
@@ -1154,7 +1190,7 @@ async fn collect_cache_service_capabilities_snapshot(
         );
     }
 
-    let body = match response.bytes().await {
+    let body = match read_cache_service_response_bounded(response).await {
         Ok(body) => body,
         Err(err) => {
             return (
@@ -1234,7 +1270,7 @@ async fn collect_cache_service_authz_snapshot(
         );
     }
 
-    let body = match response.bytes().await {
+    let body = match read_cache_service_response_bounded(response).await {
         Ok(body) => body,
         Err(err) => {
             return (
@@ -1308,7 +1344,7 @@ async fn collect_cache_service_admin_snapshot(
         );
     }
 
-    let body = match response.bytes().await {
+    let body = match read_cache_service_response_bounded(response).await {
         Ok(body) => body,
         Err(err) => {
             return (
@@ -2127,7 +2163,7 @@ async fn check_cache_service_admin(
         );
     }
 
-    let body = match resp.bytes().await {
+    let body = match read_cache_service_response_bounded(resp).await {
         Ok(body) => body,
         Err(e) => {
             return CheckResult::warn(

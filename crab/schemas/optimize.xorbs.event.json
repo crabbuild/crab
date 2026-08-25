@@ -159,6 +159,12 @@
           },
           "type": "array"
         },
+        "corrupt_list_omitted": {
+          "description": "Number of corrupt source hashes omitted from the bounded report.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "counts": {
           "allOf": [
             {
@@ -186,6 +192,7 @@
         "bytes_read",
         "bytes_written",
         "corrupt_list",
+        "corrupt_list_omitted",
         "counts",
         "elapsed_ms",
         "profile",

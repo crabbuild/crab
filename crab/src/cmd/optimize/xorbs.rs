@@ -147,6 +147,8 @@ pub struct OptimizeXorbsSummary {
     pub elapsed_ms: u64,
     /// List of corrupt source xorb hashes.
     pub corrupt_list: Vec<String>,
+    /// Number of corrupt source hashes omitted from the bounded report.
+    pub corrupt_list_omitted: u64,
 }
 
 /// Per-status counts in the summary.
@@ -564,8 +566,15 @@ async fn run_apply(
     .await?;
 
     // Reconcile.
-    let reconcile_outcome =
-        reconcile::finalize(&journal, &run_id, Some(&store), Some(&router), cancel).await?;
+    let reconcile_outcome = reconcile::finalize(
+        &journal,
+        &run_id,
+        Some(&store),
+        Some(&router),
+        cfg,
+        cancel,
+    )
+    .await?;
 
     let counts = journal.count_by_status(&run_id)?;
     if counts.pending > 0 || counts.staged > 0 {
@@ -610,6 +619,7 @@ async fn run_apply(
         bytes_written: outcome.bytes_written,
         elapsed_ms: elapsed.as_millis() as u64,
         corrupt_list: outcome.corrupt_list.clone(),
+        corrupt_list_omitted: outcome.corrupt_list_omitted,
     };
 
     match output_mode {

@@ -34,7 +34,7 @@ also need remote Git ref and pack updates.
 | `--include <PATTERN>` | None | Include matching file/object patterns; repeat as needed |
 | `--exclude <PATTERN>` | None | Exclude matching patterns; repeat as needed |
 | `--all` | Disabled | Fetch objects for all refs rather than only HEAD |
-| `--dry-run` | Disabled | Report the intended source and filters without downloading |
+| `--dry-run` | Disabled | Resolve and report selected files without credentials, network access, or cache writes |
 | `--no-sync-chunk-index` | Disabled | Skip post-fetch local chunk-index warming |
 | `--json` | Disabled | Emit one terminal JSON envelope |
 | `--jsonl` | Disabled | Stream JSONL progress and a terminal result |
@@ -66,6 +66,13 @@ crab fetch --include '*.safetensors' --exclude 'archive/**'
 ```bash
 crab fetch --dry-run --json
 ```
+
+Fetch uses Git pointer blobs as the live inventory. It batch-checks blob sizes,
+deduplicates identical file hashes across refs, then reconstructs selected files
+into a discard sink through the same replica, file-index, shard, and xet-core
+range-cache path used by hydrate. Reconstructed bytes are hash- and size-checked;
+peak memory does not scale with logical file size. `--all` means every local ref,
+so run `git fetch origin` first when remote refs must be current.
 
 ## Related
 

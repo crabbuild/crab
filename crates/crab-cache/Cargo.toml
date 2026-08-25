@@ -15,13 +15,22 @@ default = []
 active-probe = ["dep:reqwest"]
 local-cache = ["dep:filetime", "dep:rusqlite", "dep:tokio"]
 remote-client = ["active-probe", "dep:tokio"]
-xet-chunk-cache = ["dep:tokio", "dep:xet-client", "dep:xet-runtime"]
+xet-chunk-cache = [
+    "dep:base64",
+    "dep:crc32fast",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:xet-client",
+    "dep:xet-runtime",
+]
 
 [dependencies]
 blake3 = { workspace = true, features = ["rayon"] }
+base64 = { version = "0.22", optional = true }
 bytes = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
+crc32fast = { version = "1", optional = true }
 filetime = { version = "0.2", optional = true }
 globset = "0.4"
 reqwest = { workspace = true, features = ["rustls-tls", "json"], optional = true }
@@ -30,6 +39,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"], optional = true }
+tokio-util = { workspace = true, features = ["rt"], optional = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 xet-client = { workspace = true, optional = true }

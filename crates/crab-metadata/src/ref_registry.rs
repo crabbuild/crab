@@ -174,6 +174,26 @@ impl RefRegistry {
         self.complete_repos.insert(repo_prefix.to_owned());
     }
 
+    /// Replace one committed shard set while preserving concurrent candidates.
+    ///
+    /// Compaction passes the exact source set pinned before manifest CAS and
+    /// the exact replacement set committed by that CAS. Any other entries are
+    /// retained because they may protect an in-flight writer from GC.
+    pub fn reconcile_compaction(
+        &mut self,
+        repo_prefix: &str,
+        source_shards: &HashSet<String>,
+        replacement_shards: &[String],
+    ) {
+        self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
+        let entry = self.repos.entry(repo_prefix.to_owned()).or_default();
+        entry.retain(|hash| !source_shards.contains(hash));
+        entry.extend(replacement_shards.iter().cloned());
+        entry.sort();
+        entry.dedup();
+        self.complete_repos.insert(repo_prefix.to_owned());
+    }
+
     /// Mark bucket-wide repo discovery complete after a manifest repair scan.
     pub fn mark_coverage_complete(&mut self) {
         self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
@@ -788,6 +808,71 @@ pub async fn union_register_repo_shards(
         record.complete = true;
         // Shard partitions commit first. Advancing this generation makes a
         // root-identity seal observe the complete union as one publication.
+        record.generation = record.generation.saturating_add(1);
+    })
+    .await
+    .map(|record| record.generation)
+}
+
+/// Remove only the source shards replaced by a committed compaction.
+///
+/// Candidate roots added by concurrent writers remain registered. This may
+/// retain an extra root after a failed writer, but it cannot make live data
+/// collectible.
+#[cfg(feature = "storage")]
+pub async fn reconcile_compacted_repo_shards(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    source_shards: HashSet<String>,
+    replacement_shards: Vec<String>,
+) -> Result<u64> {
+    let repo_prefix = router.repo_prefix().to_owned();
+    let mut partitions = HashMap::<String, (HashSet<String>, Vec<String>)>::new();
+    for hash in source_shards {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .0
+            .insert(hash);
+    }
+    for hash in replacement_shards {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .1
+            .push(hash);
+    }
+
+    for (partition, (sources, mut replacements)) in partitions {
+        normalize(&mut replacements);
+        let path = shard_root_partition_path(router, &repo_prefix, &partition);
+        let repo_for_update = repo_prefix.clone();
+        let partition_for_update = partition.clone();
+        let root = crab_storage::cas::cas_update_default::<ShardRootPartition, _>(
+            store,
+            path.as_ref(),
+            |root| {
+                if root.repo_prefix.is_empty() {
+                    root.repo_prefix.clone_from(&repo_for_update);
+                    root.partition.clone_from(&partition_for_update);
+                }
+                if root.repo_prefix == repo_for_update && root.partition == partition_for_update {
+                    root.schema_version = REF_REGISTRY_ROOT_SCHEMA_VERSION;
+                    root.shard_hashes.retain(|hash| !sources.contains(hash));
+                    root.shard_hashes.extend(replacements.clone());
+                    normalize(&mut root.shard_hashes);
+                    root.generation = root.generation.saturating_add(1);
+                }
+            },
+        )
+        .await
+        .map_err(MetadataError::from)?;
+        validate_shard_root_partition(&root, router, &path)?;
+    }
+
+    update_repo_record(store, router, |record| {
+        record.schema_version = REF_REGISTRY_RECORD_SCHEMA_VERSION;
+        record.complete = true;
         record.generation = record.generation.saturating_add(1);
     })
     .await
@@ -1469,6 +1554,44 @@ mod tests {
             store.get_with_etag(&target.ref_registry_path()).await,
             Err(crab_storage::StorageError::NotFound { .. })
         ));
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn compaction_reconciliation_preserves_concurrent_candidates() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        union_register_repo_shards(
+            &store,
+            &router,
+            vec!["source-a".to_owned(), "source-b".to_owned()],
+        )
+        .await
+        .unwrap();
+        union_register_repo_shards(&store, &router, vec!["concurrent".to_owned()])
+            .await
+            .unwrap();
+
+        reconcile_compacted_repo_shards(
+            &store,
+            &router,
+            HashSet::from(["source-a".to_owned(), "source-b".to_owned()]),
+            vec!["replacement".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        let registry = load_ref_registry(&store, &router).await.unwrap();
+        assert_eq!(
+            registry.repos["org/models"],
+            vec!["concurrent".to_owned(), "replacement".to_owned()]
+        );
     }
 
     #[test]

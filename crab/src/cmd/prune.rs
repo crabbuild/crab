@@ -6,10 +6,15 @@
 use std::io::Stdout;
 
 use serde::Serialize;
+use tokio::pin;
+use tokio_util::sync::CancellationToken;
 
-use crate::cache::{LocalCache, PruneOptions, PruneStats};
+use crate::cache::{
+    LocalCache, PruneObjectKind, PruneOptions, PruneStats, PrunedCacheObject,
+    prune_xet_chunk_cache_with_cancel,
+};
 use crate::core::config::Config;
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::event_payloads::FileDonePayload;
 use crate::core::output::{JsonlStream, OutputMode};
 
@@ -45,15 +50,57 @@ pub async fn run_prune(
     args: &PruneArgs,
     jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<PruneSummary> {
+    run_prune_with_cancel(args, jsonl_stream, &CancellationToken::new()).await
+}
+
+/// Run cache pruning while honoring cancellation during both cache families.
+pub async fn run_prune_with_cancel(
+    args: &PruneArgs,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    cancel: &CancellationToken,
+) -> Result<PruneSummary> {
+    check_cancelled(cancel)?;
     let config = Config::resolve_local()?;
     let cache = LocalCache::with_limits(
         crate::cache::default_cache_root(),
         config.chunk_cache_bytes,
         config.shard_cache_bytes,
     );
-    run_prune_with_cache(&cache, args, jsonl_stream).await
+    let local_prune = cache.prune_with_options(PruneOptions {
+        dry_run: args.dry_run,
+        record_entries: args.verbose || args.mode == OutputMode::Jsonl,
+    });
+    pin!(local_prune);
+    let mut stats = tokio::select! {
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = &mut local_prune => result?,
+    };
+    check_cancelled(cancel)?;
+    let xet = prune_xet_chunk_cache_with_cancel(
+        &config.effective_chunk_cache_dir(),
+        config.chunk_cache_bytes,
+        args.dry_run,
+        args.verbose || args.mode == OutputMode::Jsonl,
+        cancel,
+    )
+    .await?;
+    check_cancelled(cancel)?;
+    stats.chunks_evicted = stats.chunks_evicted.saturating_add(xet.entries_evicted);
+    stats.bytes_freed = stats.bytes_freed.saturating_add(xet.bytes_freed);
+    stats.entries.extend(
+        xet.entries
+            .into_iter()
+            .map(|(path, bytes)| PrunedCacheObject {
+                kind: PruneObjectKind::Chunk,
+                bytes,
+                path,
+            }),
+    );
+    check_cancelled(cancel)?;
+    finish_prune(&stats, args, jsonl_stream)
 }
 
+#[cfg(test)]
 async fn run_prune_with_cache(
     cache: &LocalCache,
     args: &PruneArgs,
@@ -65,7 +112,15 @@ async fn run_prune_with_cache(
             record_entries: args.verbose || args.mode == OutputMode::Jsonl,
         })
         .await?;
-    emit_pruned_entries(&stats, args, jsonl_stream);
+    finish_prune(&stats, args, jsonl_stream)
+}
+
+fn finish_prune(
+    stats: &PruneStats,
+    args: &PruneArgs,
+    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+) -> Result<PruneSummary> {
+    emit_pruned_entries(stats, args, jsonl_stream);
     let summary = PruneSummary::from_stats(&stats, args.dry_run);
     emit_text_summary(&summary, args);
     Ok(summary)
@@ -161,6 +216,22 @@ mod tests {
         assert_eq!(summary.objects_pruned, 0);
         assert_eq!(summary.bytes_freed, 0);
         assert!(summary.dry_run);
+    }
+
+    #[tokio::test]
+    async fn prune_honors_cancellation_before_cache_resolution() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let args = PruneArgs {
+            dry_run: true,
+            verbose: false,
+            mode: OutputMode::Text,
+        };
+
+        let error = run_prune_with_cancel(&args, None, &cancel)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CrabError::Cancelled));
     }
 
     #[tokio::test]

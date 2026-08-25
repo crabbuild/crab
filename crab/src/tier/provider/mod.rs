@@ -245,6 +245,22 @@ pub trait LifecycleProvider: Send + Sync {
     /// guarded by a CAS token.
     async fn put(&self, doc: &RenderedLifecycle, guard: Option<Guard>) -> Result<PutOutcome>;
 
+    /// Remove the lifecycle configuration, optionally guarded by a CAS token.
+    async fn delete(&self, _guard: Option<Guard>) -> Result<PutOutcome> {
+        Err(crate::core::error::CrabError::TierProviderUnsupported {
+            provider: format!("{:?} lifecycle deletion", self.kind()),
+        })
+    }
+
+    /// Return whether a provider read-back preserves an intended document.
+    fn equivalent(
+        &self,
+        current: &RenderedLifecycle,
+        intended: &RenderedLifecycle,
+    ) -> Result<bool> {
+        Ok(current.format == intended.format && current.body == intended.body)
+    }
+
     /// Fetch the provider-side CAS token for the current lifecycle.
     /// Returns `None` on first write (no existing config).
     async fn cas_guard(&self) -> Result<Option<Guard>>;

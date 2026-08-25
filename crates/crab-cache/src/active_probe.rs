@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+const MAX_ACTIVE_PROBE_RESPONSE_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub enum ActiveProbeAuth<'a> {
     None,
@@ -148,10 +150,9 @@ async fn get_probe_object(
         .get("x-cache")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body = response
-        .bytes()
+    let body = read_response_bounded(response)
         .await
-        .map_err(|error| redact_probe_error(base_url, &error.to_string()))?;
+        .map_err(|error| redact_probe_error(base_url, &error))?;
     if body.as_ref() != probe.body.as_slice() {
         return Err("probe read body did not match written bytes".to_string());
     }
@@ -193,10 +194,9 @@ async fn range_probe_object(
         .get("x-cache")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body = response
-        .bytes()
+    let body = read_response_bounded(response)
         .await
-        .map_err(|error| redact_probe_error(base_url, &error.to_string()))?;
+        .map_err(|error| redact_probe_error(base_url, &error))?;
     if body.as_ref() != &probe.body[..4] {
         return Err("probe range body did not match written bytes".to_string());
     }
@@ -207,6 +207,32 @@ async fn range_probe_object(
         ));
     }
     Ok(())
+}
+
+async fn read_response_bounded(response: reqwest::Response) -> Result<bytes::Bytes, String> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_ACTIVE_PROBE_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "response exceeds the {MAX_ACTIVE_PROBE_RESPONSE_BYTES}-byte safety limit"
+        ));
+    }
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "response body length overflow".to_owned())?;
+        if next_len > MAX_ACTIVE_PROBE_RESPONSE_BYTES {
+            return Err(format!(
+                "response exceeds the {MAX_ACTIVE_PROBE_RESPONSE_BYTES}-byte safety limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(bytes::Bytes::from(body))
 }
 
 async fn evict_probe_object(
@@ -233,9 +259,8 @@ async fn evict_probe_object(
             status_hint(status, auth_failure_hint)
         ));
     }
-    response
-        .json::<ActiveProbeEvictStats>()
-        .await
+    let body = read_response_bounded(response).await?;
+    serde_json::from_slice::<ActiveProbeEvictStats>(&body)
         .map_err(|error| format!("exact eviction JSON did not match expected schema: {error}"))
 }
 

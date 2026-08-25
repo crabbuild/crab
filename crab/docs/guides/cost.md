@@ -72,6 +72,9 @@ This uses a deterministic `blake3(key)` hash to include ~25% of
 objects. The report records that totals are scaled estimates when sampling
 is enabled; it does not currently emit a statistical confidence interval.
 
+The optional `--top-k` cold-object report is bounded to 10,000 entries so a
+large archive inventory cannot turn the report into unbounded memory use.
+
 ## Pricing Model
 
 ### Embedded prices
@@ -159,19 +162,20 @@ operator checklist:
 - `crab doctor --cost` for cost inventory and recommendations.
 - active-active maintenance admission before any mutating apply step.
 - lifecycle tiering through `crab tier plan --apply --merge` when
-  `[tier] enabled = true`.
-- xorb optimization is exposed as a planned step, but apply is currently
-  blocked until destination xorbs can be committed with their file-index and
-  shard metadata atomically. Use `crab optimize xorbs --dry-run` for estimates.
+  `[tier] enabled = true`; provider conditional-write and read-back checks
+  remain in force.
+- xorb optimization through the reconciled xorb, shard, and file-index
+  transaction path. Use `crab optimize xorbs --dry-run` for estimates.
 - local cache pruning through `crab prune`.
 - replica policy checks through `crab replica doctor --fix-plan` when
   replication is configured.
 
 `crab optimize apply` executes the same plan in order. It preserves each
-underlying command's safety checks and stops on the first failed step. Xorb
-rewrites are opt-in because they can be long-running and may restore archived
-objects before rewriting content-addressed xorbs; requesting that step
-currently fails closed until metadata reconciliation is implemented.
+underlying command's safety checks, holds a repository-wide apply lock, and
+stops on the first failed step. Child output is drained with a fixed memory
+bound, and invalid sampling or unavailable report-inventory requests fail
+before apply. Xorb rewrites are opt-in because they can be long-running and
+may restore archived objects before rewriting content-addressed xorbs.
 
 ### 5. Heaviest Cold Objects
 

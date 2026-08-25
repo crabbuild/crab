@@ -6,6 +6,10 @@ pub type Result<T> = std::result::Result<T, CacheError>;
 /// Errors raised by cache contracts and local cache storage.
 #[derive(thiserror::Error, Debug)]
 pub enum CacheError {
+    /// A caller cancelled a long-running cache scan or eviction.
+    #[error("cache operation cancelled")]
+    Cancelled,
+
     /// Filesystem I/O failed while reading or writing the local cache.
     #[error("cache I/O error: {0}")]
     Io(#[from] std::io::Error),

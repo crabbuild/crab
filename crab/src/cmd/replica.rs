@@ -1,6 +1,7 @@
 //! `crab replica` — configure and inspect read replicas for Crab remotes.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,7 +16,7 @@ use tracing::warn;
 
 use crate::audit::{AuditEvent, AuditOutcome, NewAuditEvent, append_event, default_log_path};
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::project_config::{ProjectConfig, RemoteConfig};
 use crate::git::url::CrabUrl;
@@ -60,6 +61,9 @@ const MAX_REPAIR_WATCH_BACKOFF_SECS: u64 = 300;
 const REPAIR_WATCH_LEASE_SCHEMA_VERSION: u32 = 1;
 const COORDINATOR_STATE_WARNING_PERCENT: u64 = 80;
 const COORDINATOR_STATE_CRITICAL_PERCENT: u64 = 95;
+const MAX_EVIDENCE_FILES: usize = 100_000;
+const MAX_EVIDENCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_REPAIR_WATCH_LEASE_BYTES: u64 = 64 * 1024;
 #[cfg(test)]
 const ACTIVE_ACTIVE_SMOKE_SEQUENCE: &[&str] = &[
     "mode-active-active",
@@ -1716,6 +1720,7 @@ pub struct RemovePayload {
 }
 
 pub async fn exec(command: ReplicaCommand, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     match command {
         ReplicaCommand::Add(args) => run_add(&args).await,
         ReplicaCommand::Export(args) => run_export(&args),
@@ -1735,7 +1740,7 @@ pub async fn exec(command: ReplicaCommand, cancel: &CancellationToken) -> Result
         ReplicaCommand::SetPrimary(args) => run_set_primary(&args).await,
         ReplicaCommand::Diagnostics(args) => run_diagnostics(&args, cancel).await,
         ReplicaCommand::Certify(args) => run_certify(&args, cancel).await,
-        ReplicaCommand::Evidence(command) => run_evidence(&command),
+        ReplicaCommand::Evidence(command) => run_evidence_with_cancel(&command, cancel),
         ReplicaCommand::Status(args) => run_status(&args, cancel).await,
         ReplicaCommand::Doctor(args) => run_doctor(&args, cancel).await,
         ReplicaCommand::Remove(args) => run_remove(&args).await,
@@ -2766,31 +2771,37 @@ fn lease_expires_at_ms(now_ms: u64, ttl_seconds: u64) -> u64 {
 }
 
 fn read_repair_watch_lease(path: &Path) -> Result<Option<RepairWatchWorkerState>> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let state: RepairWatchWorkerState =
-                serde_json::from_slice(&bytes).map_err(|err| CrabError::Configuration {
-                    key: "replica.repair.watch".into(),
-                    origin: format!(
-                        "repair worker lease {} is not valid JSON: {err}",
-                        path.display()
-                    ),
-                })?;
-            if state.schema_version != REPAIR_WATCH_LEASE_SCHEMA_VERSION {
-                return Err(CrabError::Configuration {
-                    key: "replica.repair.watch".into(),
-                    origin: format!(
-                        "repair worker lease {} has unsupported schema version {}",
-                        path.display(),
-                        state.schema_version
-                    ),
-                });
-            }
-            Ok(Some(state))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(CrabError::Io(err)),
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CrabError::Io(error)),
+    };
+    if metadata.len() > MAX_REPAIR_WATCH_LEASE_BYTES {
+        return Err(CrabError::Configuration {
+            key: "replica.repair.watch".to_owned(),
+            origin: format!("repair worker lease exceeds {MAX_REPAIR_WATCH_LEASE_BYTES} bytes"),
+        });
     }
+    let bytes = std::fs::read(path).map_err(CrabError::Io)?;
+    let state: RepairWatchWorkerState =
+        serde_json::from_slice(&bytes).map_err(|err| CrabError::Configuration {
+            key: "replica.repair.watch".into(),
+            origin: format!(
+                "repair worker lease {} is not valid JSON: {err}",
+                path.display()
+            ),
+        })?;
+    if state.schema_version != REPAIR_WATCH_LEASE_SCHEMA_VERSION {
+        return Err(CrabError::Configuration {
+            key: "replica.repair.watch".into(),
+            origin: format!(
+                "repair worker lease {} has unsupported schema version {}",
+                path.display(),
+                state.schema_version
+            ),
+        });
+    }
+    Ok(Some(state))
 }
 
 fn write_repair_watch_lease(path: &Path, state: &RepairWatchWorkerState) -> Result<()> {
@@ -4053,6 +4064,15 @@ fn run_evidence_verify(args: &EvidenceVerifyArgs) -> Result<()> {
     })
 }
 
+fn run_evidence_with_cancel(command: &EvidenceCommand, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    let result = match command {
+        EvidenceCommand::Verify(args) => run_evidence_verify(args),
+    };
+    check_cancelled(cancel)?;
+    result
+}
+
 #[cfg(test)]
 fn evidence_verify_payload(
     dir: &Path,
@@ -4133,6 +4153,12 @@ fn evidence_verify_payload_with_expected_run_id(
 }
 
 fn collect_evidence_json_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if out.len() >= MAX_EVIDENCE_FILES {
+        return Err(CrabError::Configuration {
+            key: "replica.evidence.files".to_owned(),
+            origin: format!("evidence inventory exceeds {MAX_EVIDENCE_FILES} files"),
+        });
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -4142,6 +4168,12 @@ fn collect_evidence_json_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()>
             continue;
         }
         if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            if out.len() >= MAX_EVIDENCE_FILES {
+                return Err(CrabError::Configuration {
+                    key: "replica.evidence.files".to_owned(),
+                    origin: format!("evidence inventory exceeds {MAX_EVIDENCE_FILES} files"),
+                });
+            }
             out.push(path);
         }
     }
@@ -4173,8 +4205,30 @@ fn verify_evidence_file(root: &Path, path: &Path, require_redacted: bool) -> Evi
         errors: Vec::new(),
     };
 
-    let value = match std::fs::read_to_string(path)
-        .map_err(|err| format!("failed to read evidence file: {err}"))
+    let value = match std::fs::metadata(path)
+        .map_err(|err| format!("failed to stat evidence file: {err}"))
+        .and_then(|metadata| {
+            if metadata.len() > MAX_EVIDENCE_FILE_BYTES {
+                return Err(format!(
+                    "evidence file exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
+                ));
+            }
+            Ok(metadata.len())
+        })
+        .and_then(|size| {
+            let file = std::fs::File::open(path)
+                .map_err(|err| format!("failed to read evidence file: {err}"))?;
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.take(MAX_EVIDENCE_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|err| format!("failed to read evidence file: {err}"))?;
+            if bytes.len() as u64 > MAX_EVIDENCE_FILE_BYTES {
+                return Err(format!(
+                    "evidence file exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
+                ));
+            }
+            String::from_utf8(bytes).map_err(|err| format!("evidence file is not UTF-8: {err}"))
+        })
         .and_then(|text| {
             serde_json::from_str::<serde_json::Value>(&text)
                 .map_err(|err| format!("invalid evidence JSON: {err}"))

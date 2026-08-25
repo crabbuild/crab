@@ -19,11 +19,9 @@
 //! `workflow.journal.show`, `workflow.journal.ls`,
 //! `workflow.journal.gc`.
 //!
-//! The command is pure-read (apart from `gc`) — it doesn't acquire
-//! the scheduler lock. `gc` is safe against concurrent runners
-//! because it walks by journal directory age and only removes
-//! terminal journals; an active run's journal is non-terminal by
-//! definition and thus protected.
+//! The command is pure-read (apart from `gc`). `gc` acquires the
+//! workflow scheduler lock before scanning and deleting so a run
+//! cannot transition a journal after the retention decision.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,9 +31,10 @@ use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
 use crate::workflow::journal::{Journal, RunOutcome, RunRow, StageRunRow};
+use tokio_util::sync::CancellationToken;
 
 /// Structured-output schema labels for the three subcommands.
 pub const WORKFLOW_JOURNAL_SHOW_SCHEMA: &str = "workflow.journal.show";
@@ -46,6 +45,9 @@ pub const WORKFLOW_JOURNAL_GC_SCHEMA: &str = "workflow.journal.gc";
 /// recent terminal journals. Tracks the operator-visible default
 /// called out in the design's risk register.
 pub const DEFAULT_GC_KEEP: usize = 50;
+const MAX_WORKFLOW_JOURNALS: usize = 1_000_000;
+const MAX_WORKFLOW_STAGE_ROWS: usize = 1_000_000;
+const MAX_WORKFLOW_GC_FAILURES: usize = 1_024;
 
 // ─── Clap surface ─────────────────────────────────────────────────────
 
@@ -202,20 +204,39 @@ pub struct GcPayload {
 
 /// `crab workflow journal show`.
 pub fn exec_show(args: ShowArgs) -> Result<()> {
-    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    run_show(&args, &cwd, args.output_mode())
+    let repo_root = resolve_repo_root()?;
+    run_show(&args, &repo_root, args.output_mode())
 }
 
 /// `crab workflow journal ls`.
 pub fn exec_ls(args: LsArgs) -> Result<()> {
-    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    run_ls(&args, &cwd, args.output_mode())
+    let repo_root = resolve_repo_root()?;
+    run_ls(&args, &repo_root, args.output_mode())
 }
 
 /// `crab workflow journal gc`.
 pub fn exec_gc(args: GcArgs) -> Result<()> {
+    exec_gc_with_cancel(args, &CancellationToken::new())
+}
+
+/// Run workflow journal GC while honoring the caller's cancellation token.
+pub fn exec_gc_with_cancel(args: GcArgs, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    let repo_root = resolve_repo_root()?;
+    run_gc_with_cancel(&args, &repo_root, args.output_mode(), cancel).map(|_| ())
+}
+
+fn resolve_repo_root() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    run_gc(&args, &cwd, args.output_mode()).map(|_| ())
+    match crate::git::worktree::WorktreeContext::resolve_from_path(&cwd) {
+        Ok(worktree) => Ok(worktree.current_worktree_root),
+        Err(_error) if cwd.join(".crab").is_dir() => {
+            // Journal inspection is useful before Git initialization; the
+            // durable `.crab` directory is sufficient to identify its root.
+            Ok(cwd)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Testable variant of `show`.
@@ -232,7 +253,7 @@ pub fn run_show(args: &ShowArgs, repo_root: &Path, mode: OutputMode) -> Result<(
     }
     let journal = Journal::open(&journal_path)?;
     let run_row = journal.run_row(run_id)?;
-    let rows = journal.all_stage_rows(run_id)?;
+    let rows = journal.all_stage_rows_with_limit(run_id, MAX_WORKFLOW_STAGE_ROWS)?;
     let payload = build_show_payload(run_id, run_row.as_ref(), &rows);
     emit_show(&payload, mode);
     Ok(())
@@ -252,34 +273,75 @@ pub fn run_ls(_args: &LsArgs, repo_root: &Path, mode: OutputMode) -> Result<()> 
 /// Testable variant of `gc`. Returns the payload so tests can
 /// inspect it without parsing stdout.
 pub fn run_gc(args: &GcArgs, repo_root: &Path, mode: OutputMode) -> Result<GcPayload> {
+    run_gc_with_cancel(args, repo_root, mode, &CancellationToken::new())
+}
+
+/// Testable variant of `gc` with cancellation support.
+pub fn run_gc_with_cancel(
+    args: &GcArgs,
+    repo_root: &Path,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<GcPayload> {
+    check_cancelled(cancel)?;
     let runs_dir = runs_dir(repo_root);
-    let summaries = collect_summaries(&runs_dir)?;
+    let workflow_root = runs_dir
+        .parent()
+        .ok_or_else(|| CrabError::Internal("workflow runs directory has no parent".to_owned()))?;
+    let _scheduler_lock = crate::workflow::scheduler_lock::SchedulerLock::try_acquire(
+        workflow_root,
+    )?
+    .ok_or(CrabError::ConcurrentMaintenance {
+        other: "workflow run",
+    })?;
+    let summaries = collect_summaries_with_cancel(&runs_dir, cancel)?;
     let payload = decide_gc(summaries, args.keep);
+    let mut removed = Vec::new();
+    let mut failures = Vec::new();
+    let mut failures_omitted = 0usize;
     if !args.dry_run {
         for run_id in &payload.removed {
+            check_cancelled(cancel)?;
             let dir = runs_dir.join(run_id);
             match fs::remove_dir_all(&dir) {
-                Ok(()) => info!(run_id = %run_id, "workflow journal gc: removed"),
-                // If another process already cleaned this up (or
-                // the operator manually deleted it between the
-                // scan and the rm), log and keep going — we still
-                // want to remove the rest.
-                Err(e) => warn!(
-                    run_id = %run_id,
-                    error = %e,
-                    "workflow journal gc: could not remove journal directory",
-                ),
+                Ok(()) => {
+                    info!(run_id = %run_id, "workflow journal gc: removed");
+                    removed.push(run_id.clone());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    removed.push(run_id.clone());
+                }
+                Err(error) if failures.len() < MAX_WORKFLOW_GC_FAILURES => {
+                    failures.push(format!("{run_id}: {error}"));
+                }
+                Err(_) => failures_omitted = failures_omitted.saturating_add(1),
             }
         }
+    } else {
+        check_cancelled(cancel)?;
+        removed.clone_from(&payload.removed);
     }
+    check_cancelled(cancel)?;
     let out = GcPayload {
         keep: args.keep,
         dry_run: args.dry_run,
-        removed: payload.removed.clone(),
+        removed,
         kept: payload.kept.clone(),
         in_flight: payload.in_flight.clone(),
     };
     emit_gc(&out, mode);
+    if !failures.is_empty() || failures_omitted > 0 {
+        return Err(CrabError::Internal(format!(
+            "workflow journal GC failed to remove {} journal(s): {}{}",
+            failures.len().saturating_add(failures_omitted),
+            failures.join("; "),
+            if failures_omitted > 0 {
+                format!(" ({} additional failures omitted)", failures_omitted)
+            } else {
+                String::new()
+            }
+        )));
+    }
     Ok(out)
 }
 
@@ -303,6 +365,14 @@ fn journal_path_for(repo_root: &Path, run_id: Uuid) -> PathBuf {
 /// Returns an empty vector when `runs/` is absent (fresh repo, or a
 /// repo that has never run a workflow).
 fn collect_summaries(runs_dir: &Path) -> Result<Vec<JournalSummary>> {
+    collect_summaries_with_cancel(runs_dir, &CancellationToken::new())
+}
+
+fn collect_summaries_with_cancel(
+    runs_dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<Vec<JournalSummary>> {
+    check_cancelled(cancel)?;
     let mut out: Vec<JournalSummary> = Vec::new();
     let entries = match fs::read_dir(runs_dir) {
         Ok(e) => e,
@@ -310,7 +380,11 @@ fn collect_summaries(runs_dir: &Path) -> Result<Vec<JournalSummary>> {
         Err(e) => return Err(CrabError::Io(e)),
     };
     for entry in entries {
+        check_cancelled(cancel)?;
         let entry = entry.map_err(CrabError::Io)?;
+        if !entry.file_type().map_err(CrabError::Io)?.is_dir() {
+            continue;
+        }
         let name = entry.file_name();
         let run_id_str = name.to_string_lossy().into_owned();
         let Ok(run_id) = Uuid::parse_str(&run_id_str) else {
@@ -319,6 +393,14 @@ fn collect_summaries(runs_dir: &Path) -> Result<Vec<JournalSummary>> {
         let journal_path = entry.path().join("journal.db");
         if !journal_path.exists() {
             continue;
+        }
+        if out.len() >= MAX_WORKFLOW_JOURNALS {
+            return Err(CrabError::Configuration {
+                key: "workflow journal count".to_owned(),
+                origin: format!(
+                    "workflow journal directory contains more than {MAX_WORKFLOW_JOURNALS} readable journals"
+                ),
+            });
         }
         let journal = match Journal::open(&journal_path) {
             Ok(j) => j,
@@ -709,6 +791,37 @@ mod tests {
         assert!(runs_dir(root).join(in_flight.to_string()).exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn gc_ignores_symlinked_run_directories() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let run_id = Uuid::now_v7();
+        let outside_journal = outside.path().join("journal.db");
+        let journal = Journal::open(&outside_journal).unwrap();
+        journal.insert_run_start(run_id, "test", "host").unwrap();
+        journal
+            .mark_run_outcome(run_id, RunOutcome::Success)
+            .unwrap();
+        let runs = runs_dir(tmp.path());
+        fs::create_dir_all(&runs).unwrap();
+        std::os::unix::fs::symlink(outside.path(), runs.join(run_id.to_string())).unwrap();
+
+        let payload = run_gc(
+            &GcArgs {
+                keep: 0,
+                dry_run: false,
+                json: false,
+            },
+            tmp.path(),
+            OutputMode::Json,
+        )
+        .unwrap();
+
+        assert!(payload.removed.is_empty());
+        assert!(outside_journal.exists());
+    }
+
     #[test]
     fn gc_dry_run_preserves_filesystem() {
         let tmp = TempDir::new().unwrap();
@@ -728,6 +841,26 @@ mod tests {
         assert_eq!(payload.removed, vec![run_id.to_string()]);
         // Directory is still on disk because of --dry-run.
         assert!(runs_dir(root).join(run_id.to_string()).exists());
+    }
+
+    #[test]
+    fn gc_honors_cancellation_before_scanning_or_deleting() {
+        let tmp = TempDir::new().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = run_gc_with_cancel(
+            &GcArgs {
+                keep: 0,
+                dry_run: false,
+                json: false,
+            },
+            tmp.path(),
+            OutputMode::Json,
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CrabError::Cancelled));
     }
 
     #[test]

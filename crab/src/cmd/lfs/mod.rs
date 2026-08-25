@@ -36,8 +36,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::OutputMode;
+use tokio_util::sync::CancellationToken;
 
 pub(super) fn hooks_dir_from(root: &Path) -> Result<PathBuf> {
     crate::cmd::install::resolve_hooks_dir(root)
@@ -210,7 +211,7 @@ pub enum LfsCmd {
         #[arg(long)]
         dry_run: bool,
         /// Rollback a previous conversion.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["from", "to", "pattern", "dry_run"])]
         rollback: bool,
     },
     /// Generate cloud lifecycle policy for LFS objects.
@@ -401,7 +402,7 @@ pub enum LfsCmd {
         /// Continue or halt when verification is disabled; remote verification always halts.
         #[arg(long, value_name = "MODE", value_parser = ["halt", "continue"])]
         when_unverified: Option<String>,
-        /// Accept Git LFS recent-pruning flag; Crab does not retain recent unreferenced objects.
+        /// Prune objects retained only by recent-ref protection.
         #[arg(long)]
         recent: bool,
         /// Report what would be pruned without deleting.
@@ -718,6 +719,15 @@ where
 /// Returns the process exit code. Most subcommands return `SUCCESS`;
 /// `pointer --check` returns a non-zero code for invalid pointers.
 pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
+    run_lfs_with_cancel(cmd, &CancellationToken::new())
+}
+
+/// Dispatch an LFS command while honoring cancellation for optimize-owned paths.
+pub fn run_lfs_with_cancel(
+    cmd: &LfsCmd,
+    cancel: &CancellationToken,
+) -> Result<std::process::ExitCode> {
+    check_cancelled(cancel)?;
     match cmd {
         LfsCmd::Install {
             force,
@@ -927,7 +937,9 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
             }
         }
         LfsCmd::Untrack { patterns } => {
-            let repo_root = std::env::current_dir()?;
+            let cwd = std::env::current_dir()?;
+            let repo_root = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?
+                .current_worktree_root;
             for pattern in patterns {
                 crate::lfs::track::untrack(pattern, &repo_root)?;
                 println!("Untracking \"{pattern}\"");
@@ -1109,17 +1121,20 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
             force,
             verbose,
         } => {
-            prune::run_lfs_prune(prune::LfsPruneOptions {
-                verify_remote: *verify_remote,
-                no_verify_remote: *no_verify_remote,
-                verify_unreachable: *verify_unreachable,
-                no_verify_unreachable: *no_verify_unreachable,
-                when_unverified: when_unverified.clone(),
-                recent: *recent,
-                dry_run: *dry_run,
-                force: *force,
-                verbose: *verbose,
-            })?;
+            prune::run_lfs_prune_with_cancel(
+                prune::LfsPruneOptions {
+                    verify_remote: *verify_remote,
+                    no_verify_remote: *no_verify_remote,
+                    verify_unreachable: *verify_unreachable,
+                    no_verify_unreachable: *no_verify_unreachable,
+                    when_unverified: when_unverified.clone(),
+                    recent: *recent,
+                    dry_run: *dry_run,
+                    force: *force,
+                    verbose: *verbose,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Migrate(migrate_cmd) => match migrate_cmd {
             LfsMigrateCmd::Import {
@@ -1298,11 +1313,14 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
             test,
             crab_cache,
         } => {
-            dedup::run_lfs_dedup(dedup::LfsDedupOptions {
-                dry_run: *dry_run,
-                test: *test,
-                crab_cache: *crab_cache,
-            })?;
+            dedup::run_lfs_dedup_with_cancel(
+                dedup::LfsDedupOptions {
+                    dry_run: *dry_run,
+                    test: *test,
+                    crab_cache: *crab_cache,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Logs {
             transfer_history,
@@ -1324,9 +1342,11 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
             dry_run,
             rollback,
         } => {
-            let repo_root = std::env::current_dir()?;
+            let cwd = std::env::current_dir()?;
+            let repo_root = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?
+                .current_worktree_root;
             if *rollback {
-                convert::run_rollback(&repo_root)?;
+                convert::run_rollback_with_cancel(&repo_root, cancel)?;
                 println!("Rollback complete.");
                 return Ok(std::process::ExitCode::SUCCESS);
             }
@@ -1340,7 +1360,7 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
                     return Ok(std::process::ExitCode::FAILURE);
                 }
             };
-            convert::run_convert(direction, pattern, *dry_run, &repo_root)?;
+            convert::run_convert_with_cancel(direction, pattern, *dry_run, &repo_root, cancel)?;
         }
         LfsCmd::LifecyclePolicy {
             backend,

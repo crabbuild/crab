@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::core::context::AppContext;
@@ -1226,7 +1226,7 @@ fn smudge_content(
             // Try LFS smudge regardless of blob content type.
             if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
                 let oid_hex = crab_git::lfs_pointer::hex_encode(&ptr.oid);
-                if let Some(local) = try_local_lfs_cache(&ptr)? {
+                if let Some(local) = try_local_lfs_cache(&ptr, session.repo_root())? {
                     tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
                     return Ok(Bytes::from(content));
@@ -1235,7 +1235,7 @@ fn smudge_content(
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
                     let rt = tokio::runtime::Handle::current();
                     let bytes = rt.block_on(store.verify(&ptr.oid))?;
-                    cache_lfs_locally(&ptr, &bytes)?;
+                    cache_lfs_locally(&ptr, &bytes, session.repo_root())?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
                     return Ok(Bytes::from(content));
@@ -1311,7 +1311,7 @@ fn smudge_by_blob_classification(
             let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
 
             // Non-lazy: try local .git/lfs/objects/ cache first, then remote.
-            if let Some(local) = try_local_lfs_cache(&pointer)? {
+            if let Some(local) = try_local_lfs_cache(&pointer, session.repo_root())? {
                 tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
                 let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
                 return Ok(Bytes::from(content));
@@ -1327,7 +1327,7 @@ fn smudge_by_blob_classification(
                 let rt = tokio::runtime::Handle::current();
                 let bytes = rt.block_on(store.verify(&pointer.oid))?;
                 // Cache locally for future checkouts.
-                cache_lfs_locally(&pointer, &bytes)?;
+                cache_lfs_locally(&pointer, &bytes, session.repo_root())?;
                 let content =
                     crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
                 return Ok(Bytes::from(content));
@@ -1635,8 +1635,26 @@ fn write_flush<W: Write>(output: &mut W) -> Result<()> {
 }
 
 /// Try to read an LFS object from the local `.git/lfs/objects/` cache.
-fn try_local_lfs_cache(pointer: &crab_git::lfs_pointer::LfsPointer) -> Result<Option<Vec<u8>>> {
-    let ctx = WorktreeContext::resolve()?;
+fn try_local_lfs_cache(
+    pointer: &crab_git::lfs_pointer::LfsPointer,
+    repo_root: Option<&Path>,
+) -> Result<Option<Vec<u8>>> {
+    let ctx = match repo_root {
+        Some(root) => match WorktreeContext::resolve_from_path(root) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
+                return Ok(None);
+            }
+        },
+        None => match WorktreeContext::resolve() {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
+                return Ok(None);
+            }
+        },
+    };
     match crate::lfs::cache::read_pointer(&ctx.common_git_dir.join("lfs"), pointer) {
         Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
         result => result,
@@ -1644,8 +1662,27 @@ fn try_local_lfs_cache(pointer: &crab_git::lfs_pointer::LfsPointer) -> Result<Op
 }
 
 /// Cache an LFS object in the local `.git/lfs/objects/` directory.
-fn cache_lfs_locally(pointer: &crab_git::lfs_pointer::LfsPointer, content: &[u8]) -> Result<()> {
-    let ctx = WorktreeContext::resolve()?;
+fn cache_lfs_locally(
+    pointer: &crab_git::lfs_pointer::LfsPointer,
+    content: &[u8],
+    repo_root: Option<&Path>,
+) -> Result<()> {
+    let ctx = match repo_root {
+        Some(root) => match WorktreeContext::resolve_from_path(root) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
+                return Ok(());
+            }
+        },
+        None => match WorktreeContext::resolve() {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
+                return Ok(());
+            }
+        },
+    };
     crate::lfs::cache::install_bytes(
         &ctx.common_git_dir.join("lfs"),
         &pointer.oid,

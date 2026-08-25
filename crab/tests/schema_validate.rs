@@ -536,6 +536,7 @@ fn validate_optimize_xorbs_event_variants() {
             bytes_written: 900,
             elapsed_ms: 1234,
             corrupt_list: Vec::new(),
+            corrupt_list_omitted: 0,
         }))
         .expect("summary serializes"),
         serde_json::to_value(OptimizeXorbsEventPayload::Control(

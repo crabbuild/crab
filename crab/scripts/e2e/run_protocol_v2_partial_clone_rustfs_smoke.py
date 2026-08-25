@@ -958,14 +958,19 @@ class ProtocolV2PartialCloneSmoke:
             ["switch", "-c", "fixture/lfs-pointers"],
             name="create LFS pointer fixture",
         )
+        lfs_content = deterministic_bytes(8 * 1024 * 1024, f"{self.run_id}:lfs-object")
+        lfs_oid_hex = hashlib.sha256(lfs_content).hexdigest()
         lfs_pointer = (
             "version https://git-lfs.github.com/spec/v1\n"
-            f"oid sha256:{hashlib.sha256(f'{self.run_id}:lfs'.encode()).hexdigest()}\n"
-            "size 8388608\n"
+            f"oid sha256:{lfs_oid_hex}\n"
+            f"size {len(lfs_content)}\n"
         ).encode()
         lfs_path = self.source / "lfs-pointer.bin"
         lfs_path.write_bytes(lfs_pointer)
         self.lfs_pointer_bytes = lfs_pointer
+        lfs_object = self.source / ".git" / "lfs" / "objects" / lfs_oid_hex[:2] / lfs_oid_hex[2:4] / lfs_oid_hex
+        lfs_object.parent.mkdir(parents=True, exist_ok=True)
+        lfs_object.write_bytes(lfs_content)
         self.run_git(self.source, ["add", lfs_path.name])
         self.run_git(self.source, ["commit", "-m", "LFS pointer fixture"])
         lfs_oid = self.git_value(

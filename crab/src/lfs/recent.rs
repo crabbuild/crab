@@ -1,5 +1,6 @@
 //! Git LFS recent-ref and recent-commit selection helpers.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::core::error::{CrabError, Result};
@@ -9,11 +10,21 @@ use crate::core::error::{CrabError, Result};
 /// `extra_days` is added to `lfs.fetchrecentrefsdays`, matching prune's
 /// offset-based retention window.
 pub(crate) fn recent_ref_oids(extra_days: u64) -> Result<Vec<String>> {
-    let fetch_days = git_config_u64("lfs.fetchrecentrefsdays", 7)?;
+    let root = std::env::current_dir().map_err(CrabError::Io)?;
+    recent_ref_oids_in(&root, extra_days)
+}
+
+pub(crate) fn git_config_u64(key: &str, default: u64) -> Result<u64> {
+    let root = std::env::current_dir().map_err(CrabError::Io)?;
+    git_config_u64_in(&root, key, default)
+}
+
+pub(crate) fn recent_ref_oids_in(repo_root: &Path, extra_days: u64) -> Result<Vec<String>> {
+    let fetch_days = git_config_u64_in(repo_root, "lfs.fetchrecentrefsdays", 7)?;
     if fetch_days == 0 {
         return Ok(Vec::new());
     }
-    let include_remotes = git_config_bool("lfs.fetchrecentremoterefs", true)?;
+    let include_remotes = git_config_bool_in(repo_root, "lfs.fetchrecentremoterefs", true)?;
     let cutoff = cutoff_unix(fetch_days.saturating_add(extra_days));
 
     let mut args = vec![
@@ -27,11 +38,15 @@ pub(crate) fn recent_ref_oids(extra_days: u64) -> Result<Vec<String>> {
 
     let output = Command::new("git")
         .args(args)
+        .current_dir(repo_root)
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to list recent refs: {e}")))?;
 
     if !output.status.success() {
-        return Ok(Vec::new());
+        return Err(CrabError::Internal(format!(
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     Ok(parse_recent_ref_oids(
@@ -42,11 +57,16 @@ pub(crate) fn recent_ref_oids(extra_days: u64) -> Result<Vec<String>> {
 
 /// Returns commits inside `lfs.fetchrecentcommitsdays` reachable from revisions.
 pub(crate) fn recent_commit_oids(revisions: &[String]) -> Result<Vec<String>> {
+    let root = std::env::current_dir().map_err(CrabError::Io)?;
+    recent_commit_oids_in(&root, revisions)
+}
+
+pub(crate) fn recent_commit_oids_in(repo_root: &Path, revisions: &[String]) -> Result<Vec<String>> {
     if revisions.is_empty() {
         return Ok(Vec::new());
     }
 
-    let days = git_config_u64("lfs.fetchrecentcommitsdays", 0)?;
+    let days = git_config_u64_in(repo_root, "lfs.fetchrecentcommitsdays", 0)?;
     if days == 0 {
         return Ok(Vec::new());
     }
@@ -57,6 +77,7 @@ pub(crate) fn recent_commit_oids(revisions: &[String]) -> Result<Vec<String>> {
 
     let output = Command::new("git")
         .args(&args)
+        .current_dir(repo_root)
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to list recent commits: {e}")))?;
 
@@ -76,14 +97,21 @@ pub(crate) fn recent_commit_oids(revisions: &[String]) -> Result<Vec<String>> {
     ))
 }
 
-pub(crate) fn git_config_u64(key: &str, default: u64) -> Result<u64> {
+pub(crate) fn git_config_u64_in(repo_root: &Path, key: &str, default: u64) -> Result<u64> {
     let output = Command::new("git")
         .args(["config", "--type", "int", "--get", key])
+        .current_dir(repo_root)
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to read {key}: {e}")))?;
 
     if !output.status.success() {
-        return Ok(default);
+        if output.status.code() == Some(1) {
+            return Ok(default);
+        }
+        return Err(CrabError::Internal(format!(
+            "git config failed while reading {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -93,14 +121,21 @@ pub(crate) fn git_config_u64(key: &str, default: u64) -> Result<u64> {
     })
 }
 
-fn git_config_bool(key: &str, default: bool) -> Result<bool> {
+fn git_config_bool_in(repo_root: &Path, key: &str, default: bool) -> Result<bool> {
     let output = Command::new("git")
         .args(["config", "--type", "bool", "--get", key])
+        .current_dir(repo_root)
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to read {key}: {e}")))?;
 
     if !output.status.success() {
-        return Ok(default);
+        if output.status.code() == Some(1) {
+            return Ok(default);
+        }
+        return Err(CrabError::Internal(format!(
+            "git config failed while reading {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();

@@ -46,6 +46,7 @@ use crate::core::metrics::Metrics;
 use crab_cache_store::CachingStore;
 use crab_metadata::file_index_lookup::{FileIndexLookupSession, SharedFileIndexLookup};
 use crab_xet::shard::ShardReader;
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 type StoreLayout = crab_storage::StoreLayout<crab_storage::Store>;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::MDBFileInfo;
@@ -330,7 +331,10 @@ impl StoreClient {
     async fn load_shard(&self, shard_hash: &MerkleHash) -> crate::core::error::Result<ShardReader> {
         let path = self.router.shard_path(shard_hash);
         debug!(shard_hash = %shard_hash.hex(), "store_client: downloading shard");
-        let (data, _) = self.store.get_with_etag(&path).await?;
+        let (data, _) = self
+            .store
+            .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
+            .await?;
 
         Ok(ShardReader::from_bytes(data, *shard_hash))
     }

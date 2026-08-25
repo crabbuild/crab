@@ -118,6 +118,50 @@ impl CacheClient {
         resp.bytes().await.map_err(|e| map_reqwest_error(&url, e))
     }
 
+    /// GET an immutable object while bounding response-body consumption.
+    pub async fn get_bounded(&self, path: &str, max_bytes: u64) -> Result<Bytes> {
+        let url = format!("{}/v1/{}", self.base_url, path);
+        let req = self.client.get(&url);
+        let mut resp = self
+            .apply_auth(req)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(&url, e))?;
+
+        check_get_status(&url, &resp)?;
+        if let Some(size) = resp.content_length()
+            && size > max_bytes
+        {
+            return Err(CacheError::CorruptObject {
+                path: path.to_owned(),
+                reason: format!(
+                    "cache service object is {size} bytes; bounded read supports at most {max_bytes} bytes"
+                ),
+            });
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| map_reqwest_error(&url, e))? {
+            let next_len =
+                body.len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| CacheError::CorruptObject {
+                        path: path.to_owned(),
+                        reason: "cache service response length overflow".to_owned(),
+                    })?;
+            if next_len as u64 > max_bytes {
+                return Err(CacheError::CorruptObject {
+                    path: path.to_owned(),
+                    reason: format!(
+                        "cache service response exceeded the bounded read limit of {max_bytes} bytes"
+                    ),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(body))
+    }
+
     /// HEAD an immutable object through the cache service.
     pub async fn head(&self, path: &str) -> Result<CacheObjectHead> {
         let url = format!("{}/v1/{}", self.base_url, path);
@@ -172,7 +216,7 @@ impl CacheClient {
             .client
             .get(&url)
             .header(reqwest::header::RANGE, &range_value);
-        let resp = self
+        let mut resp = self
             .apply_auth(req)
             .send()
             .await
@@ -180,15 +224,40 @@ impl CacheClient {
 
         let returned = check_range_status(&url, &resp, &range_value, range.start, last_byte)?;
         let cache_status = response_cache_status(&resp);
-        let body = resp.bytes().await.map_err(|e| map_reqwest_error(&url, e))?;
-        check_range_body_len(
-            &url,
-            &range_value,
-            returned.range.end - returned.range.start,
-            body.len(),
-        )?;
+        let expected_len = returned.range.end - returned.range.start;
+        if resp
+            .content_length()
+            .is_some_and(|length| length > expected_len)
+        {
+            return Err(CacheError::Service {
+                reason: format!(
+                    "range response body exceeds {expected_len} bytes for {range_value}: {url}"
+                ),
+            });
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| map_reqwest_error(&url, e))? {
+            let next_len =
+                body.len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| CacheError::Service {
+                        reason: format!(
+                            "range response body length overflow for {range_value}: {url}"
+                        ),
+                    })?;
+            if u64::try_from(next_len).unwrap_or(u64::MAX) > expected_len {
+                return Err(CacheError::Service {
+                    reason: format!(
+                        "range response body exceeds {expected_len} bytes for {range_value}: {url}"
+                    ),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        check_range_body_len(&url, &range_value, expected_len, body.len())?;
         Ok(CacheObjectRange {
-            data: body,
+            data: Bytes::from(body),
             range: returned.range,
             total_size: returned.total_size,
             cache_status,
@@ -1054,6 +1123,29 @@ mod tests {
         let err = client.get_range("xorbs/test", 2..5).await.unwrap_err();
 
         assert!(err.to_string().contains("range body length"));
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn get_range_rejects_oversized_body_before_materializing() {
+        let (addr, shutdown) = start_range_server(
+            StatusCode::PARTIAL_CONTENT,
+            Some("bytes 2-4/10"),
+            b"23456789",
+        )
+        .await;
+        let client = CacheClient::new(
+            &format!("http://{addr}"),
+            &CacheServiceAuth::None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = client.get_range("xorbs/test", 2..5).await.unwrap_err();
+
+        assert!(err.to_string().contains("exceeds 3 bytes"));
         let _ = shutdown.send(());
     }
 

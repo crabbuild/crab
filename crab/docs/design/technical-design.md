@@ -2025,7 +2025,7 @@ Format upgrades that require all clients to upgrade are rare and announced. The 
 
 - **Storage DoS**: malicious writer fills bucket with bogus data. Mitigation: S3 bucket-level size limits or cost alarms; user responsibility.
 - **Request-rate DoS**: many clients hammering S3. Mitigation: S3 auto-scales; costs money but doesn’t crash.
-- **Client resource DoS**: malicious repo contents designed to exhaust client memory (e.g., a shard referencing 10 million xorbs). Mitigation: crab enforces sanity limits on shard/xorb counts per operation, fails closed on exceeding them.
+- **Client resource DoS**: malicious repo contents designed to exhaust client memory (e.g., a shard referencing 10 million xorbs). Mitigation: `optimize` enforces caps of 1,000,000 canonical shards, 10,000,000 distinct source xorbs, 1,000,000 xorb references per source shard, and 512 MiB per source shard; the inventory and planner remain disk-backed/batched and fail closed before exceeding those limits.
 
 ### 20.5 Out of Scope
 

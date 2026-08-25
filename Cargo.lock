@@ -2053,10 +2053,12 @@ name = "crab-cache"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "crab-types",
  "crab-xet",
+ "crc32fast",
  "filetime",
  "globset",
  "reqwest 0.12.28",
@@ -2066,6 +2068,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "xet-client",

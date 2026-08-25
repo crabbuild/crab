@@ -39,6 +39,7 @@ use tracing::Instrument;
 
 use crate::core::error::{CrabError, MetaDbError, Result};
 use crate::core::metrics::Metrics;
+use crate::metadata::metadb::MetaDbEngineConfig;
 
 const GET_BATCH_CONCURRENCY: usize = 256;
 const DENSE_BATCH_SCAN_THRESHOLD: usize = 16_384;
@@ -51,6 +52,76 @@ pub(super) fn new_db_cache() -> Arc<dyn DbCache> {
         max_capacity: DB_CACHE_CAPACITY_BYTES,
         ..FoyerCacheOptions::default()
     }))
+}
+
+pub(crate) fn compactor_options(
+    config: &MetaDbEngineConfig,
+) -> Result<slatedb::config::CompactorOptions> {
+    validate_engine_config(config)?;
+    let threshold =
+        usize::try_from(config.compaction_threshold).map_err(|_| CrabError::Configuration {
+            key: "metadb compaction_threshold".to_owned(),
+            origin: "value cannot be represented by SlateDB".to_owned(),
+        })?;
+    let defaults = slatedb::config::SizeTieredCompactionSchedulerOptions::default();
+    let scheduler = slatedb::config::SizeTieredCompactionSchedulerOptions {
+        min_compaction_sources: threshold,
+        max_compaction_sources: defaults.max_compaction_sources.max(threshold),
+        ..defaults
+    };
+    Ok(slatedb::config::CompactorOptions {
+        scheduler_options: scheduler.into(),
+        ..slatedb::config::CompactorOptions::default()
+    })
+}
+
+pub(crate) fn filter_policies(
+    config: &MetaDbEngineConfig,
+) -> Result<Vec<Arc<dyn slatedb::FilterPolicy>>> {
+    validate_engine_config(config)?;
+    Ok(vec![Arc::new(slatedb::BloomFilterPolicy::new(
+        config.bloom_bits_per_key,
+    ))])
+}
+
+fn validate_engine_config(config: &MetaDbEngineConfig) -> Result<()> {
+    for (key, value) in [
+        (
+            "compaction_threshold",
+            u64::from(config.compaction_threshold),
+        ),
+        ("wal_flush_size", config.wal_flush_size),
+        ("bloom_bits_per_key", u64::from(config.bloom_bits_per_key)),
+    ] {
+        if value == 0 {
+            return Err(CrabError::Configuration {
+                key: format!("metadb {key}"),
+                origin: "value must be greater than zero".to_owned(),
+            });
+        }
+    }
+    usize::try_from(config.wal_flush_size).map_err(|_| CrabError::Configuration {
+        key: "metadb wal_flush_size".to_owned(),
+        origin: "value cannot be represented by SlateDB".to_owned(),
+    })?;
+    Ok(())
+}
+
+fn slatedb_settings(config: &MetaDbEngineConfig) -> Result<slatedb::config::Settings> {
+    Ok(slatedb::config::Settings {
+        // Crab owns explicit durability boundaries. Disabling SlateDB's
+        // 100 ms timer prevents idle and post-commit batch work from
+        // generating one WAL object per timer tick.
+        flush_interval: None,
+        l0_sst_size_bytes: usize::try_from(config.wal_flush_size).map_err(|_| {
+            CrabError::Configuration {
+                key: "metadb wal_flush_size".to_owned(),
+                origin: "value cannot be represented by SlateDB".to_owned(),
+            }
+        })?,
+        compactor_options: Some(compactor_options(config)?),
+        ..slatedb::config::Settings::default()
+    })
 }
 
 fn dense_batch_scan_options() -> ScanOptions {
@@ -217,7 +288,14 @@ impl Db {
         path: ObjectPath,
         label: &'static str,
     ) -> Result<Self> {
-        Self::open_with_cache(store, path, label, new_db_cache()).await
+        Self::open_with_cache(
+            store,
+            path,
+            label,
+            new_db_cache(),
+            &MetaDbEngineConfig::default(),
+        )
+        .await
     }
 
     pub(super) async fn open_with_cache(
@@ -225,18 +303,14 @@ impl Db {
         path: ObjectPath,
         label: &'static str,
         cache: Arc<dyn DbCache>,
+        config: &MetaDbEngineConfig,
     ) -> Result<Self> {
         let span = tracing::debug_span!("metadb.open", db = label, path = %path, mode = "rw");
         let start = std::time::Instant::now();
-        let settings = slatedb::config::Settings {
-            // Crab owns explicit durability boundaries. Disabling SlateDB's
-            // 100 ms timer prevents idle and post-commit batch work from
-            // generating one WAL object per timer tick.
-            flush_interval: None,
-            ..slatedb::config::Settings::default()
-        };
+        let settings = slatedb_settings(config)?;
         match slatedb::Db::builder(path.clone(), store)
             .with_settings(settings)
+            .with_filter_policies(filter_policies(config)?)
             .with_db_cache(Arc::clone(&cache))
             .build()
             .instrument(span.clone())
@@ -292,7 +366,14 @@ impl Db {
         path: ObjectPath,
         label: &'static str,
     ) -> Result<Self> {
-        Self::open_readonly_with_cache(store, path, label, new_db_cache()).await
+        Self::open_readonly_with_cache(
+            store,
+            path,
+            label,
+            new_db_cache(),
+            &MetaDbEngineConfig::default(),
+        )
+        .await
     }
 
     pub(super) async fn open_readonly_with_cache(
@@ -300,6 +381,7 @@ impl Db {
         path: ObjectPath,
         label: &'static str,
         cache: Arc<dyn DbCache>,
+        config: &MetaDbEngineConfig,
     ) -> Result<Self> {
         let span = tracing::debug_span!("metadb.open", db = label, path = %path, mode = "ro");
         let start = std::time::Instant::now();
@@ -309,6 +391,7 @@ impl Db {
         // has the original to surface.
         match slatedb::DbReader::builder(path.clone(), store)
             .with_db_cache(Arc::clone(&cache))
+            .with_filter_policies(filter_policies(config)?)
             .build()
             .instrument(span.clone())
             .await
@@ -804,6 +887,49 @@ mod tests {
 
     fn stub_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
+    }
+
+    #[test]
+    fn engine_config_maps_to_slatedb_settings() {
+        let config = MetaDbEngineConfig {
+            compaction_threshold: 12,
+            wal_flush_size: 8 * 1024 * 1024,
+            bloom_bits_per_key: 14,
+        };
+
+        let settings = slatedb_settings(&config).expect("valid engine config");
+        let compactor = settings.compactor_options.expect("compactor options");
+
+        assert_eq!(settings.l0_sst_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(
+            compactor.scheduler_options.get("min_compaction_sources"),
+            Some(&String::from("12"))
+        );
+        assert_eq!(
+            compactor.scheduler_options.get("max_compaction_sources"),
+            Some(&String::from("12"))
+        );
+        assert_eq!(filter_policies(&config).expect("filter policy").len(), 1);
+    }
+
+    #[test]
+    fn engine_config_rejects_zero_tunables() {
+        for config in [
+            MetaDbEngineConfig {
+                compaction_threshold: 0,
+                ..MetaDbEngineConfig::default()
+            },
+            MetaDbEngineConfig {
+                wal_flush_size: 0,
+                ..MetaDbEngineConfig::default()
+            },
+            MetaDbEngineConfig {
+                bloom_bits_per_key: 0,
+                ..MetaDbEngineConfig::default()
+            },
+        ] {
+            assert!(slatedb_settings(&config).is_err());
+        }
     }
 
     #[tokio::test]

@@ -47,7 +47,12 @@ Read-only — probes the bucket and prints what Crab would apply. No write crede
 crab tier plan --apply
 ```
 
-Crab writes a backup of the current lifecycle configuration, then submits the new rules via CAS to prevent races.
+Crab requires a provider conditional-write guard before lifecycle mutation,
+writes a backup of the current configuration, submits the new rules, and
+requires an equivalent provider read-back before reporting success. The S3
+lifecycle API has no conditional write, and GCS/Azure safe prefix-preserving
+write paths are not wired, so the CLI currently renders plans but fails closed
+on lifecycle apply for all three providers.
 
 ### 3. Roll back if needed
 
@@ -133,13 +138,17 @@ Deleting an object before its minimum retention period incurs an early-deletion 
 
 ## Rollback and Safety
 
-Every `tier plan --apply` writes a backup before modifying the bucket:
+Every supported `tier plan --apply` writes a backup before modifying the bucket:
 
 ```text
 .crab/tier/backups/<RFC3339-ts>-pre-apply.json
 ```
 
-If the bucket's lifecycle has been modified since the backup was taken, the CAS guard detects the conflict and the rollback fails safely.
+New backups record both the previous and applied documents. Rollback validates
+the provider and fails if the current policy drifted, then restores the previous
+document or deletes the policy when none existed before apply. Providers
+without a conditional lifecycle write are rejected before a backup or
+mutation. Dry-run writes no backup.
 
 ## Common Workflow
 
@@ -153,7 +162,7 @@ crab tier plan
 # 3. Apply
 crab tier plan --apply
 
-# 4. Wait for provider evaluation (S3 ~24h, GCS ~24h, Azure up to 7d)
+# 4. Wait for S3 lifecycle evaluation (~24h)
 
 # 5. Compare costs
 crab doctor --cost --json > after.json

@@ -419,9 +419,8 @@ pub fn mark_matches_stat_dirty_paths(
 // ---------------------------------------------------------------------------
 
 fn git_index_paths(repo_root: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
+    let output = git_command(repo_root)
         .args(["ls-files", "-z"])
-        .current_dir(repo_root)
         .output()
         .map_err(|e| CrabError::Configuration {
             key: "lfs track".to_owned(),
@@ -442,6 +441,23 @@ fn git_index_paths(repo_root: &Path) -> Result<Vec<String>> {
         .filter(|entry| !entry.is_empty())
         .map(|entry| String::from_utf8_lossy(entry).into_owned())
         .collect())
+}
+
+/// Run Git against an explicit repository root, ignoring ambient repository
+/// overrides that could redirect an index scan to another checkout.
+fn git_command(repo_root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(repo_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
+        .env_remove("GIT_NAMESPACE");
+    command
 }
 
 fn track_pattern_matches(pattern: &str, path: &str, filename: bool) -> bool {
@@ -974,7 +990,7 @@ mod tests {
     #[test]
     fn no_modify_attrs_marks_indexed_matches_without_attrs_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .arg("init")
             .arg("-q")
             .current_dir(dir.path())
@@ -982,7 +998,7 @@ mod tests {
             .unwrap();
         let path = dir.path().join("data.bin");
         std::fs::write(&path, b"payload").unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .args(["add", "data.bin"])
             .current_dir(dir.path())
             .status()
@@ -1000,7 +1016,7 @@ mod tests {
     #[test]
     fn filename_match_is_literal_for_index_matches() {
         let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .arg("init")
             .arg("-q")
             .current_dir(dir.path())
@@ -1008,7 +1024,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("project [1].psd"), b"payload").unwrap();
         std::fs::write(dir.path().join("project X.psd"), b"payload").unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .args(["add", "project [1].psd", "project X.psd"])
             .current_dir(dir.path())
             .status()

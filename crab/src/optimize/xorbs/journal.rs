@@ -118,7 +118,7 @@ impl OptimizeXorbsJournal {
     pub fn open(path: &Path) -> Result<Self> {
         // Ensure parent directory exists.
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CrabError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
         }
 
         let conn = Connection::open(path).map_err(|e| {
@@ -293,6 +293,36 @@ impl OptimizeXorbsJournal {
         Ok(())
     }
 
+    /// Insert a bounded page of source xorbs in one SQLite transaction.
+    pub fn insert_sources(&self, run_id: &str, src_xorbs: &[String]) -> Result<()> {
+        if src_xorbs.is_empty() {
+            return Ok(());
+        }
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| CrabError::Internal(format!("failed to begin source page insert: {e}")))?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT OR IGNORE INTO sources (run_id, src_xorb, status)
+                     VALUES (?1, ?2, 'pending')",
+                )
+                .map_err(|e| {
+                    CrabError::Internal(format!("failed to prepare source page insert: {e}"))
+                })?;
+            for src_xorb in src_xorbs {
+                statement.execute(params![run_id, src_xorb]).map_err(|e| {
+                    CrabError::Internal(format!("failed to insert source page: {e}"))
+                })?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|e| CrabError::Internal(format!("failed to commit source page: {e}")))?;
+        Ok(())
+    }
+
     /// Update a source xorb's status.
     pub fn update_source_status(
         &self,
@@ -370,6 +400,49 @@ impl OptimizeXorbsJournal {
         Ok(result)
     }
 
+    /// Read a bounded, deterministic page of sources in one status.
+    ///
+    /// The exclusive `src_xorb > after` cursor lets long-running operations
+    /// consume a journal without holding every pending row in heap memory.
+    pub fn sources_by_status_after(
+        &self,
+        run_id: &str,
+        status: SourceStatus,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SourceRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).map_err(|_| CrabError::Configuration {
+            key: "restripe journal page size".to_owned(),
+            origin: "page size cannot be represented by SQLite".to_owned(),
+        })?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT run_id, src_xorb, status, dest_xorbs, started_at,
+                        completed_at, err_kind, err_msg
+                 FROM sources
+                 WHERE run_id = ?1 AND status = ?2 AND src_xorb > ?3
+                 ORDER BY src_xorb
+                 LIMIT ?4",
+            )
+            .map_err(|e| {
+                CrabError::Internal(format!("failed to prepare source page query: {e}"))
+            })?;
+        let rows = statement
+            .query_map(
+                params![run_id, status.as_str(), after.unwrap_or_default(), limit],
+                source_row_from_sql,
+            )
+            .map_err(|e| CrabError::Internal(format!("failed to query source page: {e}")))?;
+        rows.map(|row| {
+            row.map_err(|e| CrabError::Internal(format!("failed to read source page row: {e}")))
+        })
+        .collect()
+    }
+
     /// Count sources by status for a run.
     pub fn count_by_status(&self, run_id: &str) -> Result<StatusCounts> {
         let mut counts = StatusCounts::default();
@@ -404,18 +477,17 @@ impl OptimizeXorbsJournal {
     /// Drop the journal database file. Requires explicit confirmation.
     pub fn drop_journal(path: &Path) -> Result<()> {
         for suffix in &["", "-wal", "-shm"] {
-            let p = path.with_extension(
-                path.extension()
-                    .map(|e| format!("{}{suffix}", e.to_string_lossy()))
-                    .unwrap_or_else(|| suffix.to_string()),
-            );
+            let p = path.with_extension(path.extension().map_or_else(
+                || suffix.to_string(),
+                |extension| format!("{}{suffix}", extension.to_string_lossy()),
+            ));
             if p.exists() {
-                std::fs::remove_file(&p).map_err(|e| CrabError::Io(e))?;
+                std::fs::remove_file(&p).map_err(CrabError::Io)?;
             }
         }
         // Also try the base path directly.
         if path.exists() {
-            std::fs::remove_file(path).map_err(|e| CrabError::Io(e))?;
+            std::fs::remove_file(path).map_err(CrabError::Io)?;
         }
         info!(path = %path.display(), "xorb optimization journal dropped");
         Ok(())
@@ -448,8 +520,21 @@ impl StatusCounts {
 fn epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+fn source_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceRow> {
+    let status_str: String = row.get(2)?;
+    Ok(SourceRow {
+        run_id: row.get(0)?,
+        src_xorb: row.get(1)?,
+        status: SourceStatus::from_str(&status_str).unwrap_or(SourceStatus::Pending),
+        dest_xorbs: row.get(3)?,
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+        err_kind: row.get(6)?,
+        err_msg: row.get(7)?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +633,36 @@ mod tests {
             .sources_by_status("run-004", SourceStatus::Pending)
             .unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn source_status_pages_follow_a_stable_cursor() {
+        let (_dir, journal) = temp_journal();
+        journal.start_run("run-page", "{}").unwrap();
+        for source in ["xorb-a", "xorb-b", "xorb-c"] {
+            journal.insert_source("run-page", source).unwrap();
+        }
+
+        let first = journal
+            .sources_by_status_after("run-page", SourceStatus::Pending, Some(""), 2)
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.src_xorb.as_str())
+                .collect::<Vec<_>>(),
+            vec!["xorb-a", "xorb-b"]
+        );
+        let second = journal
+            .sources_by_status_after(
+                "run-page",
+                SourceStatus::Pending,
+                Some(&first[1].src_xorb),
+                2,
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].src_xorb, "xorb-c");
     }
 
     #[test]

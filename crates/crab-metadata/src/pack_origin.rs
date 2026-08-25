@@ -10,6 +10,7 @@ use crab_storage::{StorageError, Store, StoreLayout};
 
 const PACK_ORIGIN_NAMESPACE: &str = "canonical-origin";
 const MAX_STABILITY_ATTEMPTS: usize = 3;
+const MAX_ORIGIN_RECEIPT_BYTES: u64 = 8 * 1024 * 1024;
 
 fn corrupt(path: &str, reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
@@ -42,7 +43,10 @@ async fn read_matching_receipt(
     expected_size: u64,
     meta: &ObjectMeta,
 ) -> Result<bool> {
-    let body = match store.get_with_etag(receipt_path).await {
+    let body = match store
+        .get_with_etag_bounded(receipt_path, MAX_ORIGIN_RECEIPT_BYTES)
+        .await
+    {
         Ok((body, _)) => body,
         Err(StorageError::NotFound { .. }) => return Ok(false),
         Err(error) => return Err(error.into()),

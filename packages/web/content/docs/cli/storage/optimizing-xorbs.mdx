@@ -9,7 +9,10 @@ meta:
 
 ## Optimizing Xorb Layout
 
-Crab stores file content as content-addressed xorbs. Xorb size and grouping affect storage cost, object count, and access performance. `crab optimize xorbs` rewrites xorbs to match a target profile: larger xorbs for ML models, medium xorbs for datasets, and smaller xorbs for code or random-access workloads.
+Crab stores file content as content-addressed xorbs. Xorb size and grouping
+affect storage cost, object count, and access performance. `crab optimize
+xorbs` rewrites the xorbs referenced by the repository's canonical metadata
+into a target size profile.
 
 This is different from `crab optimize packs`, which consolidates Git pack files. Xorb optimization operates on the content-addressed data layer.
 
@@ -27,7 +30,12 @@ flowchart TD
 | `dataset` | 64 MiB | unlimited | Directory | Training datasets, parquet files |
 | `code` | 16 MiB | unlimited | Hash | Source code, configs, small assets |
 
-When you omit `--profile`, Crab scans the file index and selects based on median file size:
+Built-in profiles retain their public Zstd level descriptions; the current
+Xet xorb encoder maps that config to its supported LZ4 chunk scheme. Custom
+profiles may select `zstd:N`, `lz4`, or `none`.
+
+When you omit `--profile`, Crab scans the canonical file index and selects a
+target from the median file size:
 
 - p50 > 100 MiB: `ml`
 - p50 >= 1 MiB: `dataset`
@@ -41,8 +49,9 @@ Dry-run first:
 crab optimize xorbs --profile ml --dry-run
 ```
 
-Dry-run is the supported optimization path today. It lists live source xorbs,
-reads their sizes and storage classes, and performs no writes.
+Dry-run reads the canonical shard set and live xorb metadata. It performs no
+writes. Source-shard scanning is disk-backed and hash-verified, so planning
+does not retain several complete metadata shards in memory at once.
 
 Apply the rewrite:
 
@@ -50,9 +59,11 @@ Apply the rewrite:
 crab optimize xorbs --profile ml --apply
 ```
 
-Apply currently fails closed. The executor can create destination xorbs, but
-the file-index/shard manifest reconciliation required for readers to resolve
-them is not implemented yet.
+Apply consolidates bounded batches of source xorbs, verifies every source and
+destination size/hash, rebuilds affected Xet shards, publishes candidate
+indexes, and advances the canonical manifest with compare-and-swap. A
+repository maintenance lease prevents overlapping destructive maintenance;
+old xorbs remain immutable until a later GC proves them unreferenced.
 
 Resume or abort an interrupted run:
 
@@ -70,7 +81,7 @@ Define profiles in `.crab/config.toml`:
 target_xorb_bytes = 134217728   # 128 MiB
 max_xorbs_per_file = 8
 group_by = "file"
-compression = "zstd:5"
+compression = "zstd:5"          # or "lz4" / "none"
 ```
 
 Custom profiles live under the same command namespace as `crab optimize xorbs`.
@@ -90,8 +101,9 @@ crab optimize xorbs --profile ml --apply --output-class=STANDARD_IA
 | Combination | Result |
 |-------------|--------|
 | Two `crab optimize xorbs` runs | Second fails with `CRAB-E0332` |
-| `crab gc` + `crab optimize xorbs` | Fails with `ConcurrentMaintenance [E0333]` |
+| `crab gc` + `crab optimize xorbs` | Repository maintenance lease admits only one operation |
 | `crab push` + `crab optimize xorbs --dry-run` | Safe; dry-run performs no writes |
+| `crab push` + `crab optimize xorbs --apply` | Manifest CAS reconciliation preserves current push roots |
 
 Old source xorbs become orphans and are reclaimed by the next `crab gc`.
 

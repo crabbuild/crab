@@ -6,7 +6,7 @@
 //! (`*`, `?`, `[`, `{`) are parsed as [`globset::Glob`]; everything
 //! else is treated as a literal [`PathBuf`].
 
-use std::io::BufRead;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use globset::Glob;
@@ -17,6 +17,9 @@ use crate::core::{CrabError, Result};
 /// Characters whose presence in a line signals a glob pattern rather
 /// than a literal path.
 const GLOB_META_CHARS: &[char] = &['*', '?', '[', '{'];
+pub(crate) const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MANIFEST_LINE_BYTES: usize = 64 * 1024;
+const MAX_MANIFEST_ENTRIES: usize = 1_000_000;
 
 /// A single entry parsed from a manifest file.
 #[derive(Debug, Clone)]
@@ -35,11 +38,36 @@ pub enum ManifestEntry {
 ///
 /// Returns [`CrabError::ManifestParse`] if a glob pattern is
 /// syntactically invalid.
-pub fn parse_manifest(reader: impl BufRead) -> Result<Vec<ManifestEntry>> {
+pub fn parse_manifest(mut reader: impl BufRead) -> Result<Vec<ManifestEntry>> {
     let mut entries = Vec::new();
+    let mut line = Vec::new();
+    let mut total_bytes = 0usize;
 
-    for (line_idx, line_result) in reader.lines().enumerate() {
-        let raw_line = line_result?;
+    for line_idx in 0.. {
+        let Some(line_bytes) = read_line_limited(&mut reader, &mut line)? else {
+            break;
+        };
+        total_bytes =
+            total_bytes
+                .checked_add(line_bytes)
+                .ok_or_else(|| CrabError::Configuration {
+                    key: "manifest size".to_owned(),
+                    origin: "manifest byte count overflow".to_owned(),
+                })?;
+        if total_bytes > MAX_MANIFEST_BYTES {
+            return Err(CrabError::Configuration {
+                key: "manifest size".to_owned(),
+                origin: format!("manifest exceeds the safety limit of {MAX_MANIFEST_BYTES} bytes"),
+            });
+        }
+        let raw_line = std::str::from_utf8(&line[..line_bytes]).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("manifest is not UTF-8: {error}"),
+            )
+        })?;
+        let raw_line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let raw_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         let trimmed = raw_line.trim();
 
         // Skip blank lines.
@@ -70,11 +98,44 @@ pub fn parse_manifest(reader: impl BufRead) -> Result<Vec<ManifestEntry>> {
             ManifestEntry::Path(PathBuf::from(trimmed))
         };
 
+        if entries.len() >= MAX_MANIFEST_ENTRIES {
+            return Err(CrabError::Configuration {
+                key: "manifest entry count".to_owned(),
+                origin: format!(
+                    "manifest exceeds the safety limit of {MAX_MANIFEST_ENTRIES} entries"
+                ),
+            });
+        }
         entries.push(entry);
     }
 
     debug!(count = entries.len(), "manifest: parsed entries");
     Ok(entries)
+}
+
+fn read_line_limited<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> io::Result<Option<usize>> {
+    line.clear();
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok((!line.is_empty()).then_some(line.len()));
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(chunk.len(), |index| index + 1);
+        if line.len().saturating_add(take) > MAX_MANIFEST_LINE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "manifest line exceeds the safety limit of {MAX_MANIFEST_LINE_BYTES} bytes"
+                ),
+            ));
+        }
+        line.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return Ok(Some(line.len()));
+        }
+    }
 }
 
 /// Convenience: parse a manifest from a file path, or from stdin if
@@ -189,5 +250,25 @@ Cargo.lock
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, CrabError::ManifestParse { line: 1, .. }));
+    }
+
+    #[test]
+    fn rejects_oversized_line_before_materializing_unbounded_input() {
+        let input = "x".repeat(MAX_MANIFEST_LINE_BYTES + 1);
+        let error = parse_manifest(Cursor::new(input)).unwrap_err();
+        assert!(
+            matches!(error, CrabError::Io(source) if source.kind() == std::io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn rejects_excessive_entry_count() {
+        let input = (0..=MAX_MANIFEST_ENTRIES)
+            .map(|index| format!("file-{index}\n"))
+            .collect::<String>();
+        let error = parse_manifest(Cursor::new(input)).unwrap_err();
+        assert!(
+            matches!(error, CrabError::Configuration { key, .. } if key == "manifest entry count")
+        );
     }
 }

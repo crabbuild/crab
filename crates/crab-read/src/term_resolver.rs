@@ -21,6 +21,7 @@ use crab_storage::Store;
 use crab_xet::hash::{MerkleHash, xorb_hash};
 use crab_xet::shard::ShardReader;
 use crab_xet::shard::{FileDataSequenceEntry, XorbChunkSequenceEntry};
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::builder::{CHUNK_META_ENTRY_SIZE, FOOTER_SIZE, XORB_MAGIC};
 use tokio_util::sync::CancellationToken;
 
@@ -925,7 +926,9 @@ async fn get_or_download_shard(
             let obj_path = obj_path;
             async move {
                 debug!(shard_hash = %hash.hex(), "downloading shard");
-                let (data, _) = origin.get_with_etag(&obj_path).await?;
+                let (data, _) = origin
+                    .get_with_etag_bounded(&obj_path, MAX_SHARD_SIZE_BYTES as u64)
+                    .await?;
                 Ok::<_, ReadError>(data)
             }
         })

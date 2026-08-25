@@ -987,6 +987,7 @@ impl From<crab_xet::error::XetError> for CrabError {
 impl From<crab_cache::CacheError> for CrabError {
     fn from(error: crab_cache::CacheError) -> Self {
         match error {
+            crab_cache::CacheError::Cancelled => Self::Cancelled,
             crab_cache::CacheError::Io(source) => Self::Io(source),
             crab_cache::CacheError::HashMismatch { requested, actual } => {
                 Self::HashMismatch { requested, actual }
@@ -1148,6 +1149,7 @@ impl From<crab_vfs::VfsError> for CrabError {
 impl From<crab_workflow::WorkflowError> for CrabError {
     fn from(error: crab_workflow::WorkflowError) -> Self {
         match error {
+            crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
             crab_workflow::WorkflowError::NetworkTransient(source) => {
                 Self::NetworkTransient(source)
             }

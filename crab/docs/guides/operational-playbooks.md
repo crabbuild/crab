@@ -4,13 +4,19 @@ Runbooks for common storage economy operations on production Crab
 buckets. Each playbook includes prerequisites, step-by-step commands,
 verification, and rollback procedures.
 
+Lifecycle apply steps below require a provider adapter with conditional
+lifecycle writes. The current S3, GCS, and Azure adapters render and verify
+plans but fail closed before mutation; do not treat the apply examples as a
+provider qualification result.
+
 ## Playbook 1: Enable lifecycle tiering on a production bucket
 
 **When to use:** First-time tiering setup on a bucket that has been
 running without lifecycle rules.
 
 **Prerequisites:**
-- Write credentials for the bucket (see [IAM requirements](crab-tier.md#iam-requirements))
+- A provider qualification row with conditional lifecycle-write support (see
+  [IAM requirements](crab-tier.md#iam-requirements))
 - Backup of any existing lifecycle rules (IaC or manual export)
 
 **Steps:**
@@ -152,8 +158,8 @@ crab doctor --cost --sample 0.25
 
 | Recommendation | Action | Risk |
 |---------------|--------|------|
-| Apply IA tiering | `crab tier plan --apply` | Low |
-| Apply Glacier tiering | `crab tier plan --apply` (adjust `to_deep_days`) | Medium |
+| Apply IA tiering | `crab tier plan --apply` after provider qualification | Low |
+| Apply Glacier tiering | `crab tier plan --apply` after provider qualification (adjust `to_deep_days`) | Medium |
 | Optimize xorbs | `crab optimize xorbs --apply` | Medium |
 | GC orphans | `crab gc` | Low |
 
@@ -185,7 +191,7 @@ crab gc --force-early-delete --yes-really
 
 | Operation A | Operation B | Allowed? |
 |------------|------------|----------|
-| `tier plan --apply` | `tier plan --apply` | One wins via CAS; other gets `TierLifecycleConflict` |
+| `tier plan --apply` | `tier plan --apply` | Providers with conditional CAS serialize; unsupported providers fail closed |
 | `optimize xorbs --apply` | `push` | Yes — reconciliation handles it |
 | `optimize xorbs --apply` | `gc` | No — `ConcurrentMaintenance` error |
 | `optimize xorbs --apply` | `optimize xorbs --apply` | No — `CRAB-E0332` error |

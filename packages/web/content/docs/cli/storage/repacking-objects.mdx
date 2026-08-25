@@ -22,15 +22,16 @@ flowchart LR
 
 ## How Repacking Works
 
-1. Reads the pack list manifest from the remote store.
-2. Downloads all existing pack files.
-3. Runs `git repack --geometric=2 -d` to roll up only the packs needed to
-   restore a geometric progression.
-4. Validates every resulting pack together against the manifest refs.
-5. Uploads only newly generated pack, index, and reverse-index objects, and
-   repairs missing metadata sidecars.
+1. Pins the canonical manifest and segmented pack inventory.
+2. Downloads packs and indexes with bounded concurrency after a free-space
+   preflight.
+3. Verifies every source pair and the complete pinned ref graph, then runs
+   Git's geometric repack.
+4. Validates every replacement pack with strict Git checks.
+5. Uploads immutable replacement objects and repairs missing metadata sidecars.
 6. Atomically updates the manifest using compare-and-swap (CAS).
-7. Rebinds the existing Git visibility proof to the replacement pack inventory.
+7. Publishes the rebound visibility proof, exact locators, and generation
+   receipt before reporting success.
 
 Old pack files leave the active manifest after the update, but immutable
 recovery history continues to reference them. Repack therefore reduces the
@@ -41,11 +42,12 @@ an explicit history-retention boundary with `crab recover history prune
 ### Atomicity and Safety
 
 The manifest update uses CAS to prevent concurrent maintenance or push activity
-from corrupting state. If the manifest changes between read and write, repack
-fails without replacing the newer manifest; rerun the command against the new
-generation. The existing visibility proof is reused because repack changes the
-physical pack layout, not refs or reachable objects. Repack does not create a
-missing proof; `crab fsck` reports that pre-existing condition.
+from corrupting state. Apply mode holds the repository maintenance lease. If
+the manifest changes between repack and commit, the operation fails without
+replacing newer state; rerun against the new generation. Missing post-CAS
+evidence is repairable on a rerun without advancing an already consolidated
+generation. Dry-run reports current bytes; replacement size is unknown until
+Git performs the repack.
 
 ## Usage
 

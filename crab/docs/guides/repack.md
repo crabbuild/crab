@@ -29,10 +29,10 @@ replacing the segmented pack inventory selected by the unified manifest.
 
 1. Pins the unified manifest and its exact segmented pack inventory.
 2. Downloads every selected `.pack` and canonical `.idx` to a temporary bare
-   Git repository with bounded concurrency.
-3. Verifies each source pair, then runs `git repack --geometric=2 -d` in the
-   temporary repository. Git selects the smallest roll-up that restores the
-   geometric progression.
+   Git repository with bounded concurrency and a free-space preflight.
+3. Verifies each source pair and the complete pinned ref graph, then runs
+   `git repack --geometric=2 -d` in the temporary repository. Git selects the
+   smallest roll-up that restores the geometric progression.
 4. Builds or preserves the resulting `.idx` and `.rev` files, then runs
    `git fsck` against a validation repository containing every resulting pack.
 5. Uploads immutable pack/index/reverse-index files only for newly generated
@@ -40,8 +40,14 @@ replacing the segmented pack inventory selected by the unified manifest.
    segment.
 6. Performs one CAS of a new manifest generation with unchanged refs, HEAD,
    shard index, commit graph, and ref registry.
-7. Publishes exact SlateDB object locators. Locator failure is repairable and
-   does not invalidate an already committed manifest.
+7. Publishes exact SlateDB object locators and a generation receipt. Locator
+   or receipt failure is repairable and does not invalidate an already
+   committed manifest.
+
+Apply mode holds the repository-wide maintenance lease. The temporary
+workspace lives under Crab's cache root and is removed automatically. Dry-run
+reads only the canonical inventory and reports current bytes; replacement
+size is unknown until Git performs the repack.
 
 ### Atomicity
 
@@ -49,7 +55,8 @@ The unified manifest is updated using one CAS (compare-and-swap). If any other
 writer advances it after repack pins the input inventory, repack returns a
 conflict instead of retrying against different repository state. Uploaded
 immutable files remain unreferenced and are collected later under the normal GC
-grace period.
+grace period. A rerun repairs missing post-CAS evidence without advancing an
+already consolidated generation.
 
 ### Metadata Preservation
 
@@ -96,8 +103,8 @@ The following settings in `.crab/config.toml` affect repack behavior:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `repack_auto_threshold` | | Number of packs that triggers an advisory warning |
-| `download_concurrency` | | Maximum concurrent `.pack`/`.idx` downloads |
+| `repack_auto_threshold` | `50` | Pack count that triggers an advisory warning |
+| `download_concurrency` | `8` (capped at 16) | Maximum concurrent `.pack`/`.idx` downloads |
 
 ## Prerequisites
 

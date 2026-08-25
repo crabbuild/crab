@@ -26,17 +26,17 @@ The file index is per-repository. The chunk index is shared globally across all 
 
 A two-tier local cache sits in front of the remote chunk index:
 - **In-memory LRU** — fastest lookups for hot chunks
-- **SQLite file** — persistent on-disk cache at `~/.cache/crab/{bucket}/{repo-hash}/chunk-index.sqlite`
+- **SQLite file** — persistent bucket-scoped cache at `~/.cache/crab/buckets/{bucket-hash}/chunk-index.sqlite`
 
 ## Diagnosing Issues
 
 ### Check database health
 
 ```bash
-crab metadb diagnose
+crab metadb diagnose --deep
 ```
 
-Read-only health snapshot — reports open state, format version, epoch, and path for each database. Safe to run concurrently with pushes.
+Read-only health snapshot — reports open state, format version, epoch, and path for each database. Add `--deep` to scan every metadata row and enumerate the backing object store. Deep diagnosis validates committed/receipt namespaces and flags malformed compacted-SST names as warnings; it never deletes remote objects. Safe to run concurrently with pushes.
 
 ```bash
 crab metadb diagnose --db chunk_index
@@ -49,7 +49,9 @@ crab metadb diagnose --db file_index --json
 crab metadb cache stats
 ```
 
-Shows the SQLite file path, on-disk size, entry count, installed shard count, and GC generation cursor.
+Shows the SQLite path, combined database/WAL/shared-memory size, entry count,
+installed shard count, and GC generation cursor. The read-only inspection does
+not create, migrate, repair, or load the cache into memory.
 
 ### Run a durable Git index owner
 
@@ -76,7 +78,19 @@ crab metadb rebuild --db file_index
 crab metadb rebuild --db both
 ```
 
-Rebuild is idempotent — every write is content-addressed, so running it multiple times produces the same result. An interrupted run can be restarted without cleanup.
+Rebuild is idempotent — every write is content-addressed, so running it multiple times produces the same result. An interrupted run can be restarted without cleanup. Any manifest-named shard, xorb-placement, or Git-pack validation failure exits non-zero and prevents generation-receipt publication.
+
+## Compacting the Databases
+
+```bash
+crab metadb compact --db both
+```
+
+This acquires a renewable repository maintenance lease and runs SlateDB's
+size-tiered compactor until the current scheduler work drains. File and chunk
+indexes run sequentially. Cancellation, an existing active compaction, or a new
+compaction failure exits non-zero; a database with no eligible work is reported
+as already policy-satisfied.
 
 ### When to rebuild
 
@@ -94,7 +108,9 @@ Rebuild is not a migration tool. Fresh repositories never need it — `Db::open`
 crab metadb cache clear
 ```
 
-Forces a cold re-warm on the next operation. Useful when the cache is suspected of drift or corruption, or for benchmarking. The remote state is untouched.
+Transactionally removes cached chunk and shard rows, forcing a cold re-warm on
+the next operation. The remote state is untouched, and the local SQLite file,
+schema, and GC cursor remain intact for live shared handles.
 
 ## Troubleshooting
 
@@ -123,6 +139,10 @@ cache_gc_grace = 3
 ```
 
 All settings can be overridden with `CRAB_METADB_*` environment variables (e.g., `CRAB_METADB_CHUNK_INDEX_IN_MEMORY_CEILING_BYTES`).
+The shipped `wal_flush_size` key controls SlateDB's L0 SST target size; Crab
+flushes WAL durability explicitly at commit boundaries. File-index and
+chunk-index values are applied independently, and all three database tunables
+must be non-zero.
 
 ## Command Help
 

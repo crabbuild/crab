@@ -14,10 +14,11 @@
 //! a mix.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
 use crate::{CacheError, Result};
@@ -26,6 +27,9 @@ use crab_xet::xorb::format::MerkleHash;
 
 /// Filename for the shard-hint JSON cache inside the crab cache root.
 pub const SHARD_HINTS_FILENAME: &str = "shard-hints.json";
+/// Maximum serialized shard-hint cache body read into memory.
+pub const MAX_SHARD_HINTS_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SHARD_HINTS_ENTRIES: usize = 1_000_000;
 
 /// On-disk representation: hex-encoded file_hash → hex-encoded shard_hash.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,10 +63,18 @@ impl ShardHintCache {
     /// failing — hints are advisory, so a corrupt cache degrades to the
     /// slow path instead of breaking push.
     pub async fn load(path: &Path) -> Result<Self> {
-        let bytes = match tokio::fs::read(path).await {
+        let bytes = match read_async_bounded(path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!(path = %path.display(), "shard-hints cache missing, starting empty");
+                return Ok(Self::new());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "shard-hints cache exceeds the safety limit, treating as empty"
+                );
                 return Ok(Self::new());
             }
             Err(e) => return Err(CacheError::Io(e)),
@@ -76,10 +88,18 @@ impl ShardHintCache {
     /// like the git filter-process clean loop (which runs inside
     /// `spawn_blocking`) without needing a tokio handle.
     pub fn load_sync(path: &Path) -> Result<Self> {
-        let bytes = match std::fs::read(path) {
+        let bytes = match read_sync_bounded(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!(path = %path.display(), "shard-hints cache missing, starting empty");
+                return Ok(Self::new());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "shard-hints cache exceeds the safety limit, treating as empty"
+                );
                 return Ok(Self::new());
             }
             Err(e) => return Err(CacheError::Io(e)),
@@ -90,6 +110,15 @@ impl ShardHintCache {
     /// Parse a shard-hints JSON blob, tolerating corrupt data by returning
     /// an empty cache with a `warn!` log — hints are advisory.
     fn from_bytes(path: &Path, bytes: &[u8]) -> Self {
+        if bytes.len() as u64 > MAX_SHARD_HINTS_BYTES {
+            warn!(
+                path = %path.display(),
+                bytes = bytes.len(),
+                limit = MAX_SHARD_HINTS_BYTES,
+                "shard-hints cache exceeds the safety limit, treating as empty"
+            );
+            return Self::new();
+        }
         let parsed: ShardHintsFile = match serde_json::from_slice(bytes) {
             Ok(v) => v,
             Err(e) => {
@@ -101,6 +130,15 @@ impl ShardHintCache {
                 return Self::new();
             }
         };
+        if parsed.hints.len() > MAX_SHARD_HINTS_ENTRIES {
+            warn!(
+                path = %path.display(),
+                entries = parsed.hints.len(),
+                limit = MAX_SHARD_HINTS_ENTRIES,
+                "shard-hints cache contains too many entries, treating as empty"
+            );
+            return Self::new();
+        }
 
         let mut hints = HashMap::with_capacity(parsed.hints.len());
         for (file_hex, shard_hex) in parsed.hints {
@@ -177,16 +215,47 @@ impl ShardHintCache {
         let on_disk = ShardHintsFile {
             hints: self.hints.iter().map(|(f, s)| (f.hex(), s.hex())).collect(),
         };
+        if on_disk.hints.len() > MAX_SHARD_HINTS_ENTRIES {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!(
+                    "shard-hints cache contains {} entries; limit is {MAX_SHARD_HINTS_ENTRIES}",
+                    on_disk.hints.len()
+                ),
+            });
+        }
         let body = serde_json::to_vec(&on_disk).map_err(|e| {
             CacheError::Internal(format!("failed to serialize shard-hints cache: {e}"))
         })?;
+        if body.len() as u64 > MAX_SHARD_HINTS_BYTES {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!(
+                    "serialized shard-hints cache is {} bytes; limit is {MAX_SHARD_HINTS_BYTES}",
+                    body.len()
+                ),
+            });
+        }
 
-        let tmp = tmp_path(path);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let tmp = tmp_path(
+            path,
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
         let mut f = tokio::fs::File::create(&tmp).await?;
-        f.write_all(&body).await?;
-        f.flush().await?;
-        drop(f);
-        tokio::fs::rename(&tmp, path).await?;
+        let write_result = async {
+            f.write_all(&body).await?;
+            f.flush().await?;
+            drop(f);
+            tokio::fs::rename(&tmp, path).await
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(error.into());
+        }
 
         debug!(path = %path.display(), entries = self.hints.len(), "saved shard-hints cache");
         Ok(())
@@ -206,18 +275,47 @@ impl ShardHintCache {
     }
 }
 
+async fn read_async_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SHARD_HINTS_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_SHARD_HINTS_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file exceeds {MAX_SHARD_HINTS_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_sync_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SHARD_HINTS_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SHARD_HINTS_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file exceeds {MAX_SHARD_HINTS_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Default on-disk path for the shard-hint cache.
 #[must_use]
 pub fn default_path() -> PathBuf {
     super::default_cache_root().join(SHARD_HINTS_FILENAME)
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
+fn tmp_path(path: &Path, pid: u32, sequence: u64) -> PathBuf {
     match path.file_name() {
         Some(name) => {
             let mut tmp_name = std::ffi::OsString::from(".");
             tmp_name.push(name);
-            tmp_name.push(".tmp");
+            tmp_name.push(format!(".tmp.{pid}.{sequence}"));
             match path.parent() {
                 Some(parent) => parent.join(tmp_name),
                 None => PathBuf::from(tmp_name),
@@ -316,6 +414,13 @@ mod tests {
         tokio::fs::write(&path, b"{ not valid json").await.unwrap();
 
         let cache = ShardHintCache::load(&path).await.unwrap();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn oversized_body_is_treated_as_empty() {
+        let body = vec![b' '; usize::try_from(MAX_SHARD_HINTS_BYTES).unwrap() + 1];
+        let cache = ShardHintCache::from_bytes(Path::new("oversized"), &body);
         assert!(cache.is_empty());
     }
 

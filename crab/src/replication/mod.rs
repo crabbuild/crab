@@ -8631,24 +8631,35 @@ pub async fn replica_statuses_with_options(
 
     let mut statuses = Vec::with_capacity(replication.replicas.len());
     for replica in &replication.replicas {
+        if cancel.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
         match build_replica_store(replica, &primary_url.repo_path) {
             Ok((replica_store, replica_prefix)) => {
                 let replica_router = StoreLayout::new(replica_store.clone(), replica_prefix);
-                match replica_readiness(
-                    &primary_store,
-                    &primary_router,
-                    &replica_store,
-                    &replica_router,
-                    replica,
-                    options,
-                )
-                .await
-                {
-                    Ok(status) => statuses.push(status_with_events(
-                        status,
+                let readiness = tokio::select! {
+                    result = replica_readiness(
+                        &primary_store,
+                        &primary_router,
+                        &replica_store,
+                        &replica_router,
                         replica,
-                        replica_router.repo_prefix(),
-                    )),
+                        options,
+                    ) => result,
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                };
+                match readiness {
+                    Ok(status) => {
+                        if cancel.is_cancelled() {
+                            return Err(CrabError::Cancelled);
+                        }
+                        statuses.push(status_with_events(
+                            status,
+                            replica,
+                            replica_router.repo_prefix(),
+                        ));
+                    }
+                    Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
                     Err(e) => statuses.push(status_with_events(
                         failed_status(replica, e.to_string()),
                         replica,

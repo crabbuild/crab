@@ -24,6 +24,7 @@ use object_store::path::Path;
 use crate::error::{MetadataError, Result};
 use crab_storage::Store;
 use crab_xet::shard_bloom::ShardBloom;
+use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::MerkleHash;
 
 /// Size of the v2 shard trailer: `bloom_offset` (8 bytes) + magic (4 bytes).
@@ -122,6 +123,15 @@ pub async fn check_shard_chunk_bloom(
 async fn load_bloom_if_any(store: &Store, shard_path: &Path) -> Result<Option<ShardBloom>> {
     let meta = store.head(shard_path).await?;
     let shard_size = meta.size;
+
+    if shard_size > MAX_SHARD_SIZE_BYTES as u64 {
+        return Err(MetadataError::CorruptObject {
+            path: shard_path.to_string(),
+            reason: format!(
+                "shard is {shard_size} bytes; format limit is {MAX_SHARD_SIZE_BYTES} bytes"
+            ),
+        });
+    }
 
     if shard_size < SHARD_V2_TRAILER_SIZE {
         return Ok(None);

@@ -46,10 +46,38 @@ impl LockHeartbeat {
         interval: Duration,
         push_cancel: CancellationToken,
     ) -> Self {
+        Self::spawn_with_stop(
+            store,
+            lock_path,
+            holder,
+            ttl,
+            interval,
+            push_cancel.clone(),
+            push_cancel,
+        )
+    }
+
+    /// Spawn a heartbeat whose lifetime is independent from operation
+    /// cancellation.
+    ///
+    /// `push_cancel` is still cancelled when the lock is stolen or lost, but
+    /// cancelling it does not stop the heartbeat. The separate `stop_cancel`
+    /// token is used by maintenance owners that must keep renewing while a
+    /// cancelled blocking operation unwinds and releases its lock.
+    pub fn spawn_with_stop(
+        store: Store,
+        lock_path: String,
+        holder: String,
+        ttl: Duration,
+        interval: Duration,
+        push_cancel: CancellationToken,
+        stop_cancel: CancellationToken,
+    ) -> Self {
         let interval = clamp_interval(interval, ttl);
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         let push_cancel_clone = push_cancel.clone();
+        let stop_cancel_clone = stop_cancel.clone();
 
         let handle = tokio::spawn(async move {
             heartbeat_loop(
@@ -59,6 +87,7 @@ impl LockHeartbeat {
                 ttl,
                 interval,
                 push_cancel_clone,
+                stop_cancel_clone,
                 cancel_clone,
             )
             .await;
@@ -126,6 +155,7 @@ async fn heartbeat_loop(
     ttl: Duration,
     interval: Duration,
     push_cancel: CancellationToken,
+    stop_cancel: CancellationToken,
     self_cancel: CancellationToken,
 ) {
     let obj_path = Path::from(lock_path.as_str());
@@ -139,14 +169,14 @@ async fn heartbeat_loop(
                 debug!(lock_path = %lock_path, "heartbeat stopped");
                 return;
             }
-            () = push_cancel.cancelled() => {
-                debug!(lock_path = %lock_path, "push cancelled, heartbeat exiting");
+            () = stop_cancel.cancelled() => {
+                debug!(lock_path = %lock_path, "heartbeat stop requested");
                 return;
             }
         }
 
         // After waking, check cancellation before doing any I/O.
-        if self_cancel.is_cancelled() || push_cancel.is_cancelled() {
+        if self_cancel.is_cancelled() || stop_cancel.is_cancelled() {
             return;
         }
 
@@ -462,5 +492,39 @@ mod tests {
         // Stop immediately — should not cancel the push.
         heartbeat.stop().await;
         assert!(!push_cancel.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_stop_keeps_heartbeat_after_operation_cancel() {
+        let store = memory_store();
+        let lock_path = "repo/locks/refs/heads/main/lock";
+        let holder = "test-holder";
+        let ttl = Duration::from_secs(300);
+
+        put_lock(&store, lock_path, holder, 300).await;
+        let (before, _) = store.get_with_etag(&Path::from(lock_path)).await.unwrap();
+        let before: LockPayload = serde_json::from_slice(&before).unwrap();
+
+        let push_cancel = CancellationToken::new();
+        let stop_cancel = CancellationToken::new();
+        let heartbeat = LockHeartbeat::spawn_with_stop(
+            store.clone(),
+            lock_path.to_owned(),
+            holder.to_owned(),
+            ttl,
+            Duration::from_secs(10),
+            push_cancel.clone(),
+            stop_cancel.clone(),
+        );
+
+        push_cancel.cancel();
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        let (body, _) = store.get_with_etag(&Path::from(lock_path)).await.unwrap();
+        let after: LockPayload = serde_json::from_slice(&body).unwrap();
+        heartbeat.stop().await;
+
+        assert!(!stop_cancel.is_cancelled());
+        assert!(after.expires_at >= before.expires_at);
     }
 }

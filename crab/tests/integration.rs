@@ -18,7 +18,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutPayload};
+#[cfg(feature = "testing")]
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tokio_util::sync::CancellationToken;
 
 use crab::core::config::{Config, EngineConfig};
@@ -26,6 +27,7 @@ use crab::core::context::AppContext;
 use crab::core::error::CrabError;
 use crab::git::clean::CleanSession;
 use crab::storage::store::Store;
+#[cfg(feature = "testing")]
 use crab::storage::{RetryPolicy, retry};
 use crab_types::pointer::{Pointer, is_pointer};
 
@@ -400,6 +402,25 @@ async fn put_multipart_retry_uploads_intact() {
         .put_multipart_retry(&path, body.clone(), 5, &cancel, None)
         .await
         .unwrap();
+
+    let (got, _etag) = store.get_with_etag(&path).await.unwrap();
+    assert_eq!(got, body);
+}
+
+/// Xet-addressed multipart uploads reject a body whose content hash is wrong.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn put_multipart_retry_verifies_xet_hash() {
+    let (store, _mock) = retry_store();
+    let path = ObjectPath::from("xorbs/xet-hash");
+    let body = Bytes::from_static(b"xet-addressed-content");
+    let cancel = CancellationToken::new();
+    let expected = crab_xet::hash::compute_data_hash(&body);
+
+    store
+        .put_multipart_retry_with_xet_hash(&path, body.clone(), expected.into(), 5, &cancel, None)
+        .await
+        .expect("matching Xet hash must upload");
 
     let (got, _etag) = store.get_with_etag(&path).await.unwrap();
     assert_eq!(got, body);

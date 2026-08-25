@@ -6,6 +6,7 @@
 //! of compression level.
 
 pub use xet_core_structures::merklehash::MerkleHash;
+pub use xet_core_structures::xorb_object::constants::MAX_XORB_CHUNKS;
 pub use xet_core_structures::xorb_object::{Chunk, CompressionScheme, SerializedXorbObject};
 
 /// Xorb content hash, a [`MerkleHash`] over the ordered chunk-hash sequence.

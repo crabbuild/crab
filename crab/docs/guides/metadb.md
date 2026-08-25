@@ -21,7 +21,7 @@ Architecture detail lives in
 ## Synopsis
 
 ```
-crab metadb diagnose [--db file_index|chunk_index|both] [--json]
+crab metadb diagnose [--db file_index|chunk_index|both] [--deep] [--json]
 crab metadb rebuild  --db  file_index|chunk_index|both  [--json]
 crab metadb owner    [--once] [--interval SECONDS] [--jsonl]
 crab metadb compact  [--db file_index|chunk_index|both]
@@ -50,6 +50,13 @@ Safe to run concurrently with a push: `diagnose` opens each SlateDB
 in read-only mode, so it does not fence an in-flight writer.
 `--json` emits a `DiagnosePayload` structure suitable for scripting.
 
+Pass `--deep` to scan every key/value row and enumerate the backing object
+store. The deep verdict also flags malformed compacted-SST names (SlateDB
+requires 26-character ULIDs), so an orphaned or legacy object is reported as
+a warning instead of being mistaken for a clean database. Diagnosis never
+deletes remote objects; use the provider's retention/GC procedure after
+reviewing the reported path.
+
 Use `diagnose` when you want to confirm a database opens cleanly,
 check its epoch against the manifest, or verify the remote
 `gc_generation` the local cache is being compared against.
@@ -70,6 +77,14 @@ crab metadb rebuild --db both
 Rebuild is idempotent: repeated runs produce the same receipt history and
 point-readable heads, and an
 interrupted run can be restarted without any special cleanup.
+It validates every manifest-named shard, xorb placement, and Git pack before
+publishing generation evidence. Any validation failure or cancellation exits
+non-zero, retains legacy rows, and leaves the generation receipt unpublished.
+
+Shard validation is disk-backed. Rebuild downloads one manifest-named shard at
+a time into the maintenance cache, verifies its Xet hash, and parses its
+file/chunk sections from the temporary file. `--db file_index` and
+`--db chunk_index` avoid decoding the other index's entries.
 
 Rebuild is also the repair path after a crash between manifest CAS and
 post-CAS acceleration indexing. It never scans or advertises orphan shards
@@ -125,12 +140,13 @@ crab metadb compact
 crab metadb compact --db chunk_index
 ```
 
-Currently a **no-op**. SlateDB drives compaction in the background
-on its own schedule, and the public `slatedb` crate does not expose
-an imperative trigger. The command is kept so operator runbooks can
-call it without "unknown subcommand" errors, and so it becomes
-real work the moment SlateDB exposes the API. The command logs a
-warning explaining this and exits successfully.
+The command acquires a renewable repository maintenance lease, starts
+SlateDB's size-tiered compactor immediately, and waits until the currently
+eligible work has drained. When `--db both` is selected, it compacts the
+per-repository file index first and the bucket-shared chunk index second. It
+rejects an already-active compaction and exits non-zero on cancellation or a
+new compaction failure. An already policy-satisfied database is reported as a
+truthful no-op.
 
 ### `crab metadb cache stats`
 
@@ -140,14 +156,17 @@ Report on the local chunk-index cache.
 crab metadb cache stats
 ```
 
-Prints the SQLite cache path, on-disk size, entry count, installed
-shard count, and the `cache_gc_generation` cursor. Useful before
+Prints the SQLite cache path, combined database/WAL/shared-memory size, entry
+count, installed shard count, and the `cache_gc_generation` cursor. Inspection
+uses a read-only connection: it does not create, migrate, repair, or load all
+cache rows into memory. A configured `metadb.chunk_index.local_path` is honored.
+Useful before
 running `cache clear` (to know what you're wiping) and for
 troubleshooting "push is slow / no dedup" reports.
 
 ### `crab metadb cache clear`
 
-Wipe the local chunk-index SQLite file at
+Clear chunk and shard rows in the local chunk-index SQLite database at
 `~/.cache/crab/buckets/{bucket-hash}/chunk-index.sqlite`.
 
 ```bash
@@ -158,8 +177,8 @@ Forces a cold re-warm on the next operation: the next push falls
 through to `chunk_index_db` on every classification miss until the
 cache refills. Useful when the cache is suspected of drift or
 corruption, or when you want to force a clean starting point for
-a benchmark. The remote state is untouched — only the local file
-is removed.
+a benchmark. The remote state is untouched. The SQLite file, schema, and GC
+generation cursor are preserved so live process-shared handles remain valid.
 
 ## When to use `rebuild`
 
@@ -185,7 +204,7 @@ outside this migration and are ignored.
 | `hydrate` reports `FileNotFoundInFileIndexDb` | Either the file was never pushed, or `file_index_db` is missing entries | First verify the file was pushed: look for a shard entry naming that `file_hash` under `.crab/shards/`. If the shard exists but the entry is missing, `crab metadb rebuild --db file_index` repopulates from the shards. |
 | Push is slow and xet says nothing deduped | Local cache is empty or was wiped | Run `crab pull` (or `crab fetch`) to warm the cache via shard sync, then retry. Verify with `crab metadb cache stats` — after a pull, the entry count and installed shard count should both be non-zero. |
 | `crab metadb cache stats` shows the cache was wiped unexpectedly | Remote `sys:gc_generation` drifted beyond `cache_gc_grace` after `crab gc` ran | Expected behavior. GC bumps the remote generation so stale clients know to re-validate; when the drift exceeds the grace window the cache is wiped. The cache refills on the next `crab pull` / `crab push`. Increase `metadb.chunk_index.cache_gc_grace` if you want more headroom. |
-| `compact` appears to do nothing | It is a no-op at present | See the subcommand description above. SlateDB runs background compaction; there is no imperative trigger today. |
+| `compact` reports that policy is already satisfied | SlateDB has no currently eligible size-tiered work | No action is needed. The command only starts a foreground worker when the scheduler proposes work. |
 
 For anything not covered here, `crab doctor --metadb` gives a
 per-database tabular report (path, open state, epoch, SSTable count,
@@ -217,6 +236,10 @@ cache_gc_grace          = 3
 ```
 
 Leave a field unset to use the derived default shown in comments.
+The shipped `wal_flush_size` key controls SlateDB's L0 SST target size; Crab
+performs WAL durability flushes explicitly at commit boundaries. File-index and
+chunk-index tuning is applied independently, including to foreground
+`metadb compact` workers. Values must be non-zero.
 
 ### Environment variables
 
