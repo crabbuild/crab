@@ -1825,6 +1825,27 @@ class ProtocolV2PartialCloneSmoke:
             name="push from incomplete ODB",
         )
         telemetry_after_push = self.record_telemetry_delta("incomplete_odb_push", push_baseline)
+        admission_baseline = self.storage_telemetry()
+        admission_fetch = self.run_git(
+            self.filtered,
+            [
+                "fetch",
+                "origin",
+                "refs/heads/partial-clone-push:refs/remotes/origin/partial-clone-push",
+            ],
+            name="settle post-push read admission",
+        )
+        admission_telemetry = self.record_telemetry_delta(
+            "post_push_read_admission", admission_baseline
+        )
+        self.check(
+            "post-push-read-admission",
+            admission_fetch["exit_code"] == 0,
+            {
+                "fetch_exit": admission_fetch["exit_code"],
+                "telemetry": self.report["telemetry"]["post_push_read_admission"],
+            },
+        )
         source_blob = self.source / "normal.bin"
         lazy_output = self.artifacts / "lazy-normal.bin"
         lazy_trace = self.artifacts / "lazy-fetch.trace2.json"
@@ -1886,7 +1907,7 @@ class ProtocolV2PartialCloneSmoke:
         self.run_git(self.filtered, ["repack", "-ad"], name="filtered clone repack")
         self.run_git(self.filtered, ["fsck", "--strict"], name="filtered clone fsck after repack")
 
-        lazy_baseline = telemetry_after_push
+        lazy_baseline = admission_telemetry
         telemetry_after = self.record_telemetry_delta("lazy_fetch_and_maintenance", lazy_baseline)
         lazy_delta = self.report["telemetry"]["lazy_fetch_and_maintenance"]
         initial_filtered = self.report["telemetry"].get("filtered_clone", {})
