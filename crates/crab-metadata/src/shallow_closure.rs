@@ -398,7 +398,7 @@ pub async fn upload_shallow_closure(
         if !descriptor
             .entries
             .iter()
-            .any(|reference| reference.hash == entry.reference.hash)
+            .any(|reference| reference == &entry.reference)
         {
             return Err(MetadataError::CorruptObject {
                 path: entry.reference.path.clone(),
@@ -419,7 +419,12 @@ pub async fn upload_shallow_closure(
             }
             Err(error) => return Err(MetadataError::from(error)),
         }
-        provided.insert(entry.reference.hash.clone());
+        if !provided.insert(entry.reference.hash.clone()) {
+            return Err(MetadataError::CorruptObject {
+                path: entry.reference.path.clone(),
+                reason: "shallow closure entry is provided more than once".to_owned(),
+            });
+        }
     }
     for reference in &descriptor.entries {
         if provided.contains(&reference.hash) {
