@@ -34,6 +34,7 @@ the matching `.gitattributes` rules.
 | `--storage-provider <provider>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
 | `--gc-list-profile <profile>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <remote>` | — | Configure mirror mode with an existing Git remote |
+| `--remote` | `false` | Create the generation-0 manifest in object storage |
 | `--log-level` | — | Set log verbosity |
 
 ## URL Format
@@ -101,6 +102,10 @@ Azure credentials, user config, or environment variables.
    - `filter.crab.required = true` — ensures git fails if the filter is unavailable.
    - `diff.crab.command` — the external diff driver for `diff=crab` files.
 7. Prints the next `crab setup` and `crab ship` steps.
+
+By default, init only changes local state. Pass `--remote` to provision the
+empty generation-0 manifest in object storage. The create is atomic, and
+repeated or concurrent initialization adopts the manifest already present.
 
 ## Auto-Tracking
 

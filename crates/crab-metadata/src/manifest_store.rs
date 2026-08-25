@@ -396,6 +396,7 @@ pub async fn compact_ref_journal(
 
     // Complete evidence publishes authorization before the compacted manifest;
     // otherwise no proof is written and upload-pack withholds protocol v2.
+    let compacted_transactions = snapshot.journal.transactions.clone();
     let git_visibility_published = if let Some(visibility) =
         crate::git_visibility::compact_journal_edits(
             store,
@@ -409,14 +410,18 @@ pub async fn compact_ref_journal(
         )
         .await?
     {
-        crate::git_visibility::upload_if_absent(store, router, &visibility).await?;
+        futures_util::future::try_join(
+            crate::git_visibility::upload_if_absent(store, router, &visibility),
+            write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads),
+        )
+        .await?;
         true
     } else {
+        write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads)
+            .await?;
         false
     };
 
-    let compacted_transactions = snapshot.journal.transactions.clone();
-    write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads).await?;
     write_manifest_cas(store, router, &manifest, &snapshot.manifest_etag).await?;
     cleanup_compacted_transactions(store, router, &compacted_transactions).await;
     Ok(Some(RefJournalCompaction {
@@ -565,8 +570,12 @@ pub async fn upload_segmented_bulk(
     router: &StoreLayout<Store>,
     bulk: &BulkData,
 ) -> Result<()> {
-    segmented_store::upload_write(store, router, &bulk.shard_index).await?;
-    segmented_store::upload_write(store, router, &bulk.pack_index).await
+    futures_util::future::try_join(
+        segmented_store::upload_write(store, router, &bulk.shard_index),
+        segmented_store::upload_write(store, router, &bulk.pack_index),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Upload a bulk manifest object if it does not already exist.
@@ -796,6 +805,111 @@ mod tests {
             let result = self.inner.get_opts(location, options).await;
             self.active_gets.fetch_sub(1, Ordering::AcqRel);
             result
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<object_store::path::Path>>,
+        ) -> BoxStream<'static, object_store::Result<object_store::path::Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    struct DelayedPublicationStore {
+        inner: Arc<InMemory>,
+        active_writes: AtomicUsize,
+        max_active_writes: AtomicUsize,
+    }
+
+    impl DelayedPublicationStore {
+        fn new(inner: Arc<InMemory>) -> Self {
+            Self {
+                inner,
+                active_writes: AtomicUsize::new(0),
+                max_active_writes: AtomicUsize::new(0),
+            }
+        }
+
+        fn max_active_writes(&self) -> usize {
+            self.max_active_writes.load(Ordering::Acquire)
+        }
+
+        fn tracks(location: &object_store::path::Path) -> bool {
+            let path = location.as_ref();
+            path.contains("refs/journal/frontiers/") || path.contains("metadata/git-visibility/v2/")
+        }
+    }
+
+    impl fmt::Debug for DelayedPublicationStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DelayedPublicationStore")
+        }
+    }
+
+    impl fmt::Display for DelayedPublicationStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DelayedPublicationStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for DelayedPublicationStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            let tracked = Self::tracks(location);
+            if tracked {
+                let active = self.active_writes.fetch_add(1, Ordering::AcqRel) + 1;
+                self.max_active_writes.fetch_max(active, Ordering::AcqRel);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let result = self.inner.put_opts(location, payload, options).await;
+            if tracked {
+                self.active_writes.fetch_sub(1, Ordering::AcqRel);
+            }
+            result
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.inner.get_opts(location, options).await
         }
 
         fn delete_stream(
@@ -1288,7 +1402,9 @@ mod tests {
 
     #[tokio::test]
     async fn journal_compaction_reports_published_git_visibility() {
-        let store = memory_store();
+        let inner = Arc::new(InMemory::new());
+        let delayed = Arc::new(DelayedPublicationStore::new(inner));
+        let store = Store::new(delayed.clone() as Arc<dyn ObjectStore>);
         let router = test_layout(store.clone());
         let base = Manifest::default_for_repo("refs/heads/main");
         create_manifest(&store, &router, &base).await.unwrap();
@@ -1344,6 +1460,7 @@ mod tests {
         .unwrap();
 
         assert!(compacted.git_visibility_published);
+        assert!(delayed.max_active_writes() >= 2);
         assert!(proof.contains_for_refs(["refs/heads/main"], &tip));
     }
 

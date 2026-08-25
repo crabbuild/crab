@@ -1611,8 +1611,8 @@ async fn commit_service_git_locators_with_source(
                     writer.write_locations(binding, &entries).await?;
                 }
             }
-            writer.flush_objects().await?;
-
+            // The manifest check is independent of locator durability. Keep
+            // rows pending so coverage flushes them atomically with its marker.
             let (after, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
             if after.generation != manifest.generation
                 || after.pack_index_hash != manifest.pack_index_hash

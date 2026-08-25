@@ -115,6 +115,9 @@ enum Cmd {
         /// Value is the name of the existing git remote (typically "origin").
         #[arg(long)]
         mirror: Option<String>,
+        /// Create the generation-0 manifest in object storage after local setup.
+        #[arg(long)]
+        remote: bool,
         /// Emit structured JSON output.
         #[arg(long, conflicts_with = "jsonl")]
         json: bool,
@@ -3305,6 +3308,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             storage_provider,
             gc_list_profile,
             mirror,
+            remote,
             json,
             jsonl,
         }) => {
@@ -3338,6 +3342,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 gc_list_profile,
                             )
                             .await?;
+                            if remote {
+                                crab::cmd::init::initialize_remote_repository(&u, &cwd, &cancel)
+                                    .await?;
+                            }
                             // Sync .gitattributes with [track] patterns from .crab.toml
                             if let Some(ref track) = config.track {
                                 sync_gitattributes_from_track(&cwd, &track.patterns);
@@ -3405,6 +3413,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 gc_list_profile,
             )
             .await?;
+
+            if remote {
+                crab::cmd::init::initialize_remote_repository(&resolved_url, &cwd, &cancel).await?;
+            }
 
             // Mirror mode: validate remote, add crab remote, install hooks, write config.
             if let Some(ref mirror_remote) = mirror {

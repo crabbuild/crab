@@ -126,6 +126,22 @@ pub(crate) async fn upsert_pack_metadata(
         return Ok(metadata);
     }
 
+    // A newly generated content-addressed pack normally has no sidecar yet;
+    // create-first avoids a guaranteed read on the first publication.
+    let metadata = PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips: requested_tips.iter().cloned().collect(),
+        object_count,
+    };
+    let body = serde_json::to_vec(&metadata).map_err(|error| {
+        CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
+    })?;
+    match store.create_strict(path, Bytes::from(body)).await {
+        Ok(()) => return Ok(metadata),
+        Err(CrabError::CasConflict { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
     for _ in 0..max_retries.max(1) {
         match store.get_with_etag(path).await {
             Ok((body, etag)) => {
@@ -5827,8 +5843,8 @@ async fn publish_pack_locator_inventory(
             writer.write_locations(binding, &entries).await?;
         }
     }
-    writer.flush_objects().await?;
-
+    // The manifest check is independent of locator durability. Keep object
+    // rows pending so set_coverage flushes them with the coverage marker.
     let (after, _) = read_manifest(store, router).await?;
     if after.generation != anchor.generation
         || after.pack_index_hash != anchor.pack_index_hash.hex()
@@ -8004,6 +8020,65 @@ impl PushPipeline {
         )))
     }
 
+    async fn try_publish_initial_manifest(
+        &self,
+        manifest: &Manifest,
+        bulk: &BulkData,
+        current: &crate::metadata::manifest::RepositorySnapshot,
+        admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<bool> {
+        let eligible = self.config.protected_push.is_none()
+            && self.config.active_active_replication.is_none()
+            && current.manifest.generation == 0
+            && current.manifest.refs.is_empty()
+            && current.manifest.shard_index_hash.is_empty()
+            && current.manifest.pack_index_hash.is_empty()
+            && current.journal.refs.is_empty()
+            && current.journal.packs.is_empty()
+            && current.journal.shards.is_empty()
+            && current.journal.transactions.is_empty()
+            && current.journal.visible_heads.is_empty()
+            && manifest.generation == 1
+            && !manifest.refs.is_empty();
+        if !eligible {
+            return Ok(false);
+        }
+
+        let anchor = committed_manifest_anchor(manifest)?;
+        let git_dir = self.common_git_dir()?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("initial manifest requires a store".to_owned()))?;
+
+        // The candidate indexes and the complete visibility proof are
+        // independent immutable objects. Publish both before the manifest
+        // CAS so the manifest remains the only visibility boundary.
+        tokio::try_join!(
+            upload_segmented_bulk(store, &self.router, bulk),
+            publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router),
+        )?;
+        let new_etag =
+            write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
+
+        *self.manifest_etag.lock().await = Some(new_etag);
+        *self.committed_manifest_anchor.lock().await = anchor;
+        self.git_visibility_published
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The manifest and complete Git-visibility proof are authoritative.
+        // Locator rows and their receipt are repairable acceleration state, so
+        // leave them to the next push or the metadb repair/owner path on a
+        // fresh repository instead of extending creation latency with a
+        // second SlateDB publication.
+        self.locator_publication_deferred
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(signal) = admission_commit.take() {
+            let _ = signal.send(());
+        }
+        self.stop_heartbeat_and_release_lock().await;
+        Ok(true)
+    }
+
     /// Commit independently locked refs through one atomic journal transaction.
     #[tracing::instrument(
         level = "info",
@@ -8020,7 +8095,7 @@ impl PushPipeline {
     async fn commit_ref_journal(
         &self,
         mut manifest: Manifest,
-        _bulk: BulkData,
+        bulk: BulkData,
         sha_map: &HashMap<String, String>,
         mut decisions: HashMap<String, RefUpdateDecision>,
         admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
@@ -8101,6 +8176,13 @@ impl PushPipeline {
             (manifest, _) = self
                 .apply_decisions_with_sha_map(&decisions, false, sha_map)
                 .await?;
+        }
+        if !had_conflicts
+            && self
+                .try_publish_initial_manifest(&manifest, &bulk, &current_snapshot, admission_commit)
+                .await?
+        {
+            return Ok(decisions);
         }
         let mut edits = Vec::new();
         let lock_holders = {
@@ -12296,8 +12378,9 @@ impl PushPipeline {
                             ))
                         })??;
                     let remote_idx_path = self.router.pack_index_path(&pack_sha);
-                    store
-                        .put_multipart_file_retry(
+                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
+                    tokio::try_join!(
+                        store.put_multipart_file_retry(
                             &remote_idx_path,
                             &installed.idx_path,
                             idx_size,
@@ -12305,11 +12388,8 @@ impl PushPipeline {
                             8 * 1024 * 1024,
                             &self.cancel,
                             None,
-                        )
-                        .await?;
-                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
-                    store
-                        .put_multipart_file_retry(
+                        ),
+                        store.put_multipart_file_retry(
                             &remote_rev_path,
                             &installed.rev_path,
                             rev_size,
@@ -12317,20 +12397,39 @@ impl PushPipeline {
                             8 * 1024 * 1024,
                             &self.cancel,
                             None,
-                        )
-                        .await?;
+                        ),
+                    )?;
                 }
 
+                let origin_entry = PackManifestEntry {
+                    pack_id: pack_sha.clone(),
+                    size: packed.pack_size,
+                    content_hash: pack_sha.clone(),
+                    ref_tips: ref_tips.clone(),
+                    object_count: packed.object_count,
+                };
                 let meta_path = self.router.pack_metadata_path(&pack_sha);
-                let metadata = upsert_pack_metadata(
-                    store,
-                    &meta_path,
-                    &pack_sha,
-                    packed.object_count,
-                    ref_tips.clone(),
-                    self.config.max_cas_retries,
-                )
-                .await?;
+                // The pack body is verified and durable; its immutable index
+                // evidence, metadata, and origin receipt can now publish in parallel.
+                let (metadata, _) = tokio::try_join!(
+                    upsert_pack_metadata(
+                        store,
+                        &meta_path,
+                        &pack_sha,
+                        packed.object_count,
+                        ref_tips.clone(),
+                        self.config.max_cas_retries,
+                    ),
+                    async {
+                        crab_metadata::pack_origin::record_verified_pack_origin(
+                            store.as_storage(),
+                            self.router.repo_prefix(),
+                            &origin_entry,
+                        )
+                        .await
+                        .map_err(CrabError::from)
+                    },
+                )?;
                 let entry = PackManifestEntry {
                     pack_id: pack_sha.clone(),
                     size: packed.pack_size,
@@ -12338,12 +12437,6 @@ impl PushPipeline {
                     ref_tips: metadata.ref_tips,
                     object_count: packed.object_count,
                 };
-                crab_metadata::pack_origin::record_verified_pack_origin(
-                    store.as_storage(),
-                    self.router.repo_prefix(),
-                    &entry,
-                )
-                .await?;
                 info!(
                     pack_id = %pack_sha,
                     pack_bytes = packed.pack_size,
@@ -15266,7 +15359,10 @@ impl PushPipeline {
         // hand this lock in after discovery; direct callers acquire it here.
         // This preserves lock-then-push serialization while immutable xorb
         // uploads overlap the remaining staged reads.
-        self.at_stage(PushFailureStage::Lock, self.acquire_push_lock().await)?;
+        let push_lock_phase = PhaseTimer::start("push", "push_lock_acquire");
+        let push_lock_result = self.acquire_push_lock().await;
+        self.emit_perf_phase(push_lock_phase.finish(0, 0, 0));
+        self.at_stage(PushFailureStage::Lock, push_lock_result)?;
         self.at_stage(
             PushFailureStage::Admission,
             self.acquire_active_active_gc_writer().await,
@@ -15313,10 +15409,11 @@ impl PushPipeline {
         // Protected pushes are admitted by the authenticated service before it
         // grants a session-private staging store. Coordination objects written
         // through that store cannot provide repository-wide mutual exclusion.
-        let admission_lock = if object_store_admission {
+        let admission_phase = PhaseTimer::start("push", "push_admission");
+        let admission_result = if object_store_admission {
             match self.store.as_ref() {
-                Some(store) => Some(
-                    self.at_stage(
+                Some(store) => self
+                    .at_stage(
                         PushFailureStage::Admission,
                         acquire_push_admission_lock(
                             store,
@@ -15327,13 +15424,15 @@ impl PushPipeline {
                             &self.cancel,
                         )
                         .await,
-                    )?,
-                ),
-                None => None,
+                    )
+                    .map(Some),
+                None => Ok(None),
             }
         } else {
-            None
+            Ok(None)
         };
+        self.emit_perf_phase(admission_phase.finish(0, 0, 0));
+        let admission_lock = self.at_stage(PushFailureStage::Admission, admission_result)?;
         match admission_lock {
             Some(lock) => {
                 let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
@@ -15570,6 +15669,7 @@ impl PushPipeline {
                     .lock()
                     .await
                     .is_empty();
+            let metadb_phase = PhaseTimer::start("push", "post_cas_metadb");
             let indexing = if !needs_metadb_write {
                 Ok(())
             } else {
@@ -15591,6 +15691,7 @@ impl PushPipeline {
                     Err(error) => Err(error),
                 }
             };
+            self.emit_perf_phase(metadb_phase.finish(0, 0, file_index_plan.len() as u64));
             let file_indexed = match indexing {
                 Ok(()) => true,
                 Err(error) => {
@@ -15616,7 +15717,8 @@ impl PushPipeline {
             if locator_deferred {
                 git_indexed = false;
             } else if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
-                match publish_uploaded_pack_locators(
+                let locator_phase = PhaseTimer::start("push", "post_cas_git_locator");
+                let locator_result = publish_uploaded_pack_locators(
                     store,
                     &self.router,
                     &uploaded_packs,
@@ -15625,8 +15727,9 @@ impl PushPipeline {
                     self.config.lock_ttl,
                     &self.cancel,
                 )
-                .await
-                {
+                .await;
+                self.emit_perf_phase(locator_phase.finish(0, 0, uploaded_packs.len() as u64));
+                match locator_result {
                     Ok(stats) if stats.coverage_updated => {
                         info!(
                             generation = anchor.generation,
@@ -15682,13 +15785,17 @@ impl PushPipeline {
             if file_indexed
                 && git_indexed
                 && let Some(anchor) = anchor
-                && let Err(error) = self.write_generation_index_receipt(anchor).await
             {
-                warn!(
-                    error = %error,
-                    generation = anchor.generation,
-                    "post-CAS generation-index receipt write failed; manifest-scoped repair remains available"
-                );
+                let receipt_phase = PhaseTimer::start("push", "post_cas_receipt");
+                let receipt_result = self.write_generation_index_receipt(anchor).await;
+                self.emit_perf_phase(receipt_phase.finish(0, 0, 1));
+                if let Err(error) = receipt_result {
+                    warn!(
+                        error = %error,
+                        generation = anchor.generation,
+                        "post-CAS generation-index receipt write failed; manifest-scoped repair remains available"
+                    );
+                }
             }
         }
 
@@ -19045,6 +19152,13 @@ mod tests {
         }
     }
 
+    fn non_initial_empty_manifest() -> Manifest {
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.seal_git_validation();
+        manifest
+    }
+
     #[test]
     fn locked_manifest_noop_covers_equal_update_and_missing_delete() {
         let update = make_spec("refs/heads/main");
@@ -19406,10 +19520,86 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn initial_push_publishes_manifest_without_ref_journal_state() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("initial-manifest-fast-path");
+        create_manifest_with_etag(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create initial manifest");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.expect("read base");
+        let sha_map = pipeline.resolve_src_ref_map().expect("resolve refs");
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .expect("evaluate refs");
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .expect("build candidate");
+
+        let mut admission_commit = None;
+        pipeline
+            .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
+            .await
+            .expect("publish initial manifest");
+        assert!(
+            pipeline
+                .locator_publication_deferred
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "generation-zero publication should defer repairable locator acceleration"
+        );
+
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read committed manifest");
+        assert_eq!(
+            manifest.refs.get("refs/heads/main"),
+            sha_map.get("refs/heads/main")
+        );
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .expect("read initial ref head");
+        assert!(head.etag.is_none());
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        assert!(
+            crab_metadata::ref_journal::list_active_transactions(
+                store.as_storage(),
+                &storage_router
+            )
+            .await
+            .expect("list active transactions")
+            .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn late_journal_writer_waits_for_compactor_handoff_after_commit() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-busy-compactor");
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -19495,13 +19685,9 @@ mod tests {
     async fn compactor_defers_locator_publication_to_claimed_same_ref_successor() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-locator-successor");
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
         let pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![make_spec("refs/heads/main")],
@@ -19695,13 +19881,9 @@ mod tests {
             ));
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
 
         let result = PushPipeline::new(
             PushConfig::default(),
@@ -19745,7 +19927,7 @@ mod tests {
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -19862,6 +20044,18 @@ mod tests {
             .await
             .expect("read pushed manifest");
         let covered_generation = manifest.generation;
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                covered_generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair deferred initial locator"),
+            "the explicit repair path should publish the deferred initial locator"
+        );
         let storage_router =
             crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
         let visibility = crab_metadata::git_visibility::read(
@@ -20018,6 +20212,18 @@ mod tests {
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("read pushed manifest");
+        assert!(
+            repair_git_object_locator_if_current(
+                &store,
+                &router,
+                manifest.generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair deferred initial locator"),
+            "the explicit repair path should publish the deferred initial locator"
+        );
         let visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
@@ -21679,6 +21885,7 @@ mod tests {
         .await
         .expect("publish locators");
         assert_eq!(stats.object_rows_written, 1);
+        assert_eq!(stats.flushes, 2);
         assert!(stats.coverage_updated);
 
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(

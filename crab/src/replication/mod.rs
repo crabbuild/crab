@@ -13531,6 +13531,11 @@ mod tests {
                 reason: "remote size reporting must inspect the configured primary remote, not a lagging replica",
             },
             DirectStoreClassification {
+                call: "src/cmd/init.rs::initialize_remote_repository",
+                class: "primary-write-authority",
+                reason: "remote repository initialization creates the primary generation-zero manifest",
+            },
+            DirectStoreClassification {
                 call: "src/cmd/lock.rs::setup",
                 class: "primary-write-authority",
                 reason: "lock operations are write coordination and must target the primary authority",

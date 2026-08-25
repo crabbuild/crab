@@ -45,6 +45,7 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 | `--storage-provider <PROVIDER>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
 | `--gc-list-profile <PROFILE>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <REMOTE>` | — | Configure mirror mode using an existing Git remote |
+| `--remote` | `false` | Create the generation-0 manifest in object storage |
 | `--json` | `false` | Emit structured JSON output |
 | `--jsonl` | `false` | Emit streaming JSONL output |
 | `--log-level` | — | Set log verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
@@ -55,6 +56,11 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 2. **Creates `.crab/config.toml`** with the remote URL
 3. **Registers the filter and diff drivers** in `.git/config`
 4. **Adds or updates a Git remote** for the canonical `crab://` URL
+
+By default, init only changes local state. Pass `--remote` when provisioning a
+new remote repository; Crab creates the empty generation-0 manifest with an
+atomic create and safely adopts an existing manifest on repeat or concurrent
+initialization.
 
 ## Examples
 
@@ -77,6 +83,12 @@ crab init s3://team-bucket/my-repo
 # ✓ Created .crab/config.toml
 # ✓ Registered filter.crab driver
 # Next: crab setup
+```
+
+### Provision the remote repository
+
+```bash
+crab init --remote crab://my-bucket/my-repo
 ```
 
 ### Configure tracking separately

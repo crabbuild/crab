@@ -2,8 +2,7 @@
 //!
 //! Parses the remote URL, creates the local `.crab/` directory with a
 //! `config.toml` pointing at the remote, registers the crab git drivers
-//! in the local git config, and logs the prefixes that will be
-//! created on the remote once the Store is wired.
+//! in the local git config, and logs the prefixes used by the remote layout.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -12,13 +11,14 @@ use std::process::Command;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::config::{GcListProfile, StorageProvider};
+use crate::core::config::{Config, GcListProfile, StorageProvider};
 use crate::core::credential_discovery::{CredentialSource, discover_credentials};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
 use crate::core::project_config::{ProjectAuthConfig, ProjectConfig, RemoteConfig};
 use crate::core::style::CliStyle;
 use crate::git::url::CrabUrl;
+use crate::storage::StoreLayout;
 
 /// Remote prefixes that constitute a crab repository in object storage.
 /// Per-repo prefixes live under `{repo}/`; content-addressed objects live
@@ -77,9 +77,8 @@ pub async fn run_init(url: &str, cancel: &CancellationToken) -> Result<()> {
 
 /// Initialize a crab repository rooted at `root`.
 ///
-/// Creates `{root}/.crab/config.toml` with the remote URL and logs
-/// the remote prefixes that would be created atomically (via
-/// `PutMode::Create`) once the Store is available.
+/// Creates `{root}/.crab/config.toml` with the remote URL. Pass `--remote` to
+/// create the generation-0 manifest after local setup.
 ///
 /// # Errors
 ///
@@ -88,6 +87,37 @@ pub async fn run_init(url: &str, cancel: &CancellationToken) -> Result<()> {
 /// [`CrabError::Cancelled`] if the cancellation token fires.
 pub async fn run_init_in(url: &str, root: &Path, cancel: &CancellationToken) -> Result<()> {
     run_init_with_options(url, root, cancel, OutputMode::Text).await
+}
+
+/// Create the generation-0 manifest for a repository after local init.
+///
+/// Existing manifests are adopted, so this operation is safe to repeat and
+/// concurrent callers converge on the manifest created by the first caller.
+///
+/// # Errors
+///
+/// Returns a configuration, authentication, storage, or cancellation error
+/// when the remote cannot be opened or its initial manifest cannot be created.
+pub async fn initialize_remote_repository(
+    url: &str,
+    root: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let remote = parse_init_remote(url)?;
+    let config = Config::resolve_for_repo(root)?;
+    let repo_prefix = remote.parsed.repo_path.clone();
+    let store = crate::auth::build_store(&config, remote.parsed, "repo-create", cancel).await?;
+    let router = StoreLayout::new(store.clone(), repo_prefix);
+    let head = format!("refs/heads/{}", config.default_branch);
+
+    ensure_initial_manifest(&store, &router, &head).await?;
+    tracing::info!(
+        url = %remote.canonical_url,
+        head = %head,
+        "remote repository initialized"
+    );
+    Ok(())
 }
 
 /// Options-driven init implementation.
@@ -359,15 +389,15 @@ async fn run_init_inner(
         emit_json(INIT_SCHEMA, INIT_VERSION, payload);
     }
 
-    // Log what would be created on the remote. Full remote initialization
-    // (manifest creation) happens when the Store is available — it will use
-    // create_initial_manifest for atomic, idempotent manifest creation.
+    // The default init path remains local-only. `--remote` calls
+    // `initialize_remote_repository` after local setup has written the
+    // provider and credential configuration needed to build the Store.
     for prefix in REMOTE_PREFIXES {
         tracing::info!(
             prefix = %prefix,
             host = %host,
             repo_path = %path,
-            "would create per-repo remote prefix (Store not yet wired)",
+            "remote per-repo prefix is materialized by manifest creation",
         );
     }
 
@@ -375,14 +405,11 @@ async fn run_init_inner(
         tracing::info!(
             prefix = %prefix,
             host = %host,
-            "would create global prefix (Store not yet wired)",
+            "remote global prefix is materialized by content upload",
         );
     }
 
-    tracing::info!(
-        "crab init complete — local config written, git drivers registered, \
-         manifest creation pending Store wiring"
-    );
+    tracing::info!("crab init complete — local config written and git drivers registered");
 
     if !mode.is_machine() && show_next_steps {
         eprintln!("\nNext:");
@@ -694,9 +721,10 @@ fn scan_for_large_files(
 
 /// Create the initial unified manifest for a new repository.
 ///
-/// Uploads empty segmented shard/pack indexes, then creates the
-/// manifest pointer at `{repo}/manifest` with generation 0, empty refs,
-/// and the given HEAD symref target.
+/// Creates the manifest pointer at `{repo}/manifest` with generation 0,
+/// empty refs, empty index hashes, and the given HEAD symref target.
+/// Empty index hashes are the canonical zero-state representation; the first
+/// committed push publishes real segmented indexes.
 ///
 /// Uses `create_manifest` (If-None-Match: *) so a concurrent init doesn't
 /// clobber an existing manifest.
@@ -710,24 +738,9 @@ pub async fn create_initial_manifest(
     router: &crate::storage::StoreLayout,
     head: &str,
 ) -> Result<()> {
-    use crate::metadata::manifest::{
-        BulkData, Manifest, compact_pack_index, compact_shard_index, create_manifest,
-        upload_segmented_bulk,
-    };
+    use crate::metadata::manifest::{Manifest, create_manifest};
 
-    let (empty_shard_hash, _shard_index, shard_write) = compact_shard_index(0, &[])?;
-    let (empty_pack_hash, _pack_index, pack_write) = compact_pack_index(0, &[])?;
-    let bulk = BulkData {
-        shard_index: shard_write,
-        pack_index: pack_write,
-    };
-    upload_segmented_bulk(store, router, &bulk).await?;
-
-    // Build the generation-0 manifest.
-    let mut manifest = Manifest::default_for_repo(head);
-    manifest.shard_index_hash = empty_shard_hash;
-    manifest.pack_index_hash = empty_pack_hash;
-    manifest.seal_git_validation();
+    let manifest = Manifest::default_for_repo(head);
 
     // Create the manifest pointer with If-None-Match: * semantics.
     create_manifest(store, router, &manifest).await?;
@@ -740,6 +753,24 @@ pub async fn create_initial_manifest(
     );
 
     Ok(())
+}
+
+async fn ensure_initial_manifest(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    head: &str,
+) -> Result<()> {
+    // New repositories are the hot path: create-first avoids a discovery GET.
+    // A conflict proves another initializer won, so adopt its manifest.
+    match create_initial_manifest(store, router, head).await {
+        Ok(()) => Ok(()),
+        Err(CrabError::CasConflict { .. }) => {
+            crate::metadata::manifest::read_manifest(store, router)
+                .await
+                .map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Resolve the path to the crab binary for use in git config values.
@@ -1700,7 +1731,7 @@ storage_provider = "azure"
 
     #[tokio::test]
     async fn init_creates_valid_manifest_that_read_manifest_can_parse() {
-        use crate::metadata::manifest::{read_bulk_pack_list, read_bulk_shard_list, read_manifest};
+        use crate::metadata::manifest::read_manifest;
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1724,21 +1755,10 @@ storage_provider = "azure"
         assert_eq!(manifest.generation, 0);
         assert_eq!(manifest.head, "refs/heads/main");
         assert!(manifest.refs.is_empty());
-        assert!(!manifest.shard_index_hash.is_empty());
-        assert!(!manifest.pack_index_hash.is_empty());
+        assert!(manifest.shard_index_hash.is_empty());
+        assert!(manifest.pack_index_hash.is_empty());
         assert!(manifest.commit_graph_hash.is_none());
         assert!(manifest.ref_registry_hash.is_none());
-
-        // Verify the bulk objects are readable and empty.
-        let shards = read_bulk_shard_list(&store, &router, &manifest.shard_index_hash)
-            .await
-            .expect("shard-list should be readable");
-        assert!(shards.is_empty());
-
-        let packs = read_bulk_pack_list(&store, &router, &manifest.pack_index_hash)
-            .await
-            .expect("pack-list should be readable");
-        assert!(packs.is_empty());
     }
 
     #[tokio::test]
@@ -1772,6 +1792,32 @@ storage_provider = "azure"
                 "expected CasConflict on duplicate init, got: {e:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn remote_manifest_initialization_adopts_existing_manifest() {
+        use crate::metadata::manifest::read_manifest;
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_string());
+
+        ensure_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .expect("first remote initialization should succeed");
+        ensure_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .expect("repeated remote initialization should adopt the manifest");
+
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("initialized manifest should remain readable");
+        assert_eq!(manifest.generation, 0);
+        assert_eq!(manifest.head, "refs/heads/main");
     }
 
     #[test]

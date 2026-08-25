@@ -769,10 +769,13 @@ remote.
    compute an incremental remote-object set without a round-trip.
    Index construction, checksum binding, and canonical `.idx` upload are
    pre-commit requirements. All pack entries are appended to one candidate
-   pack index and become visible through one manifest CAS. After that CAS,
-   exact offset/length/CRC rows for the whole set are published through one
-   renewed `git_locator_db` writer session; publication failure is
-   repairable acceleration damage and does not roll back committed refs.
+   pack index and become visible through one manifest CAS. On an ordinary
+   generation-zero push, the manifest CAS and complete Git-visibility proof
+   return first; exact offset/length/CRC rows are deferred because they are
+   repairable acceleration state. The next push, `crab metadb owner`, or the
+   first fetch that needs protocol-v2 locator admission publishes them through
+   one renewed `git_locator_db` writer session. Publication failure never rolls
+   back committed refs.
 ```
 
 **Source:** `crab/src/git/push.rs` (`upload_packs`, `compute_remote_objects`),
