@@ -47,17 +47,23 @@ reports, not the full 1,000-push acceptance report; repeatability, differential
 depth proof, owner-fault, and team-concurrency gates remain open. Both run-owned
 prefixes were cleaned.
 
-The latest completed qualification, `local-k8s-locator-order-36444de0-20260825`,
-replayed ten commits with the release binary built from `36444de0`, exercised
-full, filtered, depth-1/10/100/1,000, warm-cache, and incremental-fetch paths,
-and passed every harness correctness check. It is still a smoke report rather
-than the required 1,000-push report: the source/full/incremental tips and
-advertised refs matched, both full and incremental clones passed `git fsck`,
-the deterministic sample passed, and the isolated RustFS prefix was empty after
-cleanup. The run also completed the previously stuck post-repack owner passes.
-The standalone verifier now accepts the abbreviated build SHA emitted by
-`crab version --json` when it prefixes the checked-out source revision, matching
-the harness provenance contract.
+The latest completed qualification,
+`local-k8s-history-chain-100b-20260825`, replayed 100 commits with the
+pre-rebase release binary built from `1e9ac756`. It exercised full, filtered,
+depth-1/10/100/1,000, warm-cache, and incremental-fetch paths and passed every
+harness correctness check: source/full/incremental tips and advertised refs
+matched, full and incremental clones passed `git fsck`, the deterministic
+sample was byte-identical, the source checkout stayed unchanged, and the
+isolated RustFS prefix was empty after cleanup. This is still a smoke report,
+not evidence from current `HEAD` and not the required 1,000-push report; the
+latest rebased source must repeat the qualification before it can be accepted.
+
+A separate 1,000-push replay, `local-k8s-full-history-a926-1000-20260825`, is
+running against the same Kubernetes revision with the pre-rebase binary built
+from `a926fe9d`. At the latest roadmap update it had completed 532 replay
+pushes without a harness error. Its result is deliberately not counted as a
+pass until it finishes and the full profile is repeated with the committed
+latest binary.
 
 Implemented on the current branch:
 
@@ -88,6 +94,12 @@ Implemented on the current branch:
   already-shallow requests;
 - generated-pack cache descriptors that distinguish requested object count
   from the larger self-contained pack count required by delta bases.
+- long fast-forward visibility history retained across a bounded 1,000-edit
+  window, so incremental planning does not lose old haves after 64 cumulative
+  transitions;
+- deterministic sorting and deduplication of visibility delta positions,
+  plus checkpoint flush ordering that publishes dirty locator rows before
+  readers or manifest checks can observe the checkpoint;
 - sparse response-pack delta-base prefetching in locator batches, bounded range
   coalescing, local verified reconstruction, and shared decode admission;
 - conservative `include-tags` handling for exact shallow closures: lightweight
@@ -103,6 +115,8 @@ Still required before the roadmap is DONE:
 
 - a publishable full-profile Kubernetes/RustFS report from the current branch;
 - the 1,000-push growth and latency comparison for catalog and graph layers;
+- a repeated full-profile report built from the current rebased `HEAD`, not
+  only the pre-rebase binaries used by the completed smoke and running replay;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
 - a publishable full-profile qualification report from the committed latest
@@ -117,6 +131,10 @@ Still required before the roadmap is DONE:
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.
+- the current owner report's `repair_required` state must be explained and
+  cleared: the 100-push report records a missing generation-index receipt and
+  incomplete bucket-registry discovery. These diagnostics cannot be treated
+  as harmless while claiming production readiness.
 
 ## Outcome
 
@@ -953,13 +971,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | `local-k8s-shallow-index-v3-20260824`; `local-k8s-locator-order-36444de0-20260825` (smoke; prefix cleaned) | `36444de0` + verifier fix | The latest replay-10 smoke report has all correctness checks green and the standalone verifier accepts it with `--allow-smoke`; the required 1,000-push full report and repeatability gate remain pending |
+| 0 | PARTIAL | PR #75 | `local-k8s-history-chain-100b-20260825` (100-push smoke; prefix cleaned); `local-k8s-full-history-a926-1000-20260825` (running) | `793f6b43` source; live reports use pre-rebase `1e9ac756`/`a926fe9d` | The completed 100-push report is verifier-green with exact correctness checks, but it is not built from current `HEAD`; the 1,000-push replay is still running and the current-binary repeatability gate is open |
 | 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
-| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-locator-order-36444de0-20260825` | `1d69fe79`, `36444de0` | Full two-pack consolidation transferred 1.244 GB and passed fsck; filtered selected repack transferred 198.83 MB; replay-10 depth-1/10 generated 49.42/98.34 MB in 23.697/28.758 s with 7,386/7,487 requests; depth-100/1,000 generated 813.84 MB/1.244 GB in 109.878/111.615 s from two packs; full-profile and reference-pack SLO evidence remain pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-locator-order-36444de0-20260825` | `d5090649`, `36444de0` | The replay-10 checkpoint-10 repack reduced active packs 11→2 in 36.043 s; locator publication preserved the dense catalog across this pure repack, while 1,000-push drift and canonical-universe proof remain pending |
-| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-locator-order-36444de0-20260825` | `1d69fe79`, `36444de0` | Exact depth-1/10/100/1,000 plans and clone/fsck checks passed again; replay-10 planner times were 10/16/722/404 ms, but 10,000-pair differential and sustained SLO evidence remain pending |
-| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-locator-order-36444de0-20260825` | `9bb558a6`, `36444de0` | Owner checkpoint-10 completed six passes (374.805 s), including the 11→2 repack; post-repack passes completed without opening the old source pack/index, proving the closure-rebind and locator-order fixes on this run; interruption, 10,000-push, and GC matrix remain pending |
-| 6 | PARTIAL | PR #75 | `local-k8s-final-20260824`; `local-k8s-locator-order-36444de0-20260825` | `0a8b5c8f`, `b7749b2e`, `36444de0` + working tree | Single-client full/filtered/shallow checks pass and warm full-clone generation was a cache hit; shallow and large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
+| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | The 100-push smoke consolidated 11 packs to 2 with 1,264,812,786 active bytes; cold full clone transferred 1,241,522,108 bytes in 181.352 s pack generation, warm clone was a 208 ms cache hit, filtered clone transferred 198,715,382 bytes, and depth-1/10/100/1,000 transferred 49,318,431/94,912,761/814,844,514/1,241,871,926 bytes. The report uses pre-rebase code; current-binary and reference-pack SLO evidence remain pending |
+| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | The 100-push owner completed six passes, including `ref_journal_compaction`, catalog advances, commit-graph rebuild, and geometric repack; active packs fell 11→2. Owner convergence took 676.232 s and peaked at 1.87 GB RSS, so the logarithmic artifact shape is promising but maintenance latency is an open bottleneck |
+| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825` | `7dac3d75`, `793f6b43` | Exact depth-1/10/100/1,000 plans and clone/fsck checks passed again; 100-push planner times were 125/16/344/448 ms and used 2/7/3/3/3 storage requests for the measured profiles, but 10,000-pair differential, latest-binary repeatability, and sustained SLO evidence remain pending |
+| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `9bb558a6`, `7dac3d75`, `793f6b43` | The 100-push owner completed six passes and reduced active packs 11→2; post-repack maintenance completed. The report still marks `repair_required` because the generation-index receipt is missing and bucket-registry discovery is incomplete; interruption, 10,000-push, and GC matrix remain pending |
+| 6 | PARTIAL | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `0a8b5c8f`, `b7749b2e`, `7dac3d75`, `793f6b43` + working tree | Single-client correctness and warm-cache checks pass, but current-binary replay, shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -993,6 +1011,25 @@ empty-generation owner regression was fixed; the failing remote-helper and
 post-CAS cancellation tests also fail on `e54b9a49` without this working-tree
 change. They remain a separate cleanup item and are not counted as green
 qualification evidence.
+
+After rebasing the implementation onto current `origin/main`, the focused
+proof for `793f6b43` is:
+
+- `cargo fmt --all -- --check`;
+- `cargo check -p crab -p crab-auth-server --locked`;
+- `cargo test -p crab-metadata --features remote-index,storage --locked -- --test-threads=1`:
+  238 passed, 1 ignored;
+- `cargo test -p crab --lib git_object_locator_cli_publisher --locked -- --test-threads=1`:
+  2 passed;
+- `cargo test -p crab-auth-server --lib --locked -- --test-threads=1`:
+  74 passed;
+- `python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py`:
+  13 passed; and
+- `git diff --check`.
+
+All Cargo commands used the required isolated target directory on the
+workspace volume. This is focused source proof, not a substitute for the
+open full-suite, latest-binary, provider, fault, or team-concurrency gates.
 
 ### Fresh Kubernetes/RustFS evidence from the current implementation
 
@@ -1178,6 +1215,65 @@ This run closes a material post-repack regression and strengthens the
 single-client evidence for Phases 2–5. It does not close the 1,000-push growth
 curve, 10,000-pair shallow differential, interruption/GC matrix, supported
 provider, large-team concurrency, or sustained canary gates.
+
+### Long fast-forward history qualification
+
+Run profile: `local-k8s-history-chain-100b-20260825`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, 100 replay
+pushes, and the release binary built from pre-rebase commit `1e9ac756`.
+The report status is `ok`, the standalone verifier passes with `--allow-smoke`,
+and the run-owned RustFS prefix is empty after cleanup. Because the binary is
+not current `HEAD`, this is evidence for the exercised behavior, not final
+acceptance of `793f6b43`.
+
+- The source revision was `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, with
+  source base `67ea564b777bafee705a8a4ada1037015fdb96a6`. Advertised refs,
+  full and incremental clone tips, Git fsck, a deterministic byte-identical
+  object sample, source immutability, and cleanup all passed.
+- The seed contained about 1.6M objects. At checkpoint 100, owner convergence
+  completed six passes with `ref_journal_compaction`, two catalog advances,
+  `commit_graph_rebuild`, `geometric_repack`, and a final no-op; active packs
+  fell from 11 to 2 and occupied 1,264,812,786 bytes.
+- Incremental fetch after pushes 1/10/100 planned 37/1,304/4,719 logical
+  objects, omitted 1,637,163/1,637,200/1,638,492 objects, and generated
+  40,695/3,355,559/8,549,205 response bytes in 158/302/485 ms of server
+  operation time. Full cold clone generated 1,241,522,108 response bytes in
+  181,352 ms of pack generation; warm clone was a 208 ms cache hit.
+- Blobless selection planned 1,102,159 objects in 2,139 ms and transferred
+  198,715,382 bytes. Depth-1/10/100/1,000 selected 60,062/88,052/1,001,853/
+  1,643,211 logical objects, planned in 125/16/344/448 ms, and transferred
+  49,318,431/94,912,761/814,844,514/1,241,871,926 response bytes. Depth-1/10
+  used 6,966/7,453 storage requests; depth-100/1,000 used three each.
+- The owner checkpoint took 676,232 ms and reached 1,871,806,464 bytes peak
+  child RSS. This is a measured maintenance bottleneck, not an acceptance
+  threshold: the implementation has the intended bounded artifact shape, but
+  owner latency and memory need optimization before large-team rollout.
+- The report records `generation_receipt_valid: false` and
+  `repair_required: true`, with notes that the generation-index receipt is
+  missing and bucket registry discovery is incomplete. The harness correctly
+  keeps destructive bucket GC disabled, but production readiness requires this
+  state to be explained, repaired, or explicitly made a non-error invariant
+  with tests.
+
+The long-history failure mode addressed by the current branch was cumulative
+transition eviction: after enough fast-forward edits, retaining only the last
+64 transition records dropped old haves and made exact incremental planning
+fail. The current `incremental_history` path retains a bounded long-history
+window, persists it through the schema migration, and uses sorted/deduplicated
+visibility positions. Regression tests cover the 100-edit history and exact
+planning beyond the former 64-transition boundary.
+
+### Current 1,000-push qualification (running)
+
+Run profile: `local-k8s-full-history-a926-1000-20260825`, same Kubernetes
+revision and isolated RustFS, 1,000 replay pushes, release binary built from
+pre-rebase commit `a926fe9d`. At the time of this update, the report is still
+`running` after 532 pushes with no harness error. It is useful load evidence,
+but it cannot close the gate because it is not current `HEAD` and has not
+completed its full clone, shallow, incremental, cleanup, and verifier checks.
+The report also already shows owner convergence taking 192.870 s at
+checkpoint 1, 445.348 s at checkpoint 10, and 723.410 s at checkpoint 100;
+the resulting catalog/graph/repack cost is an explicit optimization target.
 
 ## Final done criteria
 
