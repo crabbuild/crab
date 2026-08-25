@@ -19,11 +19,20 @@
 //! `--verify-remote` (download and verify each candidate before local deletion).
 
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::core::error::{CrabError, Result};
+use fs4::fs_std::FileExt as LockFileExt;
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
+
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crab_git::lfs_pointer::LfsPointer;
 use crab_lfs::LfsError;
+
+const PRUNE_LOCK: &str = "crab-lfs-prune.lock";
+const MAX_LFS_SCAN_OBJECTS: usize = 5_000_000;
 
 /// Summary of a prune operation.
 #[derive(Debug, Clone)]
@@ -92,12 +101,36 @@ pub enum WhenUnverified {
 /// - `dry_run`: when true, reports what would be pruned without deleting.
 /// - `force`: when true, skips the confirmation prompt.
 pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
+    run_prune_with_cancel(options, &CancellationToken::new())
+}
+
+/// Run LFS pruning with cancellation checks and a repository-scoped lock.
+pub fn run_prune_with_cancel(
+    options: PruneOptions,
+    cancel: &CancellationToken,
+) -> Result<PruneSummary> {
+    check_cancelled(cancel)?;
     // `println!`/`eprintln!` in this function are user-facing CLI output
     // (status messages, dry-run listings, confirmation prompts). These
     // are intentional and match the pattern used by other crab
     // commands. Internal diagnostics use `tracing` and the review
     // accepts this split. See finding CR7-F1.
     let lfs_objects_dir = discover_lfs_objects_dir()?;
+    let git_dir = crate::git::discover::discover_common_git_dir()?;
+    let lock_path = git_dir.join(PRUNE_LOCK);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(CrabError::Io)?;
+    if !LockFileExt::try_lock_exclusive(&lock).map_err(CrabError::Io)? {
+        return Err(CrabError::Configuration {
+            key: "crab lfs prune".to_owned(),
+            origin: format!("another prune holds {}", lock_path.display()),
+        });
+    }
 
     if !lfs_objects_dir.is_dir() {
         println!("crab lfs prune: no local LFS objects directory found");
@@ -109,7 +142,7 @@ pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
     }
 
     // Step 1: Collect all local LFS object OIDs and their file paths.
-    let local_objects = collect_local_objects(&lfs_objects_dir)?;
+    let local_objects = collect_local_objects_with_cancel(&lfs_objects_dir, cancel)?;
 
     if local_objects.is_empty() {
         println!("crab lfs prune: no local LFS objects found");
@@ -213,6 +246,8 @@ pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
     let mut deleted_bytes = 0u64;
 
     for obj in &candidates {
+        check_cancelled(cancel)?;
+        verify_local_object(obj, cancel)?;
         match std::fs::remove_file(&obj.path) {
             Ok(()) => {
                 deleted_count += 1;
@@ -242,6 +277,46 @@ pub fn run_prune(options: PruneOptions) -> Result<PruneSummary> {
         pruned_bytes: deleted_bytes,
         dry_run: false,
     })
+}
+
+fn collect_local_objects_with_cancel(
+    lfs_objects_dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<Vec<LocalObject>> {
+    check_cancelled(cancel)?;
+    let objects = collect_local_objects(lfs_objects_dir)?;
+    if objects.len() > MAX_LFS_SCAN_OBJECTS {
+        return Err(CrabError::Configuration {
+            key: "lfs prune object count".to_owned(),
+            origin: format!("local LFS inventory exceeds {MAX_LFS_SCAN_OBJECTS} objects"),
+        });
+    }
+    check_cancelled(cancel)?;
+    Ok(objects)
+}
+
+fn verify_local_object(object: &LocalObject, cancel: &CancellationToken) -> Result<()> {
+    let mut file = File::open(&object.path).map_err(CrabError::Io)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        check_cancelled(cancel)?;
+        let read = file.read(&mut buffer).map_err(CrabError::Io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes = bytes.saturating_add(read as u64);
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    let expected = parse_hex32(&object.oid_hex)?;
+    if bytes != object.size || digest != expected {
+        return Err(CrabError::LfsObjectCorrupt {
+            oid: object.oid_hex.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn print_prune_candidates(candidates: &[&LocalObject], verbose: bool) {

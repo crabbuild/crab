@@ -5268,7 +5268,7 @@ async fn run_optimize_command(
             let _span = tracing::info_span!("optimize_plan").entered();
             let mode = OutputMode::from_flags(args.json, false);
             let config = Config::resolve_local()?;
-            crab::cmd::optimize::run_plan(&args, &config, mode);
+            crab::cmd::optimize::run_plan(&args, &config, mode)?;
             Ok(ExitCode::SUCCESS)
         }
         OptimizeCmd::Apply(args) => {
@@ -5511,7 +5511,8 @@ async fn run_optimize_apply(
 ) -> Result<ExitCode> {
     let mode = OutputMode::from_flags(args.json, false);
     let config = Config::resolve_local()?;
-    let mut payload = crab::cmd::optimize::build_apply_payload(&args, &config);
+    let _apply_lock = crab::cmd::optimize::acquire_apply_lock()?;
+    let mut payload = crab::cmd::optimize::build_apply_payload(&args, &config)?;
 
     for index in 0..payload.steps.len() {
         if cancel.is_cancelled() {
@@ -5605,7 +5606,7 @@ async fn run_compact_command(
         dry_run,
         max_shard_size: max_size,
     };
-    crab::cmd::compact::run_compact(&args, &store).await?;
+    crab::cmd::compact::run_compact_with_cancel(&args, &store, cancel).await?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5641,6 +5642,7 @@ async fn run_repack_command(
         dry_run,
         download_concurrency: config.download_concurrency,
         max_cas_retries: config.push_max_cas_retries,
+        workspace_root: crab::cache::default_cache_root().join("maintenance"),
     };
 
     let outcome = crab::cmd::repack::run_repack(&store, &prefix, &repack_config, cancel).await?;

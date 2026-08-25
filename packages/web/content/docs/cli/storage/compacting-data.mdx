@@ -21,15 +21,17 @@ flowchart LR
 
 ## How Compaction Works
 
-1. Reads the repository's shard-list to discover all current shards.
-2. Downloads all shards to a temporary directory.
-3. Merges them using xet-core's shard merging algorithm, respecting the maximum shard size limit.
-4. Strips unreferenced xorb-info entries — in global-dedup layouts, merged shards may carry metadata from other repositories.
-5. Uploads compacted shards to the remote store.
-6. Atomically updates the shard-list, then conservatively CAS-unions its
-   committed roots into the partitioned ref-registry. Exact stale-root removal
-   is reserved for exclusive registry repair so a concurrent push cannot lose
-   its pre-registered roots.
+1. Pins the repository's current shard inventory and validates its size and
+   entry bounds.
+2. Downloads shards with bounded concurrency into a temporary maintenance
+   workspace, verifying each content hash before parsing.
+3. Merges the complete set with xet-core's shard merging algorithm, respecting
+   the maximum shard size limit.
+4. Uploads hash-verified replacement shards and the new immutable shard index.
+5. Atomically updates the shard-list with compare-and-swap and publishes
+   candidate roots before the new list is visible.
+6. Reconciles the partitioned ref registry without dropping roots registered by
+   a concurrent push.
 
 Source shards are left in place for garbage collection to clean up later.
 
@@ -55,7 +57,7 @@ crab compact --repo org/models --bucket my-crab-bucket
 crab compact --repo org/models --bucket my-crab-bucket --max-shard-size 50MiB
 ```
 
-Smaller compacted shards trade fewer total shards for lower per-shard download latency — useful when shard sync latency matters more than minimizing shard count.
+Smaller compacted shards trade fewer total shards for lower per-shard download latency — useful when shard sync latency matters more than minimizing shard count. The value must be greater than zero and cannot exceed Xet's native 100 MiB shard cap.
 
 ## When to Compact
 
@@ -67,7 +69,11 @@ Smaller compacted shards trade fewer total shards for lower per-shard download l
 
 ## Concurrency Safety
 
-Compaction is safe to run concurrently with pushes — the CAS update ensures atomicity. However, two concurrent compactions on the same repository may cause one to fail with a CAS conflict. Retrying is safe.
+Compaction holds a renewable repository maintenance lease and is safe to retry.
+Pushes may continue: immutable candidate objects are safe before publication,
+the manifest compare-and-swap prevents stale commits, and registry
+reconciliation preserves concurrent push roots. Cancellation is checked between
+bounded download, parse, and publish units.
 
 ## Compaction vs. Repacking
 

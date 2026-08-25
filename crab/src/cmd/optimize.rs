@@ -2,9 +2,11 @@
 
 pub mod xorbs;
 
+use std::fs::{File, OpenOptions};
 use std::process::Stdio;
 
 use clap::Parser;
+use fs4::fs_std::FileExt as LockFileExt;
 use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -18,6 +20,18 @@ use tokio_util::sync::CancellationToken;
 pub const OPTIMIZE_PLAN_SCHEMA: &str = "optimize.plan";
 pub const OPTIMIZE_APPLY_SCHEMA: &str = "optimize.apply";
 pub const OPTIMIZE_SCHEMA_VERSION: &str = "1.0";
+const OPTIMIZE_APPLY_LOCK: &str = "optimize-apply.lock";
+const MAX_CHILD_OUTPUT_BYTES: usize = 64 * 1024;
+const GIT_ENV_OVERRIDES: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+];
 
 /// Arguments for `crab optimize plan`.
 #[derive(Debug, Clone, Parser)]
@@ -171,25 +185,109 @@ pub struct OptimizePayload {
 }
 
 /// Build and render `crab optimize plan`.
-pub fn run_plan(args: &OptimizePlanArgs, config: &Config, mode: OutputMode) -> OptimizePayload {
+pub fn run_plan(
+    args: &OptimizePlanArgs,
+    config: &Config,
+    mode: OutputMode,
+) -> Result<OptimizePayload> {
+    validate_inputs(args, config)?;
     let payload = build_payload(args, config, OptimizeWorkflowMode::Plan);
     render_payload(&payload, mode, OPTIMIZE_PLAN_SCHEMA);
-    payload
+    Ok(payload)
 }
 
 /// Build an apply payload with planned steps.
-#[must_use]
-pub fn build_apply_payload(args: &OptimizeApplyArgs, config: &Config) -> OptimizePayload {
-    build_payload(
-        &OptimizePlanArgs::from(args),
+pub fn build_apply_payload(args: &OptimizeApplyArgs, config: &Config) -> Result<OptimizePayload> {
+    let plan_args = OptimizePlanArgs::from(args);
+    validate_inputs(&plan_args, config)?;
+    Ok(build_payload(
+        &plan_args,
         config,
         OptimizeWorkflowMode::Apply,
-    )
+    ))
+}
+
+fn validate_inputs(args: &OptimizePlanArgs, config: &Config) -> Result<()> {
+    if !(1..=crate::cost::inventory::live::MAX_LIST_CONCURRENCY)
+        .contains(&config.cost.list_concurrency)
+    {
+        return Err(CrabError::Configuration {
+            key: format!("cost.list_concurrency={}", config.cost.list_concurrency),
+            origin: format!(
+                "expected a value from 1 through {}",
+                crate::cost::inventory::live::MAX_LIST_CONCURRENCY
+            ),
+        });
+    }
+    if let Some(top_k) = args.top_k
+        && top_k > crate::cost::inventory::live::MAX_TOP_K_COLD
+    {
+        return Err(CrabError::Configuration {
+            key: format!("--top-k={top_k}"),
+            origin: format!(
+                "expected a value from 0 through {}",
+                crate::cost::inventory::live::MAX_TOP_K_COLD
+            ),
+        });
+    }
+    if let Some(source) = args.inventory_source.as_deref() {
+        if !matches!(source, "auto" | "live") {
+            return Err(CrabError::Configuration {
+                key: "--inventory-source".to_owned(),
+                origin: format!("expected auto or live, got {source}"),
+            });
+        }
+    }
+    if let Some(ratio) = args.sample
+        && (!ratio.is_finite() || ratio <= 0.0 || ratio > 1.0)
+    {
+        return Err(CrabError::Configuration {
+            key: "--sample".to_owned(),
+            origin: format!("expected a finite ratio greater than 0 and at most 1, got {ratio}"),
+        });
+    }
+    if args.profile.is_some() && !args.include_xorbs {
+        return Err(CrabError::Configuration {
+            key: "--profile".to_owned(),
+            origin: "--profile requires --include-xorbs".to_owned(),
+        });
+    }
+    if let Some(profile) = args.profile.as_deref() {
+        crate::optimize::xorbs::profile::Profile::from_name(profile, &config.optimize.xorbs)?;
+    }
+    Ok(())
 }
 
 /// Render the final apply payload.
 pub fn render_apply(payload: &OptimizePayload, mode: OutputMode) {
     render_payload(payload, mode, OPTIMIZE_APPLY_SCHEMA);
+}
+
+/// Hold a repository-wide optimizer lock for the full apply workflow.
+pub fn acquire_apply_lock() -> Result<File> {
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
+    acquire_apply_lock_in(&worktree.shared_crab_dir)
+}
+
+fn acquire_apply_lock_in(shared_crab_dir: &std::path::Path) -> Result<File> {
+    let maintenance_dir = shared_crab_dir.join("maintenance");
+    std::fs::create_dir_all(&maintenance_dir).map_err(CrabError::Io)?;
+    let lock_path = maintenance_dir.join(OPTIMIZE_APPLY_LOCK);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(CrabError::Io)?;
+    if !LockFileExt::try_lock_exclusive(&lock).map_err(CrabError::Io)? {
+        return Err(CrabError::Configuration {
+            key: "crab optimize apply".to_owned(),
+            origin: format!("another optimizer apply holds {}", lock_path.display()),
+        });
+    }
+    Ok(lock)
 }
 
 /// Execute a child `crab` command as one optimizer step.
@@ -204,9 +302,13 @@ pub async fn run_child_step(
     }
 
     step.status = OptimizeStepStatus::Running;
+    let mutates = step.mutates;
     let bin = crate::cmd::init::crab_binary_path();
     let mut command = Command::new(&bin);
     command.args(args);
+    for variable in GIT_ENV_OVERRIDES {
+        command.env_remove(variable);
+    }
     if mode.is_machine() {
         let mut child = command
             .stdout(Stdio::piped())
@@ -215,17 +317,27 @@ pub async fn run_child_step(
             .map_err(CrabError::Io)?;
         let stdout_task = tokio::spawn(read_child_pipe(child.stdout.take()));
         let stderr_task = tokio::spawn(read_child_pipe(child.stderr.take()));
-        let status = tokio::select! {
-            result = child.wait() => result.map_err(CrabError::Io)?,
-            () = cancel.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                stdout_task.abort();
-                stderr_task.abort();
-                step.status = OptimizeStepStatus::Failed;
-                "cancelled".clone_into(&mut step.detail);
-                return Err(CrabError::Cancelled);
+        let (status, cancelled_after_start) = if mutates {
+            tokio::select! {
+                result = child.wait() => (result.map_err(CrabError::Io)?, false),
+                () = cancel.cancelled() => (child.wait().await.map_err(CrabError::Io)?, true),
             }
+        } else {
+            (
+                tokio::select! {
+                    result = child.wait() => result.map_err(CrabError::Io)?,
+                    () = cancel.cancelled() => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        step.status = OptimizeStepStatus::Failed;
+                        "cancelled".clone_into(&mut step.detail);
+                        return Err(CrabError::Cancelled);
+                    }
+                },
+                false,
+            )
         };
         let stdout = stdout_task.await.map_err(|error| {
             CrabError::Internal(format!("stdout capture task failed: {error}"))
@@ -238,6 +350,14 @@ pub async fn run_child_step(
         } else {
             bounded_child_output(&stderr).or_else(|| bounded_child_output(&stdout))
         };
+        if cancelled_after_start {
+            step.status = OptimizeStepStatus::Failed;
+            step.detail = match diagnostic.as_deref() {
+                Some(diagnostic) => format!("cancelled after mutation completed: {diagnostic}"),
+                None => "cancelled after mutation completed".to_owned(),
+            };
+            return Err(CrabError::Cancelled);
+        }
         return finish_child_step(step, status, diagnostic.as_deref());
     }
 
@@ -246,16 +366,31 @@ pub async fn run_child_step(
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(CrabError::Io)?;
-    let status = tokio::select! {
-        result = child.wait() => result.map_err(CrabError::Io)?,
-        () = cancel.cancelled() => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            step.status = OptimizeStepStatus::Failed;
-            "cancelled".clone_into(&mut step.detail);
-            return Err(CrabError::Cancelled);
+    let (status, cancelled_after_start) = if mutates {
+        tokio::select! {
+            result = child.wait() => (result.map_err(CrabError::Io)?, false),
+            () = cancel.cancelled() => (child.wait().await.map_err(CrabError::Io)?, true),
         }
+    } else {
+        (
+            tokio::select! {
+                result = child.wait() => result.map_err(CrabError::Io)?,
+                () = cancel.cancelled() => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    step.status = OptimizeStepStatus::Failed;
+                    "cancelled".clone_into(&mut step.detail);
+                    return Err(CrabError::Cancelled);
+                }
+            },
+            false,
+        )
     };
+    if cancelled_after_start {
+        step.status = OptimizeStepStatus::Failed;
+        step.detail = "cancelled after mutation completed".to_owned();
+        return Err(CrabError::Cancelled);
+    }
     finish_child_step(step, status, None)
 }
 
@@ -266,8 +401,19 @@ where
     let Some(mut reader) = reader else {
         return Ok(Vec::new());
     };
-    let mut output = Vec::new();
-    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut output).await?;
+    let mut output = Vec::with_capacity(MAX_CHILD_OUTPUT_BYTES);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+        if output.len() > MAX_CHILD_OUTPUT_BYTES {
+            let excess = output.len() - MAX_CHILD_OUTPUT_BYTES;
+            output.drain(..excess);
+        }
+    }
     Ok(output)
 }
 

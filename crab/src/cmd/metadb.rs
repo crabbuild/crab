@@ -29,6 +29,7 @@
 //! one helper set.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -42,12 +43,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::git::url::CrabUrl;
 use crate::metadata::{MetaDb, MetaDbGuard, XorbRef};
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
-use crab_xet::hash::MerkleHash;
+use crab_xet::hash::{HashedWrite, MerkleHash};
+use crab_xet::xorb::format::MAX_XORB_SIZE;
 use crab_xet::xorb::parser::XorbParser;
 
 /// Which databases the subcommand operates on.
@@ -252,21 +254,27 @@ pub async fn run_metadb(
     match cmd {
         MetadbCommand::Diagnose { db, json, deep } => {
             let mode = if json { OutputMode::Json } else { mode };
-            run_diagnose(db, mode, deep).await
+            run_diagnose(db, mode, deep, cancel).await
         }
         MetadbCommand::Rebuild { db, json } => {
             let mode = if json { OutputMode::Json } else { mode };
-            run_rebuild(db, mode).await
+            run_rebuild(db, mode, cancel).await
         }
         MetadbCommand::Owner {
             once,
             interval,
             jsonl,
         } => Box::pin(run_generation_owner(once, interval, jsonl, cancel)).await,
-        MetadbCommand::Compact { db } => run_compact(db).await,
+        MetadbCommand::Compact { db } => run_compact(db, cancel).await,
         MetadbCommand::Cache(sub) => match sub {
-            CacheCommand::Stats => run_cache_stats(mode),
-            CacheCommand::Clear => run_cache_clear(),
+            CacheCommand::Stats => {
+                check_cancelled(cancel)?;
+                run_cache_stats(mode)
+            }
+            CacheCommand::Clear => {
+                check_cancelled(cancel)?;
+                run_cache_clear(cancel)
+            }
         },
     }
 }
@@ -274,18 +282,21 @@ pub async fn run_metadb(
 /// Resolve the `(store, repo_prefix, bucket_identity, config)` tuple for the current
 /// working directory. Returns a user-facing error when no remote is
 /// configured — every metadb subcommand needs the bucket.
-async fn resolve_repo_store() -> Result<(
+async fn resolve_repo_store(
+    cancel: &CancellationToken,
+) -> Result<(
     Arc<dyn ObjectStore>,
     String,
     crate::storage::store::BucketIdentity,
     Config,
 )> {
-    let cwd = std::env::current_dir()?;
-    resolve_repo_store_in(&cwd).await
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    resolve_repo_store_in(&cwd, cancel).await
 }
 
 async fn resolve_repo_store_in(
     root: &Path,
+    cancel: &CancellationToken,
 ) -> Result<(
     Arc<dyn ObjectStore>,
     String,
@@ -304,9 +315,8 @@ async fn resolve_repo_store_in(
         )));
     }
     let parsed = CrabUrl::parse(&url)?;
-    let config = Config::resolve_local().unwrap_or_default();
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let store = crate::auth::build_store(&config, &parsed, "metadb", &cancel).await?;
+    let config = Config::resolve_for_repo(root)?;
+    let store = crate::auth::build_store(&config, &parsed, "metadb", cancel).await?;
     // `build_store` hands back a `ProbingStoreHandle` which wraps an
     // `Arc<dyn ObjectStore>` via `inner()`. Clone the inner handle out
     // so the metadb layer holds a plain `Arc<dyn ObjectStore>`.
@@ -409,7 +419,7 @@ async fn run_generation_owner(
             origin: "Git generation-owner interval must be at least one second".to_owned(),
         });
     }
-    let (inner, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
+    let (inner, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
     let store = crate::storage::store::Store::new(inner).with_bucket_identity(bucket_identity);
     let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix.clone());
     let lock_ttl = std::time::Duration::from_secs(config.push_lock_ttl_secs);
@@ -724,8 +734,14 @@ fn generation_owner_retry_delay(
 
 // --- diagnose -------------------------------------------------------
 
-async fn run_diagnose(db: DbSelector, mode: OutputMode, deep: bool) -> Result<()> {
-    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
+async fn run_diagnose(
+    db: DbSelector,
+    mode: OutputMode,
+    deep: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
     let metadb_config = config.build_metadb_config(&repo_prefix);
     // Diagnose only reads sys:* keys — open read-only so a
     // concurrent push is not fenced.
@@ -754,8 +770,9 @@ async fn run_diagnose(db: DbSelector, mode: OutputMode, deep: bool) -> Result<()
         chunk_index,
     };
 
-    render_diagnose(&payload, mode);
     guard.close().await?;
+    check_cancelled(cancel)?;
+    render_diagnose(&payload, mode);
     Ok(())
 }
 
@@ -1255,10 +1272,145 @@ struct RebuildPayload {
 /// memory without making the commit fan-out run at tiny-batch
 /// granularity.
 const REBUILD_COMMIT_BATCH: usize = 1000;
+const MAX_METADATA_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_METADATA_SHARD_FILE_ENTRIES: usize = 1_000_000;
+const MAX_METADATA_SHARD_CHUNK_ENTRIES: usize = 1_000_000;
+const MAX_METADATA_SHARDS: u64 = 1_000_000;
+const MAX_METADATA_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
 
-async fn run_rebuild(db: DbSelector, mode: OutputMode) -> Result<()> {
-    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
-    run_rebuild_in(store, repo_prefix, &bucket_identity, db, mode, &config).await
+fn create_shard_scan_workspace() -> Result<tempfile::TempDir> {
+    let root = crate::cache::default_cache_root().join("maintenance");
+    std::fs::create_dir_all(&root).map_err(CrabError::Io)?;
+    tempfile::Builder::new()
+        .prefix("crab-metadb-shard-")
+        .tempdir_in(root)
+        .map_err(CrabError::Io)
+}
+
+async fn download_and_parse_shard(
+    storage: &crab_storage::Store,
+    shard_path: &ObjectPath,
+    expected_hash: MerkleHash,
+    workspace: &Path,
+    include_file_index: bool,
+    include_chunk_index: bool,
+    cancel: &CancellationToken,
+) -> Result<(
+    Vec<crab_xet::shard_parse::ExtractedFileRecipe>,
+    Vec<(MerkleHash, XorbRef)>,
+)> {
+    check_cancelled(cancel)?;
+    let expected_size = tokio::select! {
+        result = storage.head(shard_path) => result?.size,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    };
+    if expected_size > MAX_METADATA_SHARD_BYTES {
+        return Err(CrabError::Configuration {
+            key: "metadata shard size".to_owned(),
+            origin: format!(
+                "shard {expected_hash} is {expected_size} bytes; bounded index scans support at most {MAX_METADATA_SHARD_BYTES} bytes"
+            ),
+        });
+    }
+    let local_path = workspace.join(format!("shard-{}", expected_hash.hex()));
+    let downloaded_size = tokio::select! {
+        result = storage.download_to_path_bounded(shard_path, &local_path, MAX_METADATA_SHARD_BYTES) => result?,
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+    };
+    if downloaded_size != expected_size {
+        return Err(CrabError::CorruptObject {
+            path: shard_path.to_string(),
+            reason: format!(
+                "shard size changed during download: expected {expected_size} bytes, downloaded {downloaded_size}"
+            ),
+        });
+    }
+    let object_path = shard_path.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let result = (|| {
+            let mut source = File::open(&local_path).map_err(CrabError::Io)?;
+            let mut hashed = HashedWrite::new(std::io::sink());
+            std::io::copy(&mut source, &mut hashed).map_err(CrabError::Io)?;
+            if hashed.hash() != expected_hash {
+                return Err(CrabError::CorruptObject {
+                    path: object_path.clone(),
+                    reason: "shard body hash mismatch".to_owned(),
+                });
+            }
+
+            let mut source = File::open(&local_path).map_err(CrabError::Io)?;
+            let parsed = match (include_file_index, include_chunk_index) {
+                (true, true) => {
+                    crab_xet::shard_parse::extract_file_and_chunk_entries_from_reader_with_limits(
+                        &mut source,
+                        MAX_METADATA_SHARD_FILE_ENTRIES,
+                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
+                    )
+                }
+                (true, false) => {
+                    crab_xet::shard_parse::extract_file_recipes_from_reader_with_limits(
+                        &mut source,
+                        MAX_METADATA_SHARD_FILE_ENTRIES,
+                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
+                    )
+                    .map(|recipes| (recipes, Vec::new()))
+                }
+                (false, true) => {
+                    crab_xet::shard_parse::extract_chunk_entries_from_reader_with_limit(
+                        &mut source,
+                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
+                    )
+                    .map(|chunks| (Vec::new(), chunks))
+                }
+                (false, false) => Ok((Vec::new(), Vec::new())),
+            };
+            parsed.map_err(|error| CrabError::CorruptObject {
+                path: object_path,
+                reason: format!("failed to parse shard entries: {error}"),
+            })
+        })();
+        let _ = std::fs::remove_file(&local_path);
+        result
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("shard scan worker failed: {error}")))?;
+    result
+}
+
+async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToken) -> Result<()> {
+    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(cancel).await?;
+    crate::replication::ensure_active_active_maintenance_admitted(
+        &config,
+        "metadata index rebuild",
+    )?;
+    let storage = crate::storage::Store::new(Arc::clone(&store))
+        .with_bucket_identity(bucket_identity.clone());
+    let lease = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        &storage,
+        crab_storage::GLOBAL_PREFIX,
+        &repo_prefix,
+        cancel,
+    )
+    .await?;
+    let operation = run_rebuild_in(
+        store,
+        repo_prefix,
+        &bucket_identity,
+        db,
+        mode,
+        &config,
+        cancel,
+    )
+    .await;
+    let release = lease.release().await;
+    match (operation, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            warn!(error = %release_error, "metadb rebuild lease release also failed");
+            Err(error)
+        }
+    }
 }
 
 /// Core rebuild entry point parameterised on the object store and
@@ -1271,17 +1423,8 @@ async fn run_rebuild_in(
     db: DbSelector,
     mode: OutputMode,
     config: &Config,
+    cancel: &CancellationToken,
 ) -> Result<()> {
-    let storage = crate::storage::Store::new(Arc::clone(&store));
-    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
-    let cancel = CancellationToken::new();
-    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
-        &storage,
-        router.global_prefix(),
-        router.repo_prefix(),
-        &cancel,
-    )
-    .await?;
     // Rebuild writes fresh entries into one or both databases — must
     // use read-write mode, which fences any concurrent writer on
     // purpose.
@@ -1294,17 +1437,9 @@ async fn run_rebuild_in(
     );
     let guard = MetaDbGuard::new(metadb);
     let emit_progress = !matches!(mode, OutputMode::Json);
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = rebuild_with_guard(&store, &repo_prefix, db, emit_progress, &guard) => result,
-    };
+    let result = rebuild_with_guard(&store, &repo_prefix, db, emit_progress, &guard, cancel).await;
     let result = close_rebuild_guard(guard, result).await;
-    let release = gc_writer.release().await;
-    let payload = match (result, release) {
-        (Ok(payload), Ok(())) => payload,
-        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
-    };
+    let payload = result?;
     render_rebuild_payload(&payload, mode);
     Ok(())
 }
@@ -1314,10 +1449,10 @@ async fn run_rebuild_in(
 pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
-    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store().await?;
+    let cancel = CancellationToken::new();
+    let (store, repo_prefix, bucket_identity, config) = resolve_repo_store(&cancel).await?;
     let storage = crate::storage::Store::new(Arc::clone(&store));
     let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
-    let cancel = CancellationToken::new();
     let gc_writer = crate::maintenance::GcWriterLeases::acquire(
         &storage,
         router.global_prefix(),
@@ -1338,7 +1473,15 @@ pub(crate) async fn rebuild_file_index_for_current_repo_and_verify(
         biased;
         () = cancel.cancelled() => Err(CrabError::Cancelled),
         result = async {
-            rebuild_with_guard(&store, &repo_prefix, DbSelector::FileIndex, false, &guard).await?;
+            rebuild_with_guard(
+                &store,
+                &repo_prefix,
+                DbSelector::FileIndex,
+                false,
+                &guard,
+                &cancel,
+            )
+            .await?;
             let file_store = guard.file_index().await?;
             let file_hashes: Vec<MerkleHash> =
                 entries.iter().map(|(file_hash, _)| *file_hash).collect();
@@ -1374,6 +1517,245 @@ async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result
     }
 }
 
+/// Counts for generation-pinned rows written before a candidate manifest is visible.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CandidateShardIndexPublication {
+    pub(crate) gc_registry_generation: u64,
+    pub(crate) file_entries_written: u64,
+    pub(crate) chunk_entries_written: u64,
+}
+
+/// Write the immutable receipt proving that a manifest's derived indexes are complete.
+pub(crate) async fn write_generation_index_receipt(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    manifest: &crab_metadata::manifests::Manifest,
+) -> Result<()> {
+    let parse_hash = |value: &str, label: &str| -> Result<MerkleHash> {
+        if value.is_empty() {
+            return Ok(MerkleHash::default());
+        }
+        MerkleHash::from_hex(value)
+            .map_err(|error| CrabError::Internal(format!("{label} hash invalid: {error}")))
+    };
+    let shard_index_hash = parse_hash(&manifest.shard_index_hash, "manifest shard-index")?;
+    let pack_index_hash = parse_hash(&manifest.pack_index_hash, "manifest pack-index")?;
+    let receipt = crab_metadata::receipts::GenerationIndexReceipt {
+        schema_version: crab_metadata::receipts::RECEIPT_SCHEMA_VERSION,
+        generation: manifest.generation,
+        shard_index_hash: shard_index_hash.into(),
+        pack_index_hash: pack_index_hash.into(),
+        file_index_digest: crab_metadata::receipts::generation_file_index_digest(
+            shard_index_hash.into(),
+        ),
+        git_object_locator_digest: crab_metadata::receipts::generation_git_object_locator_digest(
+            pack_index_hash.into(),
+        ),
+    };
+    receipt
+        .validate(
+            manifest.generation,
+            shard_index_hash.into(),
+            pack_index_hash.into(),
+        )
+        .map_err(CrabError::from)?;
+    let path = router.repo_path(&format!(
+        "metadata/generation-receipts/{:020}.json",
+        manifest.generation
+    ));
+    let body = serde_json::to_vec(&receipt)
+        .map_err(|error| CrabError::Internal(format!("receipt serialize: {error}")))?;
+    match store.put(&path, Bytes::from(body)).await {
+        Ok(()) => Ok(()),
+        Err(CrabError::CasConflict { .. }) => {
+            let (existing, _) = store
+                .get_with_etag_bounded(&path, MAX_METADATA_CONTROL_BYTES)
+                .await?;
+            let existing: crab_metadata::receipts::GenerationIndexReceipt =
+                serde_json::from_slice(&existing).map_err(|error| CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!("generation-index receipt decode failed: {error}"),
+                })?;
+            existing
+                .validate(
+                    manifest.generation,
+                    shard_index_hash.into(),
+                    pack_index_hash.into(),
+                )
+                .map_err(CrabError::from)?;
+            if existing != receipt {
+                return Err(CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "generation-index receipt conflicts with the committed index digest"
+                        .to_owned(),
+                });
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Publish generation-bound file/chunk rows before exposing a candidate shard set.
+pub(crate) async fn publish_candidate_shard_indexes(
+    store: &crate::storage::store::Store,
+    repo_prefix: &str,
+    candidate: &crab_metadata::manifests::Manifest,
+    shard_hashes: &[String],
+    config: &Config,
+    cancel: &CancellationToken,
+) -> Result<CandidateShardIndexPublication> {
+    if candidate.generation == 0 || candidate.shard_index_hash.is_empty() {
+        return Err(CrabError::Internal(
+            "candidate shard indexes require a non-zero manifest anchor".to_owned(),
+        ));
+    }
+    let metadb = build_metadb(
+        Arc::clone(store.inner()),
+        repo_prefix.to_owned(),
+        &store.bucket_identity(),
+        false,
+        config,
+    );
+    let guard = MetaDbGuard::new(metadb);
+    let result = publish_candidate_shard_indexes_with_guard(
+        store,
+        repo_prefix,
+        candidate,
+        shard_hashes,
+        &guard,
+        cancel,
+    )
+    .await;
+    close_rebuild_guard(guard, result).await
+}
+
+async fn publish_candidate_shard_indexes_with_guard(
+    store: &crate::storage::store::Store,
+    repo_prefix: &str,
+    candidate: &crab_metadata::manifests::Manifest,
+    shard_hashes: &[String],
+    guard: &MetaDbGuard,
+    cancel: &CancellationToken,
+) -> Result<CandidateShardIndexPublication> {
+    check_cancelled(cancel)?;
+    let storage = store.as_storage();
+    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+    let shard_index_hash = MerkleHash::from_hex(&candidate.shard_index_hash).map_err(|error| {
+        CrabError::Internal(format!("candidate shard-index hash invalid: {error}"))
+    })?;
+    let gc_registry_generation = crab_metadata::ref_registry::union_register_repo_shards(
+        storage,
+        &router,
+        shard_hashes.to_vec(),
+    )
+    .await?;
+    check_cancelled(cancel)?;
+    let file_store = guard.file_index().await?;
+    let chunk_store = guard.chunk_index().await?;
+    let mut pending_file = Vec::new();
+    let mut pending_chunk = Vec::new();
+    let mut pending_committed_chunk = Vec::new();
+    let mut file_entries_written = 0_u64;
+    let mut chunk_entries_written = 0_u64;
+    let mut verified_xorbs = HashMap::new();
+    let workspace = create_shard_scan_workspace()?;
+
+    for shard_hash_hex in shard_hashes {
+        check_cancelled(cancel)?;
+        let shard_hash =
+            MerkleHash::from_hex(shard_hash_hex).map_err(|error| CrabError::CorruptObject {
+                path: router.shard_path(shard_hash_hex).to_string(),
+                reason: format!("candidate shard hash is invalid: {error}"),
+            })?;
+        let shard_path = router.shard_path(shard_hash_hex);
+        let (recipes, chunk_entries) = download_and_parse_shard(
+            storage,
+            &shard_path,
+            shard_hash,
+            workspace.path(),
+            true,
+            true,
+            cancel,
+        )
+        .await?;
+        let committed_chunk_entries = rebuild_committed_chunk_receipts(
+            storage,
+            &router,
+            repo_prefix,
+            shard_hash,
+            candidate.generation,
+            shard_index_hash,
+            gc_registry_generation,
+            cancel,
+            &chunk_entries,
+            &mut verified_xorbs,
+        )
+        .await?;
+
+        for recipe in recipes {
+            let file_size = recipe.chunks.iter().try_fold(0_u64, |total, (_, size)| {
+                total.checked_add(*size).ok_or_else(|| {
+                    CrabError::StagingCorrupt("candidate recipe size overflow".to_owned())
+                })
+            })?;
+            let recipe_hash = FileRecipe::from_staged_chunks(
+                ChunkingPolicyId::XetGearV1_64KiB,
+                recipe.file_hash,
+                file_size,
+                &recipe.chunks,
+            )?
+            .hash();
+            pending_file.push((
+                recipe.file_hash,
+                crab_metadata::value_codec::CommittedFileRecord {
+                    recipe_hash,
+                    shard_hash,
+                    committed_generation: candidate.generation,
+                    shard_index_hash,
+                },
+            ));
+        }
+        pending_chunk.extend(chunk_entries);
+        pending_committed_chunk.extend(committed_chunk_entries);
+
+        if pending_file.len() >= REBUILD_COMMIT_BATCH || pending_chunk.len() >= REBUILD_COMMIT_BATCH
+        {
+            let (files, chunks) = flush_rebuild_batch(
+                guard,
+                Some(&file_store),
+                Some(&chunk_store),
+                &mut pending_file,
+                &mut pending_chunk,
+                &mut pending_committed_chunk,
+                cancel,
+            )
+            .await?;
+            file_entries_written = file_entries_written.saturating_add(files);
+            chunk_entries_written = chunk_entries_written.saturating_add(chunks);
+            verified_xorbs.clear();
+        }
+    }
+
+    let (files, chunks) = flush_rebuild_batch(
+        guard,
+        Some(&file_store),
+        Some(&chunk_store),
+        &mut pending_file,
+        &mut pending_chunk,
+        &mut pending_committed_chunk,
+        cancel,
+    )
+    .await?;
+    file_entries_written = file_entries_written.saturating_add(files);
+    chunk_entries_written = chunk_entries_written.saturating_add(chunks);
+    Ok(CandidateShardIndexPublication {
+        gc_registry_generation,
+        file_entries_written,
+        chunk_entries_written,
+    })
+}
+
 /// Inner rebuild driver. Kept separate so tests can feed a tempdir-
 /// anchored `MetaDb` in without going through the `build_metadb`
 /// cache-root plumbing.
@@ -1383,7 +1765,9 @@ async fn rebuild_with_guard(
     db: DbSelector,
     emit_progress: bool,
     guard: &MetaDbGuard,
+    cancel: &CancellationToken,
 ) -> Result<RebuildPayload> {
+    check_cancelled(cancel)?;
     let start = std::time::Instant::now();
     let storage = crab_storage::Store::new(Arc::clone(store));
     let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
@@ -1391,10 +1775,11 @@ async fn rebuild_with_guard(
     let committed_shards = if manifest.shard_index_hash.is_empty() {
         Vec::new()
     } else {
-        crab_metadata::manifest_store::read_bulk_shard_list(
+        crab_metadata::manifest_store::read_bulk_shard_list_with_limit(
             &storage,
             &router,
             &manifest.shard_index_hash,
+            MAX_METADATA_SHARDS,
         )
         .await?
     };
@@ -1406,12 +1791,14 @@ async fn rebuild_with_guard(
         })?
     };
     let gc_registry_generation = if db.includes_chunk_index() && !committed_shards.is_empty() {
-        crab_metadata::ref_registry::union_register_repo_shards(
+        let generation = crab_metadata::ref_registry::union_register_repo_shards(
             &storage,
             &router,
             committed_shards.clone(),
         )
-        .await?
+        .await?;
+        check_cancelled(cancel)?;
+        generation
     } else {
         0
     };
@@ -1443,8 +1830,10 @@ async fn rebuild_with_guard(
         crab_metadata::receipts::CommittedChunkReceipt,
     )> = Vec::new();
     let mut verified_xorbs = HashMap::new();
+    let workspace = create_shard_scan_workspace()?;
 
     for shard_hash_hex in committed_shards {
+        check_cancelled(cancel)?;
         let Ok(shard_hash) = MerkleHash::from_hex(&shard_hash_hex) else {
             warn!(shard_hash = %shard_hash_hex, "skipping committed shard with invalid hash");
             shards_failed += 1;
@@ -1452,33 +1841,24 @@ async fn rebuild_with_guard(
         };
         let shard_path = router.shard_path(&shard_hash_hex);
 
-        let body = match storage.get_with_etag(&shard_path).await {
-            Ok((body, _)) => body,
-            Err(e) => {
-                warn!(shard = %shard_hash.hex(), error = %e, "failed to download shard during rebuild");
-                shards_failed += 1;
-                continue;
-            }
-        };
-        if crab_xet::hash::compute_data_hash(&body) != shard_hash {
-            warn!(shard = %shard_hash.hex(), "committed shard body hash mismatch during rebuild");
-            shards_failed += 1;
-            continue;
-        }
-
-        let recipes = match crab_xet::shard_parse::extract_file_recipes(&body) {
-            Ok(recipes) => recipes,
+        let (recipes, chunk_entries) = match download_and_parse_shard(
+            &storage,
+            &shard_path,
+            shard_hash,
+            workspace.path(),
+            db.includes_file_index(),
+            db.includes_chunk_index(),
+            cancel,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
             Err(error) => {
-                warn!(shard = %shard_hash.hex(), error = %error, "failed to reconstruct committed shard recipes");
+                warn!(shard = %shard_hash.hex(), error = %error, "failed to download or parse shard during rebuild");
                 shards_failed += 1;
                 continue;
             }
-        };
-
-        let chunk_entries = if db.includes_chunk_index() {
-            crab_xet::shard_parse::extract_chunk_entries_streaming(&body)
-        } else {
-            Vec::new()
         };
         let committed_chunk_entries = if chunk_entries.is_empty() {
             Vec::new()
@@ -1491,6 +1871,7 @@ async fn rebuild_with_guard(
                 manifest.generation,
                 shard_index_hash,
                 gc_registry_generation,
+                cancel,
                 &chunk_entries,
                 &mut verified_xorbs,
             )
@@ -1551,6 +1932,7 @@ async fn rebuild_with_guard(
                 &mut pending_file,
                 &mut pending_chunk,
                 &mut pending_committed_chunk,
+                cancel,
             )
             .await?;
             file_entries_written += fi;
@@ -1573,13 +1955,14 @@ async fn rebuild_with_guard(
         &mut pending_file,
         &mut pending_chunk,
         &mut pending_committed_chunk,
+        cancel,
     )
     .await?;
     file_entries_written += fi;
     chunk_entries_written += ci;
 
     let (legacy_file_rows_removed, legacy_chunk_rows_removed) = if shards_failed == 0 {
-        retire_legacy_namespaces(guard, file_store.as_ref(), chunk_store.as_ref()).await?
+        retire_legacy_namespaces(guard, file_store.as_ref(), chunk_store.as_ref(), cancel).await?
     } else {
         notes.push(
             "legacy namespaces retained because one or more committed shards failed proof"
@@ -2147,6 +2530,7 @@ async fn rebuild_committed_chunk_receipts(
     committed_generation: u64,
     shard_index_hash: MerkleHash,
     gc_registry_generation: u64,
+    cancel: &CancellationToken,
     entries: &[(MerkleHash, XorbRef)],
     verified_xorbs: &mut HashMap<MerkleHash, RebuildVerifiedXorb>,
 ) -> Result<Vec<(MerkleHash, crab_metadata::receipts::CommittedChunkReceipt)>> {
@@ -2157,9 +2541,13 @@ async fn rebuild_committed_chunk_receipts(
     }
     let mut receipts = Vec::with_capacity(entries.len());
     for (chunk_hash, xorb_ref) in entries {
+        check_cancelled(cancel)?;
         if !verified_xorbs.contains_key(&xorb_ref.xorb_hash) {
             let path = router.xorb_path(&xorb_ref.xorb_hash);
-            let (body, etag) = storage.get_with_etag(&path).await?;
+            let (body, etag) = tokio::select! {
+                result = storage.get_with_etag_bounded(&path, MAX_XORB_SIZE as u64) => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
             let parser = XorbParser::parse(body.clone())?;
             if parser.hash() != xorb_ref.xorb_hash {
                 return Err(CrabError::CorruptObject {
@@ -2239,7 +2627,9 @@ async fn flush_rebuild_batch(
     pending_file: &mut Vec<(MerkleHash, crab_metadata::value_codec::CommittedFileRecord)>,
     pending_chunk: &mut Vec<(MerkleHash, XorbRef)>,
     pending_committed_chunk: &mut Vec<(MerkleHash, crab_metadata::receipts::CommittedChunkReceipt)>,
+    cancel: &CancellationToken,
 ) -> Result<(u64, u64)> {
+    check_cancelled(cancel)?;
     if pending_file.is_empty() && pending_chunk.is_empty() && pending_committed_chunk.is_empty() {
         return Ok((0, 0));
     }
@@ -2277,10 +2667,12 @@ async fn retire_legacy_namespaces(
     guard: &MetaDbGuard,
     file_store: Option<&crate::metadata::FileIndexStore>,
     chunk_store: Option<&crate::metadata::ChunkIndexStore>,
+    cancel: &CancellationToken,
 ) -> Result<(u64, u64)> {
     let mut file_removed = 0u64;
     let mut chunk_removed = 0u64;
     loop {
+        check_cancelled(cancel)?;
         let file_keys = match file_store {
             Some(store) => store.legacy_keys_batch(REBUILD_COMMIT_BATCH).await?,
             None => Vec::new(),
@@ -2309,7 +2701,8 @@ async fn retire_legacy_namespaces(
 
 // --- compact --------------------------------------------------------
 
-async fn run_compact(_db: DbSelector) -> Result<()> {
+async fn run_compact(_db: DbSelector, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     warn!(
         "crab metadb compact: SlateDB compaction runs automatically in the background; \
          this subcommand currently has no effect. It is provided so operator runbooks can \
@@ -2393,7 +2786,8 @@ fn cache_stats_for(path: &Path) -> Result<CacheStatsPayload> {
     })
 }
 
-fn run_cache_clear() -> Result<()> {
+fn run_cache_clear(cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     let path = default_local_chunk_index_path()?;
     if !path.exists() {
         println!(
@@ -2419,57 +2813,59 @@ fn run_cache_clear() -> Result<()> {
 /// anything deeper (WAL replay, bloom validation) belongs to
 /// `crab metadb diagnose`.
 pub async fn run_doctor_metadb_in(root: &Path, mode: OutputMode) -> Result<()> {
-    let (store, repo_prefix, bucket_identity, config) = match resolve_repo_store_in(root).await {
-        Ok(v) => v,
-        Err(e) => {
-            // No remote configured — still emit something useful.
-            let empty = DoctorMetadbPayload {
-                repo_prefix: String::from("<unconfigured>"),
-                file_index: DbDiagnosis {
-                    label: "file_index_db",
-                    path: String::new(),
-                    opened: false,
-                    error: Some(e.to_string()),
-                    format_version: None,
-                    epoch: None,
-                    created_at: None,
-                    gc_generation: None,
-                    deep_integrity: None,
-                },
-                chunk_index: DbDiagnosis {
-                    label: "chunk_index_db",
-                    path: String::new(),
-                    opened: false,
-                    error: Some(String::from("skipped: no remote configured")),
-                    format_version: None,
-                    epoch: None,
-                    created_at: None,
-                    gc_generation: None,
-                    deep_integrity: None,
-                },
-                shards_prefix: String::from("<unknown>"),
-                shard_count: None,
-                shard_enumeration_error: None,
-                cache: cache_stats_for(&crate::cache::chunk_index_cache_path(
-                    &crate::cache::default_cache_root(),
-                    &crate::storage::store::BucketIdentity::local_unset(),
-                ))
-                .unwrap_or_else(|_| CacheStatsPayload {
-                    cache_path: String::new(),
-                    exists: false,
-                    file_size_bytes: 0,
-                    entry_count: 0,
-                    installed_shard_count: 0,
-                    cache_gc_generation: 0,
-                }),
-                acceleration: AccelerationHealth::unavailable(
-                    "remote is not configured; generation/index proof unavailable",
-                ),
-            };
-            render_doctor_metadb(&empty, mode);
-            return Ok(());
-        }
-    };
+    let cancel = CancellationToken::new();
+    let (store, repo_prefix, bucket_identity, config) =
+        match resolve_repo_store_in(root, &cancel).await {
+            Ok(v) => v,
+            Err(e) => {
+                // No remote configured — still emit something useful.
+                let empty = DoctorMetadbPayload {
+                    repo_prefix: String::from("<unconfigured>"),
+                    file_index: DbDiagnosis {
+                        label: "file_index_db",
+                        path: String::new(),
+                        opened: false,
+                        error: Some(e.to_string()),
+                        format_version: None,
+                        epoch: None,
+                        created_at: None,
+                        gc_generation: None,
+                        deep_integrity: None,
+                    },
+                    chunk_index: DbDiagnosis {
+                        label: "chunk_index_db",
+                        path: String::new(),
+                        opened: false,
+                        error: Some(String::from("skipped: no remote configured")),
+                        format_version: None,
+                        epoch: None,
+                        created_at: None,
+                        gc_generation: None,
+                        deep_integrity: None,
+                    },
+                    shards_prefix: String::from("<unknown>"),
+                    shard_count: None,
+                    shard_enumeration_error: None,
+                    cache: cache_stats_for(&crate::cache::chunk_index_cache_path(
+                        &crate::cache::default_cache_root(),
+                        &crate::storage::store::BucketIdentity::local_unset(),
+                    ))
+                    .unwrap_or_else(|_| CacheStatsPayload {
+                        cache_path: String::new(),
+                        exists: false,
+                        file_size_bytes: 0,
+                        entry_count: 0,
+                        installed_shard_count: 0,
+                        cache_gc_generation: 0,
+                    }),
+                    acceleration: AccelerationHealth::unavailable(
+                        "remote is not configured; generation/index proof unavailable",
+                    ),
+                };
+                render_doctor_metadb(&empty, mode);
+                return Ok(());
+            }
+        };
 
     let metadb = build_metadb(
         Arc::clone(&store),
@@ -3267,9 +3663,17 @@ mod tests {
         );
         guard.commit(legacy_txn).await.expect("seed legacy rows");
 
-        let payload = rebuild_with_guard(&store, "org/test-repo", DbSelector::Both, true, &guard)
-            .await
-            .expect("rebuild");
+        let cancel = CancellationToken::new();
+        let payload = rebuild_with_guard(
+            &store,
+            "org/test-repo",
+            DbSelector::Both,
+            true,
+            &guard,
+            &cancel,
+        )
+        .await
+        .expect("rebuild");
         assert_eq!(payload.legacy_file_rows_removed, 1);
         assert_eq!(payload.legacy_chunk_rows_removed, 1);
 
@@ -3367,10 +3771,18 @@ mod tests {
         let (metadb, _cache_dir) = test_metadb(Arc::clone(&store));
         let guard = MetaDbGuard::new(metadb);
 
+        let cancel = CancellationToken::new();
         for _ in 0..2 {
-            rebuild_with_guard(&store, "org/test-repo", DbSelector::Both, true, &guard)
-                .await
-                .expect("rebuild");
+            rebuild_with_guard(
+                &store,
+                "org/test-repo",
+                DbSelector::Both,
+                true,
+                &guard,
+                &cancel,
+            )
+            .await
+            .expect("rebuild");
         }
 
         // After two passes, every file and chunk key must still

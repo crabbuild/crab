@@ -2346,7 +2346,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "xet-core-structures",
 ]
 
 [[package]]

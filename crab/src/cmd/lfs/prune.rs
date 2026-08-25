@@ -43,7 +43,15 @@ pub fn run_lfs_prune_with_cancel(
     cancel: &CancellationToken,
 ) -> Result<()> {
     check_cancelled(cancel)?;
-    run_lfs_prune(options)
+    let prune_options = resolve_prune_options(options)?;
+    let summary = crate::lfs::prune::run_prune_with_cancel(prune_options, cancel)?;
+    tracing::info!(
+        pruned_count = summary.pruned_count,
+        pruned_bytes = summary.pruned_bytes,
+        dry_run = summary.dry_run,
+        "prune complete"
+    );
+    Ok(())
 }
 
 fn resolve_prune_options(options: LfsPruneOptions) -> Result<crate::lfs::prune::PruneOptions> {

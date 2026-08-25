@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::coordination::cas::cas_update_default;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::Store;
 use crab_metadata::manifests::ShardList;
 use crab_storage::canonical_global_content_path;
@@ -86,18 +86,31 @@ impl CompactOutcome {
 /// xet-core's `merge_shards()`, uploads the results, and CAS-updates
 /// the shard-list and ref-registry.
 pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
+    run_compact_with_cancel(args, store, &CancellationToken::new()).await
+}
+
+/// Run compaction with the caller's cancellation boundary.
+pub async fn run_compact_with_cancel(
+    args: &CompactArgs,
+    store: &Store,
+    cancel: &CancellationToken,
+) -> Result<CompactOutcome> {
     validate_max_shard_size(args.max_shard_size)?;
+    check_cancelled(cancel)?;
     if args.dry_run {
-        return run_compact_inner(args, store).await;
+        return run_compact_inner(args, store, cancel).await;
     }
-    let cancel = CancellationToken::new();
-    let writer =
-        crate::maintenance::GcWriterLeases::acquire(store, GLOBAL_PREFIX, &args.repo, &cancel)
-            .await?;
+    let writer = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        store,
+        GLOBAL_PREFIX,
+        &args.repo,
+        cancel,
+    )
+    .await?;
     let operation = tokio::select! {
         biased;
         () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = run_compact_inner(args, store) => result,
+        result = run_compact_inner(args, store, cancel) => result,
     };
     let release = writer.release().await;
     match (operation, release) {
@@ -106,7 +119,12 @@ pub async fn run_compact(args: &CompactArgs, store: &Store) -> Result<CompactOut
     }
 }
 
-async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactOutcome> {
+async fn run_compact_inner(
+    args: &CompactArgs,
+    store: &Store,
+    cancel: &CancellationToken,
+) -> Result<CompactOutcome> {
+    check_cancelled(cancel)?;
     let shard_list_path = format!("{}/manifests/shard-list", args.repo);
 
     // Step 1: Read the per-repo shard-list.
@@ -156,7 +174,7 @@ async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactO
         ))
     })?;
 
-    download_shards(store, &source_hashes, source_dir.path()).await?;
+    download_shards(store, &source_hashes, source_dir.path(), cancel).await?;
 
     // Step 3: Merge shards via xet-core.
     let xet_context = XetContext::default().map_err(|error| {
@@ -218,6 +236,7 @@ async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactO
     // Step 4: Upload merged shards to the canonical global shard namespace.
     let mut new_hashes: Vec<String> = Vec::with_capacity(filtered.len());
     for shard_file in &filtered {
+        check_cancelled(cancel)?;
         let hash_hex = shard_file.shard_hash.hex();
         let shard_path = canonical_global_content_path("shards", &hash_hex);
 
@@ -241,11 +260,25 @@ async fn run_compact_inner(args: &CompactArgs, store: &Store) -> Result<CompactO
 
         debug!(hash = %hash_hex, size = buf.len(), "uploading compacted shard");
         let body = Bytes::from(buf);
-        store.put(&shard_path, body.clone()).await?;
         let hash = MerkleHash::from_hex(&hash_hex).map_err(|error| CrabError::CorruptObject {
             path: shard_path.to_string(),
             reason: format!("invalid compacted shard hash: {error}"),
         })?;
+        let local_path = target_dir.path().join(format!("upload-{}.shard", hash_hex));
+        tokio::fs::write(&local_path, &body)
+            .await
+            .map_err(CrabError::Io)?;
+        store
+            .put_multipart_file_retry_with_xet_hash(
+                &shard_path,
+                &local_path,
+                body.len() as u64,
+                hash.into(),
+                8 * 1024 * 1024,
+                cancel,
+                None,
+            )
+            .await?;
         crate::cmd::gc::closure::publish(store, GLOBAL_PREFIX, &hash, body, shard_path.as_ref())
             .await?;
         new_hashes.push(hash_hex);
@@ -325,9 +358,11 @@ async fn download_shards(
     store: &Store,
     shard_hashes: &[String],
     target_dir: &std::path::Path,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let shard_file_cache = new_shard_file_cache();
     for hash_hex in shard_hashes {
+        check_cancelled(cancel)?;
         let shard_path = canonical_global_content_path("shards", hash_hex);
         let (data, _) = store
             .get_with_etag_bounded(&shard_path, MAX_SOURCE_SHARD_BYTES)

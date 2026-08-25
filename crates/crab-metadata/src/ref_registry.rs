@@ -826,27 +826,57 @@ pub async fn reconcile_compacted_repo_shards(
     source_shards: HashSet<String>,
     replacement_shards: Vec<String>,
 ) -> Result<u64> {
-    let registry_path = router.ref_registry_path();
     let repo_prefix = router.repo_prefix().to_owned();
-    crab_storage::cas::cas_update_default::<RefRegistry, _>(
-        store,
-        registry_path.as_ref(),
-        |registry| {
-            let before = registry
-                .repos
-                .get(&repo_prefix)
-                .cloned()
-                .unwrap_or_default();
-            let was_complete = registry.complete_repos.contains(&repo_prefix);
-            registry.reconcile_compaction(&repo_prefix, &source_shards, &replacement_shards);
-            if registry.repos.get(&repo_prefix) != Some(&before) || !was_complete {
-                registry.generation += 1;
-            }
-        },
-    )
+    let mut partitions = HashMap::<String, (HashSet<String>, Vec<String>)>::new();
+    for hash in source_shards {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .0
+            .insert(hash);
+    }
+    for hash in replacement_shards {
+        partitions
+            .entry(shard_root_partition(&hash))
+            .or_default()
+            .1
+            .push(hash);
+    }
+
+    for (partition, (sources, mut replacements)) in partitions {
+        normalize(&mut replacements);
+        let path = shard_root_partition_path(router, &repo_prefix, &partition);
+        let repo_for_update = repo_prefix.clone();
+        let partition_for_update = partition.clone();
+        let root = crab_storage::cas::cas_update_default::<ShardRootPartition, _>(
+            store,
+            path.as_ref(),
+            |root| {
+                if root.repo_prefix.is_empty() {
+                    root.repo_prefix.clone_from(&repo_for_update);
+                    root.partition.clone_from(&partition_for_update);
+                }
+                if root.repo_prefix == repo_for_update && root.partition == partition_for_update {
+                    root.schema_version = REF_REGISTRY_ROOT_SCHEMA_VERSION;
+                    root.shard_hashes.retain(|hash| !sources.contains(hash));
+                    root.shard_hashes.extend(replacements.clone());
+                    normalize(&mut root.shard_hashes);
+                    root.generation = root.generation.saturating_add(1);
+                }
+            },
+        )
+        .await
+        .map_err(MetadataError::from)?;
+        validate_shard_root_partition(&root, router, &path)?;
+    }
+
+    update_repo_record(store, router, |record| {
+        record.schema_version = REF_REGISTRY_RECORD_SCHEMA_VERSION;
+        record.complete = true;
+        record.generation = record.generation.saturating_add(1);
+    })
     .await
-    .map(|registry| registry.generation)
-    .map_err(MetadataError::from)
+    .map(|record| record.generation)
 }
 
 /// Publish conservative workflow GC roots after immutable experiment
@@ -1557,11 +1587,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (body, _) = store
-            .get_with_etag(&router.ref_registry_path())
-            .await
-            .unwrap();
-        let registry: RefRegistry = serde_json::from_slice(&body).unwrap();
+        let registry = load_ref_registry(&store, &router).await.unwrap();
         assert_eq!(
             registry.repos["org/models"],
             vec!["concurrent".to_owned(), "replacement".to_owned()]

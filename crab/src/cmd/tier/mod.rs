@@ -29,7 +29,7 @@ pub enum TierCommand {
         #[arg(long, requires = "apply")]
         merge: bool,
         /// Show what would be done without making changes.
-        #[arg(long, requires = "apply")]
+        #[arg(long)]
         dry_run: bool,
         /// Output format: xml, json, or yaml.
         #[arg(long, value_parser = ["xml", "json", "yaml"], conflicts_with_all = ["json", "jsonl"])]
@@ -297,11 +297,7 @@ fn emit_text_plan(
                 })?
             );
         }
-        Some("json") => println!(
-            "{}",
-            serde_json::to_string_pretty(&TierPlanPayload::from_plan(plan))
-                .map_err(|error| CrabError::Internal(format!("tier plan JSON: {error}")))?
-        ),
+        Some("json") => emit_json("tier.plan", "1.0", TierPlanPayload::from_plan(plan)),
         Some("yaml") => print!(
             "{}",
             serde_yaml::to_string(&TierPlanPayload::from_plan(plan))

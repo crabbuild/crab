@@ -990,7 +990,7 @@ mod tests {
     #[test]
     fn no_modify_attrs_marks_indexed_matches_without_attrs_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .arg("init")
             .arg("-q")
             .current_dir(dir.path())
@@ -998,7 +998,7 @@ mod tests {
             .unwrap();
         let path = dir.path().join("data.bin");
         std::fs::write(&path, b"payload").unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .args(["add", "data.bin"])
             .current_dir(dir.path())
             .status()
@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn filename_match_is_literal_for_index_matches() {
         let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .arg("init")
             .arg("-q")
             .current_dir(dir.path())
@@ -1024,7 +1024,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("project [1].psd"), b"payload").unwrap();
         std::fs::write(dir.path().join("project X.psd"), b"payload").unwrap();
-        std::process::Command::new("git")
+        git_command(dir.path())
             .args(["add", "project [1].psd", "project X.psd"])
             .current_dir(dir.path())
             .status()

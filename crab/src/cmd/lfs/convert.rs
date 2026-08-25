@@ -7,12 +7,14 @@
 //! hydrated Crab bytes before writing the local LFS cache, uploading the LFS
 //! object, switching tracking to `filter=lfs`, and staging an LFS pointer.
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use fs4::fs_std::FileExt as LockFileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +29,11 @@ use crab_types::pointer::Pointer;
 use super::store_setup::resolve_lfs_remote_for_operation_sync;
 
 const CONVERT_MANIFEST: &str = "crab-lfs-convert-state.json";
+const CONVERT_LOCK: &str = "crab-lfs-convert.lock";
+const MAX_CONVERSION_CANDIDATES: usize = 1_000_000;
+const MAX_CONVERSION_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CONVERSION_GITATTRIBUTES_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CONVERSION_POINTER_BLOB_BYTES: usize = crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE;
 
 /// Direction of conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +74,40 @@ pub fn run_convert(
     dry_run: bool,
     repo_root: &Path,
 ) -> Result<()> {
-    let candidates = collect_candidates(direction, pattern, repo_root)?;
+    run_convert_with_cancel(
+        direction,
+        pattern,
+        dry_run,
+        repo_root,
+        &CancellationToken::new(),
+    )
+}
+
+/// Run conversion while honoring cancellation and a repository conversion lock.
+pub fn run_convert_with_cancel(
+    direction: ConvertDirection,
+    pattern: &str,
+    dry_run: bool,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let _lock = if dry_run {
+        None
+    } else {
+        Some(acquire_convert_lock(repo_root)?)
+    };
+    check_cancelled(cancel)?;
+    let candidates = collect_candidates(direction, pattern, repo_root, cancel)?;
+    if candidates.len() > MAX_CONVERSION_CANDIDATES {
+        return Err(CrabError::Configuration {
+            key: "crab lfs convert candidate count".to_owned(),
+            origin: format!(
+                "conversion selected {} files; bounded conversion supports at most {MAX_CONVERSION_CANDIDATES}",
+                candidates.len()
+            ),
+        });
+    }
     if candidates.is_empty() {
         eprintln!("convert: no matching source pointers for {pattern:?}");
         return Ok(());
@@ -93,12 +133,14 @@ pub fn run_convert(
         return Ok(());
     }
 
+    check_cancelled(cancel)?;
     write_manifest(repo_root, &candidates)?;
 
     match direction {
-        ConvertDirection::LfsToXet => convert_lfs_to_crab(pattern, repo_root, &candidates)?,
-        ConvertDirection::XetToLfs => convert_crab_to_lfs(pattern, repo_root, &candidates)?,
+        ConvertDirection::LfsToXet => convert_lfs_to_crab(pattern, repo_root, &candidates, cancel)?,
+        ConvertDirection::XetToLfs => convert_crab_to_lfs(pattern, repo_root, &candidates, cancel)?,
     }
+    check_cancelled(cancel)?;
 
     eprintln!(
         "convert: converted {} file(s), {}",
@@ -108,20 +150,15 @@ pub fn run_convert(
     Ok(())
 }
 
-/// Run conversion while honoring a caller's cancellation boundary.
-pub fn run_convert_with_cancel(
-    direction: ConvertDirection,
-    pattern: &str,
-    dry_run: bool,
-    repo_root: &Path,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    check_cancelled(cancel)?;
-    run_convert(direction, pattern, dry_run, repo_root)
-}
-
 /// Restore the index and `.gitattributes` from the last conversion manifest.
 pub fn run_rollback(repo_root: &Path) -> Result<()> {
+    run_rollback_with_cancel(repo_root, &CancellationToken::new())
+}
+
+/// Roll back a conversion while honoring cancellation and the conversion lock.
+pub fn run_rollback_with_cancel(repo_root: &Path, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    let _lock = acquire_convert_lock(repo_root)?;
     let manifest_path = manifest_path(repo_root)?;
     if !manifest_path.is_file() {
         return Err(CrabError::Configuration {
@@ -130,6 +167,15 @@ pub fn run_rollback(repo_root: &Path) -> Result<()> {
         });
     }
 
+    let size = std::fs::metadata(&manifest_path)
+        .map_err(CrabError::Io)?
+        .len();
+    if size > MAX_CONVERSION_MANIFEST_BYTES {
+        return Err(CrabError::Configuration {
+            key: "conversion manifest".to_owned(),
+            origin: format!("manifest exceeds {MAX_CONVERSION_MANIFEST_BYTES} bytes"),
+        });
+    }
     let raw = std::fs::read_to_string(&manifest_path).map_err(CrabError::Io)?;
     let manifest: ConvertManifest =
         serde_json::from_str(&raw).map_err(|e| CrabError::Configuration {
@@ -137,9 +183,28 @@ pub fn run_rollback(repo_root: &Path) -> Result<()> {
             origin: format!("failed to parse {}: {e}", manifest_path.display()),
         })?;
 
+    if manifest.files.len() > MAX_CONVERSION_CANDIDATES {
+        return Err(CrabError::Configuration {
+            key: "conversion manifest".to_owned(),
+            origin: format!("manifest contains more than {MAX_CONVERSION_CANDIDATES} files"),
+        });
+    }
+    if manifest
+        .gitattributes
+        .as_ref()
+        .is_some_and(|value| value.len() as u64 > MAX_CONVERSION_GITATTRIBUTES_BYTES)
+    {
+        return Err(CrabError::Configuration {
+            key: "conversion manifest".to_owned(),
+            origin: format!(
+                ".gitattributes backup exceeds {MAX_CONVERSION_GITATTRIBUTES_BYTES} bytes"
+            ),
+        });
+    }
     restore_gitattributes(repo_root, manifest.gitattributes.as_deref())?;
 
     for file in &manifest.files {
+        check_cancelled(cancel)?;
         let blob =
             BASE64_STANDARD
                 .decode(&file.index_blob_b64)
@@ -147,6 +212,12 @@ pub fn run_rollback(repo_root: &Path) -> Result<()> {
                     key: file.path.clone(),
                     origin: format!("invalid base64 index blob in conversion manifest: {e}"),
                 })?;
+        if blob.len() > MAX_CONVERSION_POINTER_BLOB_BYTES {
+            return Err(CrabError::Configuration {
+                key: file.path.clone(),
+                origin: format!("index blob exceeds {MAX_CONVERSION_POINTER_BLOB_BYTES} bytes"),
+            });
+        }
         write_blob_to_index(repo_root, &file.path, &blob)?;
     }
 
@@ -155,24 +226,40 @@ pub fn run_rollback(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Roll back a conversion while honoring a caller's cancellation boundary.
-pub fn run_rollback_with_cancel(repo_root: &Path, cancel: &CancellationToken) -> Result<()> {
-    check_cancelled(cancel)?;
-    run_rollback(repo_root)
+fn acquire_convert_lock(repo_root: &Path) -> Result<File> {
+    let git_dir = discover_git_dir(repo_root)?;
+    let path = git_dir.join(CONVERT_LOCK);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(CrabError::Io)?;
+    if !LockFileExt::try_lock_exclusive(&lock).map_err(CrabError::Io)? {
+        return Err(CrabError::Configuration {
+            key: "crab lfs convert".to_owned(),
+            origin: format!("another conversion holds {}", path.display()),
+        });
+    }
+    Ok(lock)
 }
 
 fn convert_lfs_to_crab(
     pattern: &str,
     repo_root: &Path,
     candidates: &[ConvertCandidate],
+    cancel: &CancellationToken,
 ) -> Result<()> {
     for candidate in candidates {
+        check_cancelled(cancel)?;
         let SourcePointer::Lfs(pointer) = &candidate.source else {
             continue;
         };
         let content = resolve_lfs_content(repo_root, &candidate.path, pointer)?;
         write_worktree_file(repo_root, &candidate.path, &content)?;
     }
+    check_cancelled(cancel)?;
 
     crate::lfs::track::untrack(pattern, repo_root)?;
     crate::cmd::track::run_track_in(pattern, repo_root)?;
@@ -184,19 +271,19 @@ fn convert_lfs_to_crab(
         skip_git_add: false,
         mode: OutputMode::Text,
     };
-    super::block_on_runtime(async {
-        crate::cmd::add::run_add(&add_args, &CancellationToken::new()).await
-    })
+    super::block_on_runtime(async { crate::cmd::add::run_add(&add_args, cancel).await })
 }
 
 fn convert_crab_to_lfs(
     pattern: &str,
     repo_root: &Path,
     candidates: &[ConvertCandidate],
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let ctx = resolve_lfs_remote_for_operation_sync("push")?;
 
     for candidate in candidates {
+        check_cancelled(cancel)?;
         let SourcePointer::Crab(pointer) = &candidate.source else {
             continue;
         };
@@ -219,6 +306,7 @@ fn convert_crab_to_lfs(
         };
         write_blob_to_index(repo_root, &candidate.path, &lfs_pointer.serialize())?;
     }
+    check_cancelled(cancel)?;
 
     crate::cmd::track::run_untrack_in(pattern, repo_root)?;
     crate::lfs::track::track_with_opts(pattern, repo_root, true, false)?;
@@ -229,11 +317,13 @@ fn collect_candidates(
     direction: ConvertDirection,
     pattern: &str,
     repo_root: &Path,
+    cancel: &CancellationToken,
 ) -> Result<Vec<ConvertCandidate>> {
     let filter = build_filter(&[pattern.to_owned()], &[])?;
     let mut candidates = Vec::new();
 
     for path in git_ls_files(repo_root)? {
+        check_cancelled(cancel)?;
         if !filter.matches(&path) {
             continue;
         }
@@ -377,6 +467,15 @@ fn write_manifest(repo_root: &Path, candidates: &[ConvertCandidate]) -> Result<(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(CrabError::Io(e)),
     };
+    if gitattributes
+        .as_ref()
+        .is_some_and(|content| content.len() as u64 > MAX_CONVERSION_GITATTRIBUTES_BYTES)
+    {
+        return Err(CrabError::Configuration {
+            key: "crab lfs convert .gitattributes".to_owned(),
+            origin: format!(".gitattributes exceeds {MAX_CONVERSION_GITATTRIBUTES_BYTES} bytes"),
+        });
+    }
 
     let files = candidates
         .iter()
@@ -393,6 +492,12 @@ fn write_manifest(repo_root: &Path, candidates: &[ConvertCandidate]) -> Result<(
     let json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
         CrabError::Internal(format!("failed to serialize conversion manifest: {e}"))
     })?;
+    if json.len() as u64 > MAX_CONVERSION_MANIFEST_BYTES {
+        return Err(CrabError::Configuration {
+            key: "crab lfs convert manifest".to_owned(),
+            origin: format!("manifest exceeds {MAX_CONVERSION_MANIFEST_BYTES} bytes"),
+        });
+    }
     std::fs::write(manifest_path, json).map_err(CrabError::Io)
 }
 
@@ -438,6 +543,12 @@ fn read_index_blob(repo_root: &Path, rel_path: &str) -> Result<Option<Vec<u8>>> 
         .output()
         .map_err(|e| CrabError::Internal(format!("failed to run git show: {e}")))?;
     if output.status.success() {
+        if output.stdout.len() > MAX_CONVERSION_POINTER_BLOB_BYTES {
+            return Err(CrabError::Configuration {
+                key: rel_path.to_owned(),
+                origin: format!("index blob exceeds {MAX_CONVERSION_POINTER_BLOB_BYTES} bytes"),
+            });
+        }
         Ok(Some(output.stdout))
     } else {
         Ok(None)

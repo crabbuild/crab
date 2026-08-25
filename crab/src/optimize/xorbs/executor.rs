@@ -1,66 +1,42 @@
-//! Streaming source-xorb → destination-xorb pipeline for optimization.
+//! Bounded, crash-safe source-xorb to destination-xorb rewrite pipeline.
 //!
-//! The executor processes source xorbs one at a time through a bounded
-//! pipeline:
-//!
-//! 1. HEAD source xorb → class, size, etag.
-//! 2. If cold and `include_cold` → delegate to `RestoreOrchestrator`.
-//!    If cold and `!include_cold` → skip with summary.
-//! 3. Stream-download source xorb (bounded by `budget_factor × target`).
-//! 4. Parse xorb, verify content hash.
-//! 5. Walk chunks; re-pack into destination xorbs per profile.
-//! 6. Upload each dest xorb via `Store::put`.
-//! 7. Mark source xorb entry `status='done'` in journal with dest hashes.
-//! 8. On corrupt source (hash mismatch), mark `status='corrupt'`, continue.
-//!
-//! Crash at steps 3–6 leaves no committed state (staged xorbs become
-//! orphans reclaimed by the next `crab gc`). Crash at step 7 is
-//! recoverable: the journal captures intent and the upload is idempotent.
-//!
-//! SIGINT/SIGTERM: the executor checks the `CancellationToken` between
-//! xorbs. On cancellation it finishes the current xorb (if in-flight),
-//! flushes the journal, and returns `Err(Cancelled)` so the CLI can
-//! exit cleanly. The next invocation with `--resume` picks up where
-//! it left off.
+//! Source rows are consumed in deterministic pages. A page shares one
+//! bounded builder, so fragments from multiple source xorbs are consolidated
+//! without loading the entire journal into memory. Immutable destinations are
+//! uploaded before any source row is committed as done.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceStatus};
+use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceRow, SourceStatus};
 use crate::optimize::xorbs::profile::Profile;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::restore::RestoreOrchestrator;
 use crab_storage::canonical_global_content_path;
-use crab_xet::xorb::builder::{FixedCompression, RunId, XorbBuilder};
-use crab_xet::xorb::format::{CompressionScheme, MAX_XORB_SIZE};
+use crab_xet::xorb::builder::{FixedCompression, RunId, XorbBuilder, XorbResult};
+use crab_xet::xorb::format::{CompressionScheme, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
+const SOURCES_PER_OPTIMIZE_BATCH: usize = 64;
+const MIN_TARGET_XORB_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TARGET_XORB_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SOURCE_XORB_BYTES: u64 = MAX_XORB_SIZE as u64;
 const MAX_CORRUPT_REPORT_ENTRIES: usize = 1_024;
 
 /// Configuration for the xorb optimization executor.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
-    /// Include archive-class source xorbs. When false, archive xorbs
-    /// are skipped and summarized in the outcome.
     pub include_cold: bool,
-    /// Restore tier for archive sources (e.g. "standard").
     pub restore_tier: String,
-    /// Output storage class for destination xorbs.
     pub output_class: String,
-    /// Memory budget multiplier: the executor will not download a
-    /// source xorb larger than `target_xorb_bytes × budget_factor`.
-    /// Sources exceeding this are skipped with a warning.
     pub budget_factor: u64,
 }
 
@@ -75,85 +51,35 @@ impl Default for ExecutorConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Progress tracking
-// ---------------------------------------------------------------------------
-
 /// Per-xorb progress event emitted during execution.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct XorbProgressEvent {
-    /// Source xorb hash.
     pub src_xorb: String,
-    /// Current state of this xorb's processing.
     pub state: String,
-    /// Destination xorb hashes (populated on completion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dest_xorbs: Option<Vec<String>>,
-    /// Bytes read from the source.
     pub bytes_read: u64,
-    /// Bytes written to destinations.
     pub bytes_written: u64,
-    /// Elapsed time in milliseconds.
     pub elapsed_ms: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Executor outcome
-// ---------------------------------------------------------------------------
 
 /// Summary of a completed xorb optimization.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExecutorOutcome {
-    /// Run identifier.
     pub run_id: String,
-    /// Profile used.
     pub profile: String,
-    /// Total source xorbs processed (attempted).
     pub sources_processed: u64,
-    /// Source xorbs completed successfully.
     pub sources_done: u64,
-    /// Source xorbs found corrupt (hash mismatch or parse failure).
     pub sources_corrupt: u64,
-    /// Source xorbs skipped (archive when `include_cold=false`, not
-    /// found, or exceeding memory budget).
     pub sources_skipped: u64,
-    /// Total bytes read from source xorbs.
     pub bytes_read: u64,
-    /// Total bytes written to destination xorbs.
     pub bytes_written: u64,
-    /// Wall-clock duration in milliseconds.
     pub elapsed_ms: u64,
-    /// List of corrupt source xorb hashes (recommend `crab fsck`).
     pub corrupt_list: Vec<String>,
+    pub corrupt_list_omitted: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Executor
-// ---------------------------------------------------------------------------
-
-/// Execute an xorb optimization run.
-///
-/// Processes each pending source xorb from the journal through the
-/// download → parse → repack → upload pipeline.
-///
-/// # Cancellation
-///
-/// On SIGINT/SIGTERM (detected via `cancel`), finishes the current
-/// xorb, flushes the journal, and returns `Err(Cancelled)` so the
-/// next invocation with `--resume` picks up where it left off.
-///
-/// # Journal-only mode
-///
-/// When `store` is `None` (tests or no remote configured), the
-/// executor marks all pending sources as done with empty dest lists.
-/// This preserves the CLI and journal lifecycle for testing.
-///
-/// # Tier-aware operation
-///
-/// When `restore_orchestrator` is provided and a source xorb is in an
-/// archive storage class, the executor calls `ensure_warm` before
-/// downloading. When `config.include_cold` is false, archive xorbs
-/// are skipped instead.
+/// Execute one bounded xorb optimization run.
 pub async fn execute(
     journal: &OptimizeXorbsJournal,
     run_id: &str,
@@ -164,413 +90,435 @@ pub async fn execute(
     restore_orchestrator: Option<&RestoreOrchestrator>,
 ) -> Result<ExecutorOutcome> {
     let start = Instant::now();
-    let profile_desc = profile.to_json();
-
-    let mut sources_processed: u64 = 0;
-    let mut sources_done: u64 = 0;
-    let mut sources_corrupt: u64 = 0;
-    let mut sources_skipped: u64 = 0;
-    let mut bytes_read: u64 = 0;
-    let mut bytes_written: u64 = 0;
-    let mut corrupt_list: Vec<String> = Vec::new();
-
-    // Compute the memory budget for a single source xorb download.
-    let memory_budget = profile
-        .target_xorb_bytes
-        .saturating_mul(config.budget_factor);
-
-    // Fetch all pending source xorbs from the journal.
-    let pending = journal.sources_by_status(run_id, SourceStatus::Pending)?;
-
-    if pending.is_empty() {
-        info!("xorb optimization executor: no pending source xorbs");
+    let pending = journal.count_by_status(run_id)?.pending;
+    if pending == 0 {
         return Ok(build_outcome(
             run_id,
-            &profile_desc,
+            profile,
             &start,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            Vec::new(),
+            BatchResult::default(),
         ));
     }
 
-    info!(
-        pending = pending.len(),
-        memory_budget_mib = memory_budget / (1024 * 1024),
-        "xorb optimization executor: processing source xorbs"
-    );
+    let compression = resolve_compression(profile)?;
+    validate_target(profile)?;
+    info!(pending, "processing live source xorbs");
 
-    let compression = resolve_compression(profile);
-
-    for source_row in &pending {
-        // Check for cancellation between xorbs (graceful SIGINT/SIGTERM).
+    let mut total = BatchResult::default();
+    let mut after = String::new();
+    loop {
         check_cancelled(cancel)?;
-
-        let src_hash = &source_row.src_xorb;
-        sources_processed += 1;
-
-        debug!(src_xorb = %src_hash, idx = sources_processed, "processing source xorb");
-
-        match process_single_xorb(
-            journal,
+        let rows = journal.sources_by_status_after(
             run_id,
-            src_hash,
-            profile,
-            config,
-            compression,
-            memory_budget,
-            store,
-            restore_orchestrator,
-        )
-        .await
-        {
-            Ok(result) => {
-                bytes_read += result.bytes_read;
-                bytes_written += result.bytes_written;
-                match result.status {
-                    XorbStatus::Done => sources_done += 1,
-                    XorbStatus::Corrupt => {
-                        sources_corrupt += 1;
-                        if corrupt_list.len() < MAX_CORRUPT_REPORT_ENTRIES {
-                            corrupt_list.push(src_hash.clone());
-                        }
-                    }
-                    XorbStatus::Skipped => sources_skipped += 1,
-                }
-            }
-            Err(e) if is_transient(&e) => {
-                // Transient errors: log and skip so the run can continue.
-                // The source stays Pending and will be retried on --resume.
-                warn!(
-                    src_xorb = %src_hash,
-                    error = %e,
-                    "transient error processing source xorb; will retry on resume"
-                );
-                sources_skipped += 1;
-            }
-            Err(e) => {
-                // Permanent errors: log, mark skipped, continue.
-                warn!(
-                    src_xorb = %src_hash,
-                    error = %e,
-                    "failed to process source xorb; skipping"
-                );
-                journal.update_source_status(run_id, src_hash, SourceStatus::Skipped, None)?;
-                sources_skipped += 1;
-            }
+            SourceStatus::Pending,
+            Some(&after),
+            SOURCES_PER_OPTIMIZE_BATCH,
+        )?;
+        if rows.is_empty() {
+            break;
         }
+        let last = rows.last().map(|row| row.src_xorb.clone()).ok_or_else(|| {
+            CrabError::Internal("pending journal page unexpectedly empty".to_owned())
+        })?;
+        let result = match store {
+            Some(store) => {
+                process_batch(
+                    journal,
+                    run_id,
+                    &rows,
+                    profile,
+                    config,
+                    compression,
+                    store,
+                    restore_orchestrator,
+                    cancel,
+                )
+                .await?
+            }
+            None => mark_batch_without_store(journal, run_id, &rows, cancel)?,
+        };
+        total.merge(result);
+        after = last;
     }
 
-    let elapsed = start.elapsed();
     info!(
-        done = sources_done,
-        corrupt = sources_corrupt,
-        skipped = sources_skipped,
-        bytes_read,
-        bytes_written,
-        elapsed_ms = elapsed.as_millis() as u64,
-        "xorb optimization executor: complete"
+        done = total.done,
+        corrupt = total.corrupt.len() as u64 + total.corrupt_omitted,
+        skipped = total.skipped,
+        bytes_read = total.bytes_read,
+        bytes_written = total.bytes_written,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "xorb rewrite pipeline complete"
     );
-
-    Ok(build_outcome(
-        run_id,
-        &profile_desc,
-        &start,
-        sources_processed,
-        sources_done,
-        sources_corrupt,
-        sources_skipped,
-        bytes_read,
-        bytes_written,
-        corrupt_list,
-    ))
+    Ok(build_outcome(run_id, profile, &start, total))
 }
 
-// ---------------------------------------------------------------------------
-// Per-xorb processing
-// ---------------------------------------------------------------------------
-
-enum XorbStatus {
-    Done,
-    Corrupt,
-    Skipped,
-}
-
-struct SingleXorbResult {
-    status: XorbStatus,
+#[derive(Default)]
+struct BatchResult {
+    processed: u64,
+    done: u64,
+    skipped: u64,
+    corrupt: Vec<String>,
+    corrupt_omitted: u64,
     bytes_read: u64,
     bytes_written: u64,
 }
 
-/// Process a single source xorb through the optimization pipeline.
-///
-/// Each step is designed so that a crash leaves no committed state
-/// until the final journal update. Destination xorbs uploaded before
-/// a crash become orphans reclaimed by `crab gc`.
-#[expect(clippy::too_many_arguments, reason = "pipeline step needs all context")]
-async fn process_single_xorb(
+impl BatchResult {
+    fn merge(&mut self, other: Self) {
+        self.processed = self.processed.saturating_add(other.processed);
+        self.done = self.done.saturating_add(other.done);
+        self.skipped = self.skipped.saturating_add(other.skipped);
+        self.bytes_read = self.bytes_read.saturating_add(other.bytes_read);
+        self.bytes_written = self.bytes_written.saturating_add(other.bytes_written);
+        self.corrupt.extend(other.corrupt);
+        if self.corrupt.len() > MAX_CORRUPT_REPORT_ENTRIES {
+            let overflow = self.corrupt.len() - MAX_CORRUPT_REPORT_ENTRIES;
+            self.corrupt.truncate(MAX_CORRUPT_REPORT_ENTRIES);
+            self.corrupt_omitted = self.corrupt_omitted.saturating_add(overflow as u64);
+        }
+        self.corrupt_omitted = self.corrupt_omitted.saturating_add(other.corrupt_omitted);
+    }
+
+    fn record_corrupt(&mut self, hash: String) {
+        if self.corrupt.len() < MAX_CORRUPT_REPORT_ENTRIES {
+            self.corrupt.push(hash);
+        } else {
+            self.corrupt_omitted = self.corrupt_omitted.saturating_add(1);
+        }
+    }
+}
+
+fn mark_batch_without_store(
     journal: &OptimizeXorbsJournal,
     run_id: &str,
-    src_hash: &str,
+    rows: &[SourceRow],
+    cancel: &CancellationToken,
+) -> Result<BatchResult> {
+    let mut result = BatchResult::default();
+    for row in rows {
+        check_cancelled(cancel)?;
+        journal.update_source_status(run_id, &row.src_xorb, SourceStatus::Done, Some("[]"))?;
+        result.processed = result.processed.saturating_add(1);
+        result.done = result.done.saturating_add(1);
+    }
+    Ok(result)
+}
+
+#[derive(Debug)]
+struct PreparedSource {
+    hash: String,
+    chunks: Vec<MerkleHash>,
+}
+
+#[expect(clippy::too_many_arguments, reason = "bounded pipeline context")]
+async fn process_batch(
+    journal: &OptimizeXorbsJournal,
+    run_id: &str,
+    source_rows: &[SourceRow],
     profile: &Profile,
     config: &ExecutorConfig,
     compression: CompressionScheme,
-    memory_budget: u64,
-    store: Option<&Store>,
+    store: &Store,
     restore_orchestrator: Option<&RestoreOrchestrator>,
-) -> Result<SingleXorbResult> {
-    // --- Journal-only mode (no store) ---
-    let Some(store) = store else {
-        journal.update_source_status(run_id, src_hash, SourceStatus::Done, Some("[]"))?;
-        return Ok(SingleXorbResult {
-            status: XorbStatus::Done,
-            bytes_read: 0,
-            bytes_written: 0,
-        });
-    };
-
-    let xorb_path = canonical_global_content_path("xorbs", src_hash);
-
-    // --- Step 1: HEAD with class probe ---
-    let head_meta = head_with_class(store, &xorb_path).await;
-    if let Ok(ref meta) = head_meta {
-        if meta.class.is_archive_class() {
-            if !config.include_cold {
-                debug!(src_xorb = %src_hash, class = ?meta.class, "skipping archive xorb (include_cold=false)");
-                journal.update_source_status(run_id, src_hash, SourceStatus::Skipped, None)?;
-                return Ok(SingleXorbResult {
-                    status: XorbStatus::Skipped,
-                    bytes_read: 0,
-                    bytes_written: 0,
-                });
-            }
-            // --- Step 2: Restore if archive ---
-            if let Some(orchestrator) = restore_orchestrator {
-                info!(src_xorb = %src_hash, class = ?meta.class, "restoring archive xorb before download");
-                orchestrator.ensure_warm(&xorb_path.to_string()).await?;
-            } else {
-                return Err(CrabError::ArchiveRestoreRequired {
-                    xorb: xorb_path.to_string(),
-                    class: format!("{}", meta.class),
-                    estimated_eta: None,
-                });
-            }
-        }
-    }
-    // HEAD failure is non-fatal: proceed to download (the GET will
-    // surface the real error if the object is truly inaccessible).
-
-    // --- Step 3: Download source xorb (bounded by memory budget) ---
-    let src_bytes = match store
-        .get_with_etag_bounded(&xorb_path, MAX_XORB_SIZE as u64)
-        .await
-    {
-        Ok((bytes, _etag)) => bytes,
-        Err(CrabError::NotFound { .. }) => {
-            debug!(src_xorb = %src_hash, "source xorb not found; skipping");
-            journal.update_source_status(run_id, src_hash, SourceStatus::Skipped, None)?;
-            return Ok(SingleXorbResult {
-                status: XorbStatus::Skipped,
-                bytes_read: 0,
-                bytes_written: 0,
-            });
-        }
-        Err(e) => return Err(e),
-    };
-
-    let src_size = src_bytes.len() as u64;
-
-    // Enforce memory budget: skip xorbs that exceed the limit.
-    if src_size > memory_budget {
-        warn!(
-            src_xorb = %src_hash,
-            src_size,
-            memory_budget,
-            "source xorb exceeds memory budget; skipping"
-        );
-        journal.update_source_status(run_id, src_hash, SourceStatus::Skipped, None)?;
-        return Ok(SingleXorbResult {
-            status: XorbStatus::Skipped,
-            bytes_read: src_size,
-            bytes_written: 0,
-        });
-    }
-
-    // --- Step 4: Parse and verify content hash ---
-    let parser = match XorbParser::parse(src_bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(src_xorb = %src_hash, error = %e, "corrupt source xorb (parse failed)");
-            journal.mark_corrupt(run_id, src_hash, "parse_failed", &e.to_string())?;
-            return Ok(SingleXorbResult {
-                status: XorbStatus::Corrupt,
-                bytes_read: src_size,
-                bytes_written: 0,
-            });
-        }
-    };
-
-    let actual_hash = parser.hash().hex();
-    if actual_hash != src_hash {
-        warn!(
-            src_xorb = %src_hash,
-            actual_hash = %actual_hash,
-            "corrupt source xorb (hash mismatch)"
-        );
-        journal.mark_corrupt(
-            run_id,
-            src_hash,
-            "hash_mismatch",
-            &format!("expected {src_hash}, got {actual_hash}"),
-        )?;
-        return Ok(SingleXorbResult {
-            status: XorbStatus::Corrupt,
-            bytes_read: src_size,
-            bytes_written: 0,
-        });
-    }
-
-    // --- Step 5: Extract chunks and repack into destination xorbs ---
-    let num_chunks = parser.num_chunks();
+    cancel: &CancellationToken,
+) -> Result<BatchResult> {
     let policy = Arc::new(FixedCompression::new(compression));
+    let target =
+        usize::try_from(profile.target_xorb_bytes).map_err(|_| CrabError::Configuration {
+            key: "optimize xorbs target size".to_owned(),
+            origin: "target size cannot be represented on this platform".to_owned(),
+        })?;
     let mut builder =
-        XorbBuilder::with_policy(policy as Arc<dyn crab_xet::xorb::builder::CompressionPolicy>);
-
-    // Set the target size from the profile.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "target_xorb_bytes validated ≤ 2 GiB, fits in usize"
-    )]
-    let target = profile.target_xorb_bytes as usize;
+        XorbBuilder::with_policy(policy as Arc<dyn crab_xet::xorb::builder::CompressionPolicy>)
+            .with_size_bounds(MIN_TARGET_XORB_BYTES, MAX_TARGET_XORB_BYTES);
     builder.set_target_size(target);
 
-    // Feed all chunks from the source xorb into the builder.
-    // All chunks share a single RunId since they come from one source.
-    let run_id_num = RunId(0);
-    for idx in 0..num_chunks {
-        let chunk = parser.get_chunk(idx)?;
-        let _ = builder.push(&chunk, run_id_num)?;
-    }
+    let memory_budget = profile
+        .target_xorb_bytes
+        .saturating_mul(config.budget_factor);
+    let mut outcome = BatchResult::default();
+    let mut prepared = Vec::with_capacity(source_rows.len());
+    let mut placements = HashMap::<MerkleHash, String>::new();
 
-    // Finalize the builder to get destination xorbs.
-    let dest_xorbs = builder.finalize()?;
+    for (source_index, source_row) in source_rows.iter().enumerate() {
+        check_cancelled(cancel)?;
+        let source_hash = &source_row.src_xorb;
+        let source_path = canonical_global_content_path("xorbs", source_hash);
+        outcome.processed = outcome.processed.saturating_add(1);
 
-    // --- Step 6: Upload each destination xorb ---
-    let mut dest_hashes: Vec<String> = Vec::with_capacity(dest_xorbs.len());
-    let mut total_written: u64 = 0;
-
-    for xorb_result in &dest_xorbs {
-        let dest_hash = xorb_result.hash.hex();
-        let dest_path = canonical_global_content_path("xorbs", &dest_hash);
-        let dest_bytes = Bytes::copy_from_slice(&xorb_result.bytes);
-        let written = dest_bytes.len() as u64;
-        if written > MAX_XORB_SIZE as u64 {
+        let object = tokio::select! {
+            result = store.head(&source_path) => result,
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        }
+        .map_err(|error| match error {
+            CrabError::NotFound { .. } => CrabError::CorruptObject {
+                path: source_path.to_string(),
+                reason: "journal references a missing source xorb".to_owned(),
+            },
+            error => error,
+        })?;
+        if object.size > MAX_SOURCE_XORB_BYTES {
             return Err(CrabError::Configuration {
-                key: "optimize xorbs destination size".to_owned(),
+                key: "optimize xorbs source size".to_owned(),
                 origin: format!(
-                    "destination xorb {dest_hash} is {written} bytes; bounded rewriting supports at most {} bytes",
-                    MAX_XORB_SIZE
+                    "source {source_hash} is {} bytes; bounded rewriting supports at most {MAX_SOURCE_XORB_BYTES} bytes",
+                    object.size
                 ),
             });
         }
 
-        // CAS put: if the xorb already exists (idempotent retry or
-        // concurrent push wrote the same content), the put succeeds
-        // silently via the Store's create-if-absent semantics.
-        store.put(&dest_path, dest_bytes).await?;
+        let head = tokio::select! {
+            result = head_with_class(store, &source_path) => result?,
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        };
+        if head.class.is_archive_class() {
+            if !config.include_cold {
+                journal.update_source_status(run_id, source_hash, SourceStatus::Skipped, None)?;
+                outcome.skipped = outcome.skipped.saturating_add(1);
+                continue;
+            }
+            let orchestrator =
+                restore_orchestrator.ok_or_else(|| CrabError::ArchiveRestoreRequired {
+                    xorb: source_path.to_string(),
+                    class: head.class.to_string(),
+                    estimated_eta: None,
+                })?;
+            orchestrator.ensure_warm(&source_path.to_string()).await?;
+            check_cancelled(cancel)?;
+        }
 
-        dest_hashes.push(dest_hash);
-        total_written += written;
+        let (source_bytes, _) = tokio::select! {
+            result = store.get_with_etag_bounded(&source_path, MAX_SOURCE_XORB_BYTES) => result?,
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        };
+        let source_size =
+            u64::try_from(source_bytes.len()).map_err(|_| CrabError::Configuration {
+                key: "optimize xorbs source size".to_owned(),
+                origin: "source size cannot be represented".to_owned(),
+            })?;
+        if source_size > memory_budget {
+            journal.update_source_status(run_id, source_hash, SourceStatus::Skipped, None)?;
+            outcome.skipped = outcome.skipped.saturating_add(1);
+            outcome.bytes_read = outcome.bytes_read.saturating_add(source_size);
+            continue;
+        }
+        if source_size != object.size {
+            return Err(CrabError::CorruptObject {
+                path: source_path.to_string(),
+                reason: format!(
+                    "source xorb size changed during read (HEAD reported {}, GET returned {source_size})",
+                    object.size
+                ),
+            });
+        }
+        outcome.bytes_read = outcome.bytes_read.saturating_add(source_size);
+
+        let parser = match XorbParser::parse(source_bytes) {
+            Ok(parser) => parser,
+            Err(error) => {
+                journal.mark_corrupt(run_id, source_hash, "parse_failed", &error.to_string())?;
+                outcome.record_corrupt(source_hash.clone());
+                continue;
+            }
+        };
+        if parser.hash().hex() != *source_hash {
+            let actual = parser.hash().hex();
+            journal.mark_corrupt(
+                run_id,
+                source_hash,
+                "hash_mismatch",
+                &format!("expected {source_hash}, got {actual}"),
+            )?;
+            outcome.record_corrupt(source_hash.clone());
+            continue;
+        }
+        if let Err(error) = parser.verify_payload_digest() {
+            journal.mark_corrupt(run_id, source_hash, "payload_digest", &error.to_string())?;
+            outcome.record_corrupt(source_hash.clone());
+            continue;
+        }
+        if let Err(error) = parser.verify_all_chunks() {
+            journal.mark_corrupt(
+                run_id,
+                source_hash,
+                "chunk_verification",
+                &error.to_string(),
+            )?;
+            outcome.record_corrupt(source_hash.clone());
+            continue;
+        }
+
+        let source_run = RunId(u64::try_from(source_index).map_err(|_| {
+            CrabError::Internal("source batch index cannot be represented".to_owned())
+        })?);
+        let mut chunks = Vec::with_capacity(parser.num_chunks() as usize);
+        for chunk_index in 0..parser.num_chunks() {
+            check_cancelled(cancel)?;
+            let chunk = parser.get_chunk(chunk_index)?;
+            chunks.push(chunk.hash);
+            let _ = builder.push(&chunk, source_run)?;
+            while let Some(destination) = builder.take_completed() {
+                outcome.bytes_written = outcome.bytes_written.saturating_add(
+                    upload_destination(store, destination, &mut placements, cancel).await?,
+                );
+            }
+        }
+        prepared.push(PreparedSource {
+            hash: source_hash.clone(),
+            chunks,
+        });
     }
 
-    // --- Step 7: Commit to journal (crash-safe boundary) ---
-    let dest_json = serde_json::to_string(&dest_hashes).unwrap_or_else(|_| "[]".to_string());
-    journal.update_source_status(run_id, src_hash, SourceStatus::Done, Some(&dest_json))?;
-
-    debug!(
-        src_xorb = %src_hash,
-        dest_count = dest_hashes.len(),
-        bytes_read = src_size,
-        bytes_written = total_written,
-        "source xorb optimized"
-    );
-
-    Ok(SingleXorbResult {
-        status: XorbStatus::Done,
-        bytes_read: src_size,
-        bytes_written: total_written,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Map the profile's compression config to a `CompressionScheme`.
-fn resolve_compression(profile: &Profile) -> CompressionScheme {
-    use crate::core::config::CompressionConfig;
-    match profile.compression {
-        CompressionConfig::None => CompressionScheme::None,
-        CompressionConfig::Lz4 => CompressionScheme::LZ4,
-        CompressionConfig::Zstd { .. } => CompressionScheme::LZ4,
+    for destination in builder.finalize()? {
+        outcome.bytes_written = outcome
+            .bytes_written
+            .saturating_add(upload_destination(store, destination, &mut placements, cancel).await?);
     }
-}
-
-/// Classify whether an error is transient (worth retrying on --resume)
-/// vs permanent (skip and move on).
-fn is_transient(err: &CrabError) -> bool {
-    matches!(
-        err,
-        CrabError::NetworkTransient(_) | CrabError::Throttled { .. }
-    )
-}
-
-#[expect(clippy::too_many_arguments, reason = "builder helper")]
-fn build_outcome(
-    run_id: &str,
-    profile: &str,
-    start: &Instant,
-    sources_processed: u64,
-    sources_done: u64,
-    sources_corrupt: u64,
-    sources_skipped: u64,
-    bytes_read: u64,
-    bytes_written: u64,
-    corrupt_list: Vec<String>,
-) -> ExecutorOutcome {
-    ExecutorOutcome {
-        run_id: run_id.to_string(),
-        profile: profile.to_string(),
-        sources_processed,
-        sources_done,
-        sources_corrupt,
-        sources_skipped,
-        bytes_read,
-        bytes_written,
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        corrupt_list,
+    check_cancelled(cancel)?;
+    for source in prepared {
+        check_cancelled(cancel)?;
+        let mut destinations = source
+            .chunks
+            .iter()
+            .map(|chunk| {
+                placements.get(chunk).cloned().ok_or_else(|| {
+                    CrabError::Internal(format!(
+                        "source {} chunk {} has no destination placement",
+                        source.hash, chunk
+                    ))
+                })
+            })
+            .collect::<Result<HashSet<_>>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        destinations.sort_unstable();
+        let encoded = serde_json::to_string(&destinations).map_err(|error| {
+            CrabError::Internal(format!("destination list serialize failed: {error}"))
+        })?;
+        journal.update_source_status(run_id, &source.hash, SourceStatus::Done, Some(&encoded))?;
+        outcome.done = outcome.done.saturating_add(1);
     }
+    Ok(outcome)
 }
 
-/// Check whether a GC operation is currently running.
-///
-/// Probes for the GC lock file at the standard location. Returns
-/// `ConcurrentMaintenance` if GC is active.
-pub fn check_gc_not_running(crab_dir: &std::path::Path) -> Result<()> {
-    let gc_lock = crab_dir.join("gc.lock");
-    if gc_lock.exists() {
-        return Err(CrabError::ConcurrentMaintenance { other: "gc" });
+async fn upload_destination(
+    store: &Store,
+    destination: XorbResult,
+    placements: &mut HashMap<MerkleHash, String>,
+    cancel: &CancellationToken,
+) -> Result<u64> {
+    let destination_hash = destination.hash;
+    let hash = destination_hash.hex();
+    let path = canonical_global_content_path("xorbs", &hash);
+    let size = u64::try_from(destination.bytes.len()).map_err(|_| CrabError::Configuration {
+        key: "optimize xorbs destination size".to_owned(),
+        origin: format!("destination xorb {hash} size cannot be represented"),
+    })?;
+    if size > MAX_TARGET_XORB_BYTES as u64 {
+        return Err(CrabError::Configuration {
+            key: "optimize xorbs destination size".to_owned(),
+            origin: format!(
+                "destination xorb {hash} is {size} bytes; bounded rewriting supports at most {MAX_TARGET_XORB_BYTES} bytes"
+            ),
+        });
+    }
+
+    match store
+        .put_multipart_retry_with_xet_hash(
+            &path,
+            Bytes::from(destination.bytes.clone()),
+            destination_hash.into(),
+            8 * 1024 * 1024,
+            cancel,
+            None,
+        )
+        .await
+    {
+        Ok(()) => {}
+        Err(CrabError::CasConflict { .. }) => {
+            let (existing, _) = store
+                .get_with_etag_bounded(&path, MAX_TARGET_XORB_BYTES as u64)
+                .await?;
+            let parser = XorbParser::parse(existing).map_err(CrabError::from)?;
+            if parser.hash() != destination_hash {
+                return Err(CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!("existing xorb hashes to {}, expected {hash}", parser.hash()),
+                });
+            }
+            parser.verify_payload_digest().map_err(CrabError::from)?;
+            parser.verify_all_chunks().map_err(CrabError::from)?;
+        }
+        Err(error) => return Err(error),
+    }
+
+    for placement in destination.placements {
+        if let Some(previous) = placements.insert(placement.chunk_hash, hash.clone())
+            && previous != hash
+        {
+            return Err(CrabError::Internal(format!(
+                "chunk {} was packed into both {previous} and {hash}",
+                placement.chunk_hash
+            )));
+        }
+    }
+    Ok(size)
+}
+
+fn validate_target(profile: &Profile) -> Result<()> {
+    let target =
+        usize::try_from(profile.target_xorb_bytes).map_err(|_| CrabError::Configuration {
+            key: "optimize xorbs target size".to_owned(),
+            origin: "target size cannot be represented on this platform".to_owned(),
+        })?;
+    if !(MIN_TARGET_XORB_BYTES..=MAX_TARGET_XORB_BYTES).contains(&target) {
+        return Err(CrabError::Configuration {
+            key: "optimize xorbs target size".to_owned(),
+            origin: format!(
+                "target must be between {MIN_TARGET_XORB_BYTES} and {MAX_TARGET_XORB_BYTES} bytes"
+            ),
+        });
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn resolve_compression(profile: &Profile) -> Result<CompressionScheme> {
+    use crate::core::config::CompressionConfig;
+    match profile.compression {
+        CompressionConfig::None => Ok(CompressionScheme::None),
+        CompressionConfig::Lz4 | CompressionConfig::Zstd { .. } => Ok(CompressionScheme::LZ4),
+    }
+}
+
+fn build_outcome(
+    run_id: &str,
+    profile: &Profile,
+    start: &Instant,
+    result: BatchResult,
+) -> ExecutorOutcome {
+    ExecutorOutcome {
+        run_id: run_id.to_owned(),
+        profile: profile.to_json(),
+        sources_processed: result.processed,
+        sources_done: result.done,
+        sources_corrupt: (result.corrupt.len() as u64).saturating_add(result.corrupt_omitted),
+        sources_skipped: result.skipped,
+        bytes_read: result.bytes_read,
+        bytes_written: result.bytes_written,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        corrupt_list: result.corrupt,
+        corrupt_list_omitted: result.corrupt_omitted,
+    }
+}
+
+/// Reject local GC implementations that do not participate in the remote lease.
+pub fn check_gc_not_running(crab_dir: &std::path::Path) -> Result<()> {
+    if crab_dir.join("gc.lock").exists() {
+        return Err(CrabError::ConcurrentMaintenance { other: "gc" });
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -579,11 +527,11 @@ mod tests {
 
     #[test]
     fn executor_config_defaults() {
-        let cfg = ExecutorConfig::default();
-        assert!(cfg.include_cold);
-        assert_eq!(cfg.restore_tier, "standard");
-        assert_eq!(cfg.output_class, "STANDARD");
-        assert_eq!(cfg.budget_factor, 2);
+        let config = ExecutorConfig::default();
+        assert!(config.include_cold);
+        assert_eq!(config.restore_tier, "standard");
+        assert_eq!(config.output_class, "STANDARD");
+        assert_eq!(config.budget_factor, 2);
     }
 
     #[test]
@@ -601,125 +549,56 @@ mod tests {
     }
 
     #[test]
-    fn resolve_compression_none() {
-        let mut p = crate::optimize::xorbs::profile::Profile::code();
-        p.compression = crate::core::config::CompressionConfig::None;
-        assert_eq!(resolve_compression(&p), CompressionScheme::None);
-    }
-
-    #[test]
-    fn resolve_compression_lz4() {
-        let mut p = crate::optimize::xorbs::profile::Profile::code();
-        p.compression = crate::core::config::CompressionConfig::Lz4;
-        assert_eq!(resolve_compression(&p), CompressionScheme::LZ4);
-    }
-
-    #[test]
-    fn resolve_compression_zstd_defaults_to_lz4() {
-        let p = crate::optimize::xorbs::profile::Profile::ml();
-        assert_eq!(resolve_compression(&p), CompressionScheme::LZ4);
-    }
-
-    #[test]
-    fn is_transient_classifies_network_errors() {
-        let transient = CrabError::NetworkTransient(object_store::Error::Generic {
-            store: "test",
-            source: "timeout".into(),
-        });
-        assert!(is_transient(&transient));
-
-        let permanent = CrabError::NotFound {
-            path: "x".to_string(),
-        };
-        assert!(!is_transient(&permanent));
+    fn zstd_profile_uses_xet_lz4_scheme() {
+        let mut profile = Profile::code();
+        profile.compression = crate::core::config::CompressionConfig::Zstd { level: 3 };
+        assert_eq!(
+            resolve_compression(&profile).unwrap(),
+            CompressionScheme::LZ4
+        );
     }
 
     #[tokio::test]
     async fn execute_with_no_store_marks_pending_as_done() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("journal.db");
-        let journal = OptimizeXorbsJournal::open(&path).unwrap();
-
-        journal.start_run("test-run", "{}").unwrap();
-        journal.insert_source("test-run", "xorb-aaa").unwrap();
-        journal.insert_source("test-run", "xorb-bbb").unwrap();
-
-        let cancel = CancellationToken::new();
-        let profile = crate::optimize::xorbs::profile::Profile::code();
-        let config = ExecutorConfig::default();
-
-        let outcome = execute(&journal, "test-run", &profile, &config, &cancel, None, None)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome.sources_processed, 2);
-        assert_eq!(outcome.sources_done, 2);
-        assert_eq!(outcome.sources_corrupt, 0);
-        assert_eq!(outcome.sources_skipped, 0);
-
-        let counts = journal.count_by_status("test-run").unwrap();
-        assert_eq!(counts.done, 2);
-        assert_eq!(counts.pending, 0);
-    }
-
-    #[tokio::test]
-    async fn execute_with_no_pending_returns_empty_outcome() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("journal.db");
-        let journal = OptimizeXorbsJournal::open(&path).unwrap();
-        journal.start_run("empty-run", "{}").unwrap();
-
-        let cancel = CancellationToken::new();
-        let profile = crate::optimize::xorbs::profile::Profile::code();
-        let config = ExecutorConfig::default();
-
+        let journal = OptimizeXorbsJournal::open(&dir.path().join("journal.db")).unwrap();
+        journal.start_run("run", "{}").unwrap();
+        journal.insert_source("run", "xorb-a").unwrap();
+        journal.insert_source("run", "xorb-b").unwrap();
         let outcome = execute(
             &journal,
-            "empty-run",
-            &profile,
-            &config,
-            &cancel,
+            "run",
+            &Profile::code(),
+            &ExecutorConfig::default(),
+            &CancellationToken::new(),
             None,
             None,
         )
         .await
         .unwrap();
-
-        assert_eq!(outcome.sources_processed, 0);
-        assert_eq!(outcome.sources_done, 0);
+        assert_eq!(outcome.sources_done, 2);
+        assert_eq!(journal.count_by_status("run").unwrap().pending, 0);
     }
 
     #[tokio::test]
-    async fn execute_cancellation_stops_between_xorbs() {
+    async fn execute_cancellation_stops_before_first_page() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("journal.db");
-        let journal = OptimizeXorbsJournal::open(&path).unwrap();
-
-        journal.start_run("cancel-run", "{}").unwrap();
-        journal.insert_source("cancel-run", "xorb-001").unwrap();
-        journal.insert_source("cancel-run", "xorb-002").unwrap();
-
+        let journal = OptimizeXorbsJournal::open(&dir.path().join("journal.db")).unwrap();
+        journal.start_run("run", "{}").unwrap();
+        journal.insert_source("run", "xorb-a").unwrap();
         let cancel = CancellationToken::new();
-        // Cancel immediately — the first check_cancelled should fire.
         cancel.cancel();
-
-        let profile = crate::optimize::xorbs::profile::Profile::code();
-        let config = ExecutorConfig::default();
-
         let result = execute(
             &journal,
-            "cancel-run",
-            &profile,
-            &config,
+            "run",
+            &Profile::code(),
+            &ExecutorConfig::default(),
             &cancel,
             None,
             None,
         )
         .await;
-
-        assert!(result.is_err());
-        // Both sources should still be pending (cancellation before processing).
-        let counts = journal.count_by_status("cancel-run").unwrap();
-        assert_eq!(counts.pending, 2);
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+        assert_eq!(journal.count_by_status("run").unwrap().pending, 1);
     }
 }

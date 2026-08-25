@@ -204,16 +204,14 @@ pub struct GcPayload {
 
 /// `crab workflow journal show`.
 pub fn exec_show(args: ShowArgs) -> Result<()> {
-    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
-    run_show(&args, &worktree.current_worktree_root, args.output_mode())
+    let repo_root = resolve_repo_root()?;
+    run_show(&args, &repo_root, args.output_mode())
 }
 
 /// `crab workflow journal ls`.
 pub fn exec_ls(args: LsArgs) -> Result<()> {
-    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
-    run_ls(&args, &worktree.current_worktree_root, args.output_mode())
+    let repo_root = resolve_repo_root()?;
+    run_ls(&args, &repo_root, args.output_mode())
 }
 
 /// `crab workflow journal gc`.
@@ -224,15 +222,21 @@ pub fn exec_gc(args: GcArgs) -> Result<()> {
 /// Run workflow journal GC while honoring the caller's cancellation token.
 pub fn exec_gc_with_cancel(args: GcArgs, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
+    let repo_root = resolve_repo_root()?;
+    run_gc_with_cancel(&args, &repo_root, args.output_mode(), cancel).map(|_| ())
+}
+
+fn resolve_repo_root() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
-    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?;
-    run_gc_with_cancel(
-        &args,
-        &worktree.current_worktree_root,
-        args.output_mode(),
-        cancel,
-    )
-    .map(|_| ())
+    match crate::git::worktree::WorktreeContext::resolve_from_path(&cwd) {
+        Ok(worktree) => Ok(worktree.current_worktree_root),
+        Err(_error) if cwd.join(".crab").is_dir() => {
+            // Journal inspection is useful before Git initialization; the
+            // durable `.crab` directory is sufficient to identify its root.
+            Ok(cwd)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Testable variant of `show`.

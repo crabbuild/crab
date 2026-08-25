@@ -31,7 +31,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-mul
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 url = "2.5"
-xet-core-structures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

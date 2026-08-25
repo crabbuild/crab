@@ -31,7 +31,6 @@ use object_store::{
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
-use xet_core_structures::merklehash::HashedWrite;
 
 use crab_types::storage::StorageScope;
 
@@ -49,56 +48,6 @@ pub type ETag = object_store::UpdateVersion;
 
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
-
-#[derive(Clone, Copy)]
-enum FileHashAlgorithm {
-    Blake3,
-    Xet,
-}
-
-#[derive(Clone, Copy)]
-struct FileHashExpectation {
-    expected: [u8; 32],
-    algorithm: FileHashAlgorithm,
-}
-
-enum FileHasher {
-    Blake3(blake3::Hasher),
-    Xet(HashedWrite<std::io::Sink>),
-}
-
-impl FileHasher {
-    fn new(algorithm: FileHashAlgorithm) -> Self {
-        match algorithm {
-            FileHashAlgorithm::Blake3 => Self::Blake3(blake3::Hasher::new()),
-            FileHashAlgorithm::Xet => Self::Xet(HashedWrite::new(std::io::sink())),
-        }
-    }
-
-    fn update(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        match self {
-            Self::Blake3(hasher) => {
-                hasher.update(bytes);
-                Ok(())
-            }
-            Self::Xet(hasher) => std::io::Write::write_all(hasher, bytes),
-        }
-    }
-
-    fn finalize(self) -> [u8; 32] {
-        match self {
-            Self::Blake3(hasher) => *hasher.finalize().as_bytes(),
-            Self::Xet(hasher) => hasher.hash().into(),
-        }
-    }
-}
-
-fn file_hash_algorithm_name(algorithm: FileHashAlgorithm) -> &'static str {
-    match algorithm {
-        FileHashAlgorithm::Blake3 => "blake3",
-        FileHashAlgorithm::Xet => "Xet data hash",
-    }
-}
 
 /// CAS-aware facade over an `object_store::ObjectStore`.
 ///
@@ -1464,58 +1413,6 @@ impl Store {
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<()> {
-        self.put_multipart_file_retry_with_algorithm(
-            path,
-            file_path,
-            size,
-            FileHashExpectation {
-                expected: expected_hash,
-                algorithm: FileHashAlgorithm::Blake3,
-            },
-            part_size,
-            cancel,
-            on_part_done,
-        )
-        .await
-    }
-
-    /// Upload a local file while verifying the keyed Xet data hash used by
-    /// Xet metadata shards and xorbs.
-    pub async fn put_multipart_file_retry_with_xet_hash(
-        &self,
-        path: &Path,
-        file_path: &std::path::Path,
-        size: u64,
-        expected_hash: [u8; 32],
-        part_size: usize,
-        cancel: &tokio_util::sync::CancellationToken,
-        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
-    ) -> Result<()> {
-        self.put_multipart_file_retry_with_algorithm(
-            path,
-            file_path,
-            size,
-            FileHashExpectation {
-                expected: expected_hash,
-                algorithm: FileHashAlgorithm::Xet,
-            },
-            part_size,
-            cancel,
-            on_part_done,
-        )
-        .await
-    }
-
-    async fn put_multipart_file_retry_with_algorithm(
-        &self,
-        path: &Path,
-        file_path: &std::path::Path,
-        size: u64,
-        expectation: FileHashExpectation,
-        part_size: usize,
-        cancel: &tokio_util::sync::CancellationToken,
-        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
-    ) -> Result<()> {
         if part_size == 0 {
             return Err(StorageError::Internal(
                 "multipart part size must be greater than zero".to_owned(),
@@ -1534,7 +1431,7 @@ impl Store {
                     &path,
                     &file_path,
                     size,
-                    expectation,
+                    expected_hash,
                     part_size,
                     &cancel,
                     on_part_done,
@@ -1544,7 +1441,7 @@ impl Store {
         })
         .await;
         if result.is_ok() && record_staged_write {
-            self.record_staged_write(path, &write_path, &expectation.expected, size);
+            self.record_staged_write(path, &write_path, &expected_hash, size);
         }
         result
     }
@@ -1647,7 +1544,7 @@ impl Store {
         path: &Path,
         file_path: &std::path::Path,
         size: u64,
-        expectation: FileHashExpectation,
+        expected_hash: [u8; 32],
         part_size: usize,
         cancel: &tokio_util::sync::CancellationToken,
         on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
@@ -1692,7 +1589,7 @@ impl Store {
                 reason: format!("local file has {actual_size} bytes; upload expects {size}"),
             });
         }
-        let mut hasher = FileHasher::new(expectation.algorithm);
+        let mut hasher = blake3::Hasher::new();
         let mut remaining = size;
         let mut pending = FuturesUnordered::new();
         while remaining > 0 {
@@ -1726,7 +1623,7 @@ impl Store {
                 abort_on(upload).await;
                 return Err(error.into());
             }
-            hasher.update(&buf)?;
+            hasher.update(&buf);
             remaining -= want as u64;
 
             let bytes = want as u64;
@@ -1748,16 +1645,15 @@ impl Store {
             }
         }
 
-        let actual_hash = hasher.finalize();
-        if actual_hash != expectation.expected {
+        let actual_hash = *hasher.finalize().as_bytes();
+        if actual_hash != expected_hash {
             abort_on(upload).await;
             return Err(StorageError::CorruptObject {
                 path: file_path.display().to_string(),
                 reason: format!(
-                    "local {} hash {} does not match expected {}",
-                    file_hash_algorithm_name(expectation.algorithm),
+                    "local blake3 hash {} does not match expected {}",
                     hex_lower(&actual_hash),
-                    hex_lower(&expectation.expected)
+                    hex_lower(&expected_hash)
                 ),
             });
         }
@@ -2395,36 +2291,6 @@ mod tests {
             store.head(&path).await,
             Err(StorageError::NotFound { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn multipart_file_verifies_keyed_xet_hash() {
-        let store = memory_store();
-        let path = Path::from("blobs/xet-hash");
-        let body = Bytes::from_static(b"keyed Xet body");
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("payload");
-        tokio::fs::write(&source, &body).await.unwrap();
-        let mut hasher = xet_core_structures::merklehash::HashedWrite::new(std::io::sink());
-        std::io::Write::write_all(&mut hasher, &body).unwrap();
-        let expected_hash: [u8; 32] = hasher.hash().into();
-        let cancel = tokio_util::sync::CancellationToken::new();
-
-        store
-            .put_multipart_file_retry_with_xet_hash(
-                &path,
-                &source,
-                body.len() as u64,
-                expected_hash,
-                3,
-                &cancel,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let (got, _) = store.get_with_etag(&path).await.unwrap();
-        assert_eq!(got, body);
     }
 
     #[tokio::test]

@@ -43,9 +43,13 @@ Crab would apply. No credentials beyond read-only are needed.
 crab tier plan --apply
 ```
 
-Crab writes a backup of the current lifecycle configuration to
-`.crab/tier/backups/<RFC3339-ts>-pre-apply.json`, then submits the new rules
-via the provider's management API with a CAS guard to prevent races.
+Crab requires a provider conditional-write guard before lifecycle mutation,
+writes a backup of the current configuration to
+`.crab/tier/backups/<RFC3339-ts>-pre-apply.json`, submits the new rules, and
+requires an equivalent provider read-back before reporting success. The backup
+uses the repository's shared Crab directory, even when invoked from a
+subdirectory, and is synced before the provider write begins. Providers that
+cannot supply a conditional guard fail closed.
 
 ### Roll back
 
@@ -97,7 +101,8 @@ former.
 
 All tiering settings live under the `[tier]` section in `.crab/config.toml`.
 Every field has a sensible default; an absent `[tier]` block means defaults
-apply.
+apply. An unreadable or invalid Crab configuration is an error; maintenance
+does not silently substitute defaults.
 
 ```toml
 [tier]
@@ -337,7 +342,7 @@ user-managed rules that conflict, the error is raised regardless of `--merge`.
 | `--apply` | `plan` | `false` | Submit the plan to the provider (requires write credentials) |
 | `--merge` | `plan --apply` | `false` | Preserve non-`crab-` rules; replace only Crab-managed rules |
 | `--dry-run` | `plan --apply` | `false` | Show what would be written without submitting |
-| `--output` | `plan` | provider native | Output format: `xml`, `json`, or `yaml` |
+| `--output` | `plan` | provider native | Output format: `xml`, `json`, or `yaml`; JSON uses the standard `tier.plan` envelope |
 | `--json` | all | `false` | Emit structured JSON via `Envelope` (`"tier.plan"` v `"1.0"`) |
 | `--jsonl` | all | `false` | Stream JSONL events via `JsonlStream` (`"tier.event"` v `"1.0"`) |
 

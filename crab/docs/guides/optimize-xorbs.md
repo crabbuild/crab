@@ -52,9 +52,12 @@ crab optimize xorbs --profile ml --apply
 ```
 
 Apply writes immutable destination xorbs, records progress in a WAL journal,
-and reconciles file-index and shard metadata through a manifest CAS. If the
-process is interrupted, rerun with `--resume`; uploaded immutable objects are
-safe to reuse and old objects remain eligible for normal garbage collection.
+verifies source and destination size/hash, and reconciles file-index and shard
+metadata through a manifest CAS. Candidate indexes are published before the
+manifest becomes visible, and old roots remain protected until reconciliation
+completes. If the process is interrupted, rerun with `--resume`; uploaded
+immutable objects are safe to reuse and old objects remain eligible for normal
+garbage collection.
 
 Resume an interrupted run:
 

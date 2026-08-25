@@ -18,6 +18,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::metadata::manifest;
 use crate::optimize::xorbs::journal::{OptimizeXorbsJournal, SourceStatus};
@@ -25,6 +26,7 @@ use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
+use crab_xet::hash::HashedWrite;
 use crab_xet::shard::{
     FileDataSequenceEntry, MDBFileInfo, MDBXorbInfo, ShardReader, ShardWriter,
     XorbChunkSequenceEntry, XorbChunkSequenceHeader,
@@ -38,6 +40,8 @@ const MAX_RECONCILIATION_MAPPING_ENTRIES: u64 = 1_000_000;
 const MAX_DESTINATIONS_PER_SOURCE: usize = 1_000_000;
 const MAX_DESTINATION_JSON_BYTES: usize = 80 * 1024 * 1024;
 const MAX_RECONCILIATION_SHARD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RECONCILIATION_FILE_ENTRIES: usize = 1_000_000;
+const MAX_RECONCILIATION_XORB_ENTRIES: usize = 1_000_000;
 const MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES: usize = 10_000_000;
 const SOURCES_PER_RECONCILIATION_BATCH: usize = 64;
 
@@ -397,6 +401,7 @@ struct ShardRewrite {
 #[derive(Debug, Default)]
 struct ReconcilePlan {
     replacements: Vec<ShardRewrite>,
+    replaced_sources: HashSet<MerkleHash>,
     final_shards: Vec<MerkleHash>,
     file_entries: Vec<FileIndexEntry>,
 }
@@ -534,9 +539,27 @@ fn rewrite_shard(
     let files = shard_info
         .read_all_file_info_sections(&mut cursor)
         .map_err(|error| corrupt_shard(format!("read file-info section: {error}")))?;
+    if files.len() > MAX_RECONCILIATION_FILE_ENTRIES {
+        return Err(CrabError::Configuration {
+            key: "xorb optimization reconciliation file entries".to_owned(),
+            origin: format!(
+                "shard contains {} file entries; bounded reconciliation supports at most {MAX_RECONCILIATION_FILE_ENTRIES}",
+                files.len()
+            ),
+        });
+    }
     let original_xorbs = shard_info
         .read_all_xorb_blocks_full(&mut cursor)
         .map_err(|error| corrupt_shard(format!("read xorb-info section: {error}")))?;
+    if original_xorbs.len() > MAX_RECONCILIATION_XORB_ENTRIES {
+        return Err(CrabError::Configuration {
+            key: "xorb optimization reconciliation xorb entries".to_owned(),
+            origin: format!(
+                "shard contains {} xorb entries; bounded reconciliation supports at most {MAX_RECONCILIATION_XORB_ENTRIES}",
+                original_xorbs.len()
+            ),
+        });
+    }
     if files.is_empty() {
         return Ok(None);
     }
@@ -640,6 +663,7 @@ async fn build_plan(
         let body = read_shard(store, router, shard_hash).await?;
         if let Some(rewrite) = rewrite_shard(&body, shard_hash, mapping)? {
             replacements_by_old.insert(shard_hash, rewrite.new_hash);
+            plan.replaced_sources.insert(shard_hash);
             plan.file_entries
                 .extend(rewrite.file_entries.iter().cloned());
             plan.replacements.push(rewrite);
@@ -687,72 +711,55 @@ async fn upload_replacements(
     replacements: &[ShardRewrite],
     cancel: &CancellationToken,
 ) -> Result<(u64, u64)> {
+    let workspace = tempfile::tempdir().map_err(CrabError::Io)?;
     let mut uploaded = 0;
     let mut bytes = 0;
     for replacement in replacements {
         check_cancelled(cancel)?;
         let path = router.shard_path(&replacement.new_hash);
-        store.put(&path, replacement.bytes.clone()).await?;
-        crate::cmd::gc::closure::publish(
-            store,
-            router.global_prefix(),
-            &replacement.new_hash,
-            replacement.bytes.clone(),
-            path.as_ref(),
-        )
-        .await?;
-        let (verified, _) = store
-            .get_with_etag_bounded(&path, MAX_RECONCILIATION_SHARD_BYTES)
+        let local_path = workspace
+            .path()
+            .join(format!("replacement-{}.shard", replacement.new_hash.hex()));
+        tokio::fs::write(&local_path, &replacement.bytes)
+            .await
+            .map_err(CrabError::Io)?;
+        let size =
+            u64::try_from(replacement.bytes.len()).map_err(|_| CrabError::Configuration {
+                key: "xorb optimization replacement size".to_owned(),
+                origin: "replacement shard size cannot be represented".to_owned(),
+            })?;
+        store
+            .put_multipart_file_retry_with_xet_hash(
+                &path,
+                &local_path,
+                size,
+                replacement.new_hash.into(),
+                8 * 1024 * 1024,
+                cancel,
+                None,
+            )
             .await?;
-        let actual_hash = crab_xet::hash::compute_data_hash(&verified);
-        if actual_hash != replacement.new_hash {
+        let mut hasher = HashedWrite::new(std::io::sink());
+        let verified_size = tokio::select! {
+            result = store.stream_to_writer(&path, &mut hasher) => result?,
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        };
+        if verified_size != size || hasher.hash() != replacement.new_hash {
             return Err(CrabError::CorruptObject {
                 path: path.to_string(),
                 reason: format!(
-                    "rewritten shard content hash is {actual_hash}, expected {}",
-                    replacement.new_hash
+                    "rewritten shard verification failed: expected {} bytes and hash {}, got {} bytes and hash {}",
+                    size,
+                    replacement.new_hash,
+                    verified_size,
+                    hasher.hash()
                 ),
             });
         }
         uploaded += 1;
-        bytes += replacement.bytes.len() as u64;
+        bytes += size;
     }
     Ok((uploaded, bytes))
-}
-
-async fn publish_file_index(
-    store: &Store,
-    router: &StoreLayout,
-    entries: &[FileIndexEntry],
-    generation: u64,
-    shard_index_hash: MerkleHash,
-) -> Result<()> {
-    let committed = entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.file_hash,
-                crab_metadata::value_codec::CommittedFileRecord {
-                    recipe_hash: entry.recipe_hash,
-                    shard_hash: entry.shard_hash,
-                    committed_generation: generation,
-                    shard_index_hash,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let config = crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-        router.repo_prefix(),
-        router.global_prefix(),
-    );
-    crab_metadata::remote_index::write_index_entries(
-        Arc::clone(store.inner()),
-        &config,
-        &committed,
-        &[],
-    )
-    .await
-    .map_err(CrabError::from)
 }
 
 fn now_iso8601() -> String {
@@ -800,6 +807,7 @@ pub async fn finalize(
     run_id: &str,
     store: Option<&Store>,
     router: Option<&StoreLayout>,
+    config: &Config,
     cancel: &CancellationToken,
 ) -> Result<ReconcileOutcome> {
     let (src_to_dest, entries_updated, entries_unchanged) = build_mapping(journal, run_id)?;
@@ -909,26 +917,51 @@ pub async fn finalize(
         total_uploaded += uploaded;
         total_bytes += bytes;
 
-        let shard_index_hash = parse_hash(&shard_index_hash_text, "reconciled shard index")?;
-        publish_file_index(
-            store,
-            router,
-            &plan.file_entries,
-            next_generation,
-            shard_index_hash,
-        )
-        .await?;
-        check_cancelled(cancel)?;
-
         let mut candidate = manifest_before;
         candidate.generation = next_generation;
         candidate.created_at = now_iso8601();
         candidate.session_id = format!("optimize-xorbs-{run_id}");
         candidate.shard_index_hash = shard_index_hash_text;
         candidate.seal_git_validation();
+        // Candidate rows and roots are durable before the manifest CAS. A
+        // cancelled or conflicting attempt may leave extra immutable objects,
+        // but it must never expose a generation with missing index evidence.
+        let publication = crate::cmd::metadb::publish_candidate_shard_indexes(
+            store,
+            router.repo_prefix(),
+            &candidate,
+            &final_shards,
+            config,
+            cancel,
+        )
+        .await?;
+        debug!(
+            gc_registry_generation = publication.gc_registry_generation,
+            file_entries = publication.file_entries_written,
+            chunk_entries = publication.chunk_entries_written,
+            "candidate xorb indexes published"
+        );
+        check_cancelled(cancel)?;
 
         match manifest::write_manifest_cas(store, router, &candidate, &etag).await {
             Ok(_) => {
+                // The manifest CAS is the visibility point. Reconcile only
+                // the exact source roots replaced by this commit and finish
+                // the registry update even when cancellation arrived during
+                // the CAS request.
+                let storage_router = crab_storage::StoreLayout::new(
+                    store.as_storage().clone(),
+                    router.repo_prefix().to_owned(),
+                );
+                crab_metadata::ref_registry::reconcile_compacted_repo_shards(
+                    store.as_storage(),
+                    &storage_router,
+                    plan.replaced_sources.iter().map(MerkleHash::hex).collect(),
+                    plan.final_shards.iter().map(MerkleHash::hex).collect(),
+                )
+                .await?;
+                crate::cmd::metadb::write_generation_index_receipt(store, router, &candidate)
+                    .await?;
                 info!(
                     entries_updated,
                     entries_unchanged,
@@ -937,6 +970,9 @@ pub async fn finalize(
                     cas_attempts = attempt,
                     "xorb optimization reconciliation complete"
                 );
+                if cancel.is_cancelled() {
+                    return Err(CrabError::Cancelled);
+                }
                 return Ok(ReconcileOutcome {
                     entries_updated,
                     entries_unchanged,
@@ -1067,6 +1103,7 @@ mod tests {
             "test-reconcile",
             None,
             None,
+            &Config::default(),
             &CancellationToken::new(),
         )
         .await
@@ -1095,6 +1132,7 @@ mod tests {
             "test-empty",
             None,
             None,
+            &Config::default(),
             &CancellationToken::new(),
         )
         .await
