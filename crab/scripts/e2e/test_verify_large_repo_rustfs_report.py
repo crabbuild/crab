@@ -268,6 +268,35 @@ class ReportVerificationTests(unittest.TestCase):
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)
         self.assertEqual(result.replay_count, 3)
 
+    def test_prevalidated_owner_path_allows_no_remote_visibility_build(self) -> None:
+        VERIFY.verify_full_visibility_telemetry(
+            {
+                "visibility_owner_seed": {
+                    "actions": ["catalog_advance", "commit_graph_rebuild", "none"],
+                    "telemetry": {
+                        "visibility_duration_ms": 0,
+                        "storage_requests": 0,
+                        "storage_bytes": 0,
+                    },
+                }
+            }
+        )
+
+    def test_visibility_repair_requires_telemetry(self) -> None:
+        with self.assertRaisesRegex(VERIFY.VerificationError, "visibility repair"):
+            VERIFY.verify_full_visibility_telemetry(
+                {
+                    "visibility_owner_seed": {
+                        "actions": ["visibility_repair", "none"],
+                        "telemetry": {
+                            "visibility_duration_ms": 0,
+                            "storage_requests": 0,
+                            "storage_bytes": 0,
+                        },
+                    }
+                }
+            )
+
     def test_abbreviated_binary_revision_is_accepted(self) -> None:
         report = valid_report()
         report["provenance"]["crab_build"]["git_sha"] = OID[:7]

@@ -759,6 +759,7 @@ class LargeRepositoryQualification:
 
     def acceleration_snapshot(self, stage: str) -> None:
         owner_runs: list[dict[str, Any]] = []
+        owner_snapshots: list[dict[str, Any]] = []
         actions: list[str] = []
         for attempt in range(1, 9):
             owner = self.run_crab(
@@ -774,6 +775,9 @@ class LargeRepositoryQualification:
                 raise QualificationError("generation owner emitted no JSONL snapshot")
             payload = json.loads(lines[-1])
             data = payload.get("data", payload)
+            if not isinstance(data, dict):
+                raise QualificationError("generation owner snapshot data is not an object")
+            owner_snapshots.append(data)
             action = str(data.get("action", ""))
             actions.append(action)
             if action == "none":
@@ -813,6 +817,17 @@ class LargeRepositoryQualification:
                 key: sum(run["telemetry"].get(key, 0) for run in owner_runs)
                 for key in owner_runs[0]["telemetry"]
             },
+            "visibility_states": [
+                str(snapshot.get("visibility", "")) for snapshot in owner_snapshots
+            ],
+            "maintenance_bytes_read": sum(
+                int(snapshot.get("maintenance_bytes_read", 0))
+                for snapshot in owner_snapshots
+            ),
+            "maintenance_bytes_written": sum(
+                int(snapshot.get("maintenance_bytes_written", 0))
+                for snapshot in owner_snapshots
+            ),
         }
         self.report["stages"][f"acceleration_{stage}"] = {
             "duration_ms": doctor["duration_ms"],

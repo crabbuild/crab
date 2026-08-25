@@ -130,6 +130,30 @@ def verify_stage(name: str, stage: Any) -> None:
         verify_telemetry(stage["telemetry"], f"stages.{name}.telemetry")
 
 
+def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
+    owner_stage = stages["visibility_owner_seed"]
+    owner_telemetry = owner_stage.get("telemetry", {})
+    visibility_duration = owner_telemetry.get("visibility_duration_ms", 0)
+    owner_actions = owner_stage.get("actions", [])
+    if visibility_duration > 0:
+        require(
+            owner_telemetry.get("storage_requests", 0) > 0
+            and owner_telemetry.get("storage_bytes", 0) > 0,
+            "full report is missing aggregate visibility storage traffic",
+        )
+        return
+    require(
+        isinstance(owner_actions, list)
+        and owner_actions
+        and owner_actions[-1] == "none",
+        "full report is missing visibility-build telemetry and owner convergence",
+    )
+    require(
+        "visibility_repair" not in owner_actions,
+        "full report records a visibility repair without visibility-build telemetry",
+    )
+
+
 def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
     report = load_report(path)
     require(report.get("schema") == SCHEMA, f"unsupported schema: {report.get('schema')!r}")
@@ -329,16 +353,7 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
             )
             require(isinstance(stage.get("notes"), list), f"stages.{name}.notes must be an array")
     if profile == "full":
-        owner_telemetry = stages["visibility_owner_seed"].get("telemetry", {})
-        require(
-            owner_telemetry.get("visibility_duration_ms", 0) > 0,
-            "full report is missing aggregate visibility-build timing",
-        )
-        require(
-            owner_telemetry.get("storage_requests", 0) > 0
-            and owner_telemetry.get("storage_bytes", 0) > 0,
-            "full report is missing aggregate visibility storage traffic",
-        )
+        verify_full_visibility_telemetry(stages)
         clone_telemetry = stages["full_clone_cold"].get("telemetry", {})
         for field in (
             "upload_pack_duration_ms",
