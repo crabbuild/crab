@@ -4181,6 +4181,14 @@ struct PushDependencyPlan {
 }
 
 impl PushDependencyPlan {
+    fn has_global_content_dependencies(&self) -> bool {
+        !self.file_dependencies.is_empty()
+            || !self.unique_chunks.is_empty()
+            || !self.origin_receipts.is_empty()
+            || !self.new_xorbs.is_empty()
+            || !self.new_shards.is_empty()
+    }
+
     fn recompute_digest(&self) -> [u8; 32] {
         fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
             hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -5238,7 +5246,7 @@ pub(crate) async fn acquire_push_lock_leases(
 async fn acquire_push_admission_lock(
     store: &Store,
     prefix: &str,
-    global_prefix: &str,
+    global_prefix: Option<&str>,
     required_slots: usize,
     ttl: Duration,
     cancel: &CancellationToken,
@@ -5249,7 +5257,7 @@ async fn acquire_push_admission_lock(
     let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted_with_global(
         store.inner(),
         prefix,
-        Some(global_prefix),
+        global_prefix,
         PUSH_ADMISSION_SLOTS,
         required_slots,
         ttl,
@@ -7249,12 +7257,17 @@ impl PushPipeline {
         new_manifest.shard_index_hash = shard_index_hash;
         new_manifest.pack_index_hash = pack_index_hash;
 
-        // Ordinary writers establish the conservative GC root and final
-        // canonical-origin proof here. Protected writers have only scoped
-        // staging credentials; the receive service validates/promotes staged
-        // objects, union-registers shards, and then commits the manifest.
+        // Shared-content writers establish the conservative GC root and final
+        // canonical-origin proof here. A plain-Git push with no shard roots
+        // has no bucket-global object to register. Protected writers have only
+        // scoped staging credentials; the receive service owns that proof.
+        let repo_local_only = self.config.active_active_replication.is_none()
+            && shard_hashes.is_empty()
+            && self.pointers.lock().await.is_empty();
         let gc_registry_generation = if self.config.protected_push.is_some() {
             self.prove_all_xorbs_for_protected_push().await?;
+            0
+        } else if repo_local_only {
             0
         } else {
             let storage = store.as_storage().clone();
@@ -7695,7 +7708,9 @@ impl PushPipeline {
             || plan.candidate_pack_index_hash != receipt.candidate_pack_index_hash
             || plan.candidate_shard_index_hash != receipt.candidate_shard_index_hash
             || plan.gc_registry_generation != receipt.gc_registry_generation
-            || (!protected && plan.gc_registry_generation == 0)
+            || (!protected
+                && plan.has_global_content_dependencies()
+                && plan.gc_registry_generation == 0)
             || plan
                 .unique_chunks
                 .iter()
@@ -15234,6 +15249,29 @@ impl PushPipeline {
         )
     }
 
+    /// Return whether this push may publish bucket-global content or roots.
+    ///
+    /// A fresh plain-Git push has no pointers, no planned xorb payload, and no
+    /// existing shard index. It only mutates repository-local objects, so the
+    /// shared bucket GC fence would add contention without protecting data.
+    async fn requires_global_gc_fence(&self) -> bool {
+        if self
+            .planned_xorb_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+        {
+            return true;
+        }
+        if !self.pointers.lock().await.is_empty() {
+            return true;
+        }
+        self.base_manifest
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|manifest| !manifest.shard_index_hash.is_empty())
+    }
+
     async fn execute_inner(&self) -> Result<PushResult> {
         // Cancellation wins over configuration or remote preflight errors so
         // callers receive the stable cancellation contract even when no
@@ -15392,6 +15430,13 @@ impl PushPipeline {
             )?;
         }
         let required_admission_slots = self.push_admission_required_slots();
+        let global_gc_domain = if object_store_admission {
+            self.requires_global_gc_fence()
+                .await
+                .then_some(self.router.global_prefix())
+        } else {
+            None
+        };
         // Protected pushes are admitted by the authenticated service before it
         // grants a session-private staging store. Coordination objects written
         // through that store cannot provide repository-wide mutual exclusion.
@@ -15404,7 +15449,7 @@ impl PushPipeline {
                         acquire_push_admission_lock(
                             store,
                             self.router.repo_prefix(),
-                            self.router.global_prefix(),
+                            global_gc_domain,
                             required_admission_slots,
                             self.config.lock_ttl,
                             &self.cancel,
@@ -20585,7 +20630,7 @@ mod tests {
         let lock = acquire_push_admission_lock(
             &store,
             "repo",
-            ".crab",
+            Some(".crab"),
             1,
             Duration::from_secs(3),
             &CancellationToken::new(),
@@ -20596,6 +20641,84 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(50));
         lock.release().await.unwrap();
         release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repo_local_push_admission_does_not_hold_global_gc_fence() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let ttl = Duration::from_secs(60);
+        let lock =
+            acquire_push_admission_lock(&store, "repo", None, 1, ttl, &CancellationToken::new())
+                .await
+                .unwrap();
+
+        let global_sweep =
+            crab_coordination::GcFenceLease::acquire_sweep(store.inner(), ".crab", ttl)
+                .await
+                .unwrap();
+        let repo_sweep =
+            crab_coordination::GcFenceLease::acquire_sweep(store.inner(), "repo", ttl).await;
+
+        assert!(matches!(
+            repo_sweep,
+            Err(crab_coordination::CoordinationError::GcFenceHeld { .. })
+        ));
+
+        global_sweep.release().await.unwrap();
+        lock.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_plain_git_push_does_not_require_global_gc_fence() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+
+        let (store, router) = test_store_router("repo");
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store),
+            None,
+            None,
+            "repo".to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+
+        pipeline.read_base_manifest().await.unwrap();
+        assert!(!pipeline.requires_global_gc_fence().await);
+    }
+
+    #[tokio::test]
+    async fn planned_xorb_push_requires_global_gc_fence() {
+        let (store, router) = test_store_router("repo");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store),
+            None,
+            None,
+            "repo".to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+
+        pipeline
+            .planned_xorb_bytes
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(pipeline.requires_global_gc_fence().await);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -29988,6 +30111,20 @@ mod tests {
         assert!(bulk.pack_index.segments.is_empty());
         assert!(bulk.shard_index.index.is_some());
         assert!(bulk.pack_index.index.is_some());
+
+        pipeline
+            .validate_push_commit_receipt(&manifest)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .inner()
+                .list(Some(&Path::from(".crab/ref-registry")))
+                .count()
+                .await,
+            0,
+            "a repo-local-only push must not create a global ref-registry record"
+        );
     }
 
     #[tokio::test]
@@ -30097,6 +30234,16 @@ mod tests {
         assert_eq!(
             manifest.pack_index_hash,
             bulk.pack_index.index.as_ref().unwrap().hash
+        );
+
+        assert!(
+            store
+                .inner()
+                .list(Some(&Path::from(".crab/ref-registry")))
+                .next()
+                .await
+                .is_some(),
+            "a push with shared shard content must retain global ref-registry publication"
         );
     }
 
