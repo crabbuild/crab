@@ -18,7 +18,7 @@ use crate::git::push::{
     CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
 };
 use crate::metadata::manifest::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_bulk_pack_list, read_manifest,
+    BulkData, Manifest, PackManifestEntry, compact_pack_index, read_manifest,
     upload_segmented_bulk, write_manifest_cas,
 };
 use crate::storage::StoreLayout;
@@ -1279,7 +1279,12 @@ mod tests {
         assert_eq!(outcome.bytes_read, selected_bytes);
         assert!(outcome.bytes_read < outcome.bytes_before);
         let (committed, _) = read_manifest(&store, &router).await?;
-        let replacement = read_bulk_pack_list(&store, &router, &committed.pack_index_hash).await?;
+        let replacement = crate::metadata::manifest::read_bulk_pack_list(
+            &store,
+            &router,
+            &committed.pack_index_hash,
+        )
+        .await?;
         assert!(replacement.iter().any(|pack| pack.pack_id == stable_id));
         assert!(
             replacement
