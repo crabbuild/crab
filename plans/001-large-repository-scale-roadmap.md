@@ -77,16 +77,17 @@ historical baselines; the current-binary result above is now the primary
 qualification evidence. Repeatability and the remaining large-team rollout
 gates are still open.
 
-The upload-pack admission boundary is now explicit: capability discovery only
-reads the manifest and generation-owner lease, so it does not rebuild derived
-indexes or hide protocol-v2 merely because a committed ref journal or
-generation-bound locator is catching up. A terminal upload-pack session first
-drains active ref-journal transactions under the manifest lock, then repairs
-the current locator and catalog-bound visibility proof before serving filtered
-fetches. Owner-probe and admission errors fail closed; the capability probe
-remains read-only. This closes the filtered incremental-fetch regression found
-by the real Git compatibility jobs while preserving the push acknowledgement
-boundary.
+The upload-pack admission boundary is now explicit: capability discovery reads
+the manifest, active ref-journal marker set, and generation-owner lease without
+mutating derived state. It withholds protocol-v2 while an active marker is
+visible, so Git can use the journal-backed ordinary ref advertisement instead
+of entering a terminal session that must fail closed on mixed-generation
+locator state. A terminal upload-pack session still drains active ref-journal
+transactions under the manifest lock, then repairs the current locator and
+catalog-bound visibility proof before serving filtered fetches. Owner-probe and
+admission errors fail closed. This closes the capability-to-admission crash
+recovery gap found by the released-shape RustFS lifecycle while preserving the
+push acknowledgement boundary.
 
 Implemented on the current branch (qualification evidence at `04655f3b`; latest
 admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`):

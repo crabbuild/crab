@@ -21123,13 +21123,13 @@ mod tests {
         );
         assert_eq!(interrupted_snapshot.journal.transactions.len(), 1);
         assert!(
-            crate::git::upload_pack_wire::snapshot_available(
+            !crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must remain available while admission can compact the active journal"
+            "protocol v2 must remain withheld while admission can compact the active journal"
         );
         let unchanged = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await

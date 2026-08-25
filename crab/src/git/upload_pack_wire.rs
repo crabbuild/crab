@@ -176,6 +176,15 @@ async fn capability_snapshot_is_stable(
     };
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+    let active_transactions =
+        crab_metadata::ref_journal::list_active_transactions(store, &layout).await?;
+    if !active_transactions.is_empty() {
+        tracing::debug!(
+            transactions = active_transactions.len(),
+            "protocol-v2 capability withheld while ref-journal admission is unsettled"
+        );
+        return Ok(false);
+    }
     let owner_active =
         match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
             Ok(active) => active,
