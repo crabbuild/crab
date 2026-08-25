@@ -99,6 +99,11 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
 
       - name: Run protocol and reader tests
+        env:
+          # The Linux test runner's default worker stack is too small for
+          # the largest async protocol fixtures; keep valid coverage from
+          # becoming a stack-overflow false negative.
+          RUST_MIN_STACK: "8388608"
         run: |
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
