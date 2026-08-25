@@ -77,6 +77,17 @@ historical baselines; the current-binary result above is now the primary
 qualification evidence. Repeatability and the remaining large-team rollout
 gates are still open.
 
+The upload-pack admission boundary is now explicit: capability discovery only
+reads the manifest and generation-owner lease, so it does not rebuild derived
+indexes or hide protocol-v2 merely because a committed ref journal or
+generation-bound locator is catching up. A terminal upload-pack session first
+drains active ref-journal transactions under the manifest lock, then repairs
+the current locator and catalog-bound visibility proof before serving filtered
+fetches. Owner-probe and admission errors fail closed; the capability probe
+remains read-only. This closes the filtered incremental-fetch regression found
+by the real Git compatibility jobs while preserving the push acknowledgement
+boundary.
+
 Implemented on the current branch (current commit `04655f3b`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
@@ -162,6 +173,9 @@ Still required before the roadmap is DONE:
 - provider-specific range-request, interruption, retry, cache-server fanout,
   owner failover, and sustained canary evidence remain required for every
   supported object-store backend.
+- a live capability-to-admission handoff while a long-running generation owner
+  holds the lease still needs explicit latency/failover evidence; the current
+  path fails closed rather than serving a mixed-generation snapshot.
 
 ## Outcome
 

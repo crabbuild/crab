@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_metadata::manifest_store::read_manifest;
-use crab_metadata::ref_journal::list_active_transactions;
 use crab_read::{
     FetchAdmissionPolicy, UploadPackFilter, UploadPackRequest, combine_upload_pack_filters,
     parse_upload_pack_filter, plan_upload_pack,
@@ -149,101 +148,43 @@ struct FetchRequest {
     filter: UploadPackFilter,
 }
 
-/// Check whether the repository has the complete proof required to advertise
-/// protocol-v2 upload-pack without rebuilding lagging locator coverage.
+/// Check whether protocol-v2 admission has a stable manifest to repair or use.
 pub async fn snapshot_available(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> bool {
-    // If exact locator coverage lags, omit v2 and let Git use the
-    // already-advertised complete-pack fetch path. Rebuilding it here makes
-    // every dependent hot-ref generation pay the full locator publication cost.
-    let Ok(Some((generation, available))) =
-        catalog_visibility_snapshot(store, prefix, cancellation).await
-    else {
+    // Filtered fetch has no useful legacy complete-pack fallback. Keep the
+    // capability probe cheap and let upload-pack admission repair derived
+    // coverage once a client actually requests a v2 session.
+    let Ok(stable) = capability_snapshot_is_stable(store, prefix, cancellation).await else {
         return false;
     };
-    if available {
-        return true;
-    }
-    repair_snapshot_availability(store, prefix, generation, cancellation).await
+    stable
 }
 
-async fn catalog_visibility_snapshot(
+async fn capability_snapshot_is_stable(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
-) -> crab_remote_git::Result<Option<(u64, bool)>> {
+) -> crab_remote_git::Result<bool> {
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-    let active_transactions = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
-        result = list_active_transactions(store, &layout) => result.map_err(RemoteGitError::Metadata)?,
-    };
-    let (manifest, _) = tokio::select! {
+    let (_manifest, _) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
         result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
     };
-    if !active_transactions.is_empty() {
-        return Ok(None);
-    }
-    if manifest.refs.is_empty() {
-        return Ok(Some((manifest.generation, true)));
-    }
-    let pack_index_hash = manifest.pack_index_hash.clone();
-    let available = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
-        result = crab_metadata::git_visibility::catalog_bound_available(
-            store,
-            &layout,
-            manifest.generation,
-            &pack_index_hash,
-            &manifest.git_validation_digest,
-        ) => result.map_err(RemoteGitError::Metadata)?,
-    };
-    Ok(Some((manifest.generation, available)))
-}
-
-async fn repair_snapshot_availability(
-    store: &crab_storage::Store,
-    prefix: &str,
-    generation: u64,
-    cancellation: &CancellationToken,
-) -> bool {
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-    if matches!(
-        super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-        Ok(true)
-    ) {
-        return false;
-    }
-    match Box::pin(super::push::repair_git_visibility_if_current(
-        &repair_store,
-        &repair_layout,
-        generation,
-        LOCATOR_READ_REPAIR_LOCK_TTL,
-        cancellation,
-    ))
-    .await
-    {
-        Ok(Some(super::push::GitVisibilityPublication::Published)) => {
-            let Ok(Some((_, available))) =
-                catalog_visibility_snapshot(store, prefix, cancellation).await
-            else {
-                return false;
-            };
-            available
-        }
-        Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => false,
-        Err(error) => {
-            tracing::warn!(%error, "current Git visibility repair failed");
-            false
-        }
-    }
+    let owner_active =
+        match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::warn!(%error, "generation owner probe failed during capability discovery");
+                return Ok(false);
+            }
+        };
+    Ok(!owner_active)
 }
 
 fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
@@ -441,8 +382,54 @@ pub(crate) async fn open_repository_with_visibility(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<(RemoteGitRepository, GitVisibilityIndex)> {
+    let repair_store = crate::storage::Store::from_storage(store.clone());
+    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
+        let (manifest, _) =
+            crate::metadata::manifest::read_manifest(&repair_store, &repair_layout).await?;
+        let active_transactions = crate::metadata::manifest::list_active_ref_journal_transactions(
+            &repair_store,
+            &repair_layout,
+        )
+        .await?;
+        if !active_transactions.is_empty() {
+            if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
+                return Err(remote_error(RemoteGitError::RepositoryIndexing {
+                    observed: Some(manifest.generation),
+                    required: manifest.generation.saturating_add(1),
+                }));
+            }
+            if super::push::compact_ref_journal_for_owner(
+                &repair_store,
+                &repair_layout,
+                LOCATOR_READ_REPAIR_LOCK_TTL,
+                manifest.pusher.clone(),
+                cancellation,
+            )
+            .await?
+            {
+                tracing::info!(
+                    generation = manifest.generation,
+                    "compacted active Git ref journal before upload-pack admission"
+                );
+                continue;
+            }
+            last_indexing = Some((
+                Some(manifest.generation),
+                manifest.generation.saturating_add(1),
+            ));
+            if attempt == LOCATOR_READ_RETRY_LIMIT {
+                break;
+            }
+            let delay = locator_read_retry_delay(attempt);
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            }
+            continue;
+        }
+
         let open = open_repository_snapshot(store, prefix, cancellation).await;
         let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
@@ -460,14 +447,9 @@ pub(crate) async fn open_repository_with_visibility(
         };
         last_indexing = Some((observed_generation, required_generation));
 
-        // The manifest generation check distinguishes derived publication lag
-        // from an active ref-journal transaction, which must remain unavailable.
-        let repair_store = crate::storage::Store::from_storage(store.clone());
-        let repair_layout = crab_storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-        if matches!(
-            super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-            Ok(true)
-        ) {
+        // Once journal transactions are drained, generation checks distinguish
+        // derived publication lag from a concurrent owner update.
+        if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
             return Err(remote_error(RemoteGitError::RepositoryIndexing {
                 observed: observed_generation,
                 required: required_generation,
@@ -1485,10 +1467,10 @@ mod tests {
             .expect("create empty manifest");
 
         assert_eq!(
-            catalog_visibility_snapshot(&store, "org/repo", &CancellationToken::new())
+            capability_snapshot_is_stable(&store, "org/repo", &CancellationToken::new())
                 .await
                 .expect("read empty capability snapshot"),
-            Some((manifest.generation, true))
+            true
         );
     }
 

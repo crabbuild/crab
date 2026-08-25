@@ -20703,7 +20703,7 @@ mod tests {
     async fn push_returns_after_active_marker_while_owner_is_busy() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-busy-compactor");
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -20846,15 +20846,36 @@ mod tests {
         pipeline
             .commit_ref_journal(candidate, bulk, &sha_map, decisions, &mut admission_commit)
             .await
-            .expect("commit and compact journal");
+            .expect("publish ref journal");
 
-        assert!(pipeline.committed_manifest_anchor.lock().await.is_some());
-        assert!(pipeline.committed_pack_inventory.lock().await.is_none());
         assert!(
-            pipeline
-                .locator_publication_deferred
-                .load(std::sync::atomic::Ordering::Relaxed)
+            compact_ref_journal_for_owner(
+                &store,
+                &router,
+                Duration::from_secs(60),
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should compact the successor handoff")
         );
+
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read compacted successor state");
+        assert!(snapshot.journal.transactions.is_empty());
+        let locator = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open deferred locator");
+        assert_ne!(
+            locator.coverage().map(|coverage| coverage.generation),
+            Some(snapshot.manifest.generation),
+            "successor-owned compaction must leave locator publication deferred"
+        );
+        locator.close().await.expect("close deferred locator");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -20862,13 +20883,9 @@ mod tests {
         let _guard = GitDirGuard::new();
         let repo_prefix = "generation-owner-locator-handoff";
         let (store, router) = test_store_router(repo_prefix);
-        create_manifest_with_etag(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .expect("create initial manifest");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
         let owner = PushLock::acquire_internal(
             store.inner(),
             router.repo_prefix(),
@@ -20984,7 +21001,7 @@ mod tests {
             "post-commit cancellation must not invert a successful ref update"
         );
         assert!(
-            compact_ref_journal_for_owner(
+            !compact_ref_journal_for_owner(
                 &store,
                 &router,
                 Duration::from_secs(60),
@@ -20992,7 +21009,14 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .expect("owner should finish the committed ref update")
+            .expect("fresh manifest fast path should leave no journal work")
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read committed fresh repository snapshot");
+        assert!(
+            snapshot.journal.transactions.is_empty(),
+            "cancellation after the direct manifest CAS must not create a journal transaction"
         );
         let (committed, _) = read_manifest(&store, &router)
             .await
@@ -21100,13 +21124,21 @@ mod tests {
         );
         assert_eq!(interrupted_snapshot.journal.transactions.len(), 1);
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must stay withheld while exact derived coverage is incomplete"
+            "protocol v2 must remain available while admission can compact the active journal"
+        );
+        let unchanged = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read capability state without admission mutation");
+        assert_eq!(
+            unchanged.journal.transactions.len(),
+            1,
+            "capability discovery must not compact an active ref journal"
         );
 
         let restarted_pipeline = PushPipeline::new(
@@ -21152,6 +21184,19 @@ mod tests {
             .await
             .expect("owner should publish exact locator coverage")
         );
+        assert!(matches!(
+            repair_git_visibility_after_locator_if_current_with_limit(
+                &store,
+                &router,
+                repaired_manifest.generation,
+                crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("owner should publish visibility after locator coverage"),
+            Some(GitVisibilityPublication::Published)
+        ));
         let repaired = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
             .expect("read repaired repository state");
@@ -21170,11 +21215,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn upload_pack_admission_compacts_active_ref_journal() {
+        let _guard = GitDirGuard::new();
+        let repo_prefix = "upload-pack-journal-admission";
+        let (store, router) = test_store_router(repo_prefix);
+        let initial = non_initial_empty_manifest();
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/main")],
+                Some(store.clone()),
+                None,
+                None,
+                router.repo_prefix().to_owned(),
+                router.clone(),
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
+        )
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok)
+        );
+        let pending = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read pending journal state");
+        assert_eq!(pending.journal.transactions.len(), 1);
+
+        let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("upload-pack admission should compact the active journal");
+        let admitted = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read admitted repository state");
+        assert!(admitted.journal.transactions.is_empty());
+        assert!(admitted.manifest.generation > initial.generation);
+        assert!(admitted.manifest.refs.contains_key("refs/heads/main"));
+        assert_eq!(repository.generation(), admitted.manifest.generation);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn upload_pack_repairs_locator_for_current_manifest_generation() {
         let _guard = GitDirGuard::new();
         let repo_prefix = "upload-pack-locator-repair";
         let (store, router) = test_store_router(repo_prefix);
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -21281,8 +21377,8 @@ mod tests {
         .await
         .expect("join capability discovery");
         assert!(
-            !v2_ready,
-            "capability discovery must use complete-pack fetch while locator coverage lags"
+            v2_ready,
+            "capability discovery must keep filtered fetch available while admission repairs catalog-bound coverage"
         );
         let still_stale = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
@@ -21354,7 +21450,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let repo_prefix = "upload-pack-visibility-repair";
         let (store, router) = test_store_router(repo_prefix);
-        let initial = Manifest::default_for_repo("refs/heads/main");
+        let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -21433,15 +21529,16 @@ mod tests {
         );
         owner.release().await.expect("release generation owner");
 
-        assert!(
-            crate::git::upload_pack_wire::snapshot_available(
-                store.as_storage(),
-                repo_prefix,
-                &CancellationToken::new(),
-            )
-            .await,
-            "upload-pack admission should rebuild current visibility from bulk-materialized packs"
+        let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect(
+            "upload-pack admission should rebuild current visibility from bulk-materialized packs",
         );
+        assert_eq!(repository.generation(), manifest.generation);
         let repaired = crab_metadata::git_visibility::read(
             store.as_storage(),
             &crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned()),
@@ -22054,7 +22151,7 @@ mod tests {
         );
         assert!(result.all_ok());
         assert!(
-            compact_ref_journal_for_owner(
+            !compact_ref_journal_for_owner(
                 &store,
                 &router,
                 Duration::from_secs(60),
@@ -22062,7 +22159,14 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .expect("owner should compact the single-ref push")
+            .expect("fresh manifest fast path should leave no journal work")
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read fresh repository snapshot");
+        assert!(
+            snapshot.journal.transactions.is_empty(),
+            "initial publication must not leave a ref-journal transaction"
         );
         let (manifest, _) = read_manifest(&store, &router).await.unwrap();
         assert!(manifest.refs.contains_key("refs/heads/main"));
@@ -22132,6 +22236,9 @@ mod tests {
             make_spec("refs/heads/dev"),
         ];
         let (store, router) = test_store_router("preflight-non-atomic");
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
 
         let result = run_push_batch(
             &specs,
@@ -22679,7 +22786,7 @@ mod tests {
         .await;
         assert!(result.all_ok());
         assert!(
-            compact_ref_journal_for_owner(
+            !compact_ref_journal_for_owner(
                 &store,
                 &router,
                 Duration::from_secs(60),
@@ -22687,7 +22794,14 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await
-            .expect("owner should compact the successful push")
+            .expect("fresh manifest fast path should leave no journal work")
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .expect("read fresh repository snapshot");
+        assert!(
+            snapshot.journal.transactions.is_empty(),
+            "initial publication must not leave a ref-journal transaction"
         );
         let (manifest, _) = read_manifest(&store, &router)
             .await
