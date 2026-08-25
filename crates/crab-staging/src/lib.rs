@@ -43,7 +43,7 @@ pub mod error;
 mod index;
 pub mod metrics;
 pub mod multipart_resume;
-pub use multipart_resume::{AbandonedUpload, MultipartRegistry, SharedMultipartJournal};
+pub use multipart_resume::{AbandonedUpload, MultipartRegistry};
 pub mod push_plan;
 pub mod recipe;
 mod recovery;
@@ -1304,7 +1304,10 @@ async fn read_prepared_staged_chunks_batch(
                         expected_hash.hex()
                     )));
                 }
-                decoded.push((position, chunk.data));
+                // Raw chunks are slices of the full xorb allocation. Copy the
+                // requested chunk so a completed task can release the other
+                // hundreds of MiB before its ordered result is collected.
+                decoded.push((position, Bytes::copy_from_slice(&chunk.data)));
             }
             Ok::<_, StagingError>((expected_bytes, decoded))
         }));

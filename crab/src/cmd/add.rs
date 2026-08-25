@@ -116,7 +116,7 @@ struct StagedEntry {
 }
 
 /// Fields [`write_pointers_and_tracking_to_git_index`] reads from a
-/// staged entry. A owned snapshot lets the git-index writer run inside
+/// staged entry. An owned snapshot lets the git-index writer run inside
 /// `spawn_blocking` without cloning non-`Clone` prepared-xorb handles.
 #[derive(Clone)]
 struct GitIndexEntrySnapshot {
@@ -124,6 +124,11 @@ struct GitIndexEntrySnapshot {
     size: u64,
     abs_path: PathBuf,
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
+}
+
+enum IndexWriteFailure {
+    Join(CrabError),
+    Write(GitIndexWriteError),
 }
 
 fn snapshot_entries(entries: &[StagedEntry]) -> Vec<GitIndexEntrySnapshot> {
@@ -1372,10 +1377,6 @@ async fn execute_add(
         let shard_hints_for_task = std::sync::Arc::new(shard_hints);
         let tracking_patterns_for_task = generated_tracking_patterns.clone();
         let progress_cb = Arc::clone(&progress);
-        enum IndexWriteFailure {
-            Join(CrabError),
-            Write(GitIndexWriteError),
-        }
         let write_result = tokio::task::spawn_blocking(move || {
             write_pointers_and_tracking_to_git_index(
                 &snapshots,

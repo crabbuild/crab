@@ -14,7 +14,11 @@
 
 use tracing::warn;
 
-use crate::error::Result;
+/// Error returned by a local multipart journal implementation.
+pub type JournalError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Result returned by a local multipart journal implementation.
+pub type JournalResult<T> = std::result::Result<T, JournalError>;
 
 /// One successfully uploaded part, as reported by the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,9 +47,16 @@ pub trait MultipartJournal: Send + Sync {
     /// Record a new upload before its first part PUT.
     ///
     /// Returns `false` when another active row already exists for
-    /// `payload_hash` (a concurrent uploader owns it); callers must then
-    /// proceed without journaling rather than clobbering the other row.
-    fn begin(&self, payload_hash: &[u8], bucket: &str, key: &str, upload_id: &str) -> Result<bool>;
+    /// the same payload and destination (a concurrent uploader owns it);
+    /// callers must then proceed without journaling rather than clobbering
+    /// the other row.
+    fn begin(
+        &self,
+        payload_hash: &[u8],
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
+    ) -> JournalResult<bool>;
 
     /// Record one successfully uploaded part.
     fn record_part(
@@ -54,17 +65,22 @@ pub trait MultipartJournal: Send + Sync {
         part_idx: usize,
         content_id: &str,
         size: u64,
-    ) -> Result<()>;
+    ) -> JournalResult<()>;
 
     /// Drop the row after a successful `complete_multipart`.
-    fn complete(&self, upload_id: &str) -> Result<()>;
+    fn complete(&self, upload_id: &str) -> JournalResult<()>;
 
     /// Drop the row because the upload is being abandoned or was found
     /// incompatible. Best-effort; backend cleanup is the caller's job.
-    fn abort_stale(&self, upload_id: &str) -> Result<()>;
+    fn abort_stale(&self, upload_id: &str) -> JournalResult<()>;
 
-    /// Look up a recorded upload for `payload_hash`.
-    fn resumable(&self, payload_hash: &[u8]) -> Result<Option<ResumeInfo>>;
+    /// Look up a recorded upload for this exact remote object identity.
+    fn resumable(
+        &self,
+        payload_hash: &[u8],
+        bucket: &str,
+        key: &str,
+    ) -> JournalResult<Option<ResumeInfo>>;
 }
 
 /// Outcome of trying to claim journal ownership for one upload attempt.
@@ -74,7 +90,7 @@ pub(crate) enum JournalLease {
     /// (either freshly begun or resumed).
     Active { upload_id: String },
     /// No journaling for this attempt: either the caller passed no
-    /// journal, or a concurrent row for the same payload hash exists.
+    /// journal, or a concurrent row for the same object exists.
     /// Failed attempts must abort the backend upload since nothing
     /// tracks the orphaned parts.
     StandDown,
@@ -128,6 +144,6 @@ pub(crate) fn compatible_parts(
 
 /// Logs a journal failure without failing the upload: durability of the
 /// resume row is an optimization, never a correctness gate.
-pub(crate) fn warn_journal_error(phase: &str, err: crate::error::StorageError) {
+pub(crate) fn warn_journal_error(phase: &str, err: JournalError) {
     warn!(phase, error = %err, "multipart journal operation failed");
 }

@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,6 +18,142 @@ use crate::core::error::{CrabError, Result};
 
 pub use crate::git::url::Cloud;
 pub use crab_storage::{BucketIdentity, ETag, StagedWrite};
+
+/// Product adapter between the staging registry and storage transport.
+///
+/// The adapter lives at this composition boundary so `crab-staging` stays
+/// independent of `crab-storage`. SQLite calls are short local transactions;
+/// the mutex supplies the `Sync` contract required by concurrent push tasks.
+pub struct MultipartJournal(Mutex<crab_staging::MultipartRegistry>);
+
+impl MultipartJournal {
+    #[must_use]
+    pub fn new(registry: crab_staging::MultipartRegistry) -> Self {
+        Self(Mutex::new(registry))
+    }
+
+    fn lock(
+        &self,
+    ) -> std::result::Result<
+        std::sync::MutexGuard<'_, crab_staging::MultipartRegistry>,
+        crab_storage::multipart::JournalError,
+    > {
+        self.0.lock().map_err(|_| {
+            Box::new(crab_staging::StagingError::Internal(
+                "multipart journal lock poisoned".to_owned(),
+            )) as crab_storage::multipart::JournalError
+        })
+    }
+
+    pub fn find_abandoned(
+        &self,
+        now: std::time::SystemTime,
+        grace: Duration,
+    ) -> std::result::Result<Vec<crab_staging::AbandonedUpload>, crab_staging::StagingError> {
+        self.0
+            .lock()
+            .map_err(|_| crab_staging::StagingError::Internal("journal lock poisoned".into()))?
+            .find_abandoned(now, grace)
+    }
+
+    pub fn abort_if_tracked(
+        &self,
+        upload_id: &str,
+    ) -> std::result::Result<bool, crab_staging::StagingError> {
+        self.0
+            .lock()
+            .map_err(|_| crab_staging::StagingError::Internal("journal lock poisoned".into()))?
+            .abort_if_tracked(upload_id)
+    }
+
+    fn map_staging(error: crab_staging::StagingError) -> crab_storage::multipart::JournalError {
+        Box::new(error)
+    }
+}
+
+impl crab_storage::multipart::MultipartJournal for MultipartJournal {
+    fn begin(
+        &self,
+        payload_hash: &[u8],
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        self.lock()?
+            .begin(payload_hash, bucket, key, upload_id)
+            .map_err(Self::map_staging)
+    }
+
+    fn record_part(
+        &self,
+        upload_id: &str,
+        part_idx: usize,
+        content_id: &str,
+        size: u64,
+    ) -> crab_storage::multipart::JournalResult<()> {
+        let part_idx = i64::try_from(part_idx).map_err(|_| {
+            Box::new(crab_staging::StagingError::Internal(
+                "multipart part index overflow".to_owned(),
+            )) as crab_storage::multipart::JournalError
+        })?;
+        let size = i64::try_from(size).map_err(|_| {
+            Box::new(crab_staging::StagingError::Internal(
+                "multipart part size overflow".to_owned(),
+            )) as crab_storage::multipart::JournalError
+        })?;
+        self.lock()?
+            .record_part(upload_id, part_idx, content_id, size)
+            .map_err(Self::map_staging)
+    }
+
+    fn complete(&self, upload_id: &str) -> crab_storage::multipart::JournalResult<()> {
+        self.lock()?.complete(upload_id).map_err(Self::map_staging)
+    }
+
+    fn abort_stale(&self, upload_id: &str) -> crab_storage::multipart::JournalResult<()> {
+        self.lock()?
+            .abort_stale(upload_id)
+            .map_err(Self::map_staging)
+    }
+
+    fn resumable(
+        &self,
+        payload_hash: &[u8],
+        bucket: &str,
+        key: &str,
+    ) -> crab_storage::multipart::JournalResult<Option<crab_storage::multipart::ResumeInfo>> {
+        let info = self
+            .lock()?
+            .resumable(payload_hash, bucket, key)
+            .map_err(Self::map_staging)?;
+        info.map(|info| {
+            let parts = info
+                .completed_parts
+                .into_iter()
+                .map(|part| {
+                    Ok(crab_storage::multipart::JournalPart {
+                        part_idx: usize::try_from(part.part_number).map_err(|_| {
+                            Box::new(crab_staging::StagingError::Internal(
+                                "multipart part index is negative".to_owned(),
+                            )) as crab_storage::multipart::JournalError
+                        })?,
+                        content_id: part.etag,
+                        size: u64::try_from(part.size).map_err(|_| {
+                            Box::new(crab_staging::StagingError::Internal(
+                                "multipart part size is negative".to_owned(),
+                            )) as crab_storage::multipart::JournalError
+                        })?,
+                    })
+                })
+                .collect::<crab_storage::multipart::JournalResult<Vec<_>>>()?;
+            Ok(crab_storage::multipart::ResumeInfo {
+                upload_id: info.upload_id,
+                parts,
+            })
+        })
+        .transpose()
+    }
+}
 
 /// CAS-aware facade over an `object_store::ObjectStore`.
 #[derive(Clone)]
@@ -110,6 +247,13 @@ impl Store {
                 journal,
             )
             .await
+    }
+
+    pub async fn abort_multipart(&self, path: &Path, upload_id: &str) -> Result<bool> {
+        self.inner
+            .abort_multipart(path, upload_id)
+            .await
+            .map_err(CrabError::from)
     }
 
     #[must_use]

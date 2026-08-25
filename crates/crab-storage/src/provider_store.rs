@@ -65,8 +65,8 @@ pub enum AzureAuthorization {
 ///
 /// `signer` is present only for providers whose concrete adapter
 /// implements URL signing. `multipart` is present only for providers
-/// whose concrete adapter implements the explicit upload-id multipart
-/// API (S3, GCS, Azure, in-memory) — it powers resumable multipart
+/// whose concrete adapter implements a stable, non-empty upload-id API
+/// (S3 and GCS) — it powers resumable multipart
 /// uploads via [`crate::multipart::MultipartJournal`].
 pub struct BuiltObjectStore {
     pub inner: Arc<dyn ObjectStore>,
@@ -371,12 +371,14 @@ fn build_object_store_inner(
             let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
-            let azure = Arc::new(azure);
             Ok(BuiltObjectStore {
-                inner: azure.clone() as Arc<dyn ObjectStore>,
+                inner: Arc::new(azure),
                 provider,
                 signer: None,
-                multipart: Some(azure),
+                // object_store's Azure adapter returns an empty multipart id
+                // for every blob and keys uncommitted blocks by path. It
+                // cannot satisfy Crab's durable upload-id journal contract.
+                multipart: None,
             })
         }
     }
@@ -478,12 +480,11 @@ fn build_static_env_object_store(
                 .with_client_options(default_client_options())
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
-            let azure = Arc::new(azure);
             Ok(BuiltObjectStore {
-                inner: azure.clone() as Arc<dyn ObjectStore>,
+                inner: Arc::new(azure),
                 provider,
                 signer: None,
-                multipart: Some(azure),
+                multipart: None,
             })
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),

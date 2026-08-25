@@ -15,7 +15,6 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-diff = { workspace = true }
-crab-storage = { workspace = true, default-features = false }
 crab-xet = { workspace = true, features = ["chunker"] }
 crc32c = "0.6"
 fs4 = "0.13"

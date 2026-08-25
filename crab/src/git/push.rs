@@ -6480,10 +6480,10 @@ impl PushPipeline {
         let multipart_journal = staging.as_ref().and_then(|staging| {
             let registry_path = staging.root().join("multipart.db");
             match crab_staging::MultipartRegistry::open(&registry_path) {
-                Ok(registry) => Some(
-                    Arc::new(crab_staging::SharedMultipartJournal::new(registry))
-                        as Arc<dyn crab_storage::multipart::MultipartJournal>,
-                ),
+                Ok(registry) => Some(Arc::new(crate::storage::store::MultipartJournal::new(
+                    registry,
+                ))
+                    as Arc<dyn crab_storage::multipart::MultipartJournal>),
                 Err(error) => {
                     debug!(
                         error = %error,
@@ -12359,157 +12359,178 @@ impl PushPipeline {
                 .map(|update| update.new_sha.clone())
                 .collect::<Vec<_>>();
             let pack_dir = self.objects_dir()?.join("pack");
-            let mut uploaded = Vec::with_capacity(packed_files.len());
-            for packed in packed_files {
-                let pack_sha = packed.pack_blake3_hex.clone();
-                let pack_path = self.router.pack_path(&pack_sha);
-                let installed = pack::install_pack_file_locally_with_timeout(
-                    &pack_dir,
-                    packed.pack_path.as_ref(),
-                    &pack_sha,
-                    self.config.receive_max_input_size,
-                    true,
-                )
-                .await
-                .map_err(|error| match error {
-                    CrabError::FetchMalformedObject {
-                        oid, kind, detail, ..
-                    } => CrabError::PushMalformedObject { oid, kind, detail },
-                    error => error,
-                })?;
-                if !upload_push_pack_file_body(
-                    store,
-                    &pack_path,
-                    packed.pack_path.as_ref(),
-                    packed.pack_size,
-                    packed.pack_blake3,
-                    &self.cancel,
-                    self.multipart_journal.as_deref(),
-                )
-                .await?
-                {
-                    debug!(pack_id = %pack_sha, "step 10: pack already exists remotely, skipping body upload");
-                }
-                let locations = crab_git::pack_locator::PackLocationIter::open(
-                    &installed.idx_path,
-                    &installed.rev_path,
-                    packed.pack_size,
-                )
-                .map_err(crab_git::pack::PackError::from)?;
-                if locations.object_count() != packed.object_count {
-                    return Err(CrabError::CorruptObject {
-                        path: installed.idx_path.display().to_string(),
-                        reason: format!(
-                            "generated pack records {} objects but verified index contains {}",
-                            packed.object_count,
-                            locations.object_count()
-                        ),
-                    });
-                }
-                if locations.pack_checksum().to_string() != installed.git_sha1 {
-                    return Err(CrabError::Internal(
-                        "generated pack index checksum disagrees with verified pack trailer"
-                            .to_owned(),
-                    ));
-                }
-                drop(locations);
-                // Protected receive rebuilds and verifies the Git index from
-                // the staged pack; `.idx` is not an accepted wire object.
-                if store.staging_write_prefix().is_none() {
-                    let idx_path = installed.idx_path.clone();
-                    let rev_path = installed.rev_path.clone();
-                    let ((idx_hash, idx_size), (rev_hash, rev_size)) =
-                        tokio::task::spawn_blocking(move || {
-                            Ok::<_, CrabError>((
-                                hash_file_blake3(&idx_path)?,
-                                hash_file_blake3(&rev_path)?,
-                            ))
-                        })
-                        .await
-                        .map_err(|error| {
-                            CrabError::Internal(format!(
-                                "pack evidence hashing join failed: {error}"
-                            ))
-                        })??;
-                    let remote_idx_path = self.router.pack_index_path(&pack_sha);
-                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
-                    tokio::try_join!(
-                        store.put_multipart_file_retry(
-                            &remote_idx_path,
-                            &installed.idx_path,
-                            idx_size,
-                            idx_hash,
-                            8 * 1024 * 1024,
-                            &self.cancel,
-                            None,
-                        ),
-                        store.put_multipart_file_retry(
-                            &remote_rev_path,
-                            &installed.rev_path,
-                            rev_size,
-                            rev_hash,
-                            8 * 1024 * 1024,
-                            &self.cancel,
-                            None,
-                        ),
-                    )?;
-                }
-
-                let origin_entry = PackManifestEntry {
-                    pack_id: pack_sha.clone(),
-                    size: packed.pack_size,
-                    content_hash: pack_sha.clone(),
-                    ref_tips: ref_tips.clone(),
-                    object_count: packed.object_count,
-                };
-                let meta_path = self.router.pack_metadata_path(&pack_sha);
-                // The pack body is verified and durable; its immutable index
-                // evidence, metadata, and origin receipt can now publish in parallel.
-                let (metadata, _) = tokio::try_join!(
-                    upsert_pack_metadata(
-                        store,
-                        &meta_path,
-                        &pack_sha,
-                        packed.object_count,
-                        ref_tips.clone(),
-                        self.config.max_cas_retries,
-                    ),
-                    async {
-                        crab_metadata::pack_origin::record_verified_pack_origin(
-                            store.as_storage(),
-                            self.router.repo_prefix(),
-                            &origin_entry,
+            use futures_util::StreamExt;
+            let mut completed = futures_util::stream::iter(packed_files.into_iter().enumerate())
+                .map(|(index, packed)| {
+                    let pack_dir = pack_dir.clone();
+                    let ref_tips = ref_tips.clone();
+                    async move {
+                        (
+                            index,
+                            self.upload_single_pack(store, &pack_dir, packed, ref_tips)
+                                .await,
                         )
-                        .await
-                        .map_err(CrabError::from)
-                    },
-                )?;
-                let entry = PackManifestEntry {
-                    pack_id: pack_sha.clone(),
-                    size: packed.pack_size,
-                    content_hash: pack_sha.clone(),
-                    ref_tips: metadata.ref_tips,
-                    object_count: packed.object_count,
-                };
-                info!(
-                    pack_id = %pack_sha,
-                    pack_bytes = packed.pack_size,
-                    object_count = packed.object_count,
-                    git_sha1 = %installed.git_sha1,
-                    "step 10: bounded pack and immutable locator evidence uploaded"
-                );
-                uploaded.push(UploadedGitPack {
-                    entry,
-                    idx_path: installed.idx_path,
-                    rev_path: installed.rev_path,
-                    git_sha1: installed.git_sha1,
-                });
-            }
+                    }
+                })
+                .buffer_unordered(2)
+                .collect::<Vec<_>>()
+                .await;
+            completed.sort_by_key(|(index, _)| *index);
+            let uploaded = completed
+                .into_iter()
+                .map(|(_, result)| result)
+                .collect::<Result<Vec<_>>>()?;
             *self.uploaded_packs.lock().await = uploaded;
         }
 
         debug!("step 10: pack upload complete");
         Ok(())
+    }
+
+    async fn upload_single_pack(
+        &self,
+        store: &Store,
+        pack_dir: &Path,
+        packed: pack::PackedFileData,
+        ref_tips: Vec<String>,
+    ) -> Result<UploadedGitPack> {
+        let pack_sha = packed.pack_blake3_hex.clone();
+        let pack_path = self.router.pack_path(&pack_sha);
+        let installed = pack::install_pack_file_locally_with_timeout(
+            pack_dir,
+            packed.pack_path.as_ref(),
+            &pack_sha,
+            self.config.receive_max_input_size,
+            true,
+        )
+        .await
+        .map_err(|error| match error {
+            CrabError::FetchMalformedObject {
+                oid, kind, detail, ..
+            } => CrabError::PushMalformedObject { oid, kind, detail },
+            error => error,
+        })?;
+        if !upload_push_pack_file_body(
+            store,
+            &pack_path,
+            packed.pack_path.as_ref(),
+            packed.pack_size,
+            packed.pack_blake3,
+            &self.cancel,
+            self.multipart_journal.as_deref(),
+        )
+        .await?
+        {
+            debug!(pack_id = %pack_sha, "step 10: pack already exists remotely, skipping body upload");
+        }
+        let locations = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            packed.pack_size,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        if locations.object_count() != packed.object_count {
+            return Err(CrabError::CorruptObject {
+                path: installed.idx_path.display().to_string(),
+                reason: format!(
+                    "generated pack records {} objects but verified index contains {}",
+                    packed.object_count,
+                    locations.object_count()
+                ),
+            });
+        }
+        if locations.pack_checksum().to_string() != installed.git_sha1 {
+            return Err(CrabError::Internal(
+                "generated pack index checksum disagrees with verified pack trailer".to_owned(),
+            ));
+        }
+        drop(locations);
+        // Protected receive rebuilds and verifies the Git index from
+        // the staged pack; `.idx` is not an accepted wire object.
+        if store.staging_write_prefix().is_none() {
+            let idx_path = installed.idx_path.clone();
+            let rev_path = installed.rev_path.clone();
+            let ((idx_hash, idx_size), (rev_hash, rev_size)) =
+                tokio::task::spawn_blocking(move || {
+                    Ok::<_, CrabError>((hash_file_blake3(&idx_path)?, hash_file_blake3(&rev_path)?))
+                })
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("pack evidence hashing join failed: {error}"))
+                })??;
+            let remote_idx_path = self.router.pack_index_path(&pack_sha);
+            let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
+            tokio::try_join!(
+                store.put_multipart_file_retry(
+                    &remote_idx_path,
+                    &installed.idx_path,
+                    idx_size,
+                    idx_hash,
+                    8 * 1024 * 1024,
+                    &self.cancel,
+                    None,
+                ),
+                store.put_multipart_file_retry(
+                    &remote_rev_path,
+                    &installed.rev_path,
+                    rev_size,
+                    rev_hash,
+                    8 * 1024 * 1024,
+                    &self.cancel,
+                    None,
+                ),
+            )?;
+        }
+
+        let origin_entry = PackManifestEntry {
+            pack_id: pack_sha.clone(),
+            size: packed.pack_size,
+            content_hash: pack_sha.clone(),
+            ref_tips: ref_tips.clone(),
+            object_count: packed.object_count,
+        };
+        let meta_path = self.router.pack_metadata_path(&pack_sha);
+        // The pack body is verified and durable; its immutable index
+        // evidence, metadata, and origin receipt can now publish in parallel.
+        let (metadata, _) = tokio::try_join!(
+            upsert_pack_metadata(
+                store,
+                &meta_path,
+                &pack_sha,
+                packed.object_count,
+                ref_tips.clone(),
+                self.config.max_cas_retries,
+            ),
+            async {
+                crab_metadata::pack_origin::record_verified_pack_origin(
+                    store.as_storage(),
+                    self.router.repo_prefix(),
+                    &origin_entry,
+                )
+                .await
+                .map_err(CrabError::from)
+            },
+        )?;
+        let entry = PackManifestEntry {
+            pack_id: pack_sha.clone(),
+            size: packed.pack_size,
+            content_hash: pack_sha.clone(),
+            ref_tips: metadata.ref_tips,
+            object_count: packed.object_count,
+        };
+        info!(
+            pack_id = %pack_sha,
+            pack_bytes = packed.pack_size,
+            object_count = packed.object_count,
+            git_sha1 = %installed.git_sha1,
+            "step 10: bounded pack and immutable locator evidence uploaded"
+        );
+        Ok(UploadedGitPack {
+            entry,
+            idx_path: installed.idx_path,
+            rev_path: installed.rev_path,
+            git_sha1: installed.git_sha1,
+        })
     }
 
     /// Compute the remote reachability boundary for incremental packs.
@@ -16504,6 +16525,9 @@ async fn upload_push_pack_file_body(
         if resumed {
             debug!(pack_size, "resumed interrupted pack upload");
         }
+        store
+            .verify_size_and_hash(pack_path, pack_size, &pack_blake3)
+            .await?;
     } else {
         let pack_bytes = tokio::fs::read(pack_file).await?;
         store.put(pack_path, Bytes::from(pack_bytes)).await?;
@@ -27259,12 +27283,12 @@ mod tests {
             if location != &self.target_path {
                 return Ok(result);
             }
-            // Inflate size metadata (HEAD-style checks see drift) and
-            // optionally swap the payload stream for a corrupted copy.
+            // Swap the payload stream for a corrupted copy while preserving
+            // metadata so the test exercises body verification.
             let range = result.range.clone();
             let attributes = result.attributes.clone();
             let extensions = result.extensions.clone();
-            let mut meta = result.meta.clone();
+            let meta = result.meta.clone();
             let payload = if !self.corrupt_body {
                 result.payload
             } else {
@@ -27314,12 +27338,6 @@ mod tests {
             options: object_store::CopyOptions,
         ) -> object_store::Result<()> {
             self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    impl TamperingStore {
-        fn inner_clone(&self) -> Arc<dyn ObjectStore> {
-            Arc::new(object_store::memory::InMemory::new())
         }
     }
 

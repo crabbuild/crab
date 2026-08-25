@@ -3,15 +3,15 @@
 //! Tracks in-progress multipart uploads so that an interrupted push can
 //! resume from the last completed part rather than re-uploading the
 //! entire xorb or pack. The database lives at `staging/multipart.db`
-//! alongside the staging index. The registry implements
-//! [`crab_storage::MultipartJournal`], the persistence boundary
-//! `crab_storage::Store` consults during resumable multipart uploads.
+//! alongside the staging index. Product composition adapts this registry
+//! to the storage transport's journal contract without coupling staging
+//! to the storage crate.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::error::{Result, StagingError};
 
@@ -67,6 +67,10 @@ impl MultipartRegistry {
             ))
         })?;
 
+        conn.busy_timeout(Duration::from_secs(5)).map_err(|e| {
+            StagingError::Internal(format!("failed to set multipart.db busy timeout: {e}"))
+        })?;
+
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StagingError::Internal(format!("failed to set WAL mode: {e}")))?;
 
@@ -77,8 +81,7 @@ impl MultipartRegistry {
 
         // Enable foreign-key enforcement. Without this, SQLite silently
         // ignores the `FOREIGN KEY` clause below and orphaned rows in
-        // `multipart_parts` accumulate when `begin()` replaces an entry
-        // in `multipart_uploads`. See finding CR10-F2.
+        // `multipart_parts` can outlive their upload.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| StagingError::Internal(format!("failed to enable foreign_keys: {e}")))?;
 
@@ -96,12 +99,11 @@ impl MultipartRegistry {
                     payload_hash BLOB NOT NULL,
                     bucket      TEXT NOT NULL,
                     key         TEXT NOT NULL,
-                    started_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    completed   INTEGER NOT NULL DEFAULT 0
+                    started_at  INTEGER NOT NULL DEFAULT (unixepoch())
                 );
 
-                CREATE INDEX IF NOT EXISTS multipart_uploads_by_payload
-                    ON multipart_uploads(payload_hash);
+                CREATE UNIQUE INDEX IF NOT EXISTS multipart_uploads_active_object
+                    ON multipart_uploads(payload_hash, bucket, key);
 
                 CREATE TABLE IF NOT EXISTS multipart_parts (
                     upload_id   TEXT NOT NULL,
@@ -124,7 +126,7 @@ impl MultipartRegistry {
     /// Claim journal ownership for a new upload before its first part PUT.
     ///
     /// Returns `false` when a different active upload already owns the
-    /// payload hash (a concurrent uploader); the caller must proceed
+    /// payload and destination (a concurrent uploader); the caller must proceed
     /// unjournaled instead of clobbering that row.
     pub fn begin(
         &self,
@@ -133,27 +135,10 @@ impl MultipartRegistry {
         key: &str,
         upload_id: &str,
     ) -> Result<bool> {
-        let existing: Option<String> = self
+        let inserted = self
             .conn
-            .query_row(
-                "SELECT upload_id FROM multipart_uploads
-                 WHERE payload_hash = ?1 AND completed = 0",
-                params![payload_hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to check existing multipart upload: {e}"))
-            })?;
-        if let Some(owner) = existing
-            && owner != upload_id
-        {
-            return Ok(false);
-        }
-
-        self.conn
             .execute(
-                "INSERT OR REPLACE INTO multipart_uploads
+                "INSERT OR IGNORE INTO multipart_uploads
                     (upload_id, payload_hash, bucket, key)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![upload_id, payload_hash, bucket, key],
@@ -161,6 +146,24 @@ impl MultipartRegistry {
             .map_err(|e| {
                 StagingError::Internal(format!("failed to insert multipart upload: {e}"))
             })?;
+
+        if inserted == 0 {
+            let owner: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT upload_id FROM multipart_uploads
+                     WHERE payload_hash = ?1 AND bucket = ?2 AND key = ?3",
+                    params![payload_hash, bucket, key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to identify existing multipart upload: {e}"
+                    ))
+                })?;
+            return Ok(owner.as_deref() == Some(upload_id));
+        }
 
         debug!(upload_id, "registered multipart upload");
         Ok(true)
@@ -219,8 +222,8 @@ impl MultipartRegistry {
 
     /// Abort a stale upload: remove both the upload row and its parts.
     ///
-    /// Called when the upload is cancelled, errors out, or the backend
-    /// reports `NoSuchUpload`.
+    /// Called after a hard upload error or when a recorded session is
+    /// incompatible with the current upload plan.
     pub fn abort_stale(&self, upload_id: &str) -> Result<()> {
         let tx = self
             .conn
@@ -251,17 +254,22 @@ impl MultipartRegistry {
 
     /// Look up a resumable upload for the given xorb hash.
     ///
-    /// Returns `Some(ResumeInfo)` if an incomplete upload exists with at
-    /// least one recorded part. Returns `None` if no resumable upload is
-    /// found.
-    pub fn resumable(&self, payload_hash: &[u8]) -> Result<Option<ResumeInfo>> {
+    /// Returns `Some(ResumeInfo)` if an incomplete upload exists, including
+    /// a session interrupted before its first part completed. Returns `None`
+    /// if no resumable upload is found.
+    pub fn resumable(
+        &self,
+        payload_hash: &[u8],
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ResumeInfo>> {
         let row: Option<(String, String, String)> = self
             .conn
             .query_row(
                 "SELECT upload_id, bucket, key
                  FROM multipart_uploads
-                 WHERE payload_hash = ?1 AND completed = 0",
-                params![payload_hash],
+                 WHERE payload_hash = ?1 AND bucket = ?2 AND key = ?3",
+                params![payload_hash, bucket, key],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
@@ -301,42 +309,6 @@ impl MultipartRegistry {
             key,
             completed_parts: parts,
         }))
-    }
-
-    /// Handle a `NoSuchUpload` error from the backend.
-    ///
-    /// Deletes the registry row so the next attempt starts fresh.
-    pub fn handle_no_such_upload(&self, upload_id: &str) -> Result<()> {
-        warn!(
-            upload_id,
-            "backend reported NoSuchUpload, clearing registry"
-        );
-        self.abort_stale(upload_id)
-    }
-
-    /// Record an upload with an explicit start timestamp.
-    ///
-    /// Recovery and fsck tooling seed rows whose age must be exact; the
-    /// normal [`Self::begin`] path always stamps the current time.
-    pub fn register_at(
-        &self,
-        payload_hash: &[u8],
-        bucket: &str,
-        key: &str,
-        upload_id: &str,
-        started_at: i64,
-    ) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO multipart_uploads
-                    (upload_id, payload_hash, bucket, key, started_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![upload_id, payload_hash, bucket, key, started_at],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to insert multipart upload: {e}"))
-            })?;
-        Ok(())
     }
 
     /// Drop the row for `upload_id`, reporting whether it was tracked.
@@ -381,19 +353,22 @@ impl MultipartRegistry {
     /// marked completed.
     ///
     /// Used by fsck to detect and report abandoned uploads.
-    pub fn find_abandoned(&self, grace_period: Duration) -> Result<Vec<AbandonedUpload>> {
-        let cutoff = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-            - grace_period.as_secs() as i64;
+    pub fn find_abandoned(
+        &self,
+        now: SystemTime,
+        grace_period: Duration,
+    ) -> Result<Vec<AbandonedUpload>> {
+        let now = i64::try_from(now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+            .unwrap_or(i64::MAX);
+        let grace = i64::try_from(grace_period.as_secs()).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(grace);
 
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT upload_id, payload_hash, bucket, key, started_at
                  FROM multipart_uploads
-                 WHERE completed = 0 AND started_at < ?1",
+                 WHERE started_at < ?1",
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to prepare abandoned query: {e}"))
@@ -416,129 +391,6 @@ impl MultipartRegistry {
             })?;
 
         Ok(uploads)
-    }
-}
-
-/// [`Sync`] wrapper implementing
-/// [`crab_storage::multipart::MultipartJournal`].
-///
-/// `rusqlite::Connection` is `Send` but not `Sync`, while the journal
-/// trait requires `Sync` so push tasks can hold the reference across
-/// awaits. All journal calls are single fast SQLite statements, so a
-/// plain mutex adds no meaningful contention.
-pub struct SharedMultipartJournal(Mutex<MultipartRegistry>);
-
-impl SharedMultipartJournal {
-    /// Wraps a registry for use as a resumable-upload journal.
-    #[must_use]
-    pub fn new(registry: MultipartRegistry) -> Self {
-        Self(Mutex::new(registry))
-    }
-
-    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, MultipartRegistry>> {
-        self.0.lock()
-    }
-
-    /// See [`MultipartRegistry::find_abandoned`].
-    pub fn find_abandoned(&self, grace_period: Duration) -> Result<Vec<AbandonedUpload>> {
-        let registry = self
-            .lock()
-            .map_err(|_| StagingError::Internal("journal lock poisoned".into()))?;
-        registry.find_abandoned(grace_period)
-    }
-
-    /// See [`MultipartRegistry::abort_if_tracked`].
-    pub fn abort_if_tracked(&self, upload_id: &str) -> Result<bool> {
-        let registry = self
-            .lock()
-            .map_err(|_| StagingError::Internal("journal lock poisoned".into()))?;
-        registry.abort_if_tracked(upload_id)
-    }
-}
-
-use std::sync::Mutex;
-
-impl crab_storage::multipart::MultipartJournal for SharedMultipartJournal {
-    fn begin(
-        &self,
-        payload_hash: &[u8],
-        bucket: &str,
-        key: &str,
-        upload_id: &str,
-    ) -> crab_storage::Result<bool> {
-        let registry = self
-            .lock()
-            .map_err(|_| crab_storage::StorageError::Internal("journal lock poisoned".into()))?;
-        registry
-            .begin(payload_hash, bucket, key, upload_id)
-            .map_err(|err| crab_storage::StorageError::Internal(err.to_string()))
-    }
-
-    fn record_part(
-        &self,
-        upload_id: &str,
-        part_idx: usize,
-        content_id: &str,
-        size: u64,
-    ) -> crab_storage::Result<()> {
-        let size = i64::try_from(size)
-            .map_err(|_| crab_storage::StorageError::Internal("part size overflow".into()))?;
-        let registry = self
-            .lock()
-            .map_err(|_| crab_storage::StorageError::Internal("journal lock poisoned".into()))?;
-        registry
-            .record_part(upload_id, part_idx as i64, content_id, size)
-            .map_err(|err| crab_storage::StorageError::Internal(err.to_string()))
-    }
-
-    fn complete(&self, upload_id: &str) -> crab_storage::Result<()> {
-        let registry = self
-            .lock()
-            .map_err(|_| crab_storage::StorageError::Internal("journal lock poisoned".into()))?;
-        registry
-            .complete(upload_id)
-            .map_err(|err| crab_storage::StorageError::Internal(err.to_string()))
-    }
-
-    fn abort_stale(&self, upload_id: &str) -> crab_storage::Result<()> {
-        let registry = self
-            .lock()
-            .map_err(|_| crab_storage::StorageError::Internal("journal lock poisoned".into()))?;
-        registry
-            .abort_stale(upload_id)
-            .map_err(|err| crab_storage::StorageError::Internal(err.to_string()))
-    }
-
-    fn resumable(
-        &self,
-        payload_hash: &[u8],
-    ) -> crab_storage::Result<Option<crab_storage::multipart::ResumeInfo>> {
-        let registry = self
-            .lock()
-            .map_err(|_| crab_storage::StorageError::Internal("journal lock poisoned".into()))?;
-        let info = registry
-            .resumable(payload_hash)
-            .map_err(|err| crab_storage::StorageError::Internal(err.to_string()))?;
-        let Some(info) = info else {
-            return Ok(None);
-        };
-        let parts = info
-            .completed_parts
-            .iter()
-            .map(|part| {
-                Ok(crab_storage::multipart::JournalPart {
-                    part_idx: usize::try_from(part.part_number).map_err(|_| {
-                        crab_storage::StorageError::Internal("part index overflow".into())
-                    })?,
-                    content_id: part.etag.clone(),
-                    size: part.size.max(0) as u64,
-                })
-            })
-            .collect::<crab_storage::Result<Vec<_>>>()?;
-        Ok(Some(crab_storage::multipart::ResumeInfo {
-            upload_id: info.upload_id,
-            parts,
-        }))
     }
 }
 
@@ -575,7 +427,10 @@ mod tests {
         reg.record_part("upload-1", 2, "\"etag-2\"", 5_000_000)
             .unwrap();
 
-        let info = reg.resumable(hash).unwrap().expect("should be resumable");
+        let info = reg
+            .resumable(hash, "my-bucket", "xet/xorbs/ab/abcd")
+            .unwrap()
+            .expect("should be resumable");
         assert_eq!(info.upload_id, "upload-1");
         assert_eq!(info.bucket, "my-bucket");
         assert_eq!(info.key, "xet/xorbs/ab/abcd");
@@ -588,7 +443,7 @@ mod tests {
     #[test]
     fn resumable_returns_none_for_unknown_hash() {
         let reg = open_in_memory();
-        assert!(reg.resumable(b"unknown").unwrap().is_none());
+        assert!(reg.resumable(b"unknown", "b", "k").unwrap().is_none());
     }
 
     #[test]
@@ -600,7 +455,7 @@ mod tests {
         reg.record_part("u1", 1, "e1", 100).unwrap();
         reg.complete("u1").unwrap();
 
-        assert!(reg.resumable(hash).unwrap().is_none());
+        assert!(reg.resumable(hash, "b", "k").unwrap().is_none());
     }
 
     #[test]
@@ -612,19 +467,7 @@ mod tests {
         reg.record_part("u1", 1, "e1", 100).unwrap();
         reg.abort_stale("u1").unwrap();
 
-        assert!(reg.resumable(hash).unwrap().is_none());
-    }
-
-    #[test]
-    fn handle_no_such_upload_clears_row() {
-        let reg = open_in_memory();
-        let hash = b"deadbeef";
-
-        reg.begin(hash, "b", "k", "u1").unwrap();
-        reg.record_part("u1", 1, "e1", 100).unwrap();
-        reg.handle_no_such_upload("u1").unwrap();
-
-        assert!(reg.resumable(hash).unwrap().is_none());
+        assert!(reg.resumable(hash, "b", "k").unwrap().is_none());
     }
 
     #[test]
@@ -645,27 +488,14 @@ mod tests {
         // Recent upload should not appear.
         reg.begin(hash, "b", "k2", "new-upload").unwrap();
 
-        let abandoned = reg.find_abandoned(Duration::from_secs(3600)).unwrap();
-        assert_eq!(abandoned.len(), 1);
-        assert_eq!(abandoned[0].upload_id, "old-upload");
-    }
-
-    #[test]
-    fn find_abandoned_excludes_completed() {
-        let reg = open_in_memory();
-        let hash = b"deadbeef";
-
-        reg.conn
-            .execute(
-                "INSERT INTO multipart_uploads
-                    (upload_id, payload_hash, bucket, key, started_at, completed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-                params!["done-upload", hash.as_slice(), "b", "k", 1_000_000i64],
+        let abandoned = reg
+            .find_abandoned(
+                UNIX_EPOCH + Duration::from_secs(2_000_000),
+                Duration::from_secs(3600),
             )
             .unwrap();
-
-        let abandoned = reg.find_abandoned(Duration::from_secs(3600)).unwrap();
-        assert!(abandoned.is_empty());
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].upload_id, "old-upload");
     }
 
     #[test]
@@ -675,83 +505,80 @@ mod tests {
 
         reg.begin(hash, "b", "k", "u1").unwrap();
 
-        let info = reg.resumable(hash).unwrap().expect("should be resumable");
+        let info = reg
+            .resumable(hash, "b", "k")
+            .unwrap()
+            .expect("should be resumable");
         assert_eq!(info.upload_id, "u1");
         assert!(info.completed_parts.is_empty());
     }
 
     #[test]
-    fn begin_replaces_existing_upload_for_same_id() {
+    fn begin_preserves_the_existing_object_owner() {
         let reg = open_in_memory();
         let hash = b"deadbeef";
 
-        reg.begin(hash, "bucket-1", "key-1", "u1").unwrap();
-        reg.begin(hash, "bucket-2", "key-2", "u1").unwrap();
+        assert!(reg.begin(hash, "bucket", "key", "u1").unwrap());
+        assert!(!reg.begin(hash, "bucket", "key", "u2").unwrap());
 
-        let info = reg.resumable(hash).unwrap().expect("should be resumable");
-        assert_eq!(info.bucket, "bucket-2");
-        assert_eq!(info.key, "key-2");
-    }
-}
-
-#[cfg(test)]
-mod journal_adapter_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-
-    fn open_temp() -> (tempfile::TempDir, MultipartRegistry) {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = MultipartRegistry::open(&dir.path().join("multipart.db")).unwrap();
-        (dir, registry)
-    }
-
-    #[test]
-    fn begin_rejects_concurrent_owner_of_same_payload() {
-        let (_dir, reg) = open_temp();
-        let hash = b"payload-hash";
-
-        assert!(reg.begin(hash, "bucket", "key", "uploader-a").unwrap());
-        assert!(
-            !reg.begin(hash, "bucket", "key", "uploader-b").unwrap(),
-            "second uploader must not clobber the active row"
-        );
-        // The original row survives untouched.
-        let info = reg.resumable(hash).unwrap().expect("row intact");
-        assert_eq!(info.upload_id, "uploader-a");
-    }
-
-    #[test]
-    fn begin_allows_same_id_to_refresh_its_row() {
-        let (_dir, reg) = open_temp();
-        assert!(reg.begin(b"h", "b1", "k1", "u").unwrap());
-        assert!(reg.begin(b"h", "b2", "k2", "u").unwrap());
-        assert_eq!(reg.resumable(b"h").unwrap().unwrap().key, "k2");
-    }
-
-    #[test]
-    fn shared_journal_adapter_round_trips_parts() {
-        let (_dir, registry) = open_temp();
-        let journal = SharedMultipartJournal::new(registry);
-        use crab_storage::multipart::MultipartJournal;
-
-        assert!(
-            journal
-                .begin(b"hash-bytes", "bucket", "some/key", "upload-9")
-                .unwrap()
-        );
-        journal.record_part("upload-9", 0, "etag-0", 4096).unwrap();
-        journal.record_part("upload-9", 1, "etag-1", 4096).unwrap();
-
-        let resumed = journal
-            .resumable(b"hash-bytes")
+        let info = reg
+            .resumable(hash, "bucket", "key")
             .unwrap()
-            .expect("resumable");
-        assert_eq!(resumed.upload_id, "upload-9");
-        assert_eq!(resumed.parts.len(), 2);
-        assert_eq!(resumed.parts[0].content_id, "etag-0");
+            .expect("should be resumable");
+        assert_eq!(info.upload_id, "u1");
+    }
 
-        journal.complete("upload-9").unwrap();
-        assert!(journal.resumable(b"hash-bytes").unwrap().is_none());
+    #[test]
+    fn same_payload_on_a_different_target_has_an_independent_row() {
+        let reg = open_in_memory();
+        let hash = b"deadbeef";
+
+        assert!(reg.begin(hash, "bucket-1", "key", "u1").unwrap());
+        assert!(reg.begin(hash, "bucket-2", "key", "u2").unwrap());
+
+        assert_eq!(
+            reg.resumable(hash, "bucket-1", "key")
+                .unwrap()
+                .unwrap()
+                .upload_id,
+            "u1"
+        );
+        assert_eq!(
+            reg.resumable(hash, "bucket-2", "key")
+                .unwrap()
+                .unwrap()
+                .upload_id,
+            "u2"
+        );
+    }
+
+    #[test]
+    fn concurrent_connections_claim_one_active_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multipart.db");
+        let first = MultipartRegistry::open(&path).unwrap();
+        let second = MultipartRegistry::open(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let first_barrier = barrier.clone();
+        let first_claim = std::thread::spawn(move || {
+            first_barrier.wait();
+            first.begin(b"hash", "bucket", "key", "u1").unwrap()
+        });
+        let second_claim = std::thread::spawn(move || {
+            barrier.wait();
+            second.begin(b"hash", "bucket", "key", "u2").unwrap()
+        });
+
+        let claims = [first_claim.join().unwrap(), second_claim.join().unwrap()];
+        assert_eq!(claims.into_iter().filter(|claimed| *claimed).count(), 1);
+
+        let registry = MultipartRegistry::open(&path).unwrap();
+        let owner = registry
+            .resumable(b"hash", "bucket", "key")
+            .unwrap()
+            .unwrap()
+            .upload_id;
+        assert!(owner == "u1" || owner == "u2");
     }
 }

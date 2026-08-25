@@ -74,9 +74,9 @@ pub struct Store {
     /// Optional parallel handle to the same underlying store viewed as
     /// a [`object_store::multipart::MultipartStore`], enabling explicit
     /// upload-id / part-index control for resumable multipart uploads.
-    /// Populated by provider builders for S3, GCS, Azure, and in-memory
-    /// backends; kept separate from `inner` for the same downcast
-    /// limitation as `signer`.
+    /// Populated by provider builders with stable upload IDs (S3 and GCS)
+    /// and explicitly by tests; kept separate from `inner` for the same
+    /// downcast limitation as `signer`.
     multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     storage_scope: Option<StorageScope>,
     read_routes: Option<Arc<Vec<ReadRoute>>>,
@@ -190,8 +190,8 @@ impl Store {
     /// upload ids and part indexes.
     ///
     /// The passed handle must be the same underlying instance as
-    /// `inner`. Provider builders populate this for S3, GCS, Azure, and
-    /// the in-memory store; other backends leave it unset and resumable
+    /// `inner`. Provider builders populate this for S3 and GCS; other
+    /// backends leave it unset and resumable
     /// uploads fall back to the whole-retry path.
     #[must_use]
     pub fn with_multipart(
@@ -207,6 +207,32 @@ impl Store {
     #[must_use]
     pub fn multipart(&self) -> Option<Arc<dyn object_store::multipart::MultipartStore>> {
         self.multipart.clone()
+    }
+
+    /// Abort a provider multipart session when explicit upload IDs are available.
+    ///
+    /// Returns `false` without side effects when the provider cannot satisfy the
+    /// explicit multipart contract. A successful provider abort returns `true`.
+    pub async fn abort_multipart(&self, path: &Path, upload_id: &str) -> Result<bool> {
+        let Some(multipart) = self.multipart() else {
+            return Ok(false);
+        };
+        let result = retry(&self.retry, || {
+            let multipart = multipart.clone();
+            let path = path.clone();
+            let upload_id = object_store::MultipartId::from(upload_id);
+            async move {
+                multipart
+                    .abort_multipart(&path, &upload_id)
+                    .await
+                    .map_err(|error| map_object_store_error(error, path.as_ref()))
+            }
+        })
+        .await;
+        match result {
+            Ok(()) | Err(StorageError::NotFound { .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     #[must_use]
@@ -1484,9 +1510,8 @@ impl Store {
     /// Extends [`Self::put_multipart_file_retry`] with a
     /// [`MultipartJournal`]: before uploading, a recorded session for
     /// `payload_hash` is resumed and only its missing parts are sent;
-    /// every completed part is journaled so a killed process (or an
-    /// outer retry attempt within this call) continues from the last
-    /// good part instead of restarting from zero.
+    /// every completed part is journaled so a later invocation can
+    /// continue from the last good part instead of restarting from zero.
     ///
     /// Failure policy differs deliberately from the non-resumable path:
     /// cancellation leaves the backend session and its journal row alive
@@ -1499,10 +1524,9 @@ impl Store {
     /// row) abort on every exit path because nothing tracks their
     /// orphaned parts.
     ///
-    /// Resume is disabled under staging-write prefixes: staged targets
-    /// are unique per push, so payload-hash-keyed rows would be
-    /// ambiguous across pushes. Staging callers get the whole-retry
-    /// path unchanged.
+    /// Resume is disabled under staging-write prefixes because those
+    /// temporary targets belong to a single protected-push transaction.
+    /// Staging callers get the whole-retry path unchanged.
     #[allow(clippy::too_many_arguments)]
     pub async fn put_multipart_file_resumable_retry(
         &self,
@@ -1517,10 +1541,20 @@ impl Store {
         journal: Option<&dyn crate::multipart::MultipartJournal>,
     ) -> Result<bool> {
         let (write_path, _, record_staged_write) = self.exact_write_target(path);
-        // Resume is disabled under staging-write prefixes: staged targets
-        // are unique per push, so payload-hash-keyed rows would be
-        // ambiguous across pushes.
-        if record_staged_write || self.multipart().is_none() || journal.is_none() {
+        let (Some(multipart), Some(journal)) = (self.multipart(), journal) else {
+            self.put_multipart_file_retry(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                part_size,
+                cancel,
+                on_part_done,
+            )
+            .await?;
+            return Ok(false);
+        };
+        if record_staged_write {
             self.put_multipart_file_retry(
                 path,
                 file_path,
@@ -1533,12 +1567,13 @@ impl Store {
             .await?;
             return Ok(false);
         }
-        let multipart = self.multipart().expect("checked above");
-        let journal = journal.expect("checked above");
 
         let bucket_label = {
             let identity = self.bucket_identity();
-            format!("{}/{}", identity.host, identity.container)
+            format!(
+                "{:?}/{}/{}",
+                identity.cloud, identity.host, identity.container
+            )
         };
 
         // One strike per resume source: a recorded row is probed at most
@@ -1617,7 +1652,7 @@ impl Store {
         let mut slots: Vec<Option<crate::multipart::JournalPart>> = vec![None; total_parts];
         let mut lease = crate::multipart::JournalLease::StandDown;
         if allow_resume {
-            match journal.resumable(payload_hash) {
+            match journal.resumable(payload_hash, bucket_label, path.as_ref()) {
                 Ok(Some(info)) => {
                     match crate::multipart::compatible_parts(&info, total_parts, part_size) {
                         Some(compatible) => {
@@ -1636,19 +1671,17 @@ impl Store {
                             // the recorded id unusable; drop the row and
                             // best-effort abort its backend session so
                             // the provider does not retain stray parts.
-                            let _ = journal.abort_stale(&info.upload_id);
-                            if let Err(err) = multipart
-                                .abort_multipart(
-                                    path,
-                                    &object_store::MultipartId::from(info.upload_id.as_str()),
-                                )
-                                .await
+                            let stale_id = object_store::MultipartId::from(info.upload_id.as_str());
+                            if Self::abort_resumable_session(
+                                multipart,
+                                path,
+                                &stale_id,
+                                "incompatible multipart session",
+                            )
+                            .await
+                                && let Err(err) = journal.abort_stale(&info.upload_id)
                             {
-                                tracing::debug!(
-                                    path = %path,
-                                    error = %err,
-                                    "best-effort abort of incompatible multipart session failed"
-                                );
+                                crate::multipart::warn_journal_error("abort_stale", err);
                             }
                         }
                     }
@@ -1687,8 +1720,7 @@ impl Store {
         };
         let multipart_id = object_store::MultipartId::from(upload_id.as_str());
 
-        let resumed =
-            lease.upload_id().is_some() && slots.iter().filter(|slot| slot.is_some()).count() > 0;
+        let resumed = lease.upload_id().is_some() && slots.iter().any(Option::is_some);
 
         // Upload missing parts with bounded in-flight concurrency. Parts
         // are read at their exact file offsets so resumed sessions skip
@@ -1712,7 +1744,11 @@ impl Store {
             // Drain when at capacity or when nothing remains to dispatch;
             // otherwise keep the pipeline full.
             if pending.len() >= IN_FLIGHT_PARTS || drained_all {
-                match pending.next().await {
+                let completed = tokio::select! {
+                    () = cancel.cancelled() => break Err(StorageError::Cancelled),
+                    completed = pending.next() => completed,
+                };
+                match completed {
                     Some(Ok((idx, content_id, bytes))) => {
                         if let Some(id) = lease.upload_id()
                             && let Err(err) = journal.record_part(id, idx, &content_id, bytes)
@@ -1763,14 +1799,15 @@ impl Store {
             let keep_alive =
                 matches!(result, Err(StorageError::Cancelled)) && lease.upload_id().is_some();
             if !keep_alive {
-                if let Err(err) = multipart.abort_multipart(path, &multipart_id).await {
-                    tracing::debug!(
-                        path = %path,
-                        error = %err,
-                        "best-effort abort of failed multipart session"
-                    );
-                }
-                if let Some(id) = lease.upload_id()
+                let aborted = Self::abort_resumable_session(
+                    multipart,
+                    path,
+                    &multipart_id,
+                    "failed multipart session",
+                )
+                .await;
+                if aborted
+                    && let Some(id) = lease.upload_id()
                     && let Err(err) = journal.abort_stale(id)
                 {
                     crate::multipart::warn_journal_error("abort_stale", err);
@@ -1796,7 +1833,15 @@ impl Store {
             .complete_multipart(path, &multipart_id, parts)
             .await;
         if let Err(err) = completed {
-            if let Some(id) = lease.upload_id()
+            let aborted = Self::abort_resumable_session(
+                multipart,
+                path,
+                &multipart_id,
+                "multipart session after completion failure",
+            )
+            .await;
+            if aborted
+                && let Some(id) = lease.upload_id()
                 && let Err(cleanup) = journal.abort_stale(id)
             {
                 crate::multipart::warn_journal_error("abort_stale", cleanup);
@@ -1811,6 +1856,30 @@ impl Store {
         }
         Ok(resumed)
     }
+
+    /// Abort one explicit multipart session, treating an already-absent
+    /// provider session as clean. Other failures keep the journal row so a
+    /// later push or fsck run retains enough identity to retry cleanup.
+    async fn abort_resumable_session(
+        multipart: &Arc<dyn object_store::multipart::MultipartStore>,
+        path: &Path,
+        upload_id: &object_store::MultipartId,
+        reason: &'static str,
+    ) -> bool {
+        match multipart.abort_multipart(path, upload_id).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => true,
+            Err(error) => {
+                tracing::debug!(
+                    path = %path,
+                    error = %error,
+                    reason,
+                    "multipart provider abort failed; preserving recovery row"
+                );
+                false
+            }
+        }
+    }
+
     async fn put_multipart_once(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
@@ -3123,7 +3192,7 @@ mod resumable_multipart_tests {
             _bucket: &str,
             _key: &str,
             upload_id: &str,
-        ) -> Result<bool> {
+        ) -> crate::multipart::JournalResult<bool> {
             let mut rows = self.rows.lock().unwrap();
             if rows
                 .get(payload_hash)
@@ -3148,7 +3217,7 @@ mod resumable_multipart_tests {
             part_idx: usize,
             content_id: &str,
             size: u64,
-        ) -> Result<()> {
+        ) -> crate::multipart::JournalResult<()> {
             let mut rows = self.rows.lock().unwrap();
             let Some(row) = rows.values_mut().find(|row| row.upload_id == upload_id) else {
                 return Ok(());
@@ -3162,7 +3231,7 @@ mod resumable_multipart_tests {
             Ok(())
         }
 
-        fn complete(&self, upload_id: &str) -> Result<()> {
+        fn complete(&self, upload_id: &str) -> crate::multipart::JournalResult<()> {
             self.rows
                 .lock()
                 .unwrap()
@@ -3170,7 +3239,7 @@ mod resumable_multipart_tests {
             Ok(())
         }
 
-        fn abort_stale(&self, upload_id: &str) -> Result<()> {
+        fn abort_stale(&self, upload_id: &str) -> crate::multipart::JournalResult<()> {
             self.rows
                 .lock()
                 .unwrap()
@@ -3178,7 +3247,12 @@ mod resumable_multipart_tests {
             Ok(())
         }
 
-        fn resumable(&self, payload_hash: &[u8]) -> Result<Option<ResumeInfo>> {
+        fn resumable(
+            &self,
+            payload_hash: &[u8],
+            _bucket: &str,
+            _key: &str,
+        ) -> crate::multipart::JournalResult<Option<ResumeInfo>> {
             Ok(self
                 .row(payload_hash)
                 .map(|(upload_id, parts)| ResumeInfo { upload_id, parts }))
@@ -3191,6 +3265,7 @@ mod resumable_multipart_tests {
         put_part_calls: AtomicU64,
         fail_idx_once: AtomicU64,
         create_calls: AtomicU64,
+        abort_fails: bool,
     }
 
     #[async_trait::async_trait]
@@ -3241,6 +3316,12 @@ mod resumable_multipart_tests {
             path: &Path,
             id: &object_store::MultipartId,
         ) -> object_store::Result<()> {
+            if self.abort_fails {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "injected abort failure".into(),
+                });
+            }
             self.inner.abort_multipart(path, id).await
         }
     }
@@ -3280,6 +3361,7 @@ mod resumable_multipart_tests {
             put_part_calls: AtomicU64::new(0),
             fail_idx_once: AtomicU64::new(u64::MAX),
             create_calls: AtomicU64::new(0),
+            abort_fails: false,
         });
         let journal = MemJournal::default();
         let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
@@ -3320,6 +3402,7 @@ mod resumable_multipart_tests {
             put_part_calls: AtomicU64::new(0),
             fail_idx_once: AtomicU64::new(u64::MAX),
             create_calls: AtomicU64::new(0),
+            abort_fails: false,
         });
         let journal = MemJournal::default();
         let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
@@ -3383,6 +3466,7 @@ mod resumable_multipart_tests {
             put_part_calls: AtomicU64::new(0),
             fail_idx_once: AtomicU64::new(u64::MAX),
             create_calls: AtomicU64::new(0),
+            abort_fails: false,
         });
         let journal = MemJournal::default();
         let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
@@ -3433,6 +3517,7 @@ mod resumable_multipart_tests {
             put_part_calls: AtomicU64::new(0),
             fail_idx_once: AtomicU64::new(u64::MAX),
             create_calls: AtomicU64::new(0),
+            abort_fails: false,
         });
         let journal = MemJournal::default();
         let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)
@@ -3458,13 +3543,55 @@ mod resumable_multipart_tests {
 
         assert!(
             counting.create_calls.load(Ordering::Relaxed) >= 2,
-            "failed journaled session stays alive; retry opens a new one"
+            "hard failure is cleaned up before retry opens a new session"
         );
         assert_eq!(uploaded_bytes(&store, &path, data.len()).await, data);
         assert!(
             journal.row(&HASH).is_none(),
             "final attempt completed its row"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_provider_abort_preserves_recovery_row() {
+        let inner = Arc::new(InMemory::new());
+        let counting = Arc::new(CountingParts {
+            inner: inner.clone(),
+            put_part_calls: AtomicU64::new(0),
+            fail_idx_once: AtomicU64::new(u64::MAX),
+            create_calls: AtomicU64::new(0),
+            abort_fails: true,
+        });
+        counting.fail_once(0);
+        let journal = MemJournal::default();
+        let store = Store::with_retry(
+            inner as Arc<dyn ObjectStore>,
+            RetryPolicy {
+                max_attempts: 1,
+                base: std::time::Duration::ZERO,
+                cap: std::time::Duration::ZERO,
+            },
+        )
+        .with_multipart(counting as Arc<dyn object_store::multipart::MultipartStore>);
+        let (file, data) = temp_file(PART_SIZE * 2, 0x44);
+        let path = Path::from("xet/xorbs/ff/fa11");
+
+        store
+            .put_multipart_file_resumable_retry(
+                &path,
+                file.path(),
+                data.len() as u64,
+                [7; 32],
+                &HASH,
+                PART_SIZE,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(journal.row(&HASH).is_some());
     }
 
     #[tokio::test]
@@ -3475,6 +3602,7 @@ mod resumable_multipart_tests {
             put_part_calls: AtomicU64::new(0),
             fail_idx_once: AtomicU64::new(u64::MAX),
             create_calls: AtomicU64::new(0),
+            abort_fails: false,
         });
         let journal = MemJournal::default();
         let store = Store::new(inner.clone() as Arc<dyn ObjectStore>)

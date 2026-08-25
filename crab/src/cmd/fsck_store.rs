@@ -40,7 +40,7 @@ pub struct StoreChecker {
     router: StoreLayout,
     /// Local staging multipart registry, when the repo has a staging
     /// dir. Enables detection of abandoned resumable uploads.
-    multipart_registry: Option<std::sync::Arc<crab_staging::SharedMultipartJournal>>,
+    multipart_registry: Option<std::sync::Arc<crate::storage::store::MultipartJournal>>,
 }
 
 impl StoreChecker {
@@ -59,7 +59,7 @@ impl StoreChecker {
     #[must_use]
     pub fn with_multipart_registry(
         mut self,
-        registry: std::sync::Arc<crab_staging::SharedMultipartJournal>,
+        registry: std::sync::Arc<crate::storage::store::MultipartJournal>,
     ) -> Self {
         self.multipart_registry = Some(registry);
         self
@@ -548,7 +548,7 @@ impl FsckChecker for StoreChecker {
 
     fn check_multipart_uploads(
         &self,
-        _now: SystemTime,
+        now: SystemTime,
         grace: Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<MultipartMeta>>> + Send + '_>>
     {
@@ -562,7 +562,7 @@ impl FsckChecker for StoreChecker {
             };
             let abandoned = tokio::task::spawn_blocking({
                 let registry = registry.clone();
-                move || registry.find_abandoned(grace)
+                move || registry.find_abandoned(now, grace)
             })
             .await
             .map_err(|error| CrabError::Internal(format!("multipart fsck join: {error}")))?
@@ -623,7 +623,7 @@ pub struct StoreRepairer {
     store: Store,
     prefix: String,
     router: StoreLayout,
-    multipart_registry: Option<std::sync::Arc<crab_staging::SharedMultipartJournal>>,
+    multipart_registry: Option<std::sync::Arc<crate::storage::store::MultipartJournal>>,
 }
 
 impl StoreRepairer {
@@ -645,7 +645,7 @@ impl StoreRepairer {
     #[must_use]
     pub fn with_multipart_registry(
         mut self,
-        registry: std::sync::Arc<crab_staging::SharedMultipartJournal>,
+        registry: std::sync::Arc<crate::storage::store::MultipartJournal>,
     ) -> Self {
         self.multipart_registry = Some(registry);
         self
@@ -757,19 +757,24 @@ impl FsckRepairer for StoreRepairer {
     fn abort_multipart(
         &self,
         upload_id: &str,
-        _key: &str,
+        key: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         let multipart_registry = self.multipart_registry.clone();
         let upload_id = upload_id.to_owned();
+        let key = object_store::path::Path::from(key);
+        let store = self.store.clone();
         Box::pin(async move {
-            // Drop the locally tracked record for the abandoned upload.
-            // Backend parts of an already-dead session cannot be aborted
-            // through object_store's generic API; provider lifecycle
-            // rules reclaim them. Returns whether a tracked row existed.
             let Some(registry) = multipart_registry else {
                 debug!("multipart abort skipped: no local staging registry");
                 return Ok(false);
             };
+            // Keep the recovery row unless the provider confirms cleanup.
+            // Deleting it first would strand billable parts and make a later
+            // push unable to resume the session.
+            if !store.abort_multipart(&key, &upload_id).await? {
+                debug!("multipart abort skipped: provider has no explicit upload-id API");
+                return Ok(false);
+            }
             let existed =
                 tokio::task::spawn_blocking(move || registry.abort_if_tracked(&upload_id))
                     .await
@@ -1427,6 +1432,7 @@ mod multipart_fsck_tests {
 
     use super::tests::test_store;
     use super::*;
+    use object_store::multipart::MultipartStore;
     use std::time::Duration;
 
     #[tokio::test]
@@ -1435,15 +1441,17 @@ mod multipart_fsck_tests {
         let staging = tempfile::tempdir().unwrap();
         let registry =
             crab_staging::MultipartRegistry::open(&staging.path().join("multipart.db")).unwrap();
-        // Backdated row beyond any grace period.
         registry
-            .register_at(b"hash", "bucket", "xet/xorbs/aa/a", "abandoned-1", 1_000)
+            .begin(b"hash", "bucket", "xet/xorbs/aa/a", "abandoned-1")
             .unwrap();
-        let shared = std::sync::Arc::new(crab_staging::SharedMultipartJournal::new(registry));
+        let shared = std::sync::Arc::new(crate::storage::store::MultipartJournal::new(registry));
         let checker = StoreChecker::new(store, prefix).with_multipart_registry(shared);
 
         let uploads = checker
-            .check_multipart_uploads(SystemTime::now(), Duration::from_secs(60))
+            .check_multipart_uploads(
+                SystemTime::now() + Duration::from_secs(120),
+                Duration::from_secs(60),
+            )
             .await
             .unwrap();
 
@@ -1454,21 +1462,28 @@ mod multipart_fsck_tests {
 
     #[tokio::test]
     async fn repairer_drops_tracked_abandoned_upload() {
-        let (store, prefix) = test_store();
+        let inner = std::sync::Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner.clone() as std::sync::Arc<dyn object_store::ObjectStore>)
+            .with_multipart(
+                inner.clone() as std::sync::Arc<dyn object_store::multipart::MultipartStore>
+            );
+        let prefix = "test-repo".to_owned();
+        let key = object_store::path::Path::from("k");
+        let upload_id = inner.create_multipart(&key).await.unwrap();
         let staging = tempfile::tempdir().unwrap();
         let registry =
             crab_staging::MultipartRegistry::open(&staging.path().join("multipart.db")).unwrap();
-        registry.begin(b"hash", "bucket", "k", "doomed").unwrap();
-        registry.record_part("doomed", 0, "etag", 8).unwrap();
-        let shared = std::sync::Arc::new(crab_staging::SharedMultipartJournal::new(registry));
+        registry.begin(b"hash", "bucket", "k", &upload_id).unwrap();
+        let shared = std::sync::Arc::new(crate::storage::store::MultipartJournal::new(registry));
         let repairer = StoreRepairer::new(store, prefix).with_multipart_registry(shared.clone());
 
         assert!(
-            repairer.abort_multipart("doomed", "k").await.unwrap(),
+            repairer.abort_multipart(&upload_id, "k").await.unwrap(),
             "tracked upload is repaired"
         );
-        assert!(!repairer.abort_multipart("doomed", "k").await.unwrap());
-        let issues = shared.find_abandoned(Duration::from_secs(0)).unwrap();
+        let issues = shared
+            .find_abandoned(SystemTime::now() + Duration::from_secs(1), Duration::ZERO)
+            .unwrap();
         assert!(issues.is_empty(), "row removed by repair");
     }
 }

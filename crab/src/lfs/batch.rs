@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 #[cfg(not(feature = "gix-pathmatch"))]
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use sha2::Digest;
 use tokio::sync::Semaphore;
 
 use crate::core::error::{CrabError, Result};
@@ -171,6 +170,23 @@ impl BatchResolver {
                 // Stream from disk with inline SHA-256 verification;
                 // put_stream surfaces a corrupt local cache as an oid-
                 // identified ObjectCorrupt before anything is stored.
+                let actual_size = tokio::fs::metadata(&local_path)
+                    .await
+                    .map_err(|error| match error.kind() {
+                        std::io::ErrorKind::NotFound => CrabError::LfsObjectMissing {
+                            oid: hex_encode(&oid),
+                        },
+                        _ => CrabError::Io(error),
+                    })?
+                    .len();
+                if actual_size != size {
+                    return Err(CrabError::CorruptObject {
+                        path: local_path.display().to_string(),
+                        reason: format!(
+                            "local LFS object has {actual_size} bytes; pointer declares {size}"
+                        ),
+                    });
+                }
                 store.put_stream(&oid, &local_path).await?;
                 Ok(())
             });
@@ -355,20 +371,6 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(&hex[..2])
         .join(&hex[2..4])
         .join(&hex)
-}
-
-/// Write an LFS object to local storage, creating parent directories.
-async fn write_local_object(path: &Path, content: &[u8]) -> Result<()> {
-    let path = path.to_owned();
-    let content = content.to_vec();
-    tokio::task::spawn_blocking(move || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
-        }
-        std::fs::write(&path, &content).map_err(CrabError::Io)
-    })
-    .await
-    .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
 }
 
 // ---------------------------------------------------------------------------

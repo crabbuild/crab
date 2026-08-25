@@ -4040,15 +4040,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let multipart_registry = discover_git_repo_root()
                 .map(|root| root.join(".crab").join("staging").join("multipart.db"))
                 .filter(|db| db.exists())
-                .and_then(|db| match crab_staging::MultipartRegistry::open(&db) {
-                    Ok(registry) => Some(std::sync::Arc::new(
-                        crab_staging::SharedMultipartJournal::new(registry),
-                    )),
-                    Err(error) => {
-                        tracing::warn!(error = %error, "staging multipart registry unreadable");
-                        None
-                    }
-                });
+                .map(|db| {
+                    crab_staging::MultipartRegistry::open(&db).map(|registry| {
+                        std::sync::Arc::new(crab::storage::store::MultipartJournal::new(registry))
+                    })
+                })
+                .transpose()
+                .map_err(crab::core::CrabError::from)?;
             let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone());
             let checker = if let Some(registry) = multipart_registry.clone() {
                 checker.with_multipart_registry(registry)
