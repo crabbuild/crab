@@ -88,7 +88,8 @@ remains read-only. This closes the filtered incremental-fetch regression found
 by the real Git compatibility jobs while preserving the push acknowledgement
 boundary.
 
-Implemented on the current branch (current commit `04655f3b`):
+Implemented on the current branch (qualification evidence at `04655f3b`; latest
+admission hardening at `0ba86693`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
