@@ -148,6 +148,14 @@ def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
         and owner_actions[-1] == "none",
         "full report is missing visibility-build telemetry and owner convergence",
     )
+    visibility_states = owner_stage.get("visibility_states")
+    if visibility_states is not None:
+        require(
+            isinstance(visibility_states, list)
+            and visibility_states
+            and visibility_states[-1] == "published",
+            "full report owner did not finish with a published visibility proof",
+        )
     require(
         "visibility_repair" not in owner_actions,
         "full report records a visibility repair without visibility-build telemetry",
