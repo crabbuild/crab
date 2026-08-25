@@ -1786,9 +1786,11 @@ async fn has_commit_graph_summary(
     }
 
     let result = if let (Some(store), Some(router)) = (store, router) {
-        crate::metadata::manifest::read_repository_snapshot(store, router)
+        // Capability negotiation only needs the committed graph pointer. A full
+        // repository snapshot materializes every ref and catalog entry first.
+        crate::metadata::manifest::read_manifest(store, router)
             .await
-            .is_ok_and(|snapshot| snapshot.materialized_manifest().commit_graph_hash.is_some())
+            .is_ok_and(|(manifest, _)| manifest.commit_graph_hash.is_some())
     } else {
         false
     };

@@ -373,6 +373,12 @@ where
                     cancellation,
                 )
                 .await?;
+                // A terminal stateless-connect session has no server-side state to preserve
+                // after the final fetch response. Closing here lets Git finish processing the
+                // pack without waiting for a second empty request on the same pipe.
+                if fetch.done {
+                    return Ok(());
+                }
             }
             other => {
                 let error =
