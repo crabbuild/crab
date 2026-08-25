@@ -48,8 +48,8 @@ server-side incremental fetch was bounded (zero-millisecond visibility
 planning, 72 ms response operation, and 4 ms pack generation), but the full
 clone helper still spent roughly 90 seconds before its first request because
 the old path opened the visibility dictionary twice. That report is useful
-diagnostic evidence only; the post-handoff binary must produce the final
-acceptance report below. The remaining O(N) operation is one full immutable
+diagnostic evidence only; the post-handoff binary now produced the final
+current-binary report below. The remaining O(N) operation is one full immutable
 OID dictionary materialization per helper, which is still a large-team SLO
 gate even after the duplicate load is removed.
 
@@ -57,45 +57,27 @@ gate even after the duplicate load is removed.
 
 The implementation work for Phases 1 through 5 is assembled on one draft
 integration branch so reviewers can inspect the complete generation-binding
-contract across push, read, maintenance, and GC. This intentionally does not
-mark those phases accepted: their Kubernetes/RustFS performance thresholds,
-long-running fault matrix, and rollout gates still require dedicated evidence.
-The branch must remain a draft until those gates are either recorded here or
-split into explicitly tracked follow-up work approved by maintainers.
+contract across push, read, maintenance, and GC. A current-binary full-profile
+qualification now exists, but the branch remains draft because repeatability,
+10,000-push differential, fault, provider, concurrency, and rollout gates are
+still open.
 
-The latest live runs use Kubernetes revision `b3bc2ac5` and isolated local
-RustFS endpoints. `local-k8s-shallow-index-v3-20260824` completed the
-generation-bound closure path for full, filtered, and depth-1/10/100/1,000
-clones; all clone, fsck, object-sample, ref, and cleanup checks passed. A
-focused follow-up, `local-k8s-shallow-prefetch-v1-20260824`, exercised the
-current sparse response-pack path: depth-1 and depth-10 remained exact while
-server-side pack generation fell to roughly 27 seconds and range requests
-fell below 7,600 per clone. These are strong single-client implementation
-reports, not the full 1,000-push acceptance report; repeatability, differential
-depth proof, owner-fault, and team-concurrency gates remain open. Both run-owned
-prefixes were cleaned.
+`local-k8s-final-04655f3b-1000-20260825` used Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated external RustFS, and the
+installed binary built from committed source `04655f3b`. The standalone
+verifier reports `status=ok`, `profile=full`, and `replay_count=1000`. All 22
+harness checks passed: 1,001 pushes completed, advertised refs and clone tips
+matched the source, full and incremental fsck passed, 1,000 sampled objects
+were byte-identical, the source checkout was unchanged, and the run-owned
+RustFS prefix was cleaned. Correctness fingerprint:
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
 
-The latest completed qualification,
-`local-k8s-history-chain-100b-20260825`, replayed 100 commits with the
-pre-rebase release binary built from `1e9ac756`. It exercised full, filtered,
-depth-1/10/100/1,000, warm-cache, and incremental-fetch paths and passed every
-harness correctness check: source/full/incremental tips and advertised refs
-matched, full and incremental clones passed `git fsck`, the deterministic
-sample was byte-identical, the source checkout stayed unchanged, and the
-isolated RustFS prefix was empty after cleanup. This is still a smoke report,
-not evidence from current `HEAD` and not the required 1,000-push report; the
-latest rebased source must repeat the qualification before it can be accepted.
+The earlier 100-push smoke and pre-rebase 1,000-push reports remain useful
+historical baselines; the current-binary result above is now the primary
+qualification evidence. Repeatability and the remaining large-team rollout
+gates are still open.
 
-A separate 1,000-push replay, `local-k8s-full-history-a926-1000-20260825`, has
-completed against the same Kubernetes revision and isolated RustFS with the
-pre-rebase binary built from `a926fe9d`. The report is `ok`, the standalone
-verifier passes with `--allow-smoke`, all 1,001 pushes (seed plus 1,000
-replays) completed, correctness and cleanup checks passed, and the run-owned
-remote prefix is empty. It is strong long-history/load evidence, but it is not
-current-HEAD acceptance; the full profile and repeatability run must still be
-repeated with the installed binary built from `036df853`.
-
-Implemented on the current branch:
+Implemented on the current branch (current commit `04655f3b`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -150,16 +132,11 @@ Implemented on the current branch:
 
 Still required before the roadmap is DONE:
 
-- a publishable full-profile Kubernetes/RustFS report from the current branch;
-- the current-HEAD 1,000-push growth and latency comparison for catalog and
-  graph layers; the completed pre-rebase run is evidence, not the final gate;
-- a repeated full-profile report built from the current rebased `HEAD`, not
-  only the pre-rebase binaries used by the completed smoke and 1,000-push
-  replay;
+- an independent repeatability full-profile report from the current binary;
+- 1,000-push growth and latency comparison across multiple runs, not only the
+  completed current-binary report;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
-- a publishable full-profile qualification report from the committed latest
-  binary, including the required 1,000-push replay and repeatability run;
 - full shallow differential proof and the final response-pack SLO report. The
   exact closure index now handles all four measured depths, and sparse
   delta-base prefetch reduced depth-1 from 36,702 to 7,388 origin requests and
@@ -171,9 +148,10 @@ Still required before the roadmap is DONE:
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.
 - the current owner report's `repair_required` state must be explained and
-  cleared: the 100-push report records a missing generation-index receipt and
-  incomplete bucket-registry discovery. These diagnostics cannot be treated
-  as harmless while claiming production readiness.
+  cleared: the current generation receipt is valid, but bucket-registry
+  discovery remains incomplete and destructive bucket GC remains disabled.
+  This diagnostic cannot be treated as harmless while claiming production
+  readiness.
 - a persisted compact catalog/sidecar or lazy ordinal lookup path is still
   required to remove the remaining O(N) visibility dictionary materialization
   from every upload-pack process; the current change only removes the second
@@ -1020,13 +998,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PARTIAL | PR #75 | `local-k8s-history-chain-100b-20260825` (100-push smoke; prefix cleaned); `local-k8s-full-history-a926-1000-20260825` (1,000-push report; prefix cleaned) | `793f6b43` source; live reports use pre-rebase `1e9ac756`/`a926fe9d` | Both reports are verifier-green with exact correctness/cleanup checks, but neither is built from current `HEAD`; current-binary full-profile and repeatability gates remain open |
-| 1 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824` | `4c771baa`, `ac74dad1`, `acbe1da8` | Full-closure planning is 66–67 ms and catalog-filter planning is 1.987 s for 1.64M objects; RSS and bitmap algebra thresholds remain unmeasured |
-| 2 | IMPLEMENTED; STRONG SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | The 1,000-push report consolidated the final inventory to 2 active packs with 1,263,069,674 active bytes; cold full clone transferred 1,240,981,438 bytes in 134.561 s pack generation, warm clone was a 307 ms cache hit, blobless clone transferred 198,746,774 bytes, and depth-1/10/100/1,000 transferred 49,108,396/91,467,386/812,827,443/1,240,938,129 bytes. The report uses pre-rebase code; current-binary and reference-pack SLO evidence remain pending |
-| 3 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | The 1,000-push owner retained 2 active packs and completed six passes at checkpoints 10/100/1,000; checkpoint-1/10/100/1,000 owner convergence was 192.870/445.348/723.410/2,580.374 s and peak child RSS was 944 MB/960 MB/1.015 GB/1.975 GB. Artifact count is bounded, but maintenance latency and memory are a measured large-team bottleneck |
-| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-shallow-index-v3-20260824`; focused `local-k8s-shallow-prefetch-v1-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `7dac3d75`, `793f6b43` | Exact depth-1/10/100/1,000 plans and clone/fsck checks passed on the 1,000-push report; planner times were 13/19/3,813/471 ms and storage requests were 6,187/7,276/3/3. Incremental fetch at push 1/10/100/1,000 planned 37/420/4,810/38,745 objects with 2/6/33/225 requests. The report is pre-rebase; 10,000-pair differential, current-binary repeatability, and sustained SLO evidence remain pending |
-| 5 | IMPLEMENTED; QUALIFICATION PENDING | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825`; `local-k8s-full-history-a926-1000-20260825` | `9bb558a6`, `7dac3d75`, `793f6b43` | The 1,000-push owner completed its bounded maintenance sequence and ended with 2 active packs. Every acceleration checkpoint still reports `repair_required` because the generation-index receipt is missing and bucket-registry discovery is incomplete; interruption, 10,000-push, and GC matrix remain pending |
-| 6 | PARTIAL | PR #75 | `local-k8s-final-20260824`; `local-k8s-history-chain-100b-20260825` | `0a8b5c8f`, `b7749b2e`, `7dac3d75`, `793f6b43` + working tree | Single-client correctness and warm-cache checks pass, but current-binary replay, shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
+| 0 | CURRENT-BINARY FULL PROFILE PASS; REPEATABILITY PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` (prefix cleaned) | `04655f3b` / binary `git_sha=04655f3b` | Full profile, 1,001 pushes, 22/22 checks, exact refs/fsck/sample/cleanup all pass. Repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
+| 1 | IMPLEMENTED; SLO/PROVIDER PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Full-closure visibility planning is 70 ms; blobless planning is 2,203 ms. The one remaining O(N) immutable dictionary load and provider/fault SLOs remain open |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Final inventory is 2 active packs with 1,263,723,813 bytes; cold/warm clones are 184,248/56,788 ms, blobless is 78,162 ms, and depth-1/10/100/1,000 are 32,842/43,552/145,423/201,211 ms. Reference-pack SLO, fanout, and provider evidence remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Owner convergence at checkpoints 1/10/100/1,000 was 100.821/209.100/403.914/1,993.181 s; the 1,000 checkpoint used six passes, ended at 2 packs, and peaked at 1.846 GB RSS. Artifact shape is bounded, but maintenance latency and memory remain large-team bottlenecks |
+| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Current depth-1/10/100/1,000 visibility planning was 12/17/316/502 ms, with 6,178/7,281/3/3 storage requests; incremental fetch at push 1/10/100/1,000 remained exact. 10,000-pair differential, sustained response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | All acceleration checkpoints have valid generation receipts and current locator/visibility/graph artifacts; `repair_required` remains because bucket-registry discovery is incomplete. Interruption, 10,000-push, and GC matrix remain pending |
+| 6 | PARTIAL | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Current single-client correctness and warm-cache checks pass; shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -1049,38 +1027,62 @@ The earlier broad proof was run with the roadmap target directory:
   `crab-metadata`, `crab-git`, `crab-remote-git`, and `crab-read` also passed.
 
 The repository-wide `make clippy` gate is not recorded as passing: it reaches
-pre-existing warnings in untouched `crab-vfs` code. The full Kubernetes/RustFS
-qualification and Phase 6 rollout evidence are also not yet complete, so this
-table is an implementation checkpoint rather than phase acceptance.
+pre-existing warnings in untouched `crab-vfs` code. The current full
+Kubernetes/RustFS qualification is green, while Phase 6 rollout evidence and
+the remaining SLO/differential/fault/provider gates are not complete.
 
-The current working tree additionally passes the focused shallow-closure,
-metadata, read-planner, and remote-Git suites. A current full Crab-library
-rerun still reproduces five unrelated baseline fixture failures after the
-empty-generation owner regression was fixed; the failing remote-helper and
-post-CAS cancellation tests also fail on `e54b9a49` without this working-tree
-change. They remain a separate cleanup item and are not counted as green
-qualification evidence.
+The current committed tree additionally passes the focused remote-helper
+transcript suite (`42` tests), architecture gates, split-crate behavior gates,
+strict split-crate clippy checks, metadata tests, and remote-Git tests. The
+full workspace test/clippy gates are not claimed green here; unrelated baseline
+failures/warnings outside the touched surfaces remain separate cleanup work.
 
-After rebasing the implementation onto current `origin/main`, the focused
-proof for `793f6b43` is:
+The focused proof for committed `04655f3b` is:
 
 - `cargo fmt --all -- --check`;
-- `cargo check -p crab -p crab-auth-server --locked`;
+- `cargo check -p crab --locked` and metadata feature checks;
 - `cargo test -p crab-metadata --features remote-index,storage --locked -- --test-threads=1`:
   238 passed, 1 ignored;
-- `cargo test -p crab --lib git_object_locator_cli_publisher --locked -- --test-threads=1`:
-  2 passed;
-- `cargo test -p crab-auth-server --lib --locked -- --test-threads=1`:
-  74 passed;
-- `python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py`:
-  13 passed; and
+- `cargo test -p crab --test remote_helper_transcript --locked -- --test-threads=1`:
+  42 passed;
+- `python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py crab/scripts/e2e/test_run_concurrent_push_smoke.py`:
+  30 passed; and
 - `git diff --check`.
 
 All Cargo commands used the required isolated target directory on the
 workspace volume. This is focused source proof, not a substitute for the
 open full-suite, latest-binary, provider, fault, or team-concurrency gates.
 
-### Fresh Kubernetes/RustFS evidence from the current implementation
+### Current Kubernetes/RustFS evidence from committed `04655f3b`
+
+Run profile: `local-k8s-final-04655f3b-1000-20260825`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, external local RustFS, and the
+release binary whose provenance reports `git_sha=04655f3b`. The standalone
+verifier passed with `status=ok` and `profile=full`; all 22 harness checks
+passed and cleanup removed the isolated remote prefix.
+
+- Pushes: 1,000 replay pushes plus the seed; median 1,808 ms, p95 3,211 ms.
+- Owner: 1,993,181 ms at the 1,000 checkpoint across six passes; peak child
+  RSS 1,846,001,664 bytes. Final state: generation 8, 2 active packs,
+  1,263,723,813 active bytes, 9 catalog layers, 115,230,529 catalog bytes,
+  current locator/visibility indexes, and one graph layer for 140,383 commits.
+- Fetch: the 1,000-checkpoint incremental fetch completed in 8,927 ms with
+  2,048 ms server operation time, 38,745 logical objects, 40,495,429 response
+  bytes, and 226 storage requests.
+- Clones: cold full 184,248 ms with 1,241,537,452 response bytes and two
+  storage requests; warm full 56,788 ms with zero storage requests; blobless
+  78,162 ms; depth-1/10/100/1,000 32,842/43,552/145,423/201,211 ms.
+- Correctness: advertised refs and clone tips matched the source, full and
+  incremental fsck passed, 1,000 sampled objects were byte-identical, and the
+  source checkout was unchanged. Fingerprint:
+  `7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+This closes current-binary single-client correctness and qualification
+evidence. It does not close the owner-latency/memory SLO, roughly 1.2 GB cold
+response-pack egress, blobless planning, differential, fault, provider,
+concurrency, or rollout gates listed above.
+
+### Historical pre-handoff diagnostic
 
 Run profile: `local-k8s-final-20260824`, Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, one replay
@@ -1350,10 +1352,10 @@ The correctness fingerprint is
   receipt and incomplete bucket-registry discovery. This remains an explicit
   production-readiness gap and destructive bucket GC stayed disabled.
 
-This closes the pre-rebase 1,000-push load/correctness evidence, not the final
-acceptance gate. The same full profile must be repeated from current `HEAD`
-`036df853`, followed by an independent repeatability run and the remaining
-differential, fault, concurrency, provider, and rollout gates.
+This section is retained as a pre-rebase historical comparison only. The
+current committed full-profile result is recorded above; independent
+repeatability and the remaining differential, fault, concurrency, provider,
+and rollout gates are still open.
 
 ## Final done criteria
 
