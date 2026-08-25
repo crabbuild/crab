@@ -566,6 +566,35 @@ impl RemoteGitRepository {
         self.state.inventory.values().copied().next()
     }
 
+    /// Check the current catalog-bound visibility proof without loading its object dictionary.
+    pub async fn catalog_visibility_available(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<bool> {
+        let runtime_cancellation = self.state.runtime.background_cancellation();
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        let Some(coverage) = self.state.coverage else {
+            return Ok(self.state.refs.is_empty());
+        };
+        let pack_index_hash = coverage.pack_index_hash.to_string();
+        let available = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = crab_metadata::git_visibility::catalog_bound_available(
+                &self.state.store,
+                &self.state.layout,
+                self.state.generation,
+                &pack_index_hash,
+                &self.state.git_validation_digest,
+            ) => result.map_err(Error::Metadata)?,
+        };
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        Ok(available)
+    }
+
     /// Read the immutable object-visibility proof for this pinned generation.
     pub async fn visibility_index(
         &self,
@@ -1392,6 +1421,12 @@ mod tests {
         .expect("open empty repository");
         assert!(repository.refs().is_empty());
         assert_eq!(repository.pack_count(), 0);
+        assert!(
+            repository
+                .catalog_visibility_available(&CancellationToken::new())
+                .await
+                .expect("empty repository visibility proof")
+        );
     }
 
     #[tokio::test]
@@ -1400,6 +1435,12 @@ mod tests {
         let repository = open(&fixture).await.expect("open repository");
         assert_eq!(repository.generation(), 1);
         assert_eq!(repository.pack_count(), 1);
+        assert!(
+            !repository
+                .catalog_visibility_available(&CancellationToken::new())
+                .await
+                .expect("missing visibility proof")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

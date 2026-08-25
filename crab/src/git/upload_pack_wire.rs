@@ -160,45 +160,53 @@ pub async fn snapshot_available(
     let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
         return false;
     };
-    match repository.visibility_index(cancellation).await {
-        Ok(_) => true,
+    match repository.catalog_visibility_available(cancellation).await {
+        Ok(true) => true,
+        Ok(false) => repair_snapshot_availability(store, prefix, repository, cancellation).await,
         Err(error) if visibility_index_needs_repair(&error) => {
-            let repair_store = crate::storage::Store::from_storage(store.clone());
-            let repair_layout =
-                crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-            if matches!(
-                super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-                Ok(true)
-            ) {
-                return false;
-            }
-            match Box::pin(super::push::repair_git_visibility_if_current(
-                &repair_store,
-                &repair_layout,
-                repository.generation(),
-                LOCATOR_READ_REPAIR_LOCK_TTL,
-                cancellation,
-            ))
-            .await
-            {
-                Ok(Some(super::push::GitVisibilityPublication::Published)) => {
-                    let Ok(repository) =
-                        open_repository_snapshot(store, prefix, cancellation).await
-                    else {
-                        return false;
-                    };
-                    repository.visibility_index(cancellation).await.is_ok()
-                }
-                Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => {
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "current Git visibility repair failed");
-                    false
-                }
-            }
+            repair_snapshot_availability(store, prefix, repository, cancellation).await
         }
         Err(_) => false,
+    }
+}
+
+async fn repair_snapshot_availability(
+    store: &crab_storage::Store,
+    prefix: &str,
+    repository: RemoteGitRepository,
+    cancellation: &CancellationToken,
+) -> bool {
+    let repair_store = crate::storage::Store::from_storage(store.clone());
+    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+    if matches!(
+        super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
+        Ok(true)
+    ) {
+        return false;
+    }
+    match Box::pin(super::push::repair_git_visibility_if_current(
+        &repair_store,
+        &repair_layout,
+        repository.generation(),
+        LOCATOR_READ_REPAIR_LOCK_TTL,
+        cancellation,
+    ))
+    .await
+    {
+        Ok(Some(super::push::GitVisibilityPublication::Published)) => {
+            let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
+                return false;
+            };
+            repository
+                .catalog_visibility_available(cancellation)
+                .await
+                .is_ok_and(|available| available)
+        }
+        Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "current Git visibility repair failed");
+            false
+        }
     }
 }
 

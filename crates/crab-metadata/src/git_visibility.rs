@@ -1045,6 +1045,7 @@ mod storage {
     use base64::engine::general_purpose::STANDARD_NO_PAD;
     use bytes::Bytes;
     use crab_storage::{StorageError, Store, StoreLayout};
+    #[cfg(feature = "remote-index")]
     use crab_xet::hash::MerkleHash;
     use object_store::path::Path as ObjectPath;
     use serde::{Deserialize, Serialize};
@@ -1144,6 +1145,7 @@ mod storage {
         objects: GitVisibilityClosureV3,
     }
 
+    #[cfg(feature = "remote-index")]
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct GitVisibilityTransitionV5 {
@@ -1998,6 +2000,7 @@ mod storage {
         Ok((index, GitVisibilityFormat::V5))
     }
 
+    #[cfg(feature = "remote-index")]
     fn catalog_identity(
         stored: &GitVisibilityIndexV5,
         generation: u64,
@@ -2013,12 +2016,15 @@ mod storage {
     /// proof is already bound to the published catalog. Full ordinal
     /// materialization remains in `read_catalog_bound` for authorization and
     /// compaction paths that actually need object IDs.
-    async fn catalog_bound_exists(
+    #[cfg(feature = "remote-index")]
+    async fn catalog_bound_exists_for_identity(
         store: &Store,
         router: &StoreLayout<Store>,
-        manifest: &Manifest,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
     ) -> Result<bool> {
-        let path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
+        let path = router.git_visibility_catalog_path(git_validation_digest);
         let body = match read_bounded(store, &path).await {
             Ok(body) => body,
             Err(crate::error::MetadataError::Storage {
@@ -2032,12 +2038,8 @@ mod storage {
                 reason: format!("invalid catalog visibility index JSON: {error}"),
             }
         })?;
-        let identity = catalog_identity(
-            &stored,
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-        )?;
+        let identity =
+            catalog_identity(&stored, generation, pack_index_hash, git_validation_digest)?;
         let session = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
             Arc::clone(store.inner()),
             router.repo_prefix(),
@@ -2048,6 +2050,44 @@ mod storage {
         let matches = session.catalog_identity() == Some(identity);
         session.close().await?;
         Ok(matches)
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn catalog_bound_exists(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<bool> {
+        catalog_bound_exists_for_identity(
+            store,
+            router,
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )
+        .await
+    }
+
+    /// Check whether the V5 visibility proof is bound to the published catalog.
+    ///
+    /// This validates the immutable proof and catalog checkpoint identity
+    /// without materializing the catalog's complete object-ID dictionary.
+    #[cfg(feature = "remote-index")]
+    pub async fn catalog_bound_available(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<bool> {
+        catalog_bound_exists_for_identity(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await
     }
 
     async fn read_digest_bound(
@@ -2280,19 +2320,27 @@ mod storage {
         router: &StoreLayout<Store>,
         manifest: &Manifest,
     ) -> Result<bool> {
-        if catalog_bound_exists(store, router, manifest).await? {
-            return Ok(true);
+        #[cfg(feature = "remote-index")]
+        {
+            if catalog_bound_exists(store, router, manifest).await? {
+                return Ok(true);
+            }
+            let Some(read) = read_for_manifest(store, router, manifest).await? else {
+                return Ok(false);
+            };
+            if read.format == GitVisibilityFormat::V5 {
+                return Ok(true);
+            }
+            upload_if_absent(store, router, &read.index).await?;
+            return Ok(read_for_manifest(store, router, manifest)
+                .await?
+                .is_some_and(|read| read.format == GitVisibilityFormat::V5));
         }
-        let Some(read) = read_for_manifest(store, router, manifest).await? else {
-            return Ok(false);
-        };
-        if read.format == GitVisibilityFormat::V5 {
-            return Ok(true);
+        #[cfg(not(feature = "remote-index"))]
+        {
+            let _ = (store, router, manifest);
+            Ok(false)
         }
-        upload_if_absent(store, router, &read.index).await?;
-        Ok(read_for_manifest(store, router, manifest)
-            .await?
-            .is_some_and(|read| read.format == GitVisibilityFormat::V5))
     }
 
     async fn upload_visibility_body(store: &Store, path: &ObjectPath, body: Bytes) -> Result<()> {
@@ -2481,6 +2529,9 @@ pub use storage::{
     GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound, read,
     read_edit, read_for_manifest, read_with_format, upload_edit, upload_if_absent,
 };
+
+#[cfg(all(feature = "remote-index", feature = "storage"))]
+pub use storage::catalog_bound_available;
 
 #[cfg(test)]
 mod tests {
@@ -3069,6 +3120,28 @@ mod tests {
             ensure_catalog_bound(&store, &router, &manifest)
                 .await
                 .expect("migrate catalog proof")
+        );
+        assert!(
+            catalog_bound_available(
+                &store,
+                &router,
+                manifest.generation,
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+            )
+            .await
+            .expect("check catalog proof")
+        );
+        assert!(
+            catalog_bound_available(
+                &store,
+                &router,
+                manifest.generation.saturating_add(1),
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+            )
+            .await
+            .is_err()
         );
         let migrated = read_with_format(&store, &router, 7, &pack_hash, &digest)
             .await
