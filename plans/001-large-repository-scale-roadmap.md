@@ -172,6 +172,9 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
   already-shallow requests;
 - generated-pack cache descriptors that distinguish requested object count
   from the larger self-contained pack count required by delta bases.
+- repository GC now resolves recent generated-pack descriptors with bounded
+  list-concurrency and streams validated descriptor/artifact roots without
+  accumulating the cache namespace in memory.
 - an immutable catalog-readiness marker that makes healthy admission checks
   metadata-only while preserving generation and validation-digest binding;
 - one catalog-bound ordinal-proof handoff across protocol-v2 upload-pack, exact

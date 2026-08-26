@@ -81,8 +81,10 @@ immediately. A descriptor is read with a fixed body limit before its artifact
 is retained, so a corrupt cache descriptor fails closed instead of allowing a
 possibly referenced artifact to be collected. Bucket previews use a
 non-executable journal and remove its temporary batches and marks after
-reporting. Repair commands intentionally retain their collection-oriented
-behavior.
+reporting. Descriptor resolution is streamed with at most the configured
+GC list-concurrency count of reads in flight, so a large response-cache
+namespace does not create an unbounded task or descriptor backlog. Repair
+commands intentionally retain their collection-oriented behavior.
 
 ## How It Works
 

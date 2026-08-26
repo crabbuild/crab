@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
 use serde::Serialize;
@@ -1915,6 +1916,7 @@ async fn stream_repo_reachability(
             router,
             retention_at,
             grace_period,
+            concurrency,
             &mut sink,
             cancel,
         )
@@ -2024,30 +2026,60 @@ async fn extend_generated_pack_cache_reachable(
     router: &StoreLayout,
     retention_at: SystemTime,
     grace_period: Duration,
+    concurrency: usize,
     reachable: &mut HashSet<String>,
 ) -> Result<()> {
     let cutoff = retention_at - grace_period.max(MIN_GRACE_PERIOD);
     let prefix = router.repo_path("generated-packs/v1/requests/");
     let mut descriptors = store.inner().list(Some(&prefix));
-    while let Some(meta) = descriptors.try_next().await.map_err(CrabError::Storage)? {
-        let last_modified: SystemTime = meta.last_modified.into();
-        if last_modified < cutoff {
+    let mut pending = FuturesUnordered::new();
+    let limit = concurrency.max(1);
+    let cancel = CancellationToken::new();
+    let mut listing_done = false;
+
+    loop {
+        while !listing_done && pending.len() < limit {
+            let Some(meta) = (tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                next = descriptors.try_next() => next.map_err(CrabError::Storage)?,
+            }) else {
+                listing_done = true;
+                break;
+            };
+            let last_modified: SystemTime = meta.last_modified.into();
+            if last_modified < cutoff {
+                continue;
+            }
+            pending.push(resolve_generated_pack_cache_descriptor(
+                store.clone(),
+                router.clone(),
+                meta,
+                cutoff,
+                cancel.clone(),
+            ));
+        }
+
+        if pending.is_empty() {
+            if listing_done {
+                return Ok(());
+            }
             continue;
         }
-        let descriptor_key = meta.location.as_ref().to_owned();
-        let (bytes, _) = match store
-            .get_with_etag_bounded(&meta.location, GENERATED_PACK_DESCRIPTOR_MAX_BYTES)
-            .await
-        {
-            Ok(value) => value,
-            Err(CrabError::NotFound { .. }) => continue,
-            Err(error) => return Err(error),
+
+        let Some(result) = (tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = pending.next() => result,
+        }) else {
+            return Ok(());
         };
-        let artifact_key = generated_pack_cache_artifact_key(router, &descriptor_key, &bytes)?;
+        let Some((descriptor_key, artifact_key)) = result? else {
+            continue;
+        };
         reachable.insert(descriptor_key);
         reachable.insert(artifact_key);
     }
-    Ok(())
 }
 
 async fn stream_generated_pack_cache_reachable(
@@ -2055,39 +2087,89 @@ async fn stream_generated_pack_cache_reachable(
     router: &StoreLayout,
     retention_at: SystemTime,
     grace_period: Duration,
+    concurrency: usize,
     sink: &mut RepoReachabilitySink<'_>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let cutoff = retention_at - grace_period.max(MIN_GRACE_PERIOD);
     let prefix = router.repo_path("generated-packs/v1/requests/");
     let mut descriptors = store.inner().list(Some(&prefix));
-    while let Some(meta) = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        next = descriptors.try_next() => next.map_err(CrabError::Storage)?,
-    } {
-        let last_modified: SystemTime = meta.last_modified.into();
-        if last_modified < cutoff {
+    let mut pending = FuturesUnordered::new();
+    let limit = concurrency.max(1);
+    let mut listing_done = false;
+
+    loop {
+        while !listing_done && pending.len() < limit {
+            let Some(meta) = (tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                next = descriptors.try_next() => next.map_err(CrabError::Storage)?,
+            }) else {
+                listing_done = true;
+                break;
+            };
+            let last_modified: SystemTime = meta.last_modified.into();
+            if last_modified < cutoff {
+                continue;
+            }
+            pending.push(resolve_generated_pack_cache_descriptor(
+                store.clone(),
+                router.clone(),
+                meta,
+                cutoff,
+                cancel.clone(),
+            ));
+        }
+
+        if pending.is_empty() {
+            if listing_done {
+                return Ok(());
+            }
             continue;
         }
-        let descriptor_key = meta.location.as_ref().to_owned();
-        let (bytes, _) = tokio::select! {
+
+        let Some(result) = (tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(CrabError::Cancelled),
-            result = store.get_with_etag_bounded(
-                &meta.location,
-                GENERATED_PACK_DESCRIPTOR_MAX_BYTES,
-            ) => match result {
-                Ok(value) => value,
-                Err(CrabError::NotFound { .. }) => continue,
-                Err(error) => return Err(error),
-            },
+            result = pending.next() => result,
+        }) else {
+            return Ok(());
         };
-        let artifact_key = generated_pack_cache_artifact_key(router, &descriptor_key, &bytes)?;
+        let Some((descriptor_key, artifact_key)) = result? else {
+            continue;
+        };
         sink.add(descriptor_key).await?;
         sink.add(artifact_key).await?;
     }
-    Ok(())
+}
+
+async fn resolve_generated_pack_cache_descriptor(
+    store: Store,
+    router: StoreLayout,
+    meta: object_store::ObjectMeta,
+    cutoff: SystemTime,
+    cancel: CancellationToken,
+) -> Result<Option<(String, String)>> {
+    check_cancelled(&cancel)?;
+    let last_modified: SystemTime = meta.last_modified.into();
+    if last_modified < cutoff {
+        return Ok(None);
+    }
+    let descriptor_key = meta.location.as_ref().to_owned();
+    let (bytes, _) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = store.get_with_etag_bounded(
+            &meta.location,
+            GENERATED_PACK_DESCRIPTOR_MAX_BYTES,
+        ) => match result {
+            Ok(value) => value,
+            Err(CrabError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        },
+    };
+    let artifact_key = generated_pack_cache_artifact_key(&router, &descriptor_key, &bytes)?;
+    Ok(Some((descriptor_key, artifact_key)))
 }
 
 async fn stream_reachable_bulk_objects(
@@ -2498,6 +2580,7 @@ async fn reachable_repo_objects_from_manifest_with_options(
             router,
             SystemTime::now(),
             grace_period,
+            concurrency,
             &mut reachable,
         )
         .await?;

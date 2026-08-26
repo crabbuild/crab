@@ -83,6 +83,9 @@ cancelling one waiter does not cancel work still needed by another process.
 Repository GC treats these objects as a soft acceleration cache: recent
 descriptors retain their referenced artifacts through the configured grace
 period, after which stale descriptor/artifact pairs become collectible.
+GC resolves recent descriptors with bounded list-concurrency and streams
+validated pairs, keeping response-cache cleanup from turning into an
+unbounded read or memory wave as request history grows.
 
 Directory listing reads only the selected tree. Child sizes are absent unless
 the caller requests bounded page-only metadata. Comparison prunes equal tree
