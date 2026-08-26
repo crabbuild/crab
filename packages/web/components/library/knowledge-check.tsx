@@ -52,7 +52,7 @@ export function KnowledgeCheck({
   return (
     <section
       aria-labelledby={`knowledge-check-${slug}`}
-      className="not-prose mt-12 overflow-hidden rounded-2xl border-2 border-[#163052] bg-[#f4f7f9] text-[#142033] shadow-[0_18px_45px_rgba(20,32,51,0.12)]"
+      className="not-prose mt-12 overflow-hidden rounded-2xl border border-[#dbe3ec] bg-white text-[#142033] shadow-sm"
     >
       <header className="flex flex-col gap-3 border-b border-[#b9c7d8] px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-7">
         <div>

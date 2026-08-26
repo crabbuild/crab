@@ -29,17 +29,17 @@ export default function BlogDashboardPage() {
 
   return (
     <MarketingLayout>
-      <section className="border-b border-[#b9c7d8] bg-[#f4f7f9] text-[#142033]">
+      <section className="border-b border-border bg-background text-foreground">
         <div className="mx-auto grid max-w-6xl gap-8 px-6 pt-20 pb-14 lg:grid-cols-[minmax(0,1fr)_23rem] lg:pt-24 lg:pb-16">
           <div>
-            <Badge variant="outline" className="gap-1 bg-white">
+            <Badge variant="outline" className="gap-1 bg-background">
               <Newspaper className="size-3" aria-hidden="true" />
               Crab blog
             </Badge>
             <h1 className="mt-5 max-w-3xl text-4xl font-black tracking-[-0.045em] sm:text-5xl">
               Notes from building Git for large files.
             </h1>
-            <p className="mt-5 max-w-2xl text-base leading-7 text-[#52637a]">
+            <p className="mt-5 max-w-2xl text-base leading-7 text-muted-foreground">
               Product decisions, system boundaries, and lessons from making
               object storage behave like a dependable Git remote.
             </p>
@@ -57,7 +57,7 @@ export default function BlogDashboardPage() {
       </section>
 
       <main className="mx-auto max-w-6xl px-6 py-14 sm:py-16">
-        <div className="flex flex-col gap-3 border-b-2 border-[#163052] pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-3 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="font-mono text-[10px] font-black tracking-[0.18em] text-[#2f6fce]">
               EDITORIAL LEDGER
@@ -149,7 +149,7 @@ function PostCard({ post }: { post: BlogPostMeta }) {
   return (
     <Link
       href={`/blog/${post.slug}`}
-      className="group flex h-full flex-col rounded-xl border border-[#b9c7d8] bg-white p-5 transition-transform outline-none hover:-translate-y-0.5 hover:shadow-[6px_6px_0_#dbe5f2] focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-2 focus-visible:outline-none"
+      className="group flex h-full flex-col rounded-xl border border-border bg-card p-5 transition-[border-color,box-shadow] outline-none hover:border-primary/30 hover:shadow-sm focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-2 focus-visible:outline-none"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Badge variant="secondary">{post.category}</Badge>
@@ -208,18 +208,22 @@ function MetaLine({
 
 function CurrentSubjectDiagram() {
   return (
-    <aside className="self-start overflow-hidden rounded-xl border-2 border-[#163052] bg-white shadow-[7px_7px_0_#dbe5f2]">
-      <div className="flex items-center justify-between border-b-2 border-[#163052] px-4 py-3">
+    <aside className="self-start rounded-xl border border-border bg-card p-5 shadow-sm">
+      <div className="flex items-center justify-between">
         <span className="font-mono text-[9px] font-black tracking-[0.17em]">
           CURRENT SUBJECT
         </span>
         <span className="size-2 rounded-full bg-[#3d9b72]" aria-hidden="true" />
       </div>
-      <div className="p-4">
-        <div className="rounded-md bg-[#163052] px-3 py-2 font-mono text-[10px] font-black text-white">
+      <div className="mt-4">
+        <div className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 font-mono text-[10px] font-black text-foreground">
+          <span
+            className="size-1.5 rounded-full bg-[#2f6fce]"
+            aria-hidden="true"
+          />
           ONE COMMIT
         </div>
-        <div className="mx-auto h-5 w-px bg-[#163052]" aria-hidden="true" />
+        <div className="mx-auto h-5 w-px bg-border" aria-hidden="true" />
         <div className="grid grid-cols-2 gap-3">
           <DiagramLane
             icon={GitCommit}
@@ -234,7 +238,7 @@ function CurrentSubjectDiagram() {
             color="#e9784a"
           />
         </div>
-        <p className="m-0 mt-3 border border-[#3d9b72] bg-[#e9f6ef] px-3 py-2 text-center text-xs font-bold text-[#287754]">
+        <p className="m-0 mt-4 border-t border-border pt-3 text-center text-xs font-bold text-[#287754]">
           One visible repository state
         </p>
       </div>
@@ -254,15 +258,14 @@ function DiagramLane({
   color: string
 }) {
   return (
-    <div
-      className="border border-[#b9c7d8] p-3"
-      style={{ borderTop: `4px solid ${color}` }}
-    >
+    <div className="rounded-lg border border-border bg-muted/20 p-3">
       <Icon className="size-4" style={{ color }} aria-hidden="true" />
       <p className="m-0 mt-3 text-[10px] font-black tracking-wide uppercase">
         {label}
       </p>
-      <p className="m-0 mt-1 text-[10px] leading-4 text-[#607188]">{value}</p>
+      <p className="m-0 mt-1 text-[10px] leading-4 text-muted-foreground">
+        {value}
+      </p>
     </div>
   )
 }

@@ -73,8 +73,8 @@ export function CrabIntroductionWorkbench() {
   const active = stages.find((stage) => stage.id === activeId) ?? stages[0]
 
   return (
-    <section className="wide-article-visual not-prose my-10 overflow-hidden rounded-2xl border-2 border-[#163052] bg-[#f4f7f9] text-[#142033] shadow-[0_22px_55px_rgba(20,32,51,0.16)] lg:relative lg:left-1/2 lg:w-[min(72rem,calc(100vw-3rem))] lg:-translate-x-1/2">
-      <header className="border-b-2 border-[#163052] bg-white px-5 py-5 sm:px-7">
+    <section className="wide-article-visual not-prose my-10 overflow-hidden rounded-2xl border border-[#dbe3ec] bg-white text-[#142033] shadow-sm lg:relative lg:left-1/2 lg:w-[min(72rem,calc(100vw-3rem))] lg:-translate-x-1/2">
+      <header className="border-b border-[#dbe3ec] px-5 py-5 sm:px-7">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="m-0 font-mono text-[10px] font-black tracking-[0.2em] text-[#2f6fce]">
@@ -92,7 +92,7 @@ export function CrabIntroductionWorkbench() {
       </header>
 
       <div
-        className="grid border-b-2 border-[#163052] bg-[#163052] sm:grid-cols-4"
+        className="grid border-b border-[#dbe3ec] bg-[#f8fafc] sm:grid-cols-4"
         role="tablist"
         aria-label="Crab repository stages"
       >
@@ -106,10 +106,10 @@ export function CrabIntroductionWorkbench() {
             aria-controls="crab-stage-panel"
             onClick={() => setActiveId(stage.id)}
             className={cn(
-              "min-h-12 border-b border-white/20 px-4 py-3 text-left font-mono text-xs font-black text-white transition-colors outline-none last:border-b-0 focus-visible:ring-2 focus-visible:ring-[#7fb0ff] focus-visible:ring-inset sm:border-r sm:border-b-0 sm:last:border-r-0",
+              "relative min-h-12 border-b border-[#dbe3ec] px-4 py-3 text-left font-mono text-xs font-black text-[#607188] transition-colors outline-none after:absolute after:inset-x-4 after:bottom-0 after:h-0.5 after:scale-x-0 after:bg-[#2f6fce] after:transition-transform last:border-b-0 focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-inset sm:border-r sm:border-b-0 sm:last:border-r-0",
               active.id === stage.id
-                ? "bg-[#2f6fce]"
-                : "bg-[#163052] hover:bg-[#23466f]"
+                ? "bg-white text-[#142033] after:scale-x-100"
+                : "hover:bg-white hover:text-[#142033]"
             )}
           >
             {stage.label}
@@ -124,7 +124,7 @@ export function CrabIntroductionWorkbench() {
         className="p-4 sm:p-6"
       >
         <div className="grid gap-4 xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="rounded-xl border border-[#b9c7d8] bg-white p-4">
+          <div className="rounded-xl border border-[#dbe3ec] bg-[#f8fafc] p-4">
             <div className="flex items-center gap-2 text-xs font-black tracking-[0.12em] text-[#52637a] uppercase">
               <Code2 className="size-4 text-[#e9784a]" aria-hidden="true" />
               Action
@@ -153,8 +153,8 @@ export function CrabIntroductionWorkbench() {
           />
         </div>
 
-        <div className="mt-4 grid gap-3 rounded-xl border-2 border-[#3d9b72] bg-[#e9f6ef] p-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center">
-          <span className="flex size-10 items-center justify-center rounded-full bg-[#3d9b72] text-white">
+        <div className="mt-4 grid gap-3 border-t border-[#dbe3ec] pt-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center">
+          <span className="flex size-10 items-center justify-center rounded-full bg-[#e9f6ef] text-[#287754]">
             <Check className="size-5" aria-hidden="true" />
           </span>
           <div>
@@ -193,11 +193,8 @@ function DataLane({
   items: readonly string[]
 }) {
   return (
-    <section className="overflow-hidden rounded-xl border border-[#b9c7d8] bg-white">
-      <header
-        className="flex items-center gap-3 border-b border-[#b9c7d8] px-4 py-3"
-        style={{ borderTop: `5px solid ${accent}` }}
-      >
+    <section className="overflow-hidden rounded-xl border border-[#dbe3ec] bg-white">
+      <header className="flex items-center gap-3 border-b border-[#dbe3ec] px-4 py-3">
         <Icon className="size-5" style={{ color: accent }} aria-hidden="true" />
         <div>
           <p className="m-0 font-mono text-[9px] font-black tracking-[0.18em] text-[#607188]">

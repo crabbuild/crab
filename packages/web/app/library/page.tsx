@@ -86,7 +86,7 @@ export default function LibraryIndexPage() {
 
   return (
     <MarketingLayout>
-      <section className="border-b border-[#b9c7d8] bg-[#f4f7f9] text-[#142033]">
+      <section className="border-b border-border bg-background text-foreground">
         <div className="mx-auto grid max-w-6xl gap-8 px-6 pt-20 pb-12 lg:grid-cols-[minmax(0,1fr)_24rem] lg:pt-24 lg:pb-14">
           <div>
             <Badge variant="outline" className="gap-1">
@@ -137,42 +137,39 @@ export default function LibraryIndexPage() {
             <LibraryProgress total={posts.length} />
           </div>
 
-          <aside className="self-start overflow-hidden rounded-lg border-2 border-[#163052] bg-white shadow-[8px_8px_0_#dbe5f2]">
-            <div className="h-2 bg-[linear-gradient(90deg,#2f6fce_0_50%,#e9784a_50%_78%,#3d9b72_78%)]" />
-            <div className="p-5">
-              <div className="flex items-center justify-between gap-3">
-                <Badge variant="secondary">Recommended first</Badge>
-                <span className="text-xs font-medium text-muted-foreground">
-                  Step {firstPost.pathOrder}
-                </span>
-              </div>
-              <h2 className="mt-4 text-xl leading-tight font-semibold">
-                {firstPost.title}
-              </h2>
-              <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                {firstPost.description}
-              </p>
-              <div className="mt-5 divide-y divide-border text-sm">
-                <HeroInfoRow label="Depth" value={firstPost.level} />
-                <HeroInfoRow
-                  label="Read time"
-                  value={`${firstPost.readingTimeMinutes} min`}
-                />
-                <HeroInfoRow label="Path" value={firstPath.label} />
-                <HeroInfoRow
-                  label="Diagram"
-                  value={firstPost.diagramType ?? "Guide"}
-                />
-                <HeroInfoRow label="Proof" value="1 knowledge check" />
-              </div>
-              <Link
-                href={`/library/${firstPost.slug}`}
-                className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-primary transition-colors hover:text-primary-hover"
-              >
-                Read the guide
-                <ArrowRight size={14} />
-              </Link>
+          <aside className="self-start rounded-xl border border-border bg-card p-5 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <Badge variant="secondary">Recommended first</Badge>
+              <span className="text-xs font-medium text-muted-foreground">
+                Step {firstPost.pathOrder}
+              </span>
             </div>
+            <h2 className="mt-4 text-xl leading-tight font-semibold">
+              {firstPost.title}
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-muted-foreground">
+              {firstPost.description}
+            </p>
+            <div className="mt-5 divide-y divide-border text-sm">
+              <HeroInfoRow label="Depth" value={firstPost.level} />
+              <HeroInfoRow
+                label="Read time"
+                value={`${firstPost.readingTimeMinutes} min`}
+              />
+              <HeroInfoRow label="Path" value={firstPath.label} />
+              <HeroInfoRow
+                label="Diagram"
+                value={firstPost.diagramType ?? "Guide"}
+              />
+              <HeroInfoRow label="Proof" value="1 knowledge check" />
+            </div>
+            <Link
+              href={`/library/${firstPost.slug}`}
+              className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-primary transition-colors hover:text-primary-hover"
+            >
+              Read the guide
+              <ArrowRight size={14} />
+            </Link>
           </aside>
         </div>
       </section>
