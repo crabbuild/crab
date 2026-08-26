@@ -513,14 +513,25 @@ fn lfs_endpoint_url(state: &AppState, headers: &HeaderMap, repository: &str) -> 
     else {
         return path;
     };
-    let scheme = headers
+    let scheme = endpoint_scheme(headers, state.config.tls.is_some());
+    format!("{scheme}://{host}{path}")
+}
+
+fn endpoint_scheme(headers: &HeaderMap, native_tls: bool) -> &'static str {
+    if let Some(value) = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next())
         .map(str::trim)
-        .filter(|value| *value == "http" || *value == "https")
-        .unwrap_or("http");
-    format!("{scheme}://{host}{path}")
+    {
+        if value == "http" {
+            return "http";
+        }
+        if value == "https" {
+            return "https";
+        }
+    }
+    if native_tls { "https" } else { "http" }
 }
 
 fn action_url(
@@ -1955,6 +1966,13 @@ mod tests {
             .expect("discovery body");
         let discovery: serde_json::Value = serde_json::from_slice(&body).expect("discovery JSON");
         assert_eq!(discovery["href"], "/team/model.git/info/lfs");
+    }
+
+    #[test]
+    fn endpoint_scheme_defaults_to_native_tls_transport() {
+        let headers = HeaderMap::new();
+        assert_eq!(endpoint_scheme(&headers, true), "https");
+        assert_eq!(endpoint_scheme(&headers, false), "http");
     }
 
     #[tokio::test]
