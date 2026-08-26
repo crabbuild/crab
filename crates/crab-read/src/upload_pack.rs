@@ -1480,13 +1480,19 @@ async fn plan_from_shallow_closure(
     {
         return Ok(None);
     }
-    ensure_visible_objects(
-        operation,
-        visibility,
-        visible_ref_names,
-        &selection.object_ids,
-    )
-    .await?;
+    if matches!(visibility, VisibilitySource::Materialized(_)) {
+        // The catalog-bound closure was built from this already-authorized
+        // visible tip and validated against the exact manifest generation.
+        // Rechecking every selected OID would turn one immutable entry read
+        // into one locator lookup per object for every concurrent shallow clone.
+        ensure_visible_objects(
+            operation,
+            visibility,
+            visible_ref_names,
+            &selection.object_ids,
+        )
+        .await?;
+    }
     Ok(Some(PackPlan {
         wants: request.wants.clone(),
         common_haves: Vec::new(),
