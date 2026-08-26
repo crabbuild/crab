@@ -17,6 +17,7 @@ path = "src/bin/crab_lfs_server.rs"
 axum = { version = "0.8", features = ["json", "matched-path"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
+bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-lfs = { workspace = true }

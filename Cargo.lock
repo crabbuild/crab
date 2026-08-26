@@ -2230,6 +2230,7 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "clap",
  "crab-lfs",
  "crab-storage",

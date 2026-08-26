@@ -1086,10 +1086,7 @@ async fn download(
         Ok(result) => result,
         Err(error) => return lfs_error_response(error),
     };
-    let stream = stream.map(move |chunk| {
-        let _keep_permit = &permit;
-        chunk.map_err(std::io::Error::other)
-    });
+    let stream = timed_download_stream(stream, permit, state.config.request_timeout);
     let status = if actual_range.start == 0 && actual_range.end == meta.size {
         StatusCode::OK
     } else {
@@ -1099,6 +1096,34 @@ async fn download(
     *response.status_mut() = status;
     set_object_headers(&mut response, &meta, oid_value, Some(&actual_range));
     response
+}
+
+fn timed_download_stream(
+    stream: crab_lfs::LfsByteStream,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    timeout: std::time::Duration,
+) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    futures_util::stream::unfold(
+        (Some(stream), Some(permit), deadline),
+        |(stream, permit, deadline)| async move {
+            let mut stream = stream?;
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(chunk)) => Some((
+                    chunk.map_err(std::io::Error::other),
+                    (Some(stream), permit, deadline),
+                )),
+                Ok(None) => None,
+                Err(_) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "LFS download exceeded request timeout",
+                    )),
+                    (None, permit, deadline),
+                )),
+            }
+        },
+    )
 }
 
 async fn upload(
@@ -1973,6 +1998,31 @@ mod tests {
         )
         .await;
         assert_eq!(downloaded.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn streamed_download_timeout_releases_permit_after_body_error() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("download permit");
+        let source: crab_lfs::LfsByteStream = Box::pin(futures_util::stream::pending());
+        let mut stream = Box::pin(timed_download_stream(
+            source,
+            permit,
+            std::time::Duration::ZERO,
+        ));
+
+        let error = stream
+            .next()
+            .await
+            .expect("timeout item")
+            .expect_err("pending source should time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(permits.available_permits(), 0);
+        assert!(stream.next().await.is_none());
+        assert_eq!(permits.available_permits(), 1);
     }
 
     #[tokio::test]
