@@ -63,6 +63,17 @@ impl RepositoryIdentity {
     pub const fn placement_generation(&self) -> u64 {
         self.placement_generation
     }
+
+    pub(crate) fn hash_cache_identity(&self, hash: &mut blake3::Hasher) {
+        for component in [
+            self.provider_namespace.as_bytes(),
+            self.repository_namespace.as_bytes(),
+        ] {
+            hash.update(&(component.len() as u64).to_be_bytes());
+            hash.update(component);
+        }
+        hash.update(&self.placement_generation.to_be_bytes());
+    }
 }
 
 impl fmt::Debug for RepositoryIdentity {
@@ -87,7 +98,7 @@ fn validate_identity_component(component: &'static str, value: &str) -> Result<(
 }
 
 /// Limits applied independently to each decoded Git object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectLimits {
     pub max_packed_entry_bytes: u64,
     pub max_inflated_entry_bytes: u64,
@@ -105,7 +116,8 @@ impl Default for ObjectLimits {
             max_inflated_entry_bytes: 64 * 1024 * 1024,
             max_object_bytes: 64 * 1024 * 1024,
             max_pack_index_bytes: 128 * 1024 * 1024,
-            max_commit_graph_bytes: 16 * 1024 * 1024,
+            max_commit_graph_bytes:
+                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
             max_delta_depth: 128,
             max_tag_depth: 32,
         }
@@ -113,7 +125,7 @@ impl Default for ObjectLimits {
 }
 
 /// Aggregate limits charged across one repository operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OperationLimits {
     /// Maximum wall time from locator open through semantic completion.
     pub max_duration: Duration,
@@ -157,7 +169,7 @@ impl Default for OperationLimits {
 }
 
 /// Validated behavior and resource limits for opening a repository.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct RepositoryOptions {
     object: ObjectLimits,
     operation: OperationLimits,
@@ -250,7 +262,8 @@ fn validate_non_zero(name: &'static str, value: u64) -> Result<()> {
 /// caller-constructed coverage. Every later operation is pinned to this state.
 #[derive(Clone)]
 pub struct RemoteGitRepository {
-    state: Arc<RepositoryState>,
+    pub(crate) state: Arc<RepositoryState>,
+    pub(crate) generated_pack_lease_provider: Option<Arc<dyn crate::GeneratedPackLeaseProvider>>,
 }
 
 impl fmt::Debug for RemoteGitRepository {
@@ -345,9 +358,11 @@ impl RemoteGitRepository {
                     refs,
                     reader: None,
                     commit_graph: None,
+                    shallow_closure: None,
                 };
                 return Ok(Self {
                     state: Arc::new(state),
+                    generated_pack_lease_provider: None,
                 });
             }
 
@@ -399,6 +414,14 @@ impl RemoteGitRepository {
                     &store,
                     &layout,
                     manifest.commit_graph_hash.as_deref(),
+                    manifest.generation,
+                    &manifest.pack_index_hash,
+                    &manifest.git_validation_digest,
+                    &refs
+                        .entries
+                        .iter()
+                        .map(|entry| entry.peeled.unwrap_or(entry.target))
+                        .collect::<Vec<_>>(),
                     options.object_limits().max_commit_graph_bytes,
                     cancellation,
                     &runtime_cancellation,
@@ -408,6 +431,32 @@ impl RemoteGitRepository {
                     Ok(index) => index.map(Arc::new),
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(_) => {
+                        runtime.metrics().record(crate::MetricObservation {
+                            kind: crate::MetricKind::Metadata,
+                            value: 1,
+                            duration: None,
+                            outcome: Some(crate::MetricOutcome::Error),
+                            cache: None,
+                        });
+                        None
+                    }
+                };
+                let shallow_closure = match tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+                    result = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
+                        &store,
+                        &layout,
+                        &manifest.git_validation_digest,
+                        manifest.generation,
+                        &manifest.pack_index_hash,
+                        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
+                    ) => result.map_err(Error::Metadata),
+                } {
+                    Ok(index) => index.map(Arc::new),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "shallow closure index unavailable; using bounded traversal");
                         runtime.metrics().record(crate::MetricObservation {
                             kind: crate::MetricKind::Metadata,
                             value: 1,
@@ -432,9 +481,11 @@ impl RemoteGitRepository {
                     refs,
                     reader: Some(Arc::new(reader)),
                     commit_graph,
+                    shallow_closure,
                 };
                 return Ok(Self {
                     state: Arc::new(state),
+                    generated_pack_lease_provider: None,
                 });
             }
 
@@ -490,10 +541,58 @@ impl RemoteGitRepository {
         &self.state.identity
     }
 
+    /// Install product-owned coordination for generated response-pack misses.
+    ///
+    /// The provider must protect this repository's object-store namespace.
+    #[must_use]
+    pub fn with_generated_pack_lease_provider(
+        mut self,
+        provider: Arc<dyn crate::GeneratedPackLeaseProvider>,
+    ) -> Self {
+        self.generated_pack_lease_provider = Some(provider);
+        self
+    }
+
     /// Return the number of immutable packs in the pinned inventory.
     #[must_use]
     pub fn pack_count(&self) -> usize {
         self.state.inventory.len()
+    }
+
+    pub(crate) fn single_pack_inventory(&self) -> Option<GitPackInventoryEntry> {
+        if self.state.inventory.len() != 1 {
+            return None;
+        }
+        self.state.inventory.values().copied().next()
+    }
+
+    /// Check the current catalog-bound visibility proof without loading its object dictionary.
+    pub async fn catalog_visibility_available(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<bool> {
+        let runtime_cancellation = self.state.runtime.background_cancellation();
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        let Some(coverage) = self.state.coverage else {
+            return Ok(self.state.refs.is_empty());
+        };
+        let pack_index_hash = coverage.pack_index_hash.to_string();
+        let available = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = crab_metadata::git_visibility::catalog_bound_available(
+                &self.state.store,
+                &self.state.layout,
+                self.state.generation,
+                &pack_index_hash,
+                &self.state.git_validation_digest,
+            ) => result.map_err(Error::Metadata)?,
+        };
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        Ok(available)
     }
 
     /// Read the immutable object-visibility proof for this pinned generation.
@@ -506,7 +605,7 @@ impl RemoteGitRepository {
         check_cancelled(&runtime_cancellation)?;
         let index = if let Some(coverage) = self.state.coverage {
             let pack_index_hash = coverage.pack_index_hash.to_string();
-            let read = crab_metadata::git_visibility::read(
+            let read = crab_metadata::git_visibility::read_with_format(
                 &self.state.store,
                 &self.state.layout,
                 self.state.generation,
@@ -517,7 +616,15 @@ impl RemoteGitRepository {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                result = read => result.map_err(Error::Metadata)?,
+                result = read => {
+                    let read = result.map_err(Error::Metadata)?;
+                    if read.format != crab_metadata::git_visibility::GitVisibilityFormat::V5 {
+                        return Err(Error::RepositoryState {
+                            reason: RepositoryStateError::VisibilityProofMismatch,
+                        });
+                    }
+                    read.index
+                },
             }
         } else if self.state.refs.is_empty() {
             // An empty repository has no pack index or locator coverage to
@@ -528,6 +635,7 @@ impl RemoteGitRepository {
                 self.state.git_validation_digest.as_ref(),
                 std::collections::BTreeMap::new(),
             )
+            .map_err(Error::Metadata)?
         } else {
             return Err(Error::EmptyRepository);
         };
@@ -535,16 +643,20 @@ impl RemoteGitRepository {
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
 
-        if index.refs.len() != self.state.refs.entries.len()
+        if index.ref_count() != self.state.refs.entries.len()
             || self.state.refs.entries.iter().any(|reference| {
-                let Some(objects) = index.refs.get(&reference.name) else {
+                if !index.contains_ref(&reference.name) {
+                    return true;
+                }
+                let Ok(target) = reference.target.as_bytes().try_into() else {
                     return true;
                 };
-                let target = reference.target.to_hex().to_string();
-                objects.binary_search(&target).is_err()
+                !index.contains_in_ref(&reference.name, &target)
                     || reference.peeled.is_some_and(|peeled| {
-                        let peeled = peeled.to_hex().to_string();
-                        objects.binary_search(&peeled).is_err()
+                        let Ok(peeled) = peeled.as_bytes().try_into() else {
+                            return true;
+                        };
+                        !index.contains_in_ref(&reference.name, &peeled)
                     })
             })
         {
@@ -1309,6 +1421,12 @@ mod tests {
         .expect("open empty repository");
         assert!(repository.refs().is_empty());
         assert_eq!(repository.pack_count(), 0);
+        assert!(
+            repository
+                .catalog_visibility_available(&CancellationToken::new())
+                .await
+                .expect("empty repository visibility proof")
+        );
     }
 
     #[tokio::test]
@@ -1317,6 +1435,12 @@ mod tests {
         let repository = open(&fixture).await.expect("open repository");
         assert_eq!(repository.generation(), 1);
         assert_eq!(repository.pack_count(), 1);
+        assert!(
+            !repository
+                .catalog_visibility_available(&CancellationToken::new())
+                .await
+                .expect("missing visibility proof")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1357,7 +1481,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn caller_cancellation_interrupts_each_repository_open_io_phase() {
-        for fragment in ["org/repo/manifest", "metadata/pack/", "git_locator_db/"] {
+        for fragment in [
+            "org/repo/manifest",
+            "metadata/pack/",
+            "git_object_catalog_db/",
+        ] {
             let fixture = open_fixture(1, Some(1)).await;
             fixture.backend.block_path_containing(fragment);
             let request_started = fixture.backend.request_started.notified();

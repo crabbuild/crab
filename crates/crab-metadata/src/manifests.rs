@@ -43,7 +43,7 @@ pub struct Manifest {
     pub pack_index_hash: String,
     /// Blake3 commitment to the semantically validated Git state.
     pub git_validation_digest: String,
-    /// Blake3 hash of the commit-graph-summary bulk object.
+    /// Blake3 hash of the complete split commit-graph descriptor.
     pub commit_graph_hash: Option<String>,
     /// Blake3 hash of the ref-registry bulk object.
     pub ref_registry_hash: Option<String>,
@@ -362,29 +362,20 @@ fn validate_pack_manifest_entries(entries: &[PackManifestEntry]) -> Result<()> {
 #[must_use]
 pub fn manifest_reachable_objects(
     manifest: &Manifest,
-    summary: Option<&crate::commit_graph::CommitGraphSummary>,
+    graph: Option<&dyn crate::commit_graph::CommitGraphTraversal>,
 ) -> HashSet<String> {
     let mut reachable: HashSet<String> = manifest.refs.values().cloned().collect();
 
-    let Some(summary) = summary else {
+    let Some(graph) = graph else {
         return reachable;
     };
-
-    let parent_map: std::collections::HashMap<&str, &[String]> = summary
-        .commits
+    let roots = manifest
+        .refs
         .iter()
-        .map(|c| (c.oid.as_str(), c.parents.as_slice()))
-        .collect();
-
-    let mut stack: Vec<String> = manifest.refs.values().cloned().collect();
-    while let Some(oid) = stack.pop() {
-        if let Some(parents) = parent_map.get(oid.as_str()) {
-            for parent in *parents {
-                if reachable.insert(parent.clone()) {
-                    stack.push(parent.clone());
-                }
-            }
-        }
+        .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid).clone())
+        .collect::<Vec<_>>();
+    if let Some(commits) = graph.reachable_to_boundary(&roots, &[]) {
+        reachable.extend(commits);
     }
 
     reachable

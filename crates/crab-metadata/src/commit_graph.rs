@@ -1,12 +1,35 @@
-//! Lightweight commit graph index for shallow boundary computation.
+//! In-process parent summaries retained for CLI compatibility helpers.
 //!
-//! [`CommitGraphSummary`] is stored on the remote at `{prefix}/commit-graph-summary`
-//! and CAS-updated during push. It enables shallow boundary computation without
-//! downloading all packs.
+//! Crab persists complete graphs through [`crate::split_commit_graph`]. This
+//! module does not own an object-store format; it supports callers that have
+//! not yet moved their in-memory traversal API to positional records.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
+
+/// Read-only commit traversal used by fetch and admission hot paths.
+///
+/// Complete split graphs implement this without expanding positional parent
+/// ordinals into a repository-sized string map. The summary implementation is
+/// retained for in-process callers and tests; it is not an object-store format.
+pub trait CommitGraphTraversal: Send + Sync {
+    /// Return whether the graph contains one hexadecimal SHA-1 commit.
+    fn contains_oid(&self, oid: &str) -> bool;
+
+    /// Compute the depth boundary, or `None` when the graph cannot prove it.
+    fn shallow_boundary(&self, tips: &[String], depth: u32) -> Option<Vec<String>>;
+
+    /// Return commits reachable from `tips` without crossing `boundary`.
+    fn reachable_to_boundary(
+        &self,
+        tips: &[String],
+        boundary: &[String],
+    ) -> Option<HashSet<String>>;
+
+    /// Return whether `want` is reachable from any root.
+    fn is_reachable_from(&self, roots: &[String], want: &str) -> Option<bool>;
+}
 
 /// Lightweight commit graph index stored on the remote.
 ///
@@ -200,6 +223,136 @@ impl CommitGraphSummary {
         }
 
         false
+    }
+}
+
+impl CommitGraphTraversal for CommitGraphSummary {
+    fn contains_oid(&self, oid: &str) -> bool {
+        self.commits.iter().any(|entry| entry.oid == oid)
+    }
+
+    fn shallow_boundary(&self, tips: &[String], depth: u32) -> Option<Vec<String>> {
+        if tips.is_empty() || self.commits.is_empty() {
+            return Some(Vec::new());
+        }
+        let by_oid = self
+            .commits
+            .iter()
+            .map(|entry| (entry.oid.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        if tips.iter().any(|tip| !by_oid.contains_key(tip.as_str())) {
+            return None;
+        }
+        if depth == 0 {
+            return Some(tips.to_vec());
+        }
+        let mut pending = tips
+            .iter()
+            .map(|tip| (tip.as_str(), 1_u32))
+            .collect::<VecDeque<_>>();
+        let mut visited = tips
+            .iter()
+            .map(|tip| (tip.as_str(), 1_u32))
+            .collect::<HashMap<_, _>>();
+        let mut boundary = Vec::new();
+        while let Some((oid, current_depth)) = pending.pop_front() {
+            let entry = by_oid.get(oid)?;
+            if current_depth == depth {
+                boundary.push(entry.oid.clone());
+                continue;
+            }
+            if entry
+                .parents
+                .iter()
+                .any(|parent| !by_oid.contains_key(parent.as_str()))
+            {
+                boundary.push(entry.oid.clone());
+                continue;
+            }
+            for parent in &entry.parents {
+                let next_depth = current_depth.saturating_add(1);
+                if visited
+                    .get(parent.as_str())
+                    .is_some_and(|known| *known <= next_depth)
+                {
+                    continue;
+                }
+                visited.insert(parent, next_depth);
+                pending.push_back((parent, next_depth));
+            }
+        }
+        boundary.sort_unstable();
+        boundary.dedup();
+        Some(boundary)
+    }
+
+    fn reachable_to_boundary(
+        &self,
+        tips: &[String],
+        boundary: &[String],
+    ) -> Option<HashSet<String>> {
+        let by_oid = self
+            .commits
+            .iter()
+            .map(|entry| (entry.oid.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        if tips.iter().any(|tip| !by_oid.contains_key(tip.as_str())) {
+            return None;
+        }
+        let boundary = boundary.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut pending = tips.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut reachable = HashSet::new();
+        while let Some(oid) = pending.pop() {
+            if !reachable.insert(oid.to_owned()) || boundary.contains(oid) {
+                continue;
+            }
+            pending.extend(by_oid.get(oid)?.parents.iter().map(String::as_str));
+        }
+        Some(reachable)
+    }
+
+    fn is_reachable_from(&self, roots: &[String], want: &str) -> Option<bool> {
+        if !self.contains_oid(want) || roots.iter().any(|root| !self.contains_oid(root)) {
+            return None;
+        }
+        let by_oid = self
+            .commits
+            .iter()
+            .map(|entry| (entry.oid.as_str(), entry.parents.as_slice()))
+            .collect::<HashMap<_, _>>();
+        let mut pending = roots.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        while let Some(oid) = pending.pop() {
+            if oid == want {
+                return Some(true);
+            }
+            if seen.insert(oid) {
+                pending.extend(by_oid.get(oid)?.iter().map(String::as_str));
+            }
+        }
+        Some(false)
+    }
+}
+
+impl CommitGraphTraversal for crate::split_commit_graph::SplitCommitGraph {
+    fn contains_oid(&self, oid: &str) -> bool {
+        self.contains_hex(oid)
+    }
+
+    fn shallow_boundary(&self, tips: &[String], depth: u32) -> Option<Vec<String>> {
+        self.shallow_boundary_hex(tips, depth)
+    }
+
+    fn reachable_to_boundary(
+        &self,
+        tips: &[String],
+        boundary: &[String],
+    ) -> Option<HashSet<String>> {
+        self.reachable_to_boundary_hex(tips, boundary)
+    }
+
+    fn is_reachable_from(&self, roots: &[String], want: &str) -> Option<bool> {
+        self.is_reachable_from_hex(roots, want)
     }
 }
 

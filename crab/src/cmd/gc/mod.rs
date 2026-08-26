@@ -158,6 +158,10 @@ pub struct GcOutcome {
     pub delete_failures: u64,
     /// Whether post-delete metadata reconciliation failed.
     pub reconciliation_failed: bool,
+    pub active_pack_bytes: u64,
+    pub retained_history_pack_bytes: u64,
+    pub grace_period_pack_bytes: u64,
+    pub collectible_pack_bytes: u64,
 }
 
 impl GcOutcome {
@@ -211,6 +215,10 @@ impl GcOutcome {
             partial_enumeration: self.partial_enumeration,
             delete_failures: self.delete_failures,
             reconciliation_failed: self.reconciliation_failed,
+            active_pack_bytes: self.active_pack_bytes,
+            retained_history_pack_bytes: self.retained_history_pack_bytes,
+            grace_period_pack_bytes: self.grace_period_pack_bytes,
+            collectible_pack_bytes: self.collectible_pack_bytes,
         }
     }
 }
@@ -257,6 +265,18 @@ pub struct GcSummary {
     /// Whether post-delete metadata reconciliation failed.
     #[serde(default)]
     pub reconciliation_failed: bool,
+    /// Current-manifest Git pack bytes.
+    #[serde(default)]
+    pub active_pack_bytes: u64,
+    /// Pack bytes retained only by history, workflows, or other recovery roots.
+    #[serde(default)]
+    pub retained_history_pack_bytes: u64,
+    /// Unreachable pack bytes retained by the grace period.
+    #[serde(default)]
+    pub grace_period_pack_bytes: u64,
+    /// Unreachable pack bytes eligible for collection.
+    #[serde(default)]
+    pub collectible_pack_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,9 +1719,62 @@ async fn extend_reachable_bulk_objects(
                 .as_ref()
                 .to_string(),
         );
+        extend_shallow_closure_reachable(store, router, manifest, reachable).await?;
     }
 
     Ok(())
+}
+
+async fn extend_shallow_closure_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    let descriptor_path = router.shallow_closure_path(&manifest.git_validation_digest);
+    match store.get_with_etag(&descriptor_path).await {
+        Ok((bytes, _)) => {
+            reachable.insert(descriptor_path.as_ref().to_owned());
+            match crab_metadata::shallow_closure::decode_shallow_closure_descriptor(
+                &bytes,
+                descriptor_path.as_ref(),
+            ) {
+                Ok(descriptor) => {
+                    for entry in descriptor.entries {
+                        reachable.insert(router.repo_path(&entry.path).as_ref().to_owned());
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        path = %descriptor_path,
+                        error = %error,
+                        "retaining all shallow closure entries after descriptor validation failure"
+                    );
+                    reachable.extend(
+                        list_shallow_closure_entry_keys(store, router)
+                            .await?
+                            .into_iter(),
+                    );
+                }
+            }
+        }
+        Err(CrabError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+async fn list_shallow_closure_entry_keys(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<Vec<String>> {
+    let prefix = router.repo_path("metadata/shallow-closure/entries");
+    let mut objects = store.inner().list(Some(&prefix));
+    let mut keys = Vec::new();
+    while let Some(object) = objects.try_next().await.map_err(CrabError::Storage)? {
+        keys.push(object.location.as_ref().to_owned());
+    }
+    Ok(keys)
 }
 
 /// Read the manifest and build the repo-local object set that must survive GC.
@@ -1722,6 +1795,7 @@ struct RepoGcReachability {
     manifest: crate::metadata::manifest::Manifest,
     reachable_keys: HashSet<String>,
     shard_snapshot: ShardListSnapshot,
+    current_pack_keys: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -1960,6 +2034,45 @@ async fn stream_reachable_bulk_objects(
                 .to_owned(),
         )
         .await?;
+        stream_shallow_closure_reachable(store, router, manifest, sink).await?;
+    }
+    Ok(())
+}
+
+async fn stream_shallow_closure_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    sink: &mut RepoReachabilitySink<'_>,
+) -> Result<()> {
+    let descriptor_path = router.shallow_closure_path(&manifest.git_validation_digest);
+    match store.get_with_etag(&descriptor_path).await {
+        Ok((bytes, _)) => {
+            sink.add(descriptor_path.as_ref().to_owned()).await?;
+            match crab_metadata::shallow_closure::decode_shallow_closure_descriptor(
+                &bytes,
+                descriptor_path.as_ref(),
+            ) {
+                Ok(descriptor) => {
+                    for entry in descriptor.entries {
+                        sink.add(router.repo_path(&entry.path).as_ref().to_owned())
+                            .await?;
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        path = %descriptor_path,
+                        error = %error,
+                        "retaining all shallow closure entries after descriptor validation failure"
+                    );
+                    for key in list_shallow_closure_entry_keys(store, router).await? {
+                        sink.add(key).await?;
+                    }
+                }
+            }
+        }
+        Err(CrabError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -2214,8 +2327,10 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     extend_reachable_workflow_objects(store, router, &mut reachable).await?;
     reachable.insert(router.manifest_path().as_ref().to_string());
 
+    let mut current_pack_keys = HashSet::new();
     for pack in &snapshot.journal.packs {
         insert_pack_objects(router, &pack.pack_id, &mut reachable);
+        insert_pack_objects(router, &pack.pack_id, &mut current_pack_keys);
     }
     for edit in &snapshot.journal.ordered_edits {
         if let Some(hash) = &edit.visibility_evidence_hash {
@@ -2264,6 +2379,7 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
         manifest,
         reachable_keys: reachable,
         shard_snapshot,
+        current_pack_keys,
     })
 }
 
@@ -2555,8 +2671,16 @@ async fn run_repo_remote_gc_under_maintenance(
 
     let (listed_objects, list_outcome) =
         list_repo_gc_candidates_with_concurrency(store, router, args.list_concurrency).await?;
+    let pack_classes = classify_pack_storage(
+        &listed_objects,
+        &reachability.current_pack_keys,
+        &reachable_keys,
+        coordinator_protected_keys,
+        grace_period,
+        args.force,
+    );
 
-    run_gc(
+    let mut outcome = run_gc(
         args,
         listed_objects,
         &reachable_keys,
@@ -2569,7 +2693,49 @@ async fn run_repo_remote_gc_under_maintenance(
         &deleter,
         jsonl_stream,
     )
-    .await
+    .await?;
+    outcome.active_pack_bytes = pack_classes.active;
+    outcome.retained_history_pack_bytes = pack_classes.retained;
+    outcome.grace_period_pack_bytes = pack_classes.grace;
+    outcome.collectible_pack_bytes = pack_classes.collectible;
+    Ok(outcome)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PackStorageClasses {
+    active: u64,
+    retained: u64,
+    grace: u64,
+    collectible: u64,
+}
+
+fn classify_pack_storage(
+    objects: &[ObjectMeta],
+    current_pack_keys: &HashSet<String>,
+    reachable_keys: &HashSet<String>,
+    coordinator_protected_keys: &HashSet<String>,
+    grace_period: Duration,
+    force: bool,
+) -> PackStorageClasses {
+    let cutoff = SystemTime::now() - grace_period.max(MIN_GRACE_PERIOD);
+    let mut classes = PackStorageClasses::default();
+    for object in objects {
+        if categorize_key(&object.key) != ObjectCategory::Pack {
+            continue;
+        }
+        if current_pack_keys.contains(&object.key) {
+            classes.active = classes.active.saturating_add(object.size);
+        } else if reachable_keys.contains(&object.key)
+            || coordinator_protected_keys.contains(&object.key)
+        {
+            classes.retained = classes.retained.saturating_add(object.size);
+        } else if !force && object.last_modified >= cutoff {
+            classes.grace = classes.grace.saturating_add(object.size);
+        } else {
+            classes.collectible = classes.collectible.saturating_add(object.size);
+        }
+    }
+    classes
 }
 
 /// Build a shard-list snapshot from the manifest for GC T0 safety.
@@ -2973,6 +3139,40 @@ mod tests {
         assert_eq!(categorize_key("xorbs/cd/xorb1"), ObjectCategory::Xorb);
         assert_eq!(categorize_key("shards/ef/shard1"), ObjectCategory::Shard);
         assert_eq!(categorize_key("file-index/gh/fi1"), ObjectCategory::Other);
+    }
+
+    #[test]
+    fn pack_storage_classes_separate_active_history_grace_and_collectible() {
+        let objects = vec![
+            make_obj("packs/aa/active.pack", 10, Duration::from_secs(48 * 3600)),
+            make_obj("packs/bb/history.pack", 20, Duration::from_secs(48 * 3600)),
+            make_obj("packs/cc/grace.pack", 30, Duration::from_secs(30)),
+            make_obj("packs/dd/collect.pack", 40, Duration::from_secs(48 * 3600)),
+        ];
+        let current = HashSet::from(["packs/aa/active.pack".to_owned()]);
+        let reachable = HashSet::from([
+            "packs/aa/active.pack".to_owned(),
+            "packs/bb/history.pack".to_owned(),
+        ]);
+
+        let classes = classify_pack_storage(
+            &objects,
+            &current,
+            &reachable,
+            &HashSet::new(),
+            Duration::from_secs(3600),
+            false,
+        );
+
+        assert_eq!(
+            classes,
+            PackStorageClasses {
+                active: 10,
+                retained: 20,
+                grace: 30,
+                collectible: 40,
+            }
+        );
     }
 
     // --- Dry-run ---

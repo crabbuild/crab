@@ -36,6 +36,8 @@ The supported entry points are:
   work budget;
 - `RemoteGitRepository::{refs,resolve,snapshot}`: ref and reachable-revision
   selection;
+- `RemoteGitRepository::{generate_pack,generate_pack_cached}`: verified
+  delta-preserving response packs, with immutable reuse for no-have requests;
 - `RemoteGitSnapshot::{entry,list_directory,blob_metadata,read_blob}`: browser
   navigation and Git-representation content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
@@ -71,18 +73,27 @@ use `is_current` after a short freshness interval. A changed manifest always
 requires a new complete open handshake; cached state is never refreshed in
 place.
 
+No-have response packs can be persisted beneath the repository's immutable
+`generated-packs/v1` namespace. Keys bind physical repository identity,
+manifest Git state, the visible authorization union, canonical request
+semantics, output policy, and ordered object selection. Complete pack bodies
+and descriptors are verified on every read. Runtime single-flight and the
+existing renewable internal-lock contract coalesce concurrent producers;
+cancelling one waiter does not cancel work still needed by another process.
+
 Directory listing reads only the selected tree. Child sizes are absent unless
 the caller requests bounded page-only metadata. Comparison prunes equal tree
 IDs. History, diff, blame, archive, storage, inflation, and response work have
 independent aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
-manifest names an immutable `CommitGraphSummary`, open bounds it to 16 MiB,
-verifies its Blake3 identity, validates its OIDs, parent lists, and topological
-generations, and retains it only after manifest/inventory/locator coverage has
-matched. A snapshot uses it only while each summary parent list exactly matches
-the corresponding raw commit; missing summary entries fall back to raw parent
-order and can never hide a reachable commit.
+manifest names an immutable split commit graph, open bounds the complete graph
+to 128 MiB, verifies every descriptor and layer Blake3 identity, validates
+stable ordinals, parent closure, corrected generations, and the exact manifest
+generation/pack/digest tuple. A snapshot uses it only while each positional
+parent list exactly matches the corresponding raw commit; missing or corrupt
+acceleration falls back to raw parent order and can never hide a reachable
+commit.
 
 Each operation emits one structured span with only its bounded operation kind,
 process-local correlation ID, outcome, and safe error category. Raw OIDs,

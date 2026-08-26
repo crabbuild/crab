@@ -37,6 +37,8 @@ Before uploading new chunks, Crab can also ask the cache service which chunks ar
 | `.crab/shards/{first-two-hex}/{hash}` | Yes |
 | `{repo}/packs/pack-{id}.pack` | Yes |
 | `{repo}/packs/pack-{id}.idx` | Yes |
+| `{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack` | Yes |
+| `{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json` | Yes |
 | `{repo}/file_index_db/compacted/*.sst` | Yes |
 | `{repo}/file_index_db/manifest/*.manifest` | Yes |
 | `{repo}/file_index_db/wal/*.sst` | Yes |
@@ -56,6 +58,7 @@ Before uploading new chunks, Crab can also ask the cache service which chunks ar
 | `.crab/chunk_index_db/manifest/current` | No |
 
 Mutable repository state is never cached. This prevents stale refs and stale metadata from breaking clone, fetch, and push behavior.
+Generated response bodies and request descriptors are immutable and content- or request-addressed. Production uses the existing mutable internal-lock namespace, which already bypasses the cache.
 Only versioned SlateDB metadata objects are cached. Discovery pointers such as `manifest/current` stay mutable, and file-index lookups go through Crab's metadata databases rather than standalone file-index object routes.
 The same taxonomy is exposed from `/v1/capabilities.routes` so `crab doctor`
 and onboarding probes can verify that a client and cache server agree before

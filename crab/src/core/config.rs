@@ -920,12 +920,10 @@ const DEFAULT_CHUNK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// bounded packs; a value of `0` disables the per-pack bound.
 const DEFAULT_RECEIVE_MAX_INPUT_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Default upper bound on commits walked by the commit-graph-summary
+/// Default upper bound on commits walked by the complete positional graph
 /// ancestry fallback used when `git merge-base --is-ancestor` can't
 /// answer (shallow clients, missing local objects). Caps worst-case
-/// cost of the summary walk and matches the commit-graph-summary's
-/// default compaction window so the walk stays within the cached
-/// history. `0` disables the fallback and conservatively rejects the
+/// cost of the graph walk. `0` disables the fallback and conservatively rejects the
 /// push as non-fast-forward.
 const DEFAULT_RECEIVE_FF_SUMMARY_WINDOW_COMMITS: u64 = 1000;
 
@@ -1180,7 +1178,7 @@ pub struct Config {
     /// split into bounded packs; a single object that cannot fit is
     /// rejected before upload. A value of `0` disables the bound.
     pub receive_max_input_size: u64,
-    /// Maximum number of commits walked by the commit-graph-summary
+    /// Maximum number of commits walked by the complete commit graph
     /// ancestry fallback used when `git merge-base --is-ancestor`
     /// can't answer (e.g. shallow/sparse clients missing the old
     /// SHA locally). The walk starts from the incoming tip and

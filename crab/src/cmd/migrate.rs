@@ -2129,17 +2129,19 @@ fn verify_mapped_remote_destinations(
     let commit = create_migration_verification_commit(project_root, output_path)?;
     git_update_ref(project_root, &temporary_ref, Some(&commit))?;
 
+    let project_root_for_async = project_root.to_path_buf();
     let inventory_for_async = inventory.clone();
     let journal_for_async = journal.clone();
     let branch_for_async = temporary_branch;
     let temporary_ref_for_async = temporary_ref.clone();
     let mappings_for_async = mappings.clone();
-    let verification = run_migration_in_dir(project_root, async move {
+    let verification = run_migration_future(async move {
         let cancel = CancellationToken::new();
         let mut evidence = BTreeMap::new();
         let mut operation_error = None;
         for (name, destination) in &mappings_for_async {
             let result = verify_one_mapped_destination(
+                &project_root_for_async,
                 &inventory_for_async,
                 &journal_for_async,
                 &branch_for_async,
@@ -2158,9 +2160,13 @@ fn verify_mapped_remote_destinations(
                 }
             }
         }
-        let cleanup =
-            cleanup_remote_verification_ref(&temporary_ref_for_async, &mappings_for_async, &cancel)
-                .await;
+        let cleanup = cleanup_remote_verification_ref(
+            &project_root_for_async,
+            &temporary_ref_for_async,
+            &mappings_for_async,
+            &cancel,
+        )
+        .await;
         match (operation_error, cleanup) {
             (Some(error), Ok(())) => Err(error),
             (Some(error), Err(cleanup_error)) => Err(CrabError::Configuration {
@@ -2188,6 +2194,7 @@ fn verify_mapped_remote_destinations(
 }
 
 async fn verify_one_mapped_destination(
+    project_root: &Path,
     inventory: &DvcInventory,
     journal: &DvcMigrationJournal,
     branch: &str,
@@ -2207,7 +2214,7 @@ async fn verify_one_mapped_destination(
         vec![format!("{temporary_ref}:{temporary_ref}")],
         false,
     );
-    crate::cmd::push::run_push_without_terminal_output(&push_args, cancel).await?;
+    crate::cmd::push::run_push_without_terminal_output_in(project_root, &push_args, cancel).await?;
 
     let clone_parent = tempfile::tempdir().map_err(CrabError::Io)?;
     let clone_name = PathBuf::from("clean-clone");
@@ -2228,6 +2235,7 @@ async fn verify_one_mapped_destination(
 }
 
 async fn cleanup_remote_verification_ref(
+    project_root: &Path,
     temporary_ref: &str,
     mappings: &[(String, String)],
     cancel: &CancellationToken,
@@ -2238,7 +2246,8 @@ async fn cleanup_remote_verification_ref(
             continue;
         }
         let args = migration_push_args(destination, vec![format!(":{temporary_ref}")], true);
-        if let Err(error) = crate::cmd::push::run_push_without_terminal_output(&args, cancel).await
+        if let Err(error) =
+            crate::cmd::push::run_push_without_terminal_output_in(project_root, &args, cancel).await
         {
             if first_error.is_none() {
                 first_error = Some(error);
@@ -2438,25 +2447,13 @@ fn git_update_ref(project_root: &Path, reference: &str, value: Option<&str>) -> 
     }
 }
 
-fn run_migration_in_dir<F, T>(root: &Path, future: F) -> Result<T>
+fn run_migration_future<F, T>(future: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
-    let root = root.to_path_buf();
-    let operation = async move {
-        let previous = std::env::current_dir().map_err(CrabError::Io)?;
-        std::env::set_current_dir(&root).map_err(CrabError::Io)?;
-        let result = future.await;
-        let restore = std::env::set_current_dir(previous).map_err(CrabError::Io);
-        match (result, restore) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_) | Err(_), Err(error)) => Err(error),
-        }
-    };
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(operation))
+            tokio::task::block_in_place(|| handle.block_on(future))
         }
         Ok(_) => Err(CrabError::Configuration {
             key: "dvc_remote_verification_runtime".to_owned(),
@@ -2466,7 +2463,7 @@ where
             .enable_all()
             .build()
             .map_err(CrabError::Io)?
-            .block_on(operation),
+            .block_on(future),
     }
 }
 

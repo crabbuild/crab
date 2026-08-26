@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::remote_helper::{FetchEntry, FetchOptions};
 use crate::git::shallow;
-use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::commit_graph::CommitGraphTraversal;
 use crab_metadata::manifests::{Manifest, PackList, validate_manifest_payload};
 
 /// Metadata for a single pack available on the remote.
@@ -77,18 +77,18 @@ impl<S: PackStore> PackStore for Arc<S> {
     }
 }
 
-/// Provides access to the remote's commit graph summary and pack list.
+/// Provides access to the remote's commit graph and pack list.
 ///
 /// Used by the shallow fetch path to compute boundaries and filter packs.
 /// Separated from [`PackStore`] because not all callers need graph access.
 pub trait CommitGraphProvider: Send + Sync {
-    /// Fetch the [`CommitGraphSummary`] from the remote.
+    /// Fetch the complete generation-bound commit graph from the remote.
     ///
     /// Returns `None` if the remote has no commit graph summary (e.g.
     /// legacy repositories that predate shallow support).
-    fn fetch_commit_graph_summary(
+    fn fetch_commit_graph(
         &self,
-    ) -> impl std::future::Future<Output = Result<Option<CommitGraphSummary>>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<Arc<dyn CommitGraphTraversal>>>> + Send;
 
     /// Fetch the current [`PackList`] manifest from the remote.
     fn fetch_pack_list(&self) -> impl std::future::Future<Output = Result<PackList>> + Send;
@@ -193,7 +193,7 @@ impl PreparedFetch {
 /// 3. Downloads missing packs with per-pack atomic write (tempfile + rename).
 ///
 /// When `fetch_options` carries a depth constraint, the pipeline reads the
-/// remote's [`CommitGraphSummary`], computes the shallow boundary, filters
+/// remote's complete commit graph, computes the shallow boundary, filters
 /// packs, and writes `.git/shallow`. On `--unshallow` (depth=0 with an
 /// existing shallow file), all remaining packs are downloaded and the
 /// shallow file is removed.
@@ -336,8 +336,8 @@ async fn run_shallow_fetch<S: PackStore + 'static, G: CommitGraphProvider>(
         )
     })?;
 
-    let Some(summary) = graph_provider.fetch_commit_graph_summary().await? else {
-        warn!("no CommitGraphSummary on remote — falling back to full fetch");
+    let Some(graph) = graph_provider.fetch_commit_graph().await? else {
+        warn!("no complete commit graph on remote — falling back to full fetch");
         let installed =
             run_full_fetch(entries, config, store, Some(graph_provider), cancel).await?;
         return Ok(if deepen_relative {
@@ -360,15 +360,7 @@ async fn run_shallow_fetch<S: PackStore + 'static, G: CommitGraphProvider>(
         None
     };
     let traversal_roots = current_boundary.as_deref().unwrap_or(&ref_tips);
-    let known_commits: HashSet<&str> = summary
-        .commits
-        .iter()
-        .map(|entry| entry.oid.as_str())
-        .collect();
-    if traversal_roots
-        .iter()
-        .any(|oid| !known_commits.contains(oid.as_str()))
-    {
+    if traversal_roots.iter().any(|oid| !graph.contains_oid(oid)) {
         warn!(
             "shallow traversal root is outside the bounded commit graph; falling back to full fetch"
         );
@@ -382,9 +374,9 @@ async fn run_shallow_fetch<S: PackStore + 'static, G: CommitGraphProvider>(
     }
 
     let boundary = if let Some(current) = current_boundary.as_ref() {
-        shallow::compute_shallow_boundary(&summary, current, depth.saturating_add(1))
+        shallow::compute_shallow_boundary(graph.as_ref(), current, depth.saturating_add(1))
     } else {
-        shallow::compute_shallow_boundary(&summary, &ref_tips, depth)
+        shallow::compute_shallow_boundary(graph.as_ref(), &ref_tips, depth)
     };
 
     if let Some(current) = current_boundary.as_ref() {
@@ -405,7 +397,8 @@ async fn run_shallow_fetch<S: PackStore + 'static, G: CommitGraphProvider>(
     );
 
     let pack_list = graph_provider.fetch_pack_list().await?;
-    let filtered_ids = shallow::filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
+    let filtered_ids =
+        shallow::filter_packs_by_depth(&pack_list, graph.as_ref(), &boundary, &ref_tips);
 
     let pack_dir = config.pack_dir();
     tokio::fs::create_dir_all(&pack_dir).await?;
@@ -1191,7 +1184,7 @@ mod tests {
     struct NoOpGraphProvider;
 
     impl CommitGraphProvider for NoOpGraphProvider {
-        async fn fetch_commit_graph_summary(&self) -> Result<Option<CommitGraphSummary>> {
+        async fn fetch_commit_graph(&self) -> Result<Option<Arc<dyn CommitGraphTraversal>>> {
             Ok(None)
         }
         async fn fetch_pack_list(&self) -> Result<PackList> {
@@ -1206,8 +1199,11 @@ mod tests {
     }
 
     impl CommitGraphProvider for TestGraphProvider {
-        async fn fetch_commit_graph_summary(&self) -> Result<Option<CommitGraphSummary>> {
-            Ok(self.summary.clone())
+        async fn fetch_commit_graph(&self) -> Result<Option<Arc<dyn CommitGraphTraversal>>> {
+            Ok(self
+                .summary
+                .clone()
+                .map(|summary| Arc::new(summary) as Arc<dyn CommitGraphTraversal>))
         }
         async fn fetch_pack_list(&self) -> Result<PackList> {
             Ok(self.pack_list.clone())

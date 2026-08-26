@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crab_metadata::git_object_locator::GitObjectLocatorSession;
+use crab_metadata::git_object_locator::{GitObjectKind, GitObjectLocatorSession, GitObjectLookup};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -10,11 +10,11 @@ use tracing::Instrument as _;
 
 use crate::budget::{BudgetUsage, OperationBudget};
 use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
-use crate::reader::{GitObject, RemoteGitObjectMetadata};
+use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
-    AnnotatedTag, Blame, BudgetDimension, Commit, Error, GitPath, MetricKind, MetricObservation,
-    MetricOutcome, Result, TreeEntry,
+    AnnotatedTag, Blame, BudgetDimension, Commit, CorruptionStage, Error, GitPath, MetricKind,
+    MetricObservation, MetricOutcome, Result, TreeEntry,
 };
 
 /// Bounded semantic operation name used only for metrics and traces.
@@ -57,6 +57,15 @@ pub enum OperationKind {
     Symlink,
     /// Submodule gitlink metadata.
     Submodule,
+}
+
+/// Exact object selection and shallow boundaries for one indexed fetch depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShallowClosureSelection {
+    /// Objects included in the shallow clone.
+    pub object_ids: Vec<gix_hash::ObjectId>,
+    /// Commits that the client must retain as shallow boundaries.
+    pub shallow: Vec<gix_hash::ObjectId>,
 }
 
 impl OperationKind {
@@ -153,6 +162,7 @@ pub struct OperationContext {
     budget: OperationBudget,
     session: Option<TrackedLocatorSession>,
     started: Instant,
+    kind: OperationKind,
     finished: bool,
     correlation_id: u64,
     span: tracing::Span,
@@ -248,6 +258,7 @@ impl OperationContext {
             deadline_stop,
             session,
             started,
+            kind,
             finished: false,
             correlation_id,
             span,
@@ -294,6 +305,7 @@ impl OperationContext {
             Err(Error::Cancelled) => MetricOutcome::Cancelled,
             Err(_) => MetricOutcome::Error,
         };
+        let usage = self.budget.usage().await;
         self.state.runtime.metrics().record(MetricObservation {
             kind: MetricKind::Operation,
             value: 1,
@@ -306,6 +318,21 @@ impl OperationContext {
             self.correlation_id,
             outcome,
             result.as_ref().err(),
+        );
+        tracing::info!(
+            target: "crab_remote_git::telemetry",
+            parent: &self.span,
+            telemetry_event = "operation_summary",
+            correlation_id = self.correlation_id,
+            operation = self.kind.as_str(),
+            outcome = ?outcome,
+            duration_ms = self.started.elapsed().as_millis() as u64,
+            logical_objects = usage.amount(BudgetDimension::LogicalObjects),
+            storage_requests = usage.amount(BudgetDimension::StorageRequests),
+            fetched_bytes = usage.amount(BudgetDimension::FetchedBytes),
+            inflated_bytes = usage.amount(BudgetDimension::InflatedBytes),
+            response_bytes = usage.amount(BudgetDimension::ResponseBytes),
+            "remote Git operation summary"
         );
         self.finished = true;
         result
@@ -321,10 +348,138 @@ impl OperationContext {
         self.state.options.operation_limits().max_logical_objects
     }
 
+    /// Resolve the published object kinds without reading packed object bodies.
+    pub async fn catalog_object_kinds(
+        &self,
+        object_ids: &[[u8; 20]],
+    ) -> Result<Vec<Option<GitObjectKind>>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        let lookups = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            lookups = session.lookup_batch(object_ids, &self.state.inventory) => lookups?,
+        };
+        if lookups.len() != object_ids.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        lookups
+            .into_iter()
+            .map(|lookup| match lookup {
+                GitObjectLookup::Hit(locator) => Ok(locator.metadata.kind),
+                GitObjectLookup::Miss => Ok(None),
+                GitObjectLookup::Corrupt => Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                }),
+            })
+            .collect()
+    }
+
+    /// Load an exact generation-bound shallow object closure when available.
+    pub async fn shallow_object_closure(
+        &self,
+        tip: gix_hash::ObjectId,
+        depth: u32,
+    ) -> Result<Option<ShallowClosureSelection>> {
+        check_cancelled(&self.cancellation)?;
+        let Some(tip) = tip.as_bytes().try_into().ok() else {
+            return Ok(None);
+        };
+        let Some(index) = self.state.shallow_closure.as_ref() else {
+            return Ok(None);
+        };
+        let Some(reference) = index.entry(&tip, depth) else {
+            return Ok(None);
+        };
+        self.budget
+            .charge(BudgetDimension::StorageRequests, 1)
+            .await?;
+        self.budget
+            .charge(BudgetDimension::FetchedBytes, reference.bytes)
+            .await?;
+        self.budget
+            .charge(
+                BudgetDimension::LogicalObjects,
+                u64::from(reference.object_count),
+            )
+            .await?;
+        let entry = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            result = crab_metadata::shallow_closure::load_shallow_closure_entry(
+                &self.state.store,
+                &self.state.layout,
+                reference,
+                crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
+            ) => result?,
+        };
+        Ok(Some(ShallowClosureSelection {
+            object_ids: entry
+                .object_ids
+                .into_iter()
+                .map(gix_hash::ObjectId::from)
+                .collect(),
+            shallow: entry
+                .shallow
+                .into_iter()
+                .map(gix_hash::ObjectId::from)
+                .collect(),
+        }))
+    }
+
     /// Return the maximum complete pack response size for this operation.
     #[must_use]
     pub fn max_response_bytes(&self) -> u64 {
         self.state.options.operation_limits().max_response_bytes
+    }
+
+    /// Return the maximum source bytes this operation may fetch.
+    #[must_use]
+    pub fn max_fetched_bytes(&self) -> u64 {
+        self.state.options.operation_limits().max_fetched_bytes
+    }
+
+    pub(crate) async fn single_pack_checksum_for_exact_objects(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        object_ids: &[gix_hash::ObjectId],
+    ) -> Result<Option<[u8; 20]>> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let checksum = reader
+            .pack_checksum_for_exact_objects(pack_id, object_ids, &self.budget, &self.cancellation)
+            .await?;
+        if checksum.is_some() {
+            self.budget
+                .charge(BudgetDimension::LogicalObjects, object_ids.len() as u64)
+                .await?;
+        }
+        Ok(checksum)
+    }
+
+    pub(crate) async fn download_pack_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        expected_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_to_path(
+                pack_id,
+                expected_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
     }
 
     /// Read one verified Git object from the pinned repository generation.
@@ -430,6 +585,13 @@ impl OperationContext {
         self.budget
             .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
             .await?;
+        self.read_objects_uncharged(oids).await
+    }
+
+    pub(crate) async fn read_objects_uncharged(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::RemoteGitObject>> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let session = self
             .session
@@ -441,6 +603,69 @@ impl OperationContext {
         reader
             .read_many_with_session(
                 session,
+                oids,
+                batch_concurrency(
+                    self.state.runtime.options(),
+                    self.state.options.object_limits(),
+                    self.state.options.operation_limits(),
+                ),
+                &self.budget,
+                &self.cancellation,
+            )
+            .instrument(self.span.clone())
+            .await
+    }
+
+    pub(crate) async fn read_packed_entries(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        reader
+            .read_packed_many_with_session(
+                session,
+                oids,
+                batch_concurrency(
+                    self.state.runtime.options(),
+                    self.state.options.object_limits(),
+                    self.state.options.operation_limits(),
+                ),
+                &self.budget,
+                &self.cancellation,
+            )
+            .instrument(self.span.clone())
+            .await
+    }
+
+    pub(crate) async fn materialize_packed_entries(
+        &self,
+        entries: Vec<RemoteGitPackedEntry>,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crate::RemoteGitObject>> {
+        check_cancelled(&self.cancellation)?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        reader
+            .materialize_packed_entries(
+                session,
+                entries,
                 oids,
                 batch_concurrency(
                     self.state.runtime.options(),

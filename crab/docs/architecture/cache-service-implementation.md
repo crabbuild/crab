@@ -282,9 +282,10 @@ reading the shared chunk index.
 - Existing-shard verification and file-index shard proof reads use the
   cache-aware store when configured. Duplicate pushes should not fetch shard
   bodies from origin once the shard is warm.
-- The push pipeline loads the advisory `commit-graph-summary` only after a
-  fast-forward probe needs the shallow-client fallback. New-ref, delete, and
-  locally provable update pushes should not read that mutable object.
+- The push pipeline loads the manifest-pinned split commit graph only after a
+  fast-forward probe needs the shallow-client fallback. Every descriptor and
+  binary layer is immutable and content-verified; new-ref, delete, and locally
+  provable update pushes should not read graph objects.
 - Uncontended push locks use strict-create/update CAS tokens returned by the
   object store. The lock body is read only for contention, expired-lock reclaim,
   heartbeat renewal, or stale-token release fallback.

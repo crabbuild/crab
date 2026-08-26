@@ -10,13 +10,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crab_metadata::git_visibility::GitVisibilityIndex;
+use crab_metadata::manifest_store::read_manifest;
 use crab_read::{
     FetchAdmissionPolicy, UploadPackFilter, UploadPackRequest, combine_upload_pack_filters,
     parse_upload_pack_filter, plan_upload_pack,
 };
 use crab_remote_git::{
-    Error as RemoteGitError, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
-    RepositoryOptions,
+    Error as RemoteGitError, ObjectLimits, OperationLimits, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity, RepositoryOptions,
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
@@ -34,6 +35,80 @@ const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
 const LOCATOR_READ_RETRY_LIMIT: usize = 5;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
 const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+struct ObjectStoreGeneratedPackLeaseProvider {
+    store: Arc<dyn object_store::ObjectStore>,
+    prefix: String,
+}
+
+struct ObjectStoreGeneratedPackLease {
+    lock: crab_coordination::PushLock,
+}
+
+impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLeaseProvider {
+    fn try_acquire<'a>(
+        &'a self,
+        resource: &'a str,
+        ttl: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<
+            crab_remote_git::GeneratedPackLeaseAttempt,
+            crab_remote_git::GeneratedPackLeaseError,
+        >,
+    > {
+        Box::pin(async move {
+            match crab_coordination::PushLock::acquire_internal(
+                &self.store,
+                &self.prefix,
+                resource,
+                ttl,
+            )
+            .await
+            {
+                Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
+                    Box::new(ObjectStoreGeneratedPackLease { lock }),
+                )),
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held)
+                }
+                Err(error) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+            }
+        })
+    }
+}
+
+impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
+    fn renew(
+        &mut self,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
+    > {
+        Box::pin(async move {
+            self.lock
+                .renew()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+        })
+    }
+
+    fn release(
+        self: Box<Self>,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
+    > {
+        Box::pin(async move {
+            self.lock
+                .release()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Packet {
@@ -73,59 +148,54 @@ struct FetchRequest {
     filter: UploadPackFilter,
 }
 
-/// Check whether the repository has the complete proof required to advertise
-/// protocol-v2 upload-pack without rebuilding lagging locator coverage.
+/// Check whether protocol-v2 admission has a stable manifest to repair or use.
 pub async fn snapshot_available(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> bool {
-    // If exact locator coverage lags, omit v2 and let Git use the
-    // already-advertised complete-pack fetch path. Rebuilding it here makes
-    // every dependent hot-ref generation pay the full locator publication cost.
-    let Ok(repository) = open_repository_snapshot(store, prefix, cancellation).await else {
+    // Filtered fetch has no useful legacy complete-pack fallback. Keep the
+    // capability probe cheap and let upload-pack admission repair derived
+    // coverage once a client actually requests a v2 session.
+    let Ok(stable) = capability_snapshot_is_stable(store, prefix, cancellation).await else {
         return false;
     };
-    match repository.visibility_index(cancellation).await {
-        Ok(_) => true,
-        Err(error) if visibility_index_needs_repair(&error) => {
-            let repair_store = crate::storage::Store::from_storage(store.clone());
-            let repair_layout =
-                crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-            if matches!(
-                super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-                Ok(true)
-            ) {
-                return false;
+    stable
+}
+
+async fn capability_snapshot_is_stable(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<bool> {
+    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+    let (_manifest, _) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
+        result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
+    };
+    let repair_store = crate::storage::Store::from_storage(store.clone());
+    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
+    let active_marker_present = store
+        .list_prefix_bounded(&layout.ref_journal_active_prefix(), 1)
+        .await?
+        .map_or(true, |objects| !objects.is_empty());
+    let owner_active =
+        match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::warn!(%error, "generation owner probe failed during capability discovery");
+                return Ok(false);
             }
-            match Box::pin(super::push::repair_git_visibility_if_current(
-                &repair_store,
-                &repair_layout,
-                repository.generation(),
-                LOCATOR_READ_REPAIR_LOCK_TTL,
-                cancellation,
-            ))
-            .await
-            {
-                Ok(Some(super::push::GitVisibilityPublication::Published)) => {
-                    let Ok(repository) =
-                        open_repository_snapshot(store, prefix, cancellation).await
-                    else {
-                        return false;
-                    };
-                    repository.visibility_index(cancellation).await.is_ok()
-                }
-                Ok(Some(super::push::GitVisibilityPublication::CompletePackOnly(_)) | None) => {
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "current Git visibility repair failed");
-                    false
-                }
-            }
-        }
-        Err(_) => false,
+        };
+    if owner_active {
+        tracing::debug!(
+            active_marker_present,
+            "protocol-v2 capability withheld while generation-owner admission is active"
+        );
+        return Ok(false);
     }
+    Ok(true)
 }
 
 fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
@@ -158,11 +228,10 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let repository = open_repository(store, prefix, cancellation).await?;
-    let visibility = repository
-        .visibility_index(cancellation)
-        .await
-        .map_err(remote_error)?;
+    // Catalog-bound admission materializes the large visibility dictionary;
+    // retain that proof instead of reopening SlateDB for the same helper.
+    let (repository, visibility) =
+        open_repository_with_visibility(store, prefix, cancellation).await?;
     let visible_ref_names = visible_ref_names(&repository, hidden_ref_patterns)?;
 
     // The remote-helper positive response is one raw blank line. Only after
@@ -255,6 +324,12 @@ where
                     cancellation,
                 )
                 .await?;
+                // A terminal stateless-connect session has no server-side state to preserve
+                // after the final fetch response. Closing here lets Git finish processing the
+                // pack without waiting for a second empty request on the same pipe.
+                if fetch.done {
+                    return Ok(());
+                }
             }
             other => {
                 let error =
@@ -300,10 +375,9 @@ fn validate_fetch_wants(
         if policy.allow_any_sha_in_want
             || (policy.allow_tip_sha_in_want && advertised_tips.contains(want))
             || (policy.allow_reachable_sha_in_want
-                && visibility.contains_for_refs(
-                    visible_ref_names.iter().map(String::as_str),
-                    &want.to_hex().to_string(),
-                ))
+                && want.as_bytes().try_into().ok().is_some_and(|oid| {
+                    visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+                }))
         {
             continue;
         }
@@ -314,29 +388,79 @@ fn validate_fetch_wants(
     Ok(())
 }
 
-pub(crate) async fn open_repository(
+pub(crate) async fn open_repository_with_visibility(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
-) -> Result<RemoteGitRepository> {
+) -> Result<(RemoteGitRepository, GitVisibilityIndex)> {
+    let repair_store = crate::storage::Store::from_storage(store.clone());
+    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
+        let (manifest, _) =
+            crate::metadata::manifest::read_manifest(&repair_store, &repair_layout).await?;
+        let active_transactions = crate::metadata::manifest::list_active_ref_journal_transactions(
+            &repair_store,
+            &repair_layout,
+        )
+        .await?;
+        if !active_transactions.is_empty() {
+            if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
+                return Err(remote_error(RemoteGitError::RepositoryIndexing {
+                    observed: Some(manifest.generation),
+                    required: manifest.generation.saturating_add(1),
+                }));
+            }
+            if super::push::compact_ref_journal_for_owner(
+                &repair_store,
+                &repair_layout,
+                LOCATOR_READ_REPAIR_LOCK_TTL,
+                manifest.pusher.clone(),
+                cancellation,
+            )
+            .await?
+            {
+                tracing::info!(
+                    generation = manifest.generation,
+                    "compacted active Git ref journal before upload-pack admission"
+                );
+                continue;
+            }
+            last_indexing = Some((
+                Some(manifest.generation),
+                manifest.generation.saturating_add(1),
+            ));
+            if attempt == LOCATOR_READ_RETRY_LIMIT {
+                break;
+            }
+            let delay = locator_read_retry_delay(attempt);
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            }
+            continue;
+        }
+
         let open = open_repository_snapshot(store, prefix, cancellation).await;
+        let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
-            Ok(repository) => return Ok(repository),
+            Ok(repository) => match repository.visibility_index(cancellation).await {
+                Ok(visibility) => return Ok((repository, visibility)),
+                Err(error) if visibility_index_needs_repair(&error) => {
+                    let generation = repository.generation();
+                    visibility_error = Some(error);
+                    (Some(generation), generation)
+                }
+                Err(error) => return Err(remote_error(error)),
+            },
             Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
             Err(error) => return Err(remote_error(error)),
         };
         last_indexing = Some((observed_generation, required_generation));
 
-        // The manifest generation check distinguishes derived publication lag
-        // from an active ref-journal transaction, which must remain unavailable.
-        let repair_store = crate::storage::Store::from_storage(store.clone());
-        let repair_layout = crab_storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-        if matches!(
-            super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await,
-            Ok(true)
-        ) {
+        // Once journal transactions are drained, generation checks distinguish
+        // derived publication lag from a concurrent owner update.
+        if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
             return Err(remote_error(RemoteGitError::RepositoryIndexing {
                 observed: observed_generation,
                 required: required_generation,
@@ -356,7 +480,31 @@ pub(crate) async fn open_repository(
                 required_generation,
                 "repaired current Git locator before upload-pack admission"
             );
-            continue;
+        }
+        if repaired || visibility_error.is_some() {
+            let publication =
+                super::push::repair_git_visibility_after_locator_if_current_with_limit(
+                    &repair_store,
+                    &repair_layout,
+                    required_generation,
+                    crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+                    LOCATOR_READ_REPAIR_LOCK_TTL,
+                    cancellation,
+                )
+                .await?;
+            if matches!(
+                publication,
+                Some(super::push::GitVisibilityPublication::Published)
+            ) {
+                tracing::info!(
+                    required_generation,
+                    "repaired current catalog-bound Git visibility before upload-pack admission"
+                );
+                continue;
+            }
+            if let Some(error) = visibility_error {
+                return Err(remote_error(error));
+            }
         }
         if attempt == LOCATOR_READ_RETRY_LIMIT {
             break;
@@ -397,15 +545,41 @@ async fn open_repository_snapshot(
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1)?;
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let runtime = Arc::new(RemoteGitRuntime::default());
-    RemoteGitRepository::open(
+    let repository = RemoteGitRepository::open(
         store.clone(),
         layout,
         identity,
         runtime,
-        RepositoryOptions::default(),
+        upload_pack_repository_options()?,
         cancellation,
     )
-    .await
+    .await?;
+    let lease_provider = ObjectStoreGeneratedPackLeaseProvider {
+        store: Arc::clone(store.inner()),
+        prefix: prefix.to_owned(),
+    };
+    Ok(repository.with_generated_pack_lease_provider(Arc::new(lease_provider)))
+}
+
+fn upload_pack_repository_options() -> crab_remote_git::Result<RepositoryOptions> {
+    let object = ObjectLimits {
+        max_packed_entry_bytes: 128 * MIB,
+        max_inflated_entry_bytes: 128 * MIB,
+        max_object_bytes: 128 * MIB,
+        ..ObjectLimits::default()
+    };
+    let operation = OperationLimits {
+        // Upload-pack is an explicit repository transfer. Its bounded profile must cover the
+        // largest supported visibility generation without weakening interactive read defaults.
+        max_duration: Duration::from_secs(2 * 60 * 60),
+        max_logical_objects: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_storage_requests: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_fetched_bytes: 64 * GIB,
+        max_inflated_bytes: 128 * GIB,
+        max_response_bytes: 16 * GIB,
+        ..OperationLimits::default()
+    };
+    RepositoryOptions::new(object, operation)
 }
 
 fn locator_read_retry_delay(attempt: usize) -> Duration {
@@ -752,10 +926,9 @@ fn common_haves(
         .haves
         .iter()
         .filter(|have| {
-            visibility.contains_for_refs(
-                visible_ref_names.iter().map(String::as_str),
-                &have.to_hex().to_string(),
-            )
+            have.as_bytes().try_into().ok().is_some_and(|oid| {
+                visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
+            })
         })
         .copied()
         .collect()
@@ -876,10 +1049,29 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     if progress && !request.no_progress {
         write_packet(writer, b"counting objects\n", Some(2), cancellation).await?;
     }
-    let pack = match repository
-        .generate_pack(&plan.object_ids, cancellation)
-        .await
-    {
+    let thin_bases = request
+        .thin_pack
+        .then_some(plan.common_haves.as_slice())
+        .unwrap_or_default();
+    let generated = if request.haves.is_empty() {
+        let authorization_digest =
+            visibility.authorization_digest_for_refs(visible_ref_names.iter().map(String::as_str));
+        let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
+        let cache_key = repository.generated_pack_cache_key(
+            authorization_digest,
+            request_digest,
+            &plan.object_ids,
+            !thin_bases.is_empty(),
+        );
+        repository
+            .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
+            .await
+    } else {
+        repository
+            .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
+            .await
+    };
+    let pack = match generated {
         Ok(pack) => pack,
         Err(error) => {
             write_packet(writer, error.to_string().as_bytes(), Some(3), cancellation).await?;
@@ -908,6 +1100,46 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .map_err(remote_error)?;
     write_flush(writer, cancellation).await?;
     write_response_end(writer, cancellation).await
+}
+
+fn generated_pack_request_digest(
+    request: &FetchRequest,
+    response_shallow: &[ObjectId],
+    response_unshallow: &[ObjectId],
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.upload-pack.generated-request.v1\0");
+    let filter = request.filter.canonical_spec();
+    hash.update(&(filter.len() as u64).to_be_bytes());
+    hash.update(filter.as_bytes());
+    hash.update(&[
+        u8::from(request.deepen_relative),
+        u8::from(request.include_tags),
+        u8::from(request.thin_pack),
+        u8::from(request.ofs_delta),
+    ]);
+    match request.deepen {
+        Some(depth) => {
+            hash.update(&[1]);
+            hash.update(&depth.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    for objects in [
+        request.shallow.as_slice(),
+        response_shallow,
+        response_unshallow,
+    ] {
+        let mut objects = objects.to_vec();
+        objects.sort_unstable();
+        hash.update(&(objects.len() as u64).to_be_bytes());
+        for oid in objects {
+            hash.update(oid.as_bytes());
+        }
+    }
+    *hash.finalize().as_bytes()
 }
 
 fn is_likely_lazy_fetch(repository: &RemoteGitRepository, request: &FetchRequest) -> bool {
@@ -1145,6 +1377,115 @@ mod tests {
     }
 
     #[test]
+    fn generated_pack_request_digest_is_canonical_and_policy_bound() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let request = FetchRequest {
+            shallow: vec![second, first],
+            include_tags: true,
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        let mut reordered = request.clone();
+        reordered.shallow.reverse();
+
+        let digest = generated_pack_request_digest(&request, &[second, first], &[]);
+        assert_eq!(
+            digest,
+            generated_pack_request_digest(&reordered, &[first, second], &[])
+        );
+        reordered.thin_pack = true;
+        assert_ne!(
+            digest,
+            generated_pack_request_digest(&reordered, &[first, second], &[])
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_pack_lease_provider_serializes_one_repository_resource() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let provider = ObjectStoreGeneratedPackLeaseProvider {
+            store,
+            prefix: "org/repo".to_owned(),
+        };
+        let first = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("first lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+                panic!("first lease must be available")
+            }
+        };
+        let blocked = crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("contending lease acquisition");
+        assert!(matches!(
+            blocked,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held
+        ));
+
+        first.release().await.expect("release first lease");
+        let replacement = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("replacement lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+                panic!("released lease must be acquirable")
+            }
+        };
+        replacement.release().await.expect("release replacement");
+    }
+
+    #[test]
+    fn upload_pack_profile_covers_the_supported_visibility_generation() {
+        let options = upload_pack_repository_options().expect("valid upload-pack limits");
+
+        assert_eq!(options.object_limits().max_object_bytes, 128 * MIB);
+        assert_eq!(
+            options.operation_limits().max_logical_objects,
+            crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
+        );
+        assert!(
+            options.operation_limits().max_response_bytes
+                < options.operation_limits().max_inflated_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_snapshot_short_circuits_empty_repositories() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .expect("create empty manifest");
+
+        assert_eq!(
+            capability_snapshot_is_stable(&store, "org/repo", &CancellationToken::new())
+                .await
+                .expect("read empty capability snapshot"),
+            true
+        );
+    }
+
+    #[test]
     fn visibility_mismatch_enters_the_bounded_repair_path() {
         let error = RemoteGitError::RepositoryState {
             reason: crab_remote_git::RepositoryStateError::VisibilityProofMismatch,
@@ -1374,7 +1715,8 @@ mod tests {
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
             )]),
-        );
+        )
+        .expect("valid visibility proof");
 
         let error = validate_fetch_wants(
             &HashSet::from([tip]),
@@ -1405,7 +1747,8 @@ mod tests {
                 visible_refs[0].clone(),
                 vec![ancestor.to_string(), tip.to_string()],
             )]),
-        );
+        )
+        .expect("valid visibility proof");
         let policy = FetchAdmissionPolicy {
             allow_reachable_sha_in_want: true,
             ..FetchAdmissionPolicy::default()

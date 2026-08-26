@@ -59,16 +59,19 @@ A client request for an unsupported form receives a protocol error; Crab never
 acknowledges it and downloads a complete pack as a substitute.
 
 Fresh, unfiltered fetches of exact visible ref targets use the visibility
-proof's complete per-ref closure directly. Requests with haves, shallow or
-depth semantics, filters, tag expansion, or a want that is not an exact ref
-target use the bounded traversal planner. Pack generation reads up to the
-operation's default 10,000-object bound as one locator batch so adjacent pack
-ranges can be coalesced; fetched-byte and inflated-byte budgets remain the
-memory and I/O bounds. Locator batches spanning at least one exact-read wave
-and at least half of the pinned pack inventory use one ordered SlateDB scan,
-clipped to the requested SHA-1 range. The scan abandons itself and returns to
-exact reads if stale rows would make it examine more than twice the requested
-object count, so sparse and stale-heavy repositories remain bounded.
+proof's complete per-ref closure directly. Each monotonic ref update retains a
+bounded transition from recent prior tips to the current tip, so an unfiltered
+incremental fetch can select the proven `want - have` closure without walking
+the complete object graph. A rewrite, deletion, missing transition, shallow or
+depth request, filter, or want that is not an exact ref target uses the bounded
+traversal planner. Pack generation reads up to the operation's default
+10,000-object bound as one locator batch so adjacent pack ranges can be
+coalesced; fetched-byte and inflated-byte budgets remain the memory and I/O
+bounds. Locator batches spanning at least one exact-read wave and at least half
+of the pinned pack inventory use one ordered SlateDB scan, clipped to the
+requested SHA-1 range. The scan abandons itself and returns to exact reads if
+stale rows would make it examine more than twice the requested object count,
+so sparse and stale-heavy repositories remain bounded.
 
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
@@ -82,7 +85,12 @@ sorted dictionary and represents each ref closure as sparse dictionary
 positions or a dense bitmap, avoiding repeated 40-byte IDs and integer-heavy
 closures for shared history. Invalid or missing
 proof suppresses v2 advertisement; it never triggers a silent complete
-filtered fetch. Crab 1.0.15 proofs keyed only by generation and pack-index hash
+filtered fetch. At runtime, the proof retains one binary SHA-1 dictionary and
+sparse-or-bitmap ordinal closures; ref authorization, unions, differences, and
+counts do not expand per-ref hexadecimal strings. The current version-4 codec
+also stores up to 64 monotonic transitions per ref. Version-3 proofs normalize
+directly into the same runtime model and acquire transitions as later journal
+edits are compacted. Crab 1.0.15 proofs keyed only by generation and pack-index hash
 remain an explicit read migration: write and repair owners backfill the
 digest-bound key, and GC retains both roots while that tagged-data migration is
 supported. If a valid legacy key contains a different ref closure from the
@@ -90,16 +98,22 @@ current manifest, migration treats it as an abandoned candidate and rebuilds
 the digest-bound proof; malformed bodies still fail closed as corruption.
 
 Each direct ref update uploads content-addressed visibility evidence before its
-journal marker becomes visible. Fast-forward and ordinary updates encode only
-the object IDs added to or removed from the prior ref closure; a writer that
-cannot read the prior local closure publishes a complete replacement. The
-single journal-compaction owner applies the ordered evidence and uploads the
+journal marker becomes visible. When the compacted generation already has an
+exact proof, updates enumerate only objects reachable from the new tip but not
+the old tip and vice versa. This keeps ordinary large-repository pushes bounded
+by changed reachability rather than total history. New refs publish a bounded
+complete replacement because they have no prior closure. The single
+journal-compaction owner applies ordered evidence and uploads the next
 generation proof before advancing the compacted manifest. Concurrent writers
 therefore do not need one another's pack bodies or local Git object databases.
-Transient evidence or proof publication failures abort before the ref becomes
-visible. Repositories whose conservative per-ref proof bound exceeds the
-synchronous 100,000-entry profile explicitly remain on complete-pack fetch
-instead of turning a proof failure into a successful push.
+
+Evidence upload failures abort before the ref becomes visible. A delta larger
+than the synchronous 100,000-object profile, or one crossing a shallow-client
+boundary, may commit without derived evidence; protocol v2 is then withheld
+until the owner reconstructs the exact generation. An initial repository whose
+proof exceeds that synchronous profile similarly remains on complete-pack
+fetch until owner publication. Total repository size does not by itself defer
+evidence after an exact base proof exists.
 The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.

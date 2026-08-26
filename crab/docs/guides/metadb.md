@@ -99,12 +99,14 @@ command.
 
 ### `crab metadb owner`
 
-Run one durable derived-index owner for a repository. The owner holds the Git
-locator writer lease, reuses one SlateDB writer across manifest generations,
-publishes immutable reader checkpoints, and repairs the generation-bound Git
-visibility proof. Push and upload-pack clients detect its repository lease and
-leave locator repair to it; complete-pack fetch remains the safe fallback while
-a newly committed generation is being indexed.
+Run one durable derived-state owner for a repository. Each cycle pins one
+manifest snapshot and performs at most one bounded action: advance the object
+catalog, repair visibility, rebuild or compact the split commit graph, or roll
+up the smallest non-geometric pack suffix. The locator writer and its lease are
+opened only for catalog work and are closed before repository-sized graph or
+pack work begins. Push and upload-pack clients detect the repository owner and
+leave repair to it; complete-pack fetch remains the safe fallback while a new
+generation is being indexed.
 
 ```bash
 crab metadb owner
@@ -118,18 +120,20 @@ may run per repository. A second process exits because it cannot acquire the
 owner lease. SIGINT/SIGTERM closes SlateDB and releases both leases before exit;
 expired leases remain reclaimable after a process or host failure.
 
-The default 30-second poll bounds normal locator lag to roughly one interval.
-An unchanged repository costs one manifest read per poll, or 2,880 reads/day.
-The owner revalidates immutable visibility evidence every ten minutes and
-renews two object-store leases every one-third of the configured push-lock TTL.
-Actual repair work occurs only when the manifest generation changes or evidence
-is missing. Choose a longer interval for low-traffic repositories; choose a
-shorter interval only when lower protocol-v2 availability lag justifies the
-additional object-store requests.
+The default 30-second poll bounds normal derived-state lag to roughly one
+interval per pending action. An unchanged repository reads the manifest and
+its small inventory/descriptor metadata, but does not download stable pack
+bodies. The repository-owner lease is renewed every one-third of the configured
+push-lock TTL; the shorter locator lease is acquired only while advancing its
+SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
+a shorter interval only when lower repair or maintenance lag justifies the
+additional metadata requests.
 
-`--once` is an operator repair/check, not a daemon mode. `--jsonl` emits one
-bounded record per sample with generation, locator advancement, visibility
-result, supersession, and elapsed time.
+`--once` executes one decision, not the entire backlog. Repeat it until
+`action` is `none`, or run the continuous owner. `--jsonl` emits one record per
+sample with the selected action, active pack count/bytes, geometric roll-up
+size, catalog and commit-graph layer count/bytes, maintenance bytes read and
+written, visibility state, supersession, and elapsed time.
 
 ### `crab metadb compact`
 

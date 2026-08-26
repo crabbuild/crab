@@ -5,21 +5,23 @@ use std::time::Duration;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use slatedb::DbReaderMode;
 use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
-    METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
-    decode_object_location, decode_pack_key, decode_pack_record, object_key,
-    validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
+    decode_object_location, decode_ordinal_key, decode_pack_key, decode_pack_record, object_key,
+    ordinal_key, validate_location_for_pack,
 };
 use super::{
-    GitLocatorCoverage, GitObjectLocation, GitObjectLocator, GitPackInventoryEntry,
-    GitPackLocatorBinding, GitPackLocatorRecord, git_object_locator_path,
+    GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocation, GitObjectLocator,
+    GitObjectOrdinal, GitPackInventoryEntry, GitPackLocatorBinding, GitPackLocatorRecord,
+    git_object_locator_path,
 };
 use crate::error::{MetadataError, Result};
 
-const DB_LABEL: &str = "git_locator_db";
+const DB_LABEL: &str = "git_object_catalog_db";
 const LOOKUP_CONCURRENCY: usize = 256;
 // A scan must replace one full point-read wave and may inspect at most two
 // rows per requested object before the exact-key path becomes cheaper.
@@ -27,6 +29,11 @@ const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
 const MAX_SCAN_AMPLIFICATION: usize = 2;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
+// Catalog reads materialize one immutable dense dictionary. A larger
+// read-ahead window and more fetch tasks keep that sequential transfer from
+// degenerating into one object-store round trip per SlateDB block.
+const CATALOG_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
+const CATALOG_SCAN_FETCH_TASKS: usize = 8;
 // One cache is private to one short-lived reader process. This keeps 32
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
@@ -53,7 +60,7 @@ pub enum GitObjectLookup {
 /// Read-only session for exact compact Git locator queries.
 pub struct GitObjectLocatorSession {
     reader: Option<Arc<slatedb::DbReader>>,
-    coverage: Option<GitLocatorCoverage>,
+    identity: Option<GitObjectCatalogIdentity>,
     bindings: HashMap<u64, GitPackLocatorRecord>,
 }
 
@@ -99,8 +106,49 @@ impl GitObjectLocatorSession {
         options: DbReaderOptions,
     ) -> Result<Self> {
         let path = git_object_locator_path(repo_prefix);
-        let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path).await?;
+        let checkpoint = reader_checkpoint_id(Arc::clone(&store), &path, None).await?;
         Self::open_with_checkpoint(store, repo_prefix, options, checkpoint).await
+    }
+
+    /// Open the immutable catalog checkpoint named by an exact catalog identity.
+    pub async fn open_for_catalog(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+        identity: GitObjectCatalogIdentity,
+        minimum: Duration,
+    ) -> Result<Self> {
+        let manifest_poll_interval = minimum
+            .checked_add(Duration::from_secs(1))
+            .ok_or_else(|| MetadataError::Internal("catalog operation duration overflow".into()))?;
+        let options = DbReaderOptions {
+            manifest_poll_interval,
+            checkpoint_lifetime: manifest_poll_interval.checked_mul(2).ok_or_else(|| {
+                MetadataError::Internal("catalog checkpoint duration overflow".into())
+            })?,
+            ..locator_reader_options()
+        };
+        let path = git_object_locator_path(repo_prefix);
+        let checkpoint =
+            reader_checkpoint_id(Arc::clone(&store), &path, Some(identity.catalog_digest))
+                .await?
+                .ok_or_else(|| {
+                    corrupt("checkpoint", "published Git catalog checkpoint is missing")
+                })?;
+        let session =
+            Self::open_with_checkpoint(store, repo_prefix, options, Some(checkpoint)).await?;
+        if session.identity != Some(identity) {
+            return close_after_error(
+                session.reader.ok_or_else(|| {
+                    MetadataError::Internal("catalog checkpoint reader is absent".to_owned())
+                })?,
+                corrupt(
+                    "metadata",
+                    "catalog checkpoint identity does not match its name",
+                ),
+            )
+            .await;
+        }
+        Ok(session)
     }
 
     #[cfg(test)]
@@ -122,7 +170,7 @@ impl GitObjectLocatorSession {
         let mut builder = slatedb::DbReader::builder(ObjectPath::from(path.as_str()), store)
             .with_options(options);
         if let Some(checkpoint) = checkpoint {
-            builder = builder.with_checkpoint_id(checkpoint.id);
+            builder = builder.with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id));
         }
         let reader = match builder
             .with_db_cache(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
@@ -136,7 +184,7 @@ impl GitObjectLocatorSession {
             Err(error) if is_manifest_missing(&error) => {
                 return Ok(Self {
                     reader: None,
-                    coverage: None,
+                    identity: None,
                     bindings: HashMap::new(),
                 });
             }
@@ -150,9 +198,9 @@ impl GitObjectLocatorSession {
         };
 
         match load_state(&reader).await {
-            Ok((coverage, bindings)) => Ok(Self {
+            Ok((identity, bindings)) => Ok(Self {
                 reader: Some(reader),
-                coverage,
+                identity,
                 bindings,
             }),
             Err(operation) => close_after_error(reader, operation).await,
@@ -168,7 +216,16 @@ impl GitObjectLocatorSession {
     /// Return the latest fully published manifest inventory, if any.
     #[must_use]
     pub fn coverage(&self) -> Option<GitLocatorCoverage> {
-        self.coverage
+        self.identity.map(|identity| GitLocatorCoverage {
+            generation: identity.generation,
+            pack_index_hash: identity.pack_index_hash,
+        })
+    }
+
+    /// Return the exact generation and checkpoint identity pinned by this session.
+    #[must_use]
+    pub fn catalog_identity(&self) -> Option<GitObjectCatalogIdentity> {
+        self.identity
     }
 
     /// Resolve OID keys and validate every hit against pinned inventory.
@@ -329,6 +386,101 @@ impl GitObjectLocatorSession {
         Ok(bindings)
     }
 
+    /// Resolve dense catalog ordinals to canonical binary object IDs.
+    pub async fn object_ids_by_ordinal(
+        &self,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Vec<Option<[u8; 20]>>> {
+        let Some(reader) = &self.reader else {
+            return Ok(vec![None; ordinals.len()]);
+        };
+        let fetched = stream::iter(
+            ordinals
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, ordinal)| {
+                    let reader = Arc::clone(reader);
+                    async move {
+                        let value = reader.get(ordinal_key(ordinal)).await.map_err(read_error)?;
+                        let oid = value
+                            .map(|value| {
+                                value.as_ref().try_into().map_err(|_| {
+                                    corrupt("ordinal", "invalid Git catalog ordinal object ID")
+                                })
+                            })
+                            .transpose()?;
+                        Ok::<_, MetadataError>((index, oid))
+                    }
+                }),
+        )
+        .buffer_unordered(LOOKUP_CONCURRENCY.min(ordinals.len()).max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+        let mut objects = vec![None; ordinals.len()];
+        for (index, oid) in fetched {
+            objects[index] = oid;
+        }
+        Ok(objects)
+    }
+
+    /// Read the complete dense OID order from this immutable catalog checkpoint.
+    pub async fn all_object_ids(&self) -> Result<Vec<[u8; 20]>> {
+        let Some(reader) = &self.reader else {
+            return Ok(Vec::new());
+        };
+        let expected = self.identity.map_or(0, |identity| identity.object_count);
+        let capacity = usize::try_from(expected)
+            .map_err(|_| corrupt("metadata", "catalog object count cannot be represented"))?;
+        let mut objects = Vec::with_capacity(capacity);
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(CATALOG_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(CATALOG_SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options([ORDINAL_FAMILY], .., &options)
+            .await
+            .map_err(read_error)?;
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            let ordinal = decode_ordinal_key(&row.key)
+                .ok_or_else(|| corrupt("ordinal", "invalid Git catalog ordinal key"))?;
+            if usize::try_from(ordinal).ok() != Some(objects.len()) {
+                return Err(corrupt(
+                    "ordinal",
+                    "Git catalog ordinals are not dense and ordered",
+                ));
+            }
+            objects.push(
+                row.value
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| corrupt("ordinal", "invalid Git catalog ordinal object ID"))?,
+            );
+        }
+        if objects.len() != capacity {
+            return Err(corrupt(
+                "ordinal",
+                "Git catalog ordinal count does not match metadata",
+            ));
+        }
+        Ok(objects)
+    }
+
+    /// Read the complete catalog order and close the pinned SlateDB reader.
+    pub async fn all_object_ids_and_close(self) -> Result<Vec<[u8; 20]>> {
+        match self.all_object_ids().await {
+            Ok(objects) => {
+                self.close().await?;
+                Ok(objects)
+            }
+            Err(operation) => {
+                let Some(reader) = self.reader else {
+                    return Err(operation);
+                };
+                close_after_error(reader, operation).await
+            }
+        }
+    }
+
     /// Close the underlying SlateDB reader.
     pub async fn close(self) -> Result<()> {
         let Some(reader) = self.reader else {
@@ -360,29 +512,9 @@ fn lookup_strategy(requested_objects: usize, inventory_objects: u64) -> LookupSt
 async fn reader_checkpoint_id(
     store: Arc<dyn ObjectStore>,
     path: &str,
+    expected: Option<crab_xet::hash::MerkleHash>,
 ) -> Result<Option<slatedb::Checkpoint>> {
     let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
-    let named = match admin
-        .list_checkpoints(Some(super::READER_CHECKPOINT_NAME))
-        .await
-    {
-        Ok(checkpoints) => checkpoints,
-        Err(error) if is_manifest_missing(&error) => return Ok(None),
-        Err(source) => {
-            return Err(MetadataError::SlateDbOpen {
-                db: DB_LABEL.to_owned(),
-                path: path.to_owned(),
-                source,
-            });
-        }
-    };
-    if let Some(checkpoint) = named
-        .into_iter()
-        .max_by_key(|checkpoint| checkpoint.manifest_id)
-    {
-        return Ok(Some(checkpoint));
-    }
-
     let checkpoints = match admin.list_checkpoints(None).await {
         Ok(checkpoints) => checkpoints,
         Err(error) if is_manifest_missing(&error) => return Ok(None),
@@ -394,9 +526,27 @@ async fn reader_checkpoint_id(
             });
         }
     };
-    Ok(checkpoints
-        .into_iter()
-        .max_by_key(|checkpoint| checkpoint.manifest_id))
+    if let Some(expected) = expected.map(super::catalog_checkpoint_name) {
+        return Ok(checkpoints
+            .into_iter()
+            .filter(|checkpoint| checkpoint.name.as_deref() == Some(expected.as_str()))
+            .max_by_key(|checkpoint| checkpoint.manifest_id));
+    }
+    let named = checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(super::READER_CHECKPOINT_PREFIX))
+        })
+        .max_by_key(|checkpoint| checkpoint.manifest_id)
+        .cloned();
+    Ok(named.or_else(|| {
+        checkpoints
+            .into_iter()
+            .max_by_key(|checkpoint| checkpoint.manifest_id)
+    }))
 }
 
 fn locator_reader_options() -> DbReaderOptions {
@@ -437,15 +587,17 @@ fn classify_location(
         return GitObjectLookup::Corrupt;
     }
     GitObjectLookup::Hit(GitObjectLocator {
+        ordinal: stored.ordinal,
         pack_id: pack.pack_id,
         location,
+        metadata: stored.metadata,
     })
 }
 
 async fn load_state(
     reader: &slatedb::DbReader,
 ) -> Result<(
-    Option<GitLocatorCoverage>,
+    Option<GitObjectCatalogIdentity>,
     HashMap<u64, GitPackLocatorRecord>,
 )> {
     let value = reader
@@ -477,7 +629,7 @@ async fn load_state(
             ));
         }
     }
-    Ok((metadata.coverage, bindings))
+    Ok((metadata.identity, bindings))
 }
 
 fn is_manifest_missing(error: &slatedb::Error) -> bool {
@@ -530,7 +682,8 @@ mod tests {
 
     use super::*;
     use crate::git_object_locator::{
-        GitObjectLocatorEntry, GitObjectLocatorWriter, GitPackLocatorRecord,
+        GitObjectKind, GitObjectLocatorEntry, GitObjectLocatorWriter, GitObjectMetadata,
+        GitPackLocatorRecord,
     };
     use crab_xet::hash::MerkleHash;
 
@@ -680,6 +833,7 @@ mod tests {
                         entry_len: 96,
                         crc32: 7,
                     },
+                    metadata: Default::default(),
                 }],
             )
             .await
@@ -722,6 +876,7 @@ mod tests {
                     entry_len: 96,
                     crc32: 7,
                 },
+                metadata: Default::default(),
             })
             .collect::<Vec<_>>();
         let mut writer = GitObjectLocatorWriter::open(store, "org/repo")
@@ -769,10 +924,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_kind_metadata_round_trips_through_the_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fixture = publish(Arc::clone(&store), pack(1), [33; 20], None).await;
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[fixture.pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(
+                binding,
+                &[GitObjectLocatorEntry {
+                    oid: fixture.oid,
+                    location: GitObjectLocation {
+                        pack_offset: 12,
+                        entry_len: 96,
+                        crc32: 7,
+                    },
+                    metadata: GitObjectMetadata {
+                        kind: Some(GitObjectKind::Blob),
+                        ..Default::default()
+                    },
+                }],
+            )
+            .await
+            .expect("write kind metadata");
+        writer.flush_objects().await.expect("flush kind metadata");
+        writer.close().await.expect("close writer");
+
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+        let lookup = session
+            .lookup_batch(
+                &[fixture.oid],
+                &HashMap::from([(fixture.pack.pack_id, fixture.inventory)]),
+            )
+            .await
+            .expect("lookup object kind");
+        assert!(matches!(
+            lookup.as_slice(),
+            [GitObjectLookup::Hit(locator)]
+                if locator.metadata.kind == Some(GitObjectKind::Blob)
+        ));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
     async fn operation_reader_does_not_write_a_checkpoint() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         publish(Arc::clone(&store), pack(1), [31; 20], None).await;
-        let prefix = ObjectPath::from("org/repo/git_locator_db");
+        let prefix = ObjectPath::from("org/repo/git_object_catalog_db");
         let before = store
             .list(Some(&prefix))
             .try_collect::<Vec<_>>()
@@ -800,7 +1002,7 @@ mod tests {
     async fn published_locator_open_is_storage_read_only() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         publish(Arc::clone(&store), pack(1), [32; 20], None).await;
-        let prefix = ObjectPath::from("org/repo/git_locator_db");
+        let prefix = ObjectPath::from("org/repo/git_object_catalog_db");
         let before = store
             .list(Some(&prefix))
             .try_collect::<Vec<_>>()
@@ -950,7 +1152,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         store
             .put(
-                &ObjectPath::from("org/repo/git_object_locator_db/legacy"),
+                &ObjectPath::from("org/repo/git_locator_db/legacy"),
                 bytes::Bytes::from_static(b"legacy").into(),
             )
             .await

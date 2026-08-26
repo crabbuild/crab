@@ -1,0 +1,157 @@
+name: Large repository RustFS qualification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/large-repository-rustfs.yml"
+      - "crab/scripts/e2e/run_large_repo_rustfs.py"
+      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/verify-large-repo-rustfs-report.py"
+      - "crab/docs/guides/large-repository-qualification.md"
+      - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-remote-git/src/budget.rs"
+      - "crates/crab-remote-git/src/operation.rs"
+      - "crates/crab-remote-git/src/pack.rs"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/large-repository-rustfs.yml"
+      - "crab/scripts/e2e/run_large_repo_rustfs.py"
+      - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/verify-large-repo-rustfs-report.py"
+      - "crab/docs/guides/large-repository-qualification.md"
+      - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-remote-git/src/budget.rs"
+      - "crates/crab-remote-git/src/operation.rs"
+      - "crates/crab-remote-git/src/pack.rs"
+  schedule:
+    - cron: "31 7 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  report-contract:
+    name: Qualification report contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify report contract tests
+        run: |
+          python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
+          python3 -m py_compile \
+            crab/scripts/e2e/run_large_repo_rustfs.py \
+            crab/scripts/verify-large-repo-rustfs-report.py
+
+  kubernetes-rustfs:
+    name: Kubernetes 1,000-commit RustFS qualification
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: report-contract
+    runs-on: [self-hosted, macOS, crab-large-repo]
+    timeout-minutes: 1440
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      CARGO_TARGET_DIR: /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+      QUALIFICATION_ROOT: /Volumes/Workspace/CrabBuild/crabbuild-qualification
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preflight dedicated runner
+        run: |
+          set -euo pipefail
+          test -d /Volumes/Workspace
+          mkdir -p "$CARGO_TARGET_DIR" "$QUALIFICATION_ROOT"
+          test -w "$CARGO_TARGET_DIR"
+          test -w "$QUALIFICATION_ROOT"
+          test -d /Volumes/Workspace/Github/kubernetes/kubernetes/.git
+          test -x "$(command -v aws)"
+          test -x "$(command -v docker)"
+          docker info >/dev/null
+
+      - name: Build release Crab
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)" \
+            cargo build -p crab --release --locked --features gix-transport
+
+      - name: Start pinned RustFS
+        run: |
+          set -euo pipefail
+          data_root="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$data_root"
+          docker pull "$RUSTFS_IMAGE"
+          docker rm -f crab-large-repo-rustfs >/dev/null 2>&1 || true
+          docker run -d \
+            --name crab-large-repo-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "$data_root:/data" \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          for _ in $(seq 1 90); do
+            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs crab-large-repo-rustfs >&2 || true
+          exit 1
+
+      - name: Run consecutive qualifications
+        run: |
+          set -euo pipefail
+          first="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-a"
+          second="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-b"
+          common=(
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab"
+            --root "$QUALIFICATION_ROOT"
+            --source /Volumes/Workspace/Github/kubernetes/kubernetes
+            --object-store-version "$RUSTFS_IMAGE"
+            --cold-clone-fanout 50
+            --warm-clone-fanout 100
+            --cleanup-remote
+          )
+          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
+          python3 crab/scripts/verify-large-repo-rustfs-report.py \
+            "$QUALIFICATION_ROOT/$first/artifacts/report.json"
+          python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
+          python3 crab/scripts/verify-large-repo-rustfs-report.py \
+            "$QUALIFICATION_ROOT/$second/artifacts/report.json"
+          python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
+            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
+            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
+            --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          docker logs crab-large-repo-rustfs \
+            > "$QUALIFICATION_ROOT/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log" 2>&1 || true
+          docker rm -f crab-large-repo-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-repository-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-a/artifacts/**
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-b/artifacts/**
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/comparison-${{ github.run_id }}-${{ github.run_attempt }}.json
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}.log
+          if-no-files-found: warn
+          retention-days: 30

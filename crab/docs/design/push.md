@@ -404,7 +404,7 @@ gix-traverse commit walk (from tips)
         │       └── blob > 256 bytes → skip (not a pointer)
         │
         └── collect CommitEntry(oid, parents, gen_number)
-            for commit-graph-summary update in step 11
+            for the manifest-pinned split commit graph
 ```
 
 **Data produced:**
@@ -769,12 +769,11 @@ remote.
    compute an incremental remote-object set without a round-trip.
    Index construction, checksum binding, and canonical `.idx` upload are
    pre-commit requirements. All pack entries are appended to one candidate
-   pack index and become visible through one manifest CAS. On an ordinary
-   generation-zero push, the manifest CAS and complete Git-visibility proof
-   return first; exact offset/length/CRC rows are deferred because they are
-   repairable acceleration state. The next push, `crab metadb owner`, or the
-   first fetch that needs protocol-v2 locator admission publishes them through
-   one renewed `git_locator_db` writer session. Publication failure never rolls
+   pack index and become visible through one manifest CAS. After that CAS,
+   exact offset/length/CRC rows for the whole set are published through one
+   renewed `git_object_catalog_db` writer session. Dense object ordinals and
+   the matching visibility proof are published after the manifest CAS;
+   publication failure is repairable acceleration damage and does not roll
    back committed refs.
 ```
 
@@ -937,7 +936,7 @@ non-current-branch pushes are not rewritten.
  │                                                                   │
  │  ┌──────────────────┐                                             │
  │  │ Step 11          │                                             │
- │  │ CAS manifests    │─────────────────────────────────────────────┼──► commit-graph-summary
+ │  │ publish graph    │─────────────────────────────────────────────┼──► split graph layers
  │  └──────────────────┘                                             │     (pack-list, shard-list)
  │                                                                   │
  │  ┌──────────────────┐                                             │
@@ -1064,7 +1063,7 @@ Step 12 ◄── specs[] (from remote helper batch)
                     │          COMMIT PHASE                │
                     │                                      │
                     │ 11. CAS manifests:                   │
-                    │     commit-graph-summary             │──► CAS
+                    │     split commit graph               │──► immutable + manifest CAS
                     │     (pack-list, shard-list: stubs)   │
                     │                                      │
                     │ 12. Ref CAS:                         │
@@ -1197,6 +1196,13 @@ release that holder immediately with a holder-checked CAS. Prepared
 transactions and mismatched holders cannot take this path, and the final CAS
 cannot clear a lock that has already been acquired by a successor.
 
+The generation-owner compactor also closes the crash window after the marker
+is written: once the compacted manifest is committed, it promotes any
+prepared ref heads for that transaction before deleting the marker, then
+releases each recorded holder with the same holder-checked CAS. A failed head
+promotion retains the marker for a later compaction pass, so upload-pack never
+mistakes a half-repaired generation for a stable repository state.
+
 An object-store failure before the active-marker write returns a structured,
 retryable `transient` outcome and runs the normal holder-checked release path;
 the ref remains invisible. If the immutable marker was stored but its success
@@ -1226,7 +1232,7 @@ Every interval:
 
 ### CAS (Compare-and-Swap) for Manifests
 
-Mutable manifests (pack-list, shard-list, commit-graph-summary) are
+Mutable compatibility manifests (pack-list and shard-list) are
 updated via a CAS loop:
 
 ```
@@ -1283,7 +1289,9 @@ s3://{bucket}/{prefix}/
 ├── manifests/
 │   └── pack-list                   ← JSON { entries: [{ pack_id, ref_tips }] }
 │
-├── commit-graph-summary            ← JSON { generation, commits: [...] }
+├── manifests/commit-graph-{hash}   ← immutable split-graph descriptor
+├── metadata/commit-graph/layers/
+│   └── {hash}.bin                  ← immutable positional commit records
 │
 ├── shard-list                      ← JSON { entries: [{ shard_hash }] }
 │
@@ -1712,23 +1720,15 @@ Result: Retry uploads only the missing 50 xorbs.
         after the grace period.
 ```
 
-### Scenario 5: Manifest CAS Conflict
+### Scenario 5: Ref-Journal CAS Conflict
 
 ```
 Pusher A                              Pusher B
 ────────                              ────────
-Step 11: GET commit-graph-summary
-         (generation=5, etag=E1)
-                                      Step 11: GET commit-graph-summary
-                                               (generation=5, etag=E1)
-         mutate → generation=6
-         PUT with If-Match: E1 ✓
-         (etag now E2)
-                                               mutate → generation=6
-                                               PUT with If-Match: E1 ✗
-                                               (412 Precondition Failed)
-                                               backoff 73ms
-                                               GET → (generation=6, etag=E2)
+commit ref-journal head with CAS ✓    observe updated journal head
+compact committed transactions       re-evaluate against current refs
+append split graph layer              commit only non-conflicting edits
+CAS graph hash onto exact manifest    append/compact from that generation
                                                mutate → generation=7
                                                PUT with If-Match: E2 ✓
 
@@ -1868,17 +1868,14 @@ PUT packs/pack-0xP1.idx                  ~50ms
 PUT packs/pack-0xP1.meta (JSON)          ~50ms
 ```
 
-### Step 11–12: Build Manifest + Unified Manifest CAS
+### Step 11–12: Commit Refs + Attach Acceleration
 
 ```
-CAS commit-graph-summary:
-  GET → { generation: 5, commits: [...] }
-  append def456 → { generation: 6, commits: [..., def456] }
-  PUT (conditional) → 200 OK                              ~100ms
-
-Acquire lock: locks/refs/heads/main/lock                   ~50ms
-PUT refs/heads/main → "def456\n"                           ~50ms
-Release lock: CAS-write tombstone                          ~50ms
+Commit ref-journal transaction under the ref lock
+Compact transactions into one manifest generation
+Upload one binary graph delta layer and descriptor
+CAS the descriptor hash onto that exact manifest generation
+Release/hand off maintenance ownership
 ```
 
 ### Total Push Time

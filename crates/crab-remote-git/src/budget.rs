@@ -107,6 +107,10 @@ impl OperationBudget {
         }
     }
 
+    pub(crate) async fn remaining(&self, dimension: BudgetDimension) -> u64 {
+        self.work.lock().await.remaining(dimension)
+    }
+
     pub(crate) async fn charge_cached(&self, usage: BudgetUsage) -> Result<()> {
         for dimension in CACHED_SEMANTIC_DIMENSIONS {
             self.charge(dimension, usage.amount(dimension)).await?;
@@ -126,7 +130,7 @@ impl BudgetUsage {
         Self { used }
     }
 
-    const fn amount(self, dimension: BudgetDimension) -> u64 {
+    pub(crate) const fn amount(self, dimension: BudgetDimension) -> u64 {
         self.used[dimension as usize]
     }
 }
@@ -183,6 +187,11 @@ impl WorkBudget {
             BudgetDimension::ArchiveBytes => self.limits.max_archive_bytes,
             BudgetDimension::ResponseBytes => self.limits.max_response_bytes,
         }
+    }
+
+    const fn remaining(&self, dimension: BudgetDimension) -> u64 {
+        self.maximum(dimension)
+            .saturating_sub(self.used[dimension as usize])
     }
 }
 

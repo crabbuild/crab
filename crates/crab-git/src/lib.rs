@@ -25,7 +25,10 @@ pub use lfs_pointer::{
     LFS_VERSION_URL, LfsExtension, LfsPointer, LfsPointerError, MAX_LFS_POINTER_SIZE,
 };
 pub use odb_adapter::{CrabOdb, NoopXorbResolver, OdbError, XorbBlobResolver};
-pub use pack::{InstalledPack, PackError, install_pack_file_from_path, verify_pack_sha1};
+pub use pack::{
+    InstalledPack, PackError, initialize_bare_git_dir, install_pack_file_from_path,
+    object_kinds_from_git_dir, verify_pack_sha1,
+};
 pub use pack_locator::{
     PackLocationIter, PackLocatorError, PackObjectLocation, write_pack_reverse_index,
 };

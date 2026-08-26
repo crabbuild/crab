@@ -68,6 +68,17 @@ CHECKS = (
         ("test", "-p", "crab-metadata", "--features", "file-index-reader", "file_index_lookup"),
     ),
     Check(
+        "crab-metadata catalog-bound visibility behavior",
+        (
+            "test",
+            "-p",
+            "crab-metadata",
+            "--features",
+            "storage,remote-index",
+            "git_visibility",
+        ),
+    ),
+    Check(
         "crab-metadata persistent chunk index behavior",
         ("test", "-p", "crab-metadata", "--features", "local-index", "persistent_chunk_index"),
     ),

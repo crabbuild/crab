@@ -2,6 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
   "properties": {
+    "active_pack_bytes": {
+      "default": 0,
+      "description": "Current-manifest Git pack bytes.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "bytes_reclaimed": {
       "description": "Total bytes reclaimed.",
       "format": "uint64",
@@ -11,6 +18,13 @@
     "cancelled": {
       "description": "Whether the run was cancelled mid-sweep.",
       "type": "boolean"
+    },
+    "collectible_pack_bytes": {
+      "default": 0,
+      "description": "Unreachable pack bytes eligible for collection.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "delete_failures": {
       "default": 0,
@@ -30,6 +44,13 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "grace_period_pack_bytes": {
+      "default": 0,
+      "description": "Unreachable pack bytes retained by the grace period.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "packs_deleted": {
       "description": "Number of pack objects deleted (or would-be-deleted in dry-run).",
       "format": "uint64",
@@ -45,6 +66,13 @@
       "default": false,
       "description": "Whether post-delete metadata reconciliation failed.",
       "type": "boolean"
+    },
+    "retained_history_pack_bytes": {
+      "default": 0,
+      "description": "Pack bytes retained only by history, workflows, or other recovery roots.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "shards_deleted": {
       "description": "Number of shard objects deleted.",

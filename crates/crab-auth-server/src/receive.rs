@@ -1012,7 +1012,8 @@ pub(crate) async fn publish_materialized_git_visibility(
         manifest.pack_index_hash.clone(),
         manifest.git_validation_digest.clone(),
         refs.clone(),
-    );
+    )
+    .map_err(AuthServerError::from)?;
     if !index.matches_manifest(manifest) {
         return Err(invalid(
             "materialized Git visibility does not match the candidate manifest",
@@ -1210,6 +1211,7 @@ struct ServiceLocatorEvidence {
     idx_path: std::path::PathBuf,
     rev_path: std::path::PathBuf,
     git_sha1: String,
+    kind_by_oid: Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>,
 }
 
 fn validate_service_locator_evidence(
@@ -1320,6 +1322,7 @@ async fn download_service_locator_evidence_with_legacy_repair(
         idx_path,
         rev_path,
         git_sha1,
+        kind_by_oid: None,
     })
 }
 
@@ -1358,7 +1361,9 @@ async fn derive_service_locator_evidence(
         idx_hash,
         rev_size,
         rev_hash,
+        kind_by_oid,
     ) = tokio::task::spawn_blocking(move || {
+        crab_git::initialize_bare_git_dir(temp.path()).map_err(AuthServerError::from)?;
         let pack_dir = temp.path().join("objects/pack");
         std::fs::create_dir_all(&pack_dir)?;
         let installed = crab_git::pack::install_pack_file_from_path(
@@ -1371,7 +1376,7 @@ async fn derive_service_locator_evidence(
             // packs, so object fsck would reject valid incremental packs.
             false,
         )?;
-        let locations = crab_git::pack_locator::PackLocationIter::open(
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
             &installed.idx_path,
             &installed.rev_path,
             downloaded,
@@ -1389,6 +1394,45 @@ async fn derive_service_locator_evidence(
                 "committed pack index checksum disagrees with pack trailer",
             ));
         }
+        let object_ids = locations
+            .by_ref()
+            .map(|location| {
+                location
+                    .map(|location| location.oid)
+                    .map_err(crab_git::pack::PackError::from)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuthServerError::from)?;
+        let kinds = crab_git::object_kinds_from_git_dir(temp.path(), &object_ids)
+            .map_err(AuthServerError::from)?;
+        if kinds.len() != object_ids.len() {
+            return Err(AuthServerError::Internal(
+                "Git object-kind catalog returned an incomplete pack result".to_owned(),
+            ));
+        }
+        let kind_by_oid = kinds
+            .into_iter()
+            .map(|(oid, kind)| {
+                let oid = oid.as_bytes().try_into().map_err(|_| {
+                    AuthServerError::Internal(
+                        "Git object-kind catalog returned a non-SHA1 object".to_owned(),
+                    )
+                })?;
+                let kind = match kind {
+                    gix_object::Kind::Commit => {
+                        crab_metadata::git_object_locator::GitObjectKind::Commit
+                    }
+                    gix_object::Kind::Tree => {
+                        crab_metadata::git_object_locator::GitObjectKind::Tree
+                    }
+                    gix_object::Kind::Blob => {
+                        crab_metadata::git_object_locator::GitObjectKind::Blob
+                    }
+                    gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+                };
+                Ok((oid, kind))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let mut file = std::fs::File::open(&source)?;
         let mut hasher = blake3::Hasher::new();
         std::io::copy(&mut file, &mut hasher)?;
@@ -1410,6 +1454,7 @@ async fn derive_service_locator_evidence(
             *idx_hasher.finalize().as_bytes(),
             rev_size,
             *rev_hasher.finalize().as_bytes(),
+            kind_by_oid,
         ))
     })
     .await
@@ -1448,7 +1493,84 @@ async fn derive_service_locator_evidence(
         idx_path,
         rev_path,
         git_sha1,
+        kind_by_oid: Some(Arc::new(kind_by_oid)),
     })
+}
+
+async fn ensure_service_locator_evidence(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    packs: &[PackManifestEntry],
+    derived: &mut Vec<ServiceLocatorEvidence>,
+    pending_ids: &HashSet<MerkleHash>,
+) -> Result<()> {
+    for pack in packs {
+        let pack_id = merkle_hash_from_hex(&pack.pack_id, "committed pack id")?;
+        if !pending_ids.contains(&pack_id) || derived.iter().any(|item| item.pack_id == pack_id) {
+            continue;
+        }
+        derived.push(download_service_locator_evidence(store, router, pack).await?);
+    }
+    Ok(())
+}
+
+async fn write_service_locator_evidence(
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
+    derived: &[ServiceLocatorEvidence],
+    pending_ids: &HashSet<MerkleHash>,
+) -> Result<()> {
+    for evidence in derived {
+        if !pending_ids.contains(&evidence.pack_id) {
+            continue;
+        }
+        let Some(binding) = bindings.get(&evidence.pack_id).copied() else {
+            continue;
+        };
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &evidence.idx_path,
+            &evidence.rev_path,
+            binding.record.pack_size,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        if locations.pack_checksum().to_string() != evidence.git_sha1 {
+            return Err(invalid(
+                "committed pack index checksum changed before locator publication",
+            ));
+        }
+        let mut entries = Vec::with_capacity(25_000);
+        for location in &mut locations {
+            let location = location.map_err(crab_git::pack::PackError::from)?;
+            let oid = location
+                .oid
+                .as_bytes()
+                .try_into()
+                .map_err(|_| invalid("committed pack index contains non-SHA1 object"))?;
+            entries.push(crab_metadata::git_object_locator::GitObjectLocatorEntry {
+                oid,
+                location: crab_metadata::git_object_locator::GitObjectLocation {
+                    pack_offset: location.pack_offset,
+                    entry_len: location.entry_len,
+                    crc32: location.crc32,
+                },
+                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                    kind: evidence
+                        .kind_by_oid
+                        .as_ref()
+                        .and_then(|kinds| kinds.get(&oid).copied()),
+                    ..Default::default()
+                },
+            });
+            if entries.len() == 25_000 {
+                writer.write_locations(binding, &entries).await?;
+                entries.clear();
+            }
+        }
+        if !entries.is_empty() {
+            writer.write_locations(binding, &entries).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn commit_service_git_locators_with_source(
@@ -1511,21 +1633,6 @@ async fn commit_service_git_locators_with_source(
             )
             .await?;
         let operation = async {
-            let prior_coverage = writer.coverage();
-            let covered_packs = if let Some(coverage) = prior_coverage {
-                crab_metadata::manifest_store::read_bulk_pack_list(
-                    store,
-                    router,
-                    &coverage.pack_index_hash.hex(),
-                )
-                .await?
-            } else {
-                Vec::new()
-            };
-            let covered = covered_packs
-                .iter()
-                .map(|pack| (pack.pack_id.as_str(), (pack.object_count, pack.size)))
-                .collect::<HashMap<_, _>>();
             let records = current_packs
                 .iter()
                 .map(|pack| {
@@ -1543,16 +1650,20 @@ async fn commit_service_git_locators_with_source(
                 .iter()
                 .map(|binding| binding.pack_slot)
                 .collect::<HashSet<_>>();
-            let sweep = writer.sweep_unreferenced(&retained_slots).await?;
-            let rebuild_all = sweep.pack_rows_deleted != 0;
+            // Publish current-pack rows before sweeping stale slots. A repack
+            // can move every OID to a new slot without changing the object
+            // universe; sweeping first would force a full catalog rebuild.
+            let covered = bindings
+                .iter()
+                .filter(|binding| writer.binding_has_covered_objects(**binding))
+                .map(|binding| binding.record.pack_id)
+                .collect::<HashSet<_>>();
             let mut pending_ids = HashSet::new();
             for pack in &current_packs {
-                if !rebuild_all
-                    && covered.get(pack.pack_id.as_str()) == Some(&(pack.object_count, pack.size))
-                {
+                let pack_id = merkle_hash_from_hex(&pack.pack_id, "committed pack id")?;
+                if covered.contains(&pack_id) {
                     continue;
                 }
-                let pack_id = merkle_hash_from_hex(&pack.pack_id, "committed pack id")?;
                 pending_ids.insert(pack_id);
                 if let Some(local) = derived.iter().find(|item| item.pack_id == pack_id) {
                     validate_service_locator_evidence(
@@ -1569,50 +1680,35 @@ async fn commit_service_git_locators_with_source(
                 .into_iter()
                 .map(|binding| (binding.record.pack_id, binding))
                 .collect::<HashMap<_, _>>();
-            for evidence in &derived {
-                if !pending_ids.contains(&evidence.pack_id) {
-                    continue;
-                }
-                let Some(binding) = bindings.get(&evidence.pack_id).copied() else {
-                    continue;
-                };
-                let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                    &evidence.idx_path,
-                    &evidence.rev_path,
-                    binding.record.pack_size,
+            write_service_locator_evidence(&mut writer, &bindings, &derived, &pending_ids).await?;
+
+            let sweep = writer.sweep_unreferenced(&retained_slots).await?;
+            if sweep.object_rows_deleted != 0 {
+                // Only an actual object deletion changes the dense ordinal
+                // universe. Rebuild then replay every current pack.
+                writer.replace_object_catalog().await?;
+                pending_ids = current_packs
+                    .iter()
+                    .map(|pack| merkle_hash_from_hex(&pack.pack_id, "committed pack id"))
+                    .collect::<Result<HashSet<_>>>()?;
+                ensure_service_locator_evidence(
+                    store,
+                    router,
+                    &current_packs,
+                    &mut derived,
+                    &pending_ids,
                 )
-                .map_err(crab_git::pack::PackError::from)?;
-                if locations.pack_checksum().to_string() != evidence.git_sha1 {
-                    return Err(invalid(
-                        "committed pack index checksum changed before locator publication",
-                    ));
-                }
-                let mut entries = Vec::with_capacity(25_000);
-                for location in &mut locations {
-                    let location = location.map_err(crab_git::pack::PackError::from)?;
-                    let oid =
-                        location.oid.as_bytes().try_into().map_err(|_| {
-                            invalid("committed pack index contains non-SHA1 object")
-                        })?;
-                    entries.push(crab_metadata::git_object_locator::GitObjectLocatorEntry {
-                        oid,
-                        location: crab_metadata::git_object_locator::GitObjectLocation {
-                            pack_offset: location.pack_offset,
-                            entry_len: location.entry_len,
-                            crc32: location.crc32,
-                        },
-                    });
-                    if entries.len() == 25_000 {
-                        writer.write_locations(binding, &entries).await?;
-                        entries.clear();
-                    }
-                }
-                if !entries.is_empty() {
-                    writer.write_locations(binding, &entries).await?;
-                }
+                .await?;
+                write_service_locator_evidence(&mut writer, &bindings, &derived, &pending_ids)
+                    .await?;
             }
-            // The manifest check is independent of locator durability. Keep
-            // rows pending so coverage flushes them atomically with its marker.
+            tracing::debug!(
+                object_rows_deleted = sweep.object_rows_deleted,
+                pack_rows_deleted = sweep.pack_rows_deleted,
+                catalog_rebuilt = sweep.object_rows_deleted != 0,
+                "swept stale Git locator rows"
+            );
+            writer.flush_objects().await?;
             let (after, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
             if after.generation != manifest.generation
                 || after.pack_index_hash != manifest.pack_index_hash

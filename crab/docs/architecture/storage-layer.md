@@ -48,7 +48,7 @@ s3://{bucket}/
     ├── metadata/{pack,shard}/          Immutable segmented inventories
     ├── packs/                          Immutable Git pack family
     ├── file_index_db/                  Per-repo file → shard SlateDB
-    ├── git_locator_db/                 Derived Git object-range SlateDB
+    ├── git_object_catalog_db/          Derived Git object-catalog SlateDB
     ├── locks/                          Push and native file locks
     └── lfs/                            LFS objects and protocol locks
 ```
@@ -61,9 +61,10 @@ the first two hash characters for fan-out. File-index records live inside the op
 `file_index_db/` SlateDB; callers do not construct record object keys.
 
 The single `{repo-path}/manifest` owns refs and points at content-addressed
-segmented pack and shard inventories. The locator database is derived
+segmented pack and shard inventories. The object catalog is derived
 acceleration; the manifest plus canonical `.pack`/`.idx` files remain the
-correctness boundary.
+correctness boundary. Catalog checkpoints are named by a digest of their exact
+generation and pack inventory so readers can pin one immutable catalog.
 
 LFS objects use two-level sharding: `{oid[:2]}/{oid[2:4]}/{oid}` for
 compatibility with the standard LFS layout.

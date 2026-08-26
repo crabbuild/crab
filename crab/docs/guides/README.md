@@ -85,6 +85,7 @@ examples, and related commands.
 | [Audit Logs](audit.md) | Local audit events, digest verification, export, and future mutation hooks |
 | [Prefetch Profiles](crab-prefetch.md) | Always-materialized files, named hydration sets for CI/IDE/monorepo workflows |
 | [Local Dev: RustFS](local-dev-rustfs.md) | Run a local S3-compatible backend for end-to-end testing |
+| [Large-repository RustFS qualification](large-repository-qualification.md) | Replay Kubernetes history and verify large-repository correctness and performance |
 | [Enterprise Auth](auth/enterprise-auth.md) | Federated identity and multi-cloud credential management |
 | [Auth: Static / Multi-Cloud](auth/enterprise-auth-static.md) | Default env-var credentials for S3, GCS, or Azure |
 | [Auth: AWS OIDC](auth/enterprise-auth-aws.md) | Corporate IdP → AWS STS temporary credentials |

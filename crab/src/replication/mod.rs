@@ -8086,6 +8086,14 @@ async fn apply_active_active_repair_action(
                 &manifest,
             )
             .await?;
+            replicate_shallow_closure_index(
+                &source_store,
+                &source_router,
+                &target_store,
+                &target_router,
+                &manifest,
+            )
+            .await?;
             materialize_active_active_manifest_projection(&target_store, &target_router, &manifest)
                 .await
         } => result,
@@ -8148,6 +8156,68 @@ async fn replicate_git_visibility_index(
         target_store.as_storage(),
         &target_storage_router,
         &index,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
+async fn replicate_shallow_closure_index(
+    source_store: &Store,
+    source_router: &StoreLayout,
+    target_store: &Store,
+    target_router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<()> {
+    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
+        return Ok(());
+    }
+    let source_storage = source_store.as_storage();
+    let source_storage_router = crab_storage::StoreLayout::new(
+        source_storage.clone(),
+        source_router.repo_prefix().to_owned(),
+    );
+    let Some(descriptor) = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
+        source_storage,
+        &source_storage_router,
+        &manifest.git_validation_digest,
+        manifest.generation,
+        &manifest.pack_index_hash,
+        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
+    )
+    .await
+    .map_err(CrabError::from)?
+    else {
+        return Ok(());
+    };
+    let mut entries = Vec::with_capacity(descriptor.entries.len());
+    for reference in &descriptor.entries {
+        entries.push(
+            crab_metadata::shallow_closure::load_shallow_closure_entry(
+                source_storage,
+                &source_storage_router,
+                reference,
+                crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
+            )
+            .await
+            .map_err(CrabError::from)?,
+        );
+    }
+    let write = crab_metadata::shallow_closure::build_shallow_closure_write(
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        entries,
+    )
+    .map_err(CrabError::from)?;
+    let target_storage_router = crab_storage::StoreLayout::new(
+        target_store.as_storage().clone(),
+        target_router.repo_prefix().to_owned(),
+    );
+    crab_metadata::shallow_closure::upload_shallow_closure(
+        target_store.as_storage(),
+        &target_storage_router,
+        &manifest.git_validation_digest,
+        &write,
     )
     .await
     .map_err(CrabError::from)

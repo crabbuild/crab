@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use object_store::ObjectStore;
+use bytes::Bytes;
+use crab_xet::hash::MerkleHash;
 use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
     GarbageCollectorOptions, Settings, WriteOptions,
@@ -10,18 +12,18 @@ use slatedb::config::{
 use tracing::{debug, warn};
 
 use super::format::{
-    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation,
+    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation, coverage,
     decode_metadata, decode_object_key, decode_object_location, decode_pack_key,
     decode_pack_record, encode_metadata, encode_object_location, encode_pack_record, object_key,
-    pack_key, validate_location_for_pack,
+    ordinal_key, pack_key, validate_location_for_pack,
 };
 use super::{
-    GitLocatorCoverage, GitObjectLocatorEntry, GitPackLocatorBinding, GitPackLocatorRecord,
-    git_object_locator_path,
+    GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
+    GitObjectOrdinal, GitPackLocatorBinding, GitPackLocatorRecord, git_object_locator_path,
 };
 use crate::error::{MetadataError, Result};
 
-const DB_LABEL: &str = "git_locator_db";
+const DB_LABEL: &str = "git_object_catalog_db";
 const MAX_BATCH_ROWS: usize = 25_000;
 const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
 const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
@@ -35,6 +37,8 @@ const FIXED_PUBLICATION_SSTS: usize = 4;
 // Amortize one directory scan over a normal fan-out while bounding the number
 // of superseded locator generations. This cadence is cost policy, not safety.
 const GC_GENERATION_INTERVAL: u64 = 32;
+const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60 * 60);
 
 /// Counts produced by one stale-locator sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,7 +60,7 @@ pub struct LocatorWriteStats {
     pub object_rows_written: u64,
     /// Approximate logical key and value bytes submitted.
     pub logical_bytes_written: u64,
-    /// Explicit durability flushes completed.
+    /// Explicit object/memtable flushes completed.
     pub flushes: u64,
     /// Whether this session durably advanced exact inventory coverage.
     pub coverage_updated: bool,
@@ -66,10 +70,15 @@ pub struct LocatorWriteStats {
 pub struct GitObjectLocatorWriter {
     db: slatedb::Db,
     path: String,
+    repo_prefix: String,
     store: Arc<dyn ObjectStore>,
     initial_coverage: Option<GitLocatorCoverage>,
     metadata: LocatorMetadata,
     bindings: HashMap<u64, GitPackLocatorRecord>,
+    empty_catalog_binding: Option<u64>,
+    replacement_ordinals: Option<HashMap<[u8; 20], GitObjectOrdinal>>,
+    catalog_dirty: bool,
+    checkpoint_required: bool,
     stats: LocatorWriteStats,
     writes_durable: bool,
 }
@@ -114,7 +123,7 @@ impl GitObjectLocatorWriter {
                 source,
             })?;
 
-        let open_result = Self::load_or_initialize(db, path, store).await;
+        let open_result = Self::load_or_initialize(db, path, repo_prefix.to_owned(), store).await;
         match open_result {
             Ok(writer) => Ok(writer),
             Err((db, operation)) => close_after_error(db, operation).await,
@@ -124,6 +133,7 @@ impl GitObjectLocatorWriter {
     async fn load_or_initialize(
         db: slatedb::Db,
         path: String,
+        repo_prefix: String,
         store: Arc<dyn ObjectStore>,
     ) -> std::result::Result<Self, (slatedb::Db, MetadataError)> {
         let value = match db.get(METADATA_KEY).await {
@@ -172,13 +182,37 @@ impl GitObjectLocatorWriter {
             Ok(bindings) => bindings,
             Err(error) => return Err((db, error)),
         };
+        let catalog_dirty = metadata.identity.map_or_else(
+            || metadata.next_object_ordinal != 0 || !bindings.is_empty(),
+            |identity| {
+                identity.object_count != metadata.next_object_ordinal
+                    || bindings
+                        .values()
+                        .any(|record| record.committed_generation > identity.generation)
+            },
+        );
+        let checkpoint_required = if catalog_dirty {
+            false
+        } else if let Some(identity) = metadata.identity {
+            match catalog_checkpoint_marker_exists(&store, &repo_prefix, identity).await {
+                Ok(present) => !present,
+                Err(error) => return Err((db, error)),
+            }
+        } else {
+            false
+        };
         Ok(Self {
             db,
             path,
+            repo_prefix,
             store,
-            initial_coverage: metadata.coverage,
+            initial_coverage: coverage(metadata),
             metadata,
             bindings,
+            empty_catalog_binding: None,
+            replacement_ordinals: None,
+            catalog_dirty,
+            checkpoint_required,
             stats: LocatorWriteStats::default(),
             // The first metadata batch can share the first binding or
             // coverage flush; no reader checkpoint exists before that point.
@@ -189,13 +223,58 @@ impl GitObjectLocatorWriter {
     /// Return the last fully published manifest inventory, if any.
     #[must_use]
     pub fn coverage(&self) -> Option<GitLocatorCoverage> {
-        self.metadata.coverage
+        coverage(self.metadata)
+    }
+
+    /// Return the exact immutable identity of the latest published catalog.
+    #[must_use]
+    pub fn catalog_identity(&self) -> Option<GitObjectCatalogIdentity> {
+        self.metadata.identity
+    }
+
+    /// Return active layer and checkpoint facts without listing object-store keys.
+    pub async fn catalog_stats(&self) -> Result<GitObjectCatalogStats> {
+        let admin = slatedb::admin::AdminBuilder::new(
+            ObjectPath::from(self.path.as_str()),
+            Arc::clone(&self.store),
+        )
+        .build();
+        let manifest = admin
+            .read_manifest(None)
+            .await
+            .map_err(read_error)?
+            .ok_or_else(|| corrupt("manifest", "Git object catalog manifest is missing"))?;
+        let l0 = manifest.l0();
+        let compacted = manifest.compacted();
+        Ok(GitObjectCatalogStats {
+            object_count: self
+                .metadata
+                .identity
+                .map_or(0, |identity| identity.object_count),
+            active_layers: u64::try_from(l0.len().saturating_add(compacted.len()))
+                .unwrap_or(u64::MAX),
+            active_ssts: u64::try_from(
+                l0.len().saturating_add(
+                    compacted
+                        .iter()
+                        .map(|run| run.sst_views.len())
+                        .sum::<usize>(),
+                ),
+            )
+            .unwrap_or(u64::MAX),
+            active_bytes: l0
+                .iter()
+                .map(|sst| sst.estimate_size())
+                .chain(compacted.iter().map(|run| run.estimate_size()))
+                .fold(0_u64, u64::saturating_add),
+            checkpoints: u64::try_from(manifest.checkpoints().len()).unwrap_or(u64::MAX),
+        })
     }
 
     /// Return whether this session crossed the bounded garbage-collection cadence.
     #[must_use]
     pub fn maintenance_due(&self) -> bool {
-        locator_gc_due(self.initial_coverage, self.metadata.coverage)
+        locator_gc_due(self.initial_coverage, coverage(self.metadata))
     }
 
     /// Return whether this binding's object rows belong to exact published coverage.
@@ -207,7 +286,7 @@ impl GitObjectLocatorWriter {
         self.bindings.get(&binding.pack_slot) == Some(&binding.record)
             && self
                 .metadata
-                .coverage
+                .identity
                 .is_some_and(|coverage| binding.record.committed_generation <= coverage.generation)
     }
 
@@ -266,7 +345,8 @@ impl GitObjectLocatorWriter {
 
         let new_metadata = LocatorMetadata {
             next_pack_slot,
-            coverage: self.metadata.coverage,
+            next_object_ordinal: self.metadata.next_object_ordinal,
+            identity: self.metadata.identity,
         };
         let mut batch = metadata_batch(new_metadata);
         for binding in &additions {
@@ -279,10 +359,15 @@ impl GitObjectLocatorWriter {
         flush(&self.db).await?;
 
         self.metadata = new_metadata;
+        self.catalog_dirty = true;
+        self.checkpoint_required = true;
         self.stats.flushes = self.stats.flushes.saturating_add(1);
         self.writes_durable = true;
         for binding in additions {
             self.bindings.insert(binding.pack_slot, binding.record);
+        }
+        if self.metadata.next_object_ordinal == 0 && results.len() == 1 {
+            self.empty_catalog_binding = results.first().map(|binding| binding.pack_slot);
         }
         Ok(results)
     }
@@ -302,22 +387,64 @@ impl GitObjectLocatorWriter {
         let mut batch = slatedb::WriteBatch::new();
         let mut batch_rows = 0_usize;
         let mut batch_bytes = 0_usize;
+        let mut submitted = HashSet::with_capacity(entries.len());
         for entry in entries {
+            if !submitted.insert(entry.oid) {
+                return Err(MetadataError::Internal(
+                    "Git locator object batch contains a duplicate OID".to_owned(),
+                ));
+            }
             if !validate_location_for_pack(entry.location, binding.record.pack_size) {
                 return Err(MetadataError::Internal(
                     "Git locator object range falls outside its bound pack".to_owned(),
                 ));
             }
+            if entry.metadata.delta_base_oid == Some(entry.oid) {
+                return Err(MetadataError::Internal(
+                    "Git locator object cannot use itself as a delta base".to_owned(),
+                ));
+            }
+            let key = object_key(&entry.oid);
+            let existing_ordinal = self
+                .replacement_ordinals
+                .as_ref()
+                .and_then(|ordinals| ordinals.get(&entry.oid).copied());
+            let existing = if existing_ordinal.is_some()
+                || self.empty_catalog_binding == Some(binding.pack_slot)
+            {
+                None
+            } else {
+                self.db.get(key).await.map_err(read_error)?
+            };
+            let ordinal = match (existing_ordinal, existing) {
+                (Some(ordinal), _) => ordinal,
+                (None, Some(value)) => {
+                    decode_object_location(&value)
+                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?
+                        .ordinal
+                }
+                (None, None) => {
+                    let ordinal = self.allocate_ordinal()?;
+                    if let Some(ordinals) = &mut self.replacement_ordinals {
+                        ordinals.insert(entry.oid, ordinal);
+                    }
+                    ordinal
+                }
+            };
             let value = encode_object_location(StoredObjectLocation {
+                ordinal,
                 pack_slot: binding.pack_slot,
                 pack_offset: entry.location.pack_offset,
                 entry_len: entry.location.entry_len,
                 crc32: entry.location.crc32,
+                metadata: entry.metadata,
             });
-            batch.put(object_key(&entry.oid), value);
+            batch.put(key, value);
+            batch.put(ordinal_key(ordinal), entry.oid);
             batch_rows += 1;
-            batch_bytes += object_key(&entry.oid).len() + value.len();
+            batch_bytes += key.len() + value.len() + ordinal_key(ordinal).len() + entry.oid.len();
             if batch_rows >= MAX_BATCH_ROWS || batch_bytes >= MAX_BATCH_LOGICAL_BYTES {
+                batch.put(METADATA_KEY, encode_metadata(self.metadata));
                 write_batch(&self.db, batch, "write compact locator objects").await?;
                 self.record_object_batch(batch_rows, batch_bytes);
                 batch = slatedb::WriteBatch::new();
@@ -326,9 +453,80 @@ impl GitObjectLocatorWriter {
             }
         }
         if batch_rows != 0 {
+            batch.put(METADATA_KEY, encode_metadata(self.metadata));
             write_batch(&self.db, batch, "write compact locator objects").await?;
             self.record_object_batch(batch_rows, batch_bytes);
         }
+        if !entries.is_empty() {
+            self.catalog_dirty = true;
+            self.checkpoint_required = true;
+        }
+        Ok(())
+    }
+
+    fn allocate_ordinal(&mut self) -> Result<GitObjectOrdinal> {
+        if self.metadata.next_object_ordinal >= u64::from(GitObjectOrdinal::MAX) {
+            return Err(MetadataError::Internal(
+                "Git object catalog ordinals are exhausted".to_owned(),
+            ));
+        }
+        let ordinal =
+            GitObjectOrdinal::try_from(self.metadata.next_object_ordinal).map_err(|_| {
+                MetadataError::Internal("Git object catalog ordinals are exhausted".to_owned())
+            })?;
+        self.metadata.next_object_ordinal = self
+            .metadata
+            .next_object_ordinal
+            .checked_add(1)
+            .ok_or_else(|| {
+                MetadataError::Internal("Git object catalog ordinals are exhausted".to_owned())
+            })?;
+        self.catalog_dirty = true;
+        self.checkpoint_required = true;
+        Ok(ordinal)
+    }
+
+    /// Replace the current object/ordinal universe while retaining pack slots.
+    ///
+    /// Historical checkpoints retain the prior universe. The caller must
+    /// rewrite every current pack before advancing coverage.
+    pub async fn replace_object_catalog(&mut self) -> Result<()> {
+        for family in [OBJECT_FAMILY, super::format::ORDINAL_FAMILY] {
+            let mut rows = self
+                .db
+                .scan_prefix([family], ..)
+                .await
+                .map_err(read_error)?;
+            let mut batch = slatedb::WriteBatch::new();
+            let mut batch_rows = 0usize;
+            while let Some(row) = rows.next().await.map_err(read_error)? {
+                batch.delete(row.key);
+                batch_rows += 1;
+                if batch_rows == MAX_BATCH_ROWS {
+                    write_batch(&self.db, batch, "replace Git object catalog").await?;
+                    batch = slatedb::WriteBatch::new();
+                    batch_rows = 0;
+                    self.writes_durable = false;
+                }
+            }
+            if batch_rows != 0 {
+                write_batch(&self.db, batch, "replace Git object catalog").await?;
+                self.writes_durable = false;
+            }
+        }
+        self.metadata.next_object_ordinal = 0;
+        self.metadata.identity = None;
+        self.catalog_dirty = true;
+        write_batch(
+            &self.db,
+            metadata_batch(self.metadata),
+            "reset Git object catalog metadata",
+        )
+        .await?;
+        self.writes_durable = false;
+        self.flush_objects().await?;
+        self.empty_catalog_binding = None;
+        self.replacement_ordinals = Some(HashMap::new());
         Ok(())
     }
 
@@ -380,8 +578,11 @@ impl GitObjectLocatorWriter {
                 .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
             if !retained_slots.contains(&location.pack_slot) {
                 deletes.delete(row.key);
+                deletes.delete(ordinal_key(location.ordinal));
                 delete_count += 1;
                 stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
+                self.catalog_dirty = true;
+                self.checkpoint_required = true;
                 if delete_count == MAX_BATCH_ROWS {
                     write_batch(&self.db, deletes, "sweep compact locator objects").await?;
                     self.writes_durable = false;
@@ -412,6 +613,8 @@ impl GitObjectLocatorWriter {
                 delete_count += 1;
                 removed_slots.push(slot);
                 stats.pack_rows_deleted = stats.pack_rows_deleted.saturating_add(1);
+                self.catalog_dirty = true;
+                self.checkpoint_required = true;
                 if delete_count == MAX_BATCH_ROWS {
                     write_batch(&self.db, deletes, "sweep compact locator packs").await?;
                     self.writes_durable = false;
@@ -438,9 +641,21 @@ impl GitObjectLocatorWriter {
                 "Git locator coverage generation must be non-zero".to_owned(),
             ));
         }
+        let identity = GitObjectCatalogIdentity {
+            generation: coverage.generation,
+            pack_index_hash: coverage.pack_index_hash,
+            object_count: self.metadata.next_object_ordinal,
+            catalog_digest: catalog_digest(
+                coverage,
+                self.metadata.next_pack_slot,
+                self.metadata.next_object_ordinal,
+                &self.bindings,
+            ),
+        };
         let metadata = LocatorMetadata {
             next_pack_slot: self.metadata.next_pack_slot,
-            coverage: Some(coverage),
+            next_object_ordinal: self.metadata.next_object_ordinal,
+            identity: Some(identity),
         };
         write_batch(
             &self.db,
@@ -454,6 +669,9 @@ impl GitObjectLocatorWriter {
         // without the rows it covers.
         self.flush_objects().await?;
         self.metadata = metadata;
+        self.replacement_ordinals = None;
+        self.catalog_dirty = false;
+        self.checkpoint_required = true;
         self.stats.coverage_updated = true;
         Ok(())
     }
@@ -464,13 +682,26 @@ impl GitObjectLocatorWriter {
     /// long-lived exclusive owner can then serve multiple manifest generations
     /// from one SlateDB session while readers open only immutable checkpoints.
     pub async fn publish_checkpoint(&mut self) -> Result<()> {
+        if !self.checkpoint_required {
+            return Ok(());
+        }
         self.flush_objects().await?;
+        let published_identity = match (self.metadata.identity, self.catalog_dirty) {
+            (Some(identity), false) => Some(identity),
+            _ => None,
+        };
+        let name = published_identity.map_or_else(
+            || super::UNPUBLISHED_CHECKPOINT_NAME.to_owned(),
+            |identity| super::catalog_checkpoint_name(identity.catalog_digest),
+        );
         let checkpoint = self
             .db
             .create_checkpoint(
+                // `set_coverage` flushes object rows and the identity before
+                // publication, so another best-effort memtable flush is redundant.
                 CheckpointScope::Durable,
                 &CheckpointOptions {
-                    name: Some(super::READER_CHECKPOINT_NAME.to_owned()),
+                    name: Some(name.clone()),
                     ..CheckpointOptions::default()
                 },
             )
@@ -479,7 +710,32 @@ impl GitObjectLocatorWriter {
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
-        remove_old_reader_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint).await
+
+        if let Some(identity) = published_identity {
+            let marker_path = ObjectPath::from(super::catalog_checkpoint_marker_path(
+                &self.repo_prefix,
+                identity.catalog_digest,
+            ));
+            let marker_body =
+                serde_json::to_vec(&super::CatalogCheckpointMarker::for_identity(identity))
+                    .map_err(|error| {
+                        MetadataError::Internal(format!(
+                            "catalog checkpoint marker serialize: {error}"
+                        ))
+                    })?;
+            self.store
+                .put(&marker_path, Bytes::from(marker_body).into())
+                .await
+                .map_err(|source| MetadataError::ObjectStore { source })?;
+        }
+        self.checkpoint_required = false;
+        if let Err(error) =
+            retire_old_catalog_checkpoints(&self.path, Arc::clone(&self.store), &checkpoint, &name)
+                .await
+        {
+            warn!(%error, "old Git catalog checkpoints require retirement retry");
+        }
+        Ok(())
     }
 
     /// Flush and close the SlateDB writer.
@@ -496,7 +752,7 @@ impl GitObjectLocatorWriter {
             stats,
             ..
         } = self;
-        let collect_garbage = locator_gc_due(initial_coverage, metadata.coverage);
+        let collect_garbage = locator_gc_due(initial_coverage, coverage(metadata));
         if let Err(source) = db.close().await {
             return Err(MetadataError::SlateDbClose {
                 db: DB_LABEL.to_owned(),
@@ -522,32 +778,96 @@ impl GitObjectLocatorWriter {
     }
 }
 
-async fn remove_old_reader_checkpoints(
+async fn catalog_checkpoint_marker_exists(
+    store: &Arc<dyn ObjectStore>,
+    repo_prefix: &str,
+    identity: GitObjectCatalogIdentity,
+) -> Result<bool> {
+    let path = ObjectPath::from(super::catalog_checkpoint_marker_path(
+        repo_prefix,
+        identity.catalog_digest,
+    ));
+    match store.head(&path).await {
+        Ok(_) => Ok(true),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
+        Err(source) => Err(MetadataError::ObjectStore { source }),
+    }
+}
+
+async fn retire_old_catalog_checkpoints(
     path: &str,
     store: Arc<dyn ObjectStore>,
     current: &slatedb::CheckpointCreateResult,
+    current_name: &str,
 ) -> Result<()> {
-    let admin = slatedb::admin::AdminBuilder::new(ObjectPath::from(path), store).build();
-    let checkpoints = admin
-        .list_checkpoints(Some(super::READER_CHECKPOINT_NAME))
-        .await
-        .map_err(|source| MetadataError::SlateDbWrite {
-            db: DB_LABEL.to_owned(),
-            source,
-        })?;
-    for checkpoint in checkpoints {
-        if checkpoint.id == current.id {
-            continue;
-        }
+    let admin =
+        slatedb::admin::AdminBuilder::new(ObjectPath::from(path), Arc::clone(&store)).build();
+    let checkpoints =
         admin
-            .delete_checkpoint(checkpoint.id)
+            .list_checkpoints(None)
             .await
             .map_err(|source| MetadataError::SlateDbWrite {
                 db: DB_LABEL.to_owned(),
                 source,
             })?;
+    for checkpoint in checkpoints.into_iter().filter(|checkpoint| {
+        let Some(name) = checkpoint.name.as_deref() else {
+            return false;
+        };
+        let retired_publication = name == super::UNPUBLISHED_CHECKPOINT_NAME
+            || (current_name != super::UNPUBLISHED_CHECKPOINT_NAME
+                && name.starts_with(super::READER_CHECKPOINT_PREFIX));
+        checkpoint.id != current.id && checkpoint.expire_time.is_none() && retired_publication
+    }) {
+        admin
+            .refresh_checkpoint(checkpoint.id, Some(RETIRED_CHECKPOINT_LIFETIME))
+            .await
+            .map_err(|source| MetadataError::SlateDbWrite {
+                db: DB_LABEL.to_owned(),
+                source,
+            })?;
+        if let Some(digest) = checkpoint
+            .name
+            .as_deref()
+            .and_then(catalog_digest_from_checkpoint_name)
+        {
+            let marker_path =
+                ObjectPath::from(format!("{}checkpoints/{}.json", path, digest.hex()));
+            match store.delete(&marker_path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(source) => return Err(MetadataError::ObjectStore { source }),
+            }
+        }
     }
     Ok(())
+}
+
+fn catalog_digest_from_checkpoint_name(name: &str) -> Option<MerkleHash> {
+    name.strip_prefix(super::READER_CHECKPOINT_PREFIX)
+        .and_then(|digest| MerkleHash::from_hex(digest).ok())
+}
+
+fn catalog_digest(
+    coverage: GitLocatorCoverage,
+    next_pack_slot: u64,
+    object_count: u64,
+    bindings: &HashMap<u64, GitPackLocatorRecord>,
+) -> MerkleHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab.git-object-catalog.v1\0");
+    hasher.update(&coverage.generation.to_be_bytes());
+    hasher.update(&<[u8; 32]>::from(coverage.pack_index_hash));
+    hasher.update(&next_pack_slot.to_be_bytes());
+    hasher.update(&object_count.to_be_bytes());
+    let mut bindings = bindings.iter().collect::<Vec<_>>();
+    bindings.sort_unstable_by_key(|(slot, _)| **slot);
+    for (slot, record) in bindings {
+        hasher.update(&slot.to_be_bytes());
+        hasher.update(&<[u8; 32]>::from(record.pack_id));
+        hasher.update(&record.object_count.to_be_bytes());
+        hasher.update(&record.pack_size.to_be_bytes());
+    }
+    MerkleHash::from(*hasher.finalize().as_bytes())
 }
 
 fn locator_gc_due(
@@ -782,6 +1102,21 @@ mod tests {
                 entry_len: 96,
                 crc32: u32::from(seed),
             },
+            metadata: Default::default(),
+        }
+    }
+
+    fn generation_entry(generation: u64) -> GitObjectLocatorEntry {
+        let mut oid = [0_u8; 20];
+        oid[..8].copy_from_slice(&generation.to_be_bytes());
+        GitObjectLocatorEntry {
+            oid,
+            location: GitObjectLocation {
+                pack_offset: 12,
+                entry_len: 96,
+                crc32: generation as u32,
+            },
+            metadata: Default::default(),
         }
     }
 
@@ -878,6 +1213,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_oid_in_one_pack_batch_is_rejected_before_publication() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(store, "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack(1)]).await.expect("bind pack")[0];
+
+        let error = writer
+            .write_locations(binding, &[entry(1), entry(1)])
+            .await
+            .expect_err("reject duplicate OID");
+
+        assert!(error.to_string().contains("duplicate OID"));
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "large-repository qualification stress"]
+    async fn thousand_incremental_publications_keep_layers_bounded_and_catalog_exact() {
+        const PUBLICATIONS: u64 = 1_000;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let mut first_identity = None;
+        for generation in 1..=PUBLICATIONS {
+            let record = GitPackLocatorRecord {
+                pack_id: hash(generation),
+                committed_generation: generation,
+                pack_index_hash: hash(10_000 + generation),
+                object_count: 1,
+                pack_size: 128,
+            };
+            let binding = writer.bind_packs(&[record]).await.expect("bind pack")[0];
+            let rows_before = writer.stats.object_rows_written;
+            writer
+                .write_locations(binding, &[generation_entry(generation)])
+                .await
+                .expect("append one catalog object");
+            writer
+                .set_coverage(GitLocatorCoverage {
+                    generation,
+                    pack_index_hash: record.pack_index_hash,
+                })
+                .await
+                .expect("advance catalog coverage");
+            writer
+                .publish_checkpoint()
+                .await
+                .expect("publish catalog checkpoint");
+            assert_eq!(writer.stats.object_rows_written - rows_before, 1);
+            first_identity.get_or_insert_with(|| writer.catalog_identity().expect("identity"));
+        }
+
+        let latest_identity = writer.catalog_identity().expect("latest identity");
+        let stats = writer.catalog_stats().await.expect("catalog stats");
+        let logarithmic_layer_bound = 4 * u64::from(u64::BITS - PUBLICATIONS.leading_zeros());
+        assert_eq!(stats.object_count, PUBLICATIONS);
+        assert!(
+            stats.active_layers <= logarithmic_layer_bound,
+            "{} active layers exceed logarithmic bound {logarithmic_layer_bound}",
+            stats.active_layers
+        );
+        writer.close().await.expect("close writer");
+
+        let first = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+            Arc::clone(&store),
+            "org/repo",
+            first_identity.expect("first identity"),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open first checkpoint");
+        assert_eq!(
+            first.all_object_ids_and_close().await.expect("first IDs"),
+            vec![generation_entry(1).oid]
+        );
+
+        let latest = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+            store,
+            "org/repo",
+            latest_identity,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open latest checkpoint");
+        let expected = (1..=PUBLICATIONS)
+            .map(|generation| generation_entry(generation).oid)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            latest.all_object_ids_and_close().await.expect("latest IDs"),
+            expected
+        );
+    }
+
+    #[tokio::test]
     async fn retained_pack_reuses_slot_without_rebinding_commit_evidence() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let original = pack(1);
@@ -922,6 +1354,7 @@ mod tests {
             })
             .await
             .expect("set initial coverage");
+        let published_identity = initial.catalog_identity().expect("published identity");
         assert!(initial.binding_has_covered_objects(covered));
         initial.close().await.expect("close initial writer");
 
@@ -936,16 +1369,36 @@ mod tests {
             .bind_packs(&[pack(2)])
             .await
             .expect("bind uncovered")[0];
+        interrupted
+            .write_locations(uncovered, &[entry(2)])
+            .await
+            .expect("write interrupted object");
         assert!(interrupted.binding_has_covered_objects(retained));
         assert!(!interrupted.binding_has_covered_objects(uncovered));
         interrupted.close().await.expect("close interrupted writer");
 
-        let reopened = GitObjectLocatorWriter::open(store, "org/repo")
+        let reopened = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
             .await
             .expect("reopen writer");
         assert!(reopened.binding_has_covered_objects(retained));
         assert!(!reopened.binding_has_covered_objects(uncovered));
         reopened.close().await.expect("close reopened writer");
+
+        let published = crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+            store,
+            "org/repo",
+            published_identity,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open published checkpoint");
+        assert_eq!(
+            published
+                .all_object_ids_and_close()
+                .await
+                .expect("published IDs"),
+            vec![entry(1).oid]
+        );
     }
 
     #[tokio::test]
@@ -987,6 +1440,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sweep_after_rewriting_all_objects_preserves_dense_catalog() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let original = writer.bind_packs(&[pack(1)]).await.expect("bind original")[0];
+        writer
+            .write_locations(original, &[entry(1)])
+            .await
+            .expect("write original location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("cover original pack");
+
+        let repacked = writer.bind_packs(&[pack(2)]).await.expect("bind repacked")[0];
+        let mut moved = entry(1);
+        moved.location.pack_offset = 24;
+        moved.location.entry_len = 80;
+        writer
+            .write_locations(repacked, &[moved])
+            .await
+            .expect("write repacked location");
+        let sweep = writer
+            .sweep_unreferenced(&HashSet::from([repacked.pack_slot]))
+            .await
+            .expect("sweep original pack");
+
+        assert_eq!(sweep.object_rows_deleted, 0);
+        assert_eq!(sweep.pack_rows_deleted, 1);
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect("cover repacked pack");
+        assert_eq!(
+            writer
+                .catalog_identity()
+                .expect("catalog identity")
+                .object_count,
+            1
+        );
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
     async fn checkpoints_publish_multiple_generations_without_closing_writer() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
@@ -1009,6 +1513,7 @@ mod tests {
             .publish_checkpoint()
             .await
             .expect("publish first checkpoint");
+        let first_identity = writer.catalog_identity().expect("first catalog identity");
 
         let first_reader =
             super::super::GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
@@ -1034,15 +1539,81 @@ mod tests {
             .publish_checkpoint()
             .await
             .expect("publish second checkpoint");
+        let second_identity = writer.catalog_identity().expect("second catalog identity");
+        let stats = writer.catalog_stats().await.expect("catalog stats");
+        assert_ne!(
+            first_identity.catalog_digest,
+            second_identity.catalog_digest
+        );
+        assert_eq!(stats.object_count, 2);
+        assert_eq!(stats.checkpoints, 2);
+        assert!(stats.active_layers > 0);
+        assert!(stats.active_ssts >= stats.active_layers);
+        assert!(stats.active_bytes > 0);
         assert!(writer.binding_has_covered_objects(first));
         assert!(writer.binding_has_covered_objects(second));
+        let checkpoints = slatedb::admin::AdminBuilder::new(
+            ObjectPath::from(git_object_locator_path("org/repo")),
+            Arc::clone(&store),
+        )
+        .build()
+        .list_checkpoints(None)
+        .await
+        .expect("list catalog checkpoints");
+        let first_name = super::super::catalog_checkpoint_name(first_identity.catalog_digest);
+        let second_name = super::super::catalog_checkpoint_name(second_identity.catalog_digest);
+        assert!(checkpoints.iter().any(|checkpoint| {
+            checkpoint.name.as_deref() == Some(first_name.as_str())
+                && checkpoint.expire_time.is_some()
+        }));
+        assert!(checkpoints.iter().any(|checkpoint| {
+            checkpoint.name.as_deref() == Some(second_name.as_str())
+                && checkpoint.expire_time.is_none()
+        }));
+        let first_marker = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            first_identity.catalog_digest,
+        ));
+        let second_marker = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            second_identity.catalog_digest,
+        ));
+        assert!(matches!(
+            store.head(&first_marker).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        assert!(store.head(&second_marker).await.is_ok());
 
         let second_reader =
             super::super::GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
                 .await
                 .expect("open second reader");
         assert_eq!(second_reader.coverage(), Some(second_coverage));
+        assert_eq!(
+            second_reader
+                .all_object_ids()
+                .await
+                .expect("second objects"),
+            vec![[1; 20], [2; 20]]
+        );
         second_reader.close().await.expect("close second reader");
+
+        let first_reader = super::super::GitObjectLocatorSession::open_for_catalog(
+            Arc::clone(&store),
+            "org/repo",
+            first_identity,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("open exact first catalog");
+        assert_eq!(
+            first_reader.all_object_ids().await.expect("first objects"),
+            vec![[1; 20]]
+        );
+        first_reader
+            .close()
+            .await
+            .expect("close exact first reader");
         writer.close().await.expect("close writer");
     }
 
@@ -1060,7 +1631,7 @@ mod tests {
         writer.flush_objects().await.expect("flush objects");
         writer.close().await.expect("close writer");
 
-        let prefix = ObjectPath::from("org/repo/git_locator_db");
+        let prefix = ObjectPath::from("org/repo/git_object_catalog_db");
         let objects = store
             .list(Some(&prefix))
             .try_collect::<Vec<_>>()

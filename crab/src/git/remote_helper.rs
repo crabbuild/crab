@@ -26,7 +26,7 @@ use crate::git::push::{
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
-use crab_metadata::commit_graph::CommitGraphSummary;
+use crab_metadata::commit_graph::CommitGraphTraversal;
 use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
 use crab_metadata::pack_metadata::PackMetadata;
 
@@ -1448,7 +1448,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     warn!(%err, "failed to append push audit event");
                 }
 
-                // A successful push may have updated the CommitGraphSummary,
+                // A successful push may have attached a new split commit graph,
                 // so invalidate the cached probe result.
                 let any_ref_succeeded = result
                     .outcomes
@@ -1771,13 +1771,13 @@ where
     }
 }
 
-/// Check whether the remote has a `CommitGraphSummary`.
+/// Check whether the committed manifest pins a split commit graph.
 ///
 /// Returns the cached result when available; otherwise probes the store
 /// via a HEAD request and caches the outcome for the rest of the session.
 async fn has_commit_graph_summary(
     store: Option<&crate::storage::store::Store>,
-    prefix: &str,
+    _prefix: &str,
     router: Option<&crate::storage::StoreLayout>,
     cache: &mut SessionCache,
 ) -> bool {
@@ -1785,14 +1785,12 @@ async fn has_commit_graph_summary(
         return cached;
     }
 
-    let result = if let Some(store) = store {
-        let obj_path = if let Some(router) = router {
-            router.repo_path("commit-graph-summary")
-        } else {
-            let path = format!("{prefix}/commit-graph-summary");
-            object_store::path::Path::from(path.as_str())
-        };
-        store.head(&obj_path).await.is_ok()
+    let result = if let (Some(store), Some(router)) = (store, router) {
+        // Capability negotiation only needs the committed graph pointer. A full
+        // repository snapshot materializes every ref and catalog entry first.
+        crate::metadata::manifest::read_manifest(store, router)
+            .await
+            .is_ok_and(|(manifest, _)| manifest.commit_graph_hash.is_some())
     } else {
         false
     };
@@ -1804,7 +1802,7 @@ async fn has_commit_graph_summary(
 /// Build the legacy remote-helper capability response.
 ///
 /// Always advertises `fetch`, `push`, `option`, and `check-connectivity`.
-/// When the legacy remote has a `CommitGraphSummary`, it also advertises
+/// When the committed manifest has a complete split graph, it also advertises
 /// `shallow`. The proof-gated v2 capability is added only by
 /// [`format_capabilities_with_v2`].
 pub fn format_capabilities(has_commit_graph: bool) -> String {
@@ -1886,7 +1884,7 @@ async fn read_remote_refs_for_advertisement(
 pub fn validate_fetch_entries_with_manifest(
     entries: &[FetchEntry],
     manifest: &crate::metadata::manifest::Manifest,
-    summary: Option<&crab_metadata::commit_graph::CommitGraphSummary>,
+    graph: Option<&dyn CommitGraphTraversal>,
     config: &crate::core::config::Config,
 ) -> Vec<(
     FetchEntry,
@@ -1897,7 +1895,7 @@ pub fn validate_fetch_entries_with_manifest(
         .map(|entry| crab_read::FetchWant::new(&entry.sha, &entry.ref_name))
         .collect::<Vec<_>>();
     let policy = fetch_admission_policy(config);
-    crab_read::validate_fetch_wants_with_manifest(&wants, manifest, summary, &policy)
+    crab_read::validate_fetch_wants_with_manifest(&wants, manifest, graph, &policy)
         .into_iter()
         .map(|(want, outcome)| {
             (
@@ -2095,25 +2093,64 @@ impl PackStore for RemoteFetchStore {
 }
 
 impl CommitGraphProvider for RemoteFetchStore {
-    async fn fetch_commit_graph_summary(&self) -> Result<Option<CommitGraphSummary>> {
-        let path = self.router.repo_path("commit-graph-summary");
-        match self.store.get_with_etag(&path).await {
-            Ok((body, _etag)) => {
-                let summary = serde_json::from_slice::<CommitGraphSummary>(&body).map_err(|e| {
-                    CrabError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!("invalid commit-graph-summary JSON: {e}"),
-                    }
-                })?;
-                Ok(Some(summary))
-            }
-            Err(CrabError::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e),
+    async fn fetch_commit_graph(&self) -> Result<Option<Arc<dyn CommitGraphTraversal>>> {
+        let snapshot =
+            crate::metadata::manifest::read_repository_snapshot(&self.store, &self.router).await?;
+        let manifest = snapshot.materialized_manifest();
+        let Some(hash) = manifest.commit_graph_hash.as_deref() else {
+            return Ok(None);
+        };
+        let storage_router = crab_storage::StoreLayout::new(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+        );
+        let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
+            self.store.as_storage(),
+            &storage_router,
+            hash,
+            crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await?;
+        let identity_matches = graph.descriptor.generation == manifest.generation
+            && graph.descriptor.pack_index_hash == manifest.pack_index_hash
+            && graph.descriptor.git_validation_digest == manifest.git_validation_digest;
+        let roots_complete = crab_read::manifest_ref_advertisement(&manifest, &[])
+            .refs
+            .iter()
+            .map(|entry| entry.peeled.as_ref().unwrap_or(&entry.sha))
+            .map(|oid| remote_graph_oid(oid))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .all(|root| graph.contains(root));
+        if !identity_matches || !roots_complete {
+            return Err(CrabError::CorruptObject {
+                path: storage_router
+                    .bulk_manifest_path("commit-graph", hash)
+                    .to_string(),
+                reason: "commit graph does not match the complete committed Git state".to_owned(),
+            });
         }
+        Ok(Some(Arc::new(graph)))
     }
 
     async fn fetch_pack_list(&self) -> Result<PackList> {
         self.load_pack_list().await
+    }
+}
+
+fn remote_graph_oid(value: &str) -> Result<[u8; 20]> {
+    let oid = gix_hash::ObjectId::from_hex(value.as_bytes()).map_err(|error| {
+        CrabError::CorruptObject {
+            path: "manifest".to_owned(),
+            reason: format!("invalid commit graph root {value}: {error}"),
+        }
+    })?;
+    match oid {
+        gix_hash::ObjectId::Sha1(bytes) => Ok(bytes),
+        _ => Err(CrabError::CorruptObject {
+            path: "manifest".to_owned(),
+            reason: "commit graph requires SHA-1 object IDs".to_owned(),
+        }),
     }
 }
 
@@ -2187,12 +2224,12 @@ async fn fetch_packs(
         let summary = if config.uploadpack_allow_reachable_sha_in_want
             && !config.uploadpack_allow_any_sha_in_want
         {
-            fetch_store.fetch_commit_graph_summary().await?
+            fetch_store.fetch_commit_graph().await?
         } else {
             None
         };
         let validation =
-            validate_fetch_entries_with_manifest(entries, &manifest, summary.as_ref(), config);
+            validate_fetch_entries_with_manifest(entries, &manifest, summary.as_deref(), config);
         let mut any_allowed = false;
         for (entry, outcome) in &validation {
             match outcome {
@@ -2231,19 +2268,33 @@ async fn fetch_packs(
     }
 
     let git_dir = super::discover::discover_git_dir()?;
-    let mut fetch_config = FetchConfig::from_config(config);
-    fetch_config.git_dir = git_dir.clone();
-
-    let installed = run_fetch_batch(
-        entries,
+    let exact_shallow_install = try_fetch_exact_shallow_closure(
+        store,
+        router,
         &manifest,
-        &fetch_config,
-        fetch_store.clone(),
-        Some(fetch_store.as_ref()),
+        entries,
         fetch_options,
+        &git_dir,
         cancel,
     )
     .await?;
+    let mut fetch_config = FetchConfig::from_config(config);
+    fetch_config.git_dir = git_dir.clone();
+
+    let installed = if let Some(installed) = exact_shallow_install {
+        installed
+    } else {
+        run_fetch_batch(
+            entries,
+            &manifest,
+            &fetch_config,
+            fetch_store.clone(),
+            Some(fetch_store.as_ref()),
+            fetch_options,
+            cancel,
+        )
+        .await?
+    };
 
     if let Some(pack_list) = fetch_store.cached_pack_list().await {
         cache.pack_list = Some(pack_list);
@@ -2344,6 +2395,118 @@ async fn fetch_packs(
     .await
 }
 
+async fn try_fetch_exact_shallow_closure(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+    entries: &[FetchEntry],
+    fetch_options: &FetchOptions,
+    git_dir: &std::path::Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<Vec<std::path::PathBuf>>> {
+    let Some(depth) = fetch_options.depth.filter(|depth| *depth > 0) else {
+        return Ok(None);
+    };
+    if fetch_options.deepen_relative
+        || fetch_options.filter.is_some()
+        || entries.len() != 1
+        || git_dir.join("shallow").exists()
+    {
+        return Ok(None);
+    }
+    let entry = entries.first().ok_or_else(|| {
+        CrabError::Internal("exact shallow fetch has no advertised ref entry".to_owned())
+    })?;
+    let tip = gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|error| {
+        CrabError::Protocol(format!(
+            "invalid shallow fetch ref tip {}: {error}",
+            entry.sha
+        ))
+    })?;
+    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
+        store.as_storage(),
+        router.repo_prefix(),
+        cancel,
+    )
+    .await?;
+    if repository.generation() != manifest.generation {
+        return Ok(None);
+    }
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::UploadPack, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("shallow fetch operation rejected: {error}"))
+        })?;
+    let selection = operation.shallow_object_closure(tip, depth).await;
+    let selection = operation
+        .finish(selection)
+        .await
+        .map_err(|error| CrabError::Protocol(format!("shallow closure lookup failed: {error}")))?;
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let authorization_digest = visibility.authorization_digest_for_refs([entry.ref_name.as_str()]);
+    let request_digest = shallow_fetch_request_digest(tip, depth, &selection.shallow);
+    let cache_key = repository.generated_pack_cache_key(
+        authorization_digest,
+        request_digest,
+        &selection.object_ids,
+        false,
+    );
+    let pack = repository
+        .generate_pack_cached(&selection.object_ids, cache_key, cancel)
+        .await
+        .map_err(|error| {
+            CrabError::Protocol(format!("shallow fetch pack generation failed: {error}"))
+        })?;
+    let pack_dir = git_dir.join("objects").join("pack");
+    tokio::fs::create_dir_all(&pack_dir).await?;
+    let canonical_name = format!("shallow-{}", pack.checksum_hex());
+    let installed = crate::git::pack::install_pack_file_locally_with_timeout(
+        &pack_dir,
+        pack.path(),
+        &canonical_name,
+        0,
+        false,
+    )
+    .await?;
+    crate::git::pack::validate_fetched_ref_tips(git_dir, &[entry.sha.clone()]).await?;
+    let boundary = selection
+        .shallow
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if boundary.is_empty() {
+        crate::git::shallow::remove_shallow_file(git_dir).await?;
+    } else {
+        crate::git::shallow::write_shallow_file(git_dir, &boundary).await?;
+    }
+    tracing::info!(
+        depth,
+        planned_objects = selection.object_ids.len(),
+        shallow_boundaries = boundary.len(),
+        pack_bytes = pack.size(),
+        "remote-helper fetch used generation-bound shallow closure"
+    );
+    Ok(Some(vec![installed.pack_path]))
+}
+
+fn shallow_fetch_request_digest(
+    tip: gix_hash::ObjectId,
+    depth: u32,
+    shallow: &[gix_hash::ObjectId],
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.remote-helper.shallow-fetch.v1\0");
+    hash.update(tip.as_bytes());
+    hash.update(&depth.to_be_bytes());
+    for oid in shallow {
+        hash.update(oid.as_bytes());
+    }
+    *hash.finalize().as_bytes()
+}
+
 async fn fetch_promisor_objects(
     store: &crate::storage::store::Store,
     prefix: &str,
@@ -2363,11 +2526,12 @@ async fn fetch_promisor_objects(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let repository =
-        crate::git::upload_pack_wire::open_repository(store.as_storage(), prefix, cancel).await?;
-    let visibility = repository.visibility_index(cancel).await.map_err(|error| {
-        CrabError::Protocol(format!("promisor visibility proof failed: {error}"))
-    })?;
+    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
+        store.as_storage(),
+        prefix,
+        cancel,
+    )
+    .await?;
     let visible_refs =
         crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
     let request = crab_read::UploadPackRequest {

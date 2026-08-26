@@ -521,7 +521,7 @@ def store_category(relative_key: str) -> str:
     if len(parts) > 2 and parts[:2] == ["locks", "internal"]:
         return "/".join(parts[:3])
     if len(parts) > 1 and parts[0] in {
-        "git_locator_db",
+        "git_object_catalog_db",
         "git-visibility",
         "locks",
         "manifests",
@@ -540,7 +540,7 @@ def locator_requests_per_success(snapshot: dict[str, Any]) -> float | None:
     locator_requests = sum(
         int(count)
         for category, count in snapshot.get("categories", {}).items()
-        if category.startswith("git_locator_db/")
+        if category.startswith("git_object_catalog_db/")
     )
     return locator_requests / successful_pushes
 

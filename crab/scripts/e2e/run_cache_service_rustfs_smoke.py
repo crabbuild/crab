@@ -60,6 +60,8 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/shards/{first-two-hex}/{hash}",
     "{repo}/packs/pack-{id}.pack",
     "{repo}/packs/pack-{id}.idx",
+    "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+    "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
     "{repo}/file_index_db/compacted/*.sst",
     "{repo}/file_index_db/manifest/*.manifest",
     "{repo}/file_index_db/wal/*.sst",
@@ -3567,9 +3569,18 @@ class CacheServiceRustfsSmoke:
 
     def synthetic_immutable_route_specs(self) -> list[tuple[str, str, bytes]]:
         prefix = f"{REMOTE_PREFIX}/{self.run_id}/route-contract-immutable"
+        generated_hash = "9" * 64
         specs = [
             ("{repo}/packs/pack-{id}.pack", f"{prefix}/packs/pack-route-contract.pack"),
             ("{repo}/packs/pack-{id}.idx", f"{prefix}/packs/pack-route-contract.idx"),
+            (
+                "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+                f"{prefix}/generated-packs/v1/artifacts/99/{generated_hash}.pack",
+            ),
+            (
+                "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+                f"{prefix}/generated-packs/v1/requests/99/{generated_hash}.json",
+            ),
             (
                 "{repo}/file_index_db/compacted/*.sst",
                 f"{prefix}/file_index_db/compacted/00000000000000000001.sst",
@@ -4468,8 +4479,8 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-advisory-commit-graph-bounded",
-            sum(key.endswith("/commit-graph-summary") for key in record.origin_get_key_delta) <= 1,
+            "cli-dedup-push-retired-commit-graph-summary-unused",
+            not any(key.endswith("/commit-graph-summary") for key in record.origin_get_key_delta),
             {"key_delta": record.origin_get_key_delta},
         )
         self.check(

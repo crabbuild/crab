@@ -31,6 +31,13 @@ Retention counts distinct generations and preserves every alternate root in a
 kept generation. Pruning removes only root manifests. GC separately proves
 which dependent objects became unreachable and still applies its grace period.
 
+For Git packs, repo-scoped dry-run output separates physical bytes into
+`active`, `retained_history`, `grace_period`, and `collectible` classes.
+Manifest history is the stale-pack inventory: it records immutable
+generation/time evidence without introducing a second mutable liveness index.
+GC still recomputes reachability from current, history, workflow, and
+coordinator roots before treating any pack as collectible.
+
 ## What Becomes Garbage?
 
 Objects become unreachable when the refs that pointed to them are gone:

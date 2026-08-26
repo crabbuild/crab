@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -14,6 +15,7 @@ use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
 const REF_JOURNAL_VERSION: u32 = 1;
 const MAX_REF_HEADS: usize = 1_000_000;
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_000_000;
+const REF_JOURNAL_READ_CONCURRENCY: usize = 32;
 
 /// One expected-old ref edit committed by a journal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,7 +371,7 @@ pub async fn transaction_is_active(
     active_marker_exists(store, router, transaction_id).await
 }
 
-/// Remove compacted visibility markers once no failed head promotion needs them.
+/// Repair compacted head promotion before removing its visibility marker.
 pub async fn cleanup_compacted_transactions(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -387,8 +389,17 @@ pub async fn cleanup_compacted_transactions(
         for edit in &transaction.edits {
             match read_ref_head(store, router, &edit.ref_name).await {
                 Ok(head) => {
-                    promotion_pending |=
-                        head.head.prepared_transaction.as_deref() == Some(transaction_id);
+                    if head.head.prepared_transaction.as_deref() == Some(transaction_id)
+                        && let Err(error) = promote_head(store, router, head, transaction_id).await
+                    {
+                        warn!(
+                            %transaction_id,
+                            ref_name = %error.0,
+                            error = %error.1,
+                            "retaining compacted ref transaction marker after head promotion failure"
+                        );
+                        promotion_pending = true;
+                    }
                 }
                 Err(error) => {
                     warn!(%transaction_id, ref_name = %edit.ref_name, %error, "retaining compacted ref transaction marker");
@@ -456,22 +467,36 @@ pub async fn materialize_ref_journal(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut transactions = BTreeMap::new();
-    while let Some(transaction_id) = pending.pop_first() {
-        if transactions.contains_key(&transaction_id) {
-            continue;
+    while let Some(first_transaction_id) = pending.pop_first() {
+        let mut batch = vec![first_transaction_id];
+        while batch.len() < REF_JOURNAL_READ_CONCURRENCY {
+            let Some(transaction_id) = pending.pop_first() else {
+                break;
+            };
+            batch.push(transaction_id);
         }
-        if transactions.len() == MAX_REF_HEADS {
+        let loaded = futures_util::stream::iter(batch.into_iter().map(|transaction_id| async {
+            let transaction = read_transaction(store, router, &transaction_id).await?;
+            Ok::<_, MetadataError>((transaction_id, transaction))
+        }))
+        .buffer_unordered(REF_JOURNAL_READ_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        if transactions.len().saturating_add(loaded.len()) > MAX_REF_HEADS {
             return Err(MetadataError::Internal(
                 "ref journal transaction limit exceeded".to_owned(),
             ));
         }
-        let transaction = read_transaction(store, router, &transaction_id).await?;
-        for parent in transaction.parents.values().flatten() {
-            if !transactions.contains_key(parent) && !compacted.contains(parent) {
-                pending.insert(parent.clone());
+        for (transaction_id, transaction) in &loaded {
+            transactions.insert(transaction_id.clone(), transaction.clone());
+        }
+        for (_transaction_id, transaction) in loaded {
+            for parent in transaction.parents.values().flatten() {
+                if !transactions.contains_key(parent) && !compacted.contains(parent) {
+                    pending.insert(parent.clone());
+                }
             }
         }
-        transactions.insert(transaction_id, transaction);
     }
 
     let order = transaction_order(&transactions)?;
@@ -1073,6 +1098,51 @@ mod tests {
                 .unwrap()
                 .visible_transaction,
             Some(next.id().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn compacted_transaction_repairs_prepared_head_before_marker_cleanup() {
+        let (store, layout) = fixture();
+        let (transaction, heads) =
+            transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
+        let transaction_id = transaction.id().unwrap();
+        store
+            .put_exact(
+                &layout.ref_journal_transaction_path(&transaction_id),
+                Bytes::from(serialize(&transaction).unwrap()),
+            )
+            .await
+            .unwrap();
+        prepare_head(&store, &layout, &heads[0], &transaction_id)
+            .await
+            .unwrap();
+        let marker = RefJournalActiveMarker {
+            version: REF_JOURNAL_VERSION,
+            transaction_id: transaction_id.clone(),
+        };
+        store
+            .put_exact(
+                &layout.ref_journal_active_path(&transaction_id),
+                Bytes::from(serialize(&marker).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        cleanup_compacted_transactions(&store, &layout, &[transaction_id.clone()]).await;
+
+        let head = read_ref_head(&store, &layout, "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            head.head.committed_transaction.as_deref(),
+            Some(transaction_id.as_str())
+        );
+        assert!(head.head.prepared_transaction.is_none());
+        assert!(
+            !transaction_is_active(&store, &layout, &transaction_id)
+                .await
+                .unwrap()
         );
     }
 

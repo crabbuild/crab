@@ -236,7 +236,7 @@ lru = "0.12"
 # storage. Replaces the legacy per-file `file-index/{hash}` S3 objects with
 # two SlateDB instances: a per-repo `file_index_db` and a globally shared
 # `chunk_index_db` (single instance, not sharded).
-slatedb = "=0.14.1"
+slatedb = "=0.15.0"
 
 # Directed-graph primitives for the workflow DAG (topological sort,
 # cycle detection). Used by `workflow::graph`.

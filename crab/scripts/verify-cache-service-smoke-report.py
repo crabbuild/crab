@@ -21,6 +21,8 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/shards/{first-two-hex}/{hash}",
     "{repo}/packs/pack-{id}.pack",
     "{repo}/packs/pack-{id}.idx",
+    "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
+    "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
     "{repo}/file_index_db/compacted/*.sst",
     "{repo}/file_index_db/manifest/*.manifest",
     "{repo}/file_index_db/wal/*.sst",

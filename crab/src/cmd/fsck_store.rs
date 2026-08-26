@@ -308,23 +308,23 @@ impl StoreChecker {
             }
         };
         let mut issues = Vec::new();
-        if index.refs.len() != manifest.refs.len() {
+        if index.ref_count() != manifest.refs.len() {
             issues.push(issue(format!(
                 "proof covers {} refs but manifest has {}",
-                index.refs.len(),
+                index.ref_count(),
                 manifest.refs.len()
             )));
         }
         for (name, oid) in &manifest.refs {
-            let Some(objects) = index.refs.get(name) else {
+            if !index.contains_ref(name) {
                 issues.push(issue(format!("proof is missing ref {name}")));
                 continue;
-            };
-            if objects.binary_search(oid).is_err() {
+            }
+            if !index.contains_hex_in_ref(name, oid) {
                 issues.push(issue(format!("proof is missing tip {oid} for {name}")));
             }
             if let Some(peeled) = manifest.peeled_refs.get(name)
-                && objects.binary_search(peeled).is_err()
+                && !index.contains_hex_in_ref(name, peeled)
             {
                 issues.push(issue(format!(
                     "proof is missing peeled tip {peeled} for {name}"

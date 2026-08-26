@@ -260,6 +260,28 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("metadata/pack-origin/{pack_id}.json"))
     }
 
+    /// Path to one immutable generated response-pack artifact.
+    #[must_use]
+    pub fn generated_pack_artifact_path(&self, content_hash: &str) -> ObjectPath {
+        let partition = content_hash
+            .get(..GLOBAL_CONTENT_FANOUT_WIDTH)
+            .unwrap_or(content_hash);
+        self.repo_path(&format!(
+            "generated-packs/v1/artifacts/{partition}/{content_hash}.pack"
+        ))
+    }
+
+    /// Path to one immutable generated response-pack request descriptor.
+    #[must_use]
+    pub fn generated_pack_descriptor_path(&self, request_hash: &str) -> ObjectPath {
+        let partition = request_hash
+            .get(..GLOBAL_CONTENT_FANOUT_WIDTH)
+            .unwrap_or(request_hash);
+        self.repo_path(&format!(
+            "generated-packs/v1/requests/{partition}/{request_hash}.json"
+        ))
+    }
+
     /// Path to one immutable Git object visibility proof.
     #[must_use]
     pub fn git_visibility_path(&self, git_validation_digest: &str) -> ObjectPath {
@@ -268,11 +290,27 @@ impl<S> StoreLayout<S> {
         ))
     }
 
+    /// Path to one catalog-ordinal Git object visibility proof.
+    #[must_use]
+    pub fn git_visibility_catalog_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility/v3/{git_validation_digest}.json"
+        ))
+    }
+
     /// Path to a v1 visibility proof shipped by Crab 1.0.15.
     #[must_use]
     pub fn git_visibility_v1_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {
         self.repo_path(&format!(
             "metadata/git-visibility/{generation:020}-{pack_index_hash}.json"
+        ))
+    }
+
+    /// Path to the manifest-digest-bound shallow object closure descriptor.
+    #[must_use]
+    pub fn shallow_closure_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/shallow-closure/{git_validation_digest}.json"
         ))
     }
 
@@ -519,6 +557,22 @@ mod tests {
         assert_eq!(
             layout.pack_origin_receipt_path(&pack_id).as_ref(),
             format!("org/models/metadata/pack-origin/{pack_id}.json")
+        );
+    }
+
+    #[test]
+    fn generated_pack_paths_are_request_and_content_addressed() {
+        let layout = test_layout();
+        let request = format!("ab{}", "1".repeat(62));
+        let content = format!("cd{}", "2".repeat(62));
+
+        assert_eq!(
+            layout.generated_pack_artifact_path(&content).as_ref(),
+            format!("org/models/generated-packs/v1/artifacts/cd/{content}.pack")
+        );
+        assert_eq!(
+            layout.generated_pack_descriptor_path(&request).as_ref(),
+            format!("org/models/generated-packs/v1/requests/ab/{request}.json")
         );
     }
 

@@ -511,7 +511,30 @@ async fn publish_filtered_view(
     )
     .await
     {
-        Ok(digest) => Some(digest),
+        Ok(digest) => {
+            let catalog_ready =
+                crab_metadata::git_visibility::ensure_catalog_bound(store, &router, &manifest)
+                    .await;
+            match catalog_ready {
+                Ok(true) => Some(digest),
+                Ok(false) if !visibility_publication.is_published() => Some(digest),
+                Ok(false) => {
+                    tracing::warn!(
+                        generation = manifest.generation,
+                        "ACL view catalog visibility requires repair"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation = manifest.generation,
+                        "ACL view catalog visibility publication failed"
+                    );
+                    None
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -960,12 +983,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(manifest.refs.iter().all(|(name, tip)| {
-            visibility
+        assert!(
+            manifest
                 .refs
-                .get(name)
-                .is_some_and(|objects| objects.binary_search(tip).is_ok())
-        }));
+                .iter()
+                .all(|(name, tip)| visibility.contains_hex_in_ref(name, tip))
+        );
         let packs = read_bulk_pack_list(&store, &view_router, &manifest.pack_index_hash)
             .await
             .unwrap();

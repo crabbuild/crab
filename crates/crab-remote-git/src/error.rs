@@ -92,7 +92,7 @@ pub enum RevisionError {
 #[non_exhaustive]
 pub enum CorruptionStage {
     /// Immutable commit-graph acceleration metadata.
-    #[error("commit graph summary")]
+    #[error("split commit graph")]
     CommitGraph,
     /// Exact object-locator metadata.
     #[error("object locator")]
@@ -295,13 +295,6 @@ pub enum Error {
         source: gix_object::decode::Error,
     },
 
-    /// Commit-graph summary parsing failed.
-    #[error("failed to parse commit graph summary")]
-    CommitGraphParse {
-        #[source]
-        source: serde_json::Error,
-    },
-
     /// Tree payload parsing failed.
     #[error("failed to parse Git tree {oid}")]
     TreeParse {
@@ -463,6 +456,20 @@ pub enum Error {
     #[error(transparent)]
     Storage(#[from] crab_storage::StorageError),
 
+    /// Generated-artifact production coordination failed.
+    #[error("generated response-pack coordination failed")]
+    GeneratedPackLease {
+        #[source]
+        source: crate::GeneratedPackLeaseError,
+    },
+
+    /// A complete multi-pack response could not be consolidated.
+    #[error("failed to consolidate complete Git response pack")]
+    ResponsePackConsolidation {
+        #[source]
+        source: crab_git::repack::RepackError,
+    },
+
     /// Closing the locator also failed after the read had already failed.
     #[error("remote Git read failed and its locator could not be closed")]
     CloseAfterFailure {
@@ -515,7 +522,6 @@ impl Error {
             Self::RepositoryState { .. }
             | Self::ObjectKind { .. }
             | Self::CommitParse { .. }
-            | Self::CommitGraphParse { .. }
             | Self::TreeParse { .. }
             | Self::TagParse { .. }
             | Self::Corrupt { .. }
@@ -535,6 +541,8 @@ impl Error {
             Self::InternalInvariant { .. } => "internal",
             Self::Metadata(_) | Self::Manifest { .. } | Self::Inventory { .. } => "metadata",
             Self::Storage(_) => "storage",
+            Self::GeneratedPackLease { .. } => "coordination",
+            Self::ResponsePackConsolidation { .. } => "integrity",
             Self::CloseAfterFailure { .. } => "close",
             Self::Revision {
                 reason: RevisionError::TagDepth,

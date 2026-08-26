@@ -31,6 +31,7 @@ crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true, features = ["chunker"] }
 gix-hash = { workspace = true }
+gix-object = { workspace = true }
 gix-pack = { workspace = true }
 object_store = { workspace = true }
 serde = { workspace = true }

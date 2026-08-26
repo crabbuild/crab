@@ -127,6 +127,12 @@ gated on Plan 004.
 - CLI help, config, JSON/JSONL output, architecture docs, web docs, and
   recovery/runbooks describe one grace/force/plan/resume contract.
 
+The current draft integration branch assembles the Phase 1-5 contracts for
+end-to-end review. This does not override the dependency graph or acceptance
+gates: `001-large-repository-scale-roadmap.md` records which implementation is
+present and which Kubernetes/RustFS, fault, provider, and canary evidence is
+still pending.
+
 ## Findings considered and rejected
 
 - Raising grace alone: it cannot protect a writer longer than grace and is
@@ -139,3 +145,13 @@ gated on Plan 004.
   its permissive skip/zero semantics are appropriate for estimates, not deletes.
 - Importing PB layout/recipe/partition assumptions: they are not current GC
   roots and would make this delivery untestable against the current store.
+
+## Large-repository scale track
+
+`001-large-repository-scale-roadmap.md` is a separate P1, high-risk delivery
+track for Kubernetes-scale Git history and team fanout. It covers bitmap
+reachability, delta-preserving response packs, a generation-bound object
+catalog, split commit graphs, bounded geometric maintenance, stale-pack
+retention, and concurrency qualification. Its implementation is in progress;
+the roadmap records completed code separately from pending Kubernetes/RustFS,
+fault, provider, and canary acceptance evidence.

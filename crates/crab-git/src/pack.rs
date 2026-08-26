@@ -58,6 +58,10 @@ pub enum PackError {
     #[error("git index-pack succeeded but produced no index at {path}")]
     IndexMissing { path: PathBuf },
 
+    /// A temporary bare Git object database could not be initialized.
+    #[error("failed to initialize bare git object database {path}: {detail}")]
+    BareRepositoryInit { path: PathBuf, detail: String },
+
     /// Generated index reports a different pack hash than the pack trailer.
     #[error("pack hash mismatch: trailer says {trailer}, index says {index}")]
     PackHashMismatch { trailer: String, index: String },
@@ -76,6 +80,10 @@ pub enum PackError {
         #[from]
         source: crate::pack_locator::PackLocatorError,
     },
+
+    /// Git could not return validated object kinds for a local object database.
+    #[error("git object-kind query failed for {path}: {detail}")]
+    ObjectKindQuery { path: PathBuf, detail: String },
 }
 
 /// Verify the trailing SHA-1 checksum of a Git pack.
@@ -132,6 +140,38 @@ pub fn verify_pack_index_file(idx_path: &Path) -> Result<String> {
             reason: error.to_string(),
         })?;
     Ok(idx.pack_checksum().to_hex().to_string())
+}
+
+/// Initialize a directory as an isolated bare Git object database.
+///
+/// Callers that install packs into a temporary directory must initialize the
+/// repository metadata before invoking Git commands such as `cat-file`.
+///
+/// # Errors
+///
+/// Returns [`PackError::Io`] when Git cannot be started or
+/// [`PackError::BareRepositoryInit`] when Git rejects the directory.
+pub fn initialize_bare_git_dir(path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .map_err(|source| {
+            io_error(
+                format!("initialize {} as a bare git repository", path.display()),
+                source,
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(PackError::BareRepositoryInit {
+        path: path.to_owned(),
+        detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    })
 }
 
 /// Extracts the canonical Crab pack id from a remote pack object filename.
@@ -478,6 +518,118 @@ fn to_hex(bytes: &[u8]) -> String {
         })
 }
 
+/// Resolve the canonical kind of each requested object through a local Git
+/// object database without materializing object bodies.
+pub fn object_kinds_from_git_dir(
+    git_dir: &Path,
+    object_ids: &[gix_hash::ObjectId],
+) -> Result<std::collections::HashMap<gix_hash::ObjectId, gix_object::Kind>> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    if object_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut child = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .arg("cat-file")
+        .arg("--batch-check=%(objectname) %(objecttype)")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| PackError::ObjectKindQuery {
+            path: git_dir.to_owned(),
+            detail: source.to_string(),
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| PackError::ObjectKindQuery {
+            path: git_dir.to_owned(),
+            detail: "git cat-file did not expose piped stdin".to_owned(),
+        })?;
+    let requested = object_ids.to_owned();
+    let (output, writer_result) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            for oid in &requested {
+                writeln!(stdin, "{oid}")?;
+            }
+            stdin.flush()
+        });
+        let output = child.wait_with_output();
+        (output, writer.join())
+    });
+    let output = output.map_err(|source| PackError::ObjectKindQuery {
+        path: git_dir.to_owned(),
+        detail: source.to_string(),
+    })?;
+    if !output.status.success() {
+        return Err(PackError::ObjectKindQuery {
+            path: git_dir.to_owned(),
+            detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    let writer_result = writer_result.map_err(|_| PackError::ObjectKindQuery {
+        path: git_dir.to_owned(),
+        detail: "git cat-file stdin writer thread panicked".to_owned(),
+    })?;
+    writer_result.map_err(|source| PackError::ObjectKindQuery {
+        path: git_dir.to_owned(),
+        detail: source.to_string(),
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    if lines.len() != object_ids.len() {
+        return Err(PackError::ObjectKindQuery {
+            path: git_dir.to_owned(),
+            detail: "git cat-file returned the wrong number of object rows".to_owned(),
+        });
+    }
+    let mut kinds = std::collections::HashMap::with_capacity(object_ids.len());
+    for (oid, line) in object_ids.iter().zip(lines) {
+        let mut fields = line.split_whitespace();
+        let returned = fields
+            .next()
+            .and_then(|value| gix_hash::ObjectId::from_hex(value.as_bytes()).ok());
+        let kind = match fields.next() {
+            Some("commit") => gix_object::Kind::Commit,
+            Some("tree") => gix_object::Kind::Tree,
+            Some("blob") => gix_object::Kind::Blob,
+            Some("tag") => gix_object::Kind::Tag,
+            Some("missing") => {
+                return Err(PackError::ObjectKindQuery {
+                    path: git_dir.to_owned(),
+                    detail: format!("object {oid} is missing"),
+                });
+            }
+            Some(other) => {
+                return Err(PackError::ObjectKindQuery {
+                    path: git_dir.to_owned(),
+                    detail: format!("object {oid} returned unsupported kind {other:?}"),
+                });
+            }
+            None => {
+                return Err(PackError::ObjectKindQuery {
+                    path: git_dir.to_owned(),
+                    detail: format!("object {oid} returned a malformed response"),
+                });
+            }
+        };
+        if returned != Some(*oid) || fields.next().is_some() {
+            return Err(PackError::ObjectKindQuery {
+                path: git_dir.to_owned(),
+                detail: format!("object {oid} returned a mismatched response"),
+            });
+        }
+        kinds.insert(*oid, kind);
+    }
+    Ok(kinds)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -558,6 +710,81 @@ mod tests {
         .to_owned();
         let idx_path = dir.path().join(format!("fixture-pack-{pack_hash}.idx"));
         (dir, idx_path, pack_hash)
+    }
+
+    #[test]
+    fn object_kinds_from_git_dir_returns_validated_kinds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git_dir = dir.path().join("source.git");
+        git(
+            &["init", "--bare", git_dir.to_str().expect("git path UTF-8")],
+            None,
+        );
+        let blob = String::from_utf8(git(
+            &[
+                "--git-dir",
+                git_dir.to_str().expect("git path UTF-8"),
+                "hash-object",
+                "-w",
+                "--stdin",
+            ],
+            Some(b"catalogued blob\n"),
+        ))
+        .expect("blob object id UTF-8")
+        .trim()
+        .to_owned();
+        let tree_input = format!("100644 blob {blob}\tfile.txt\n");
+        let tree = String::from_utf8(git(
+            &[
+                "--git-dir",
+                git_dir.to_str().expect("git path UTF-8"),
+                "mktree",
+            ],
+            Some(tree_input.as_bytes()),
+        ))
+        .expect("tree object id UTF-8")
+        .trim()
+        .to_owned();
+        let object_ids = [
+            gix_hash::ObjectId::from_hex(blob.as_bytes()).expect("blob object id"),
+            gix_hash::ObjectId::from_hex(tree.as_bytes()).expect("tree object id"),
+        ];
+
+        let kinds = object_kinds_from_git_dir(&git_dir, &object_ids).expect("object kinds");
+
+        assert_eq!(kinds.get(&object_ids[0]), Some(&gix_object::Kind::Blob));
+        assert_eq!(kinds.get(&object_ids[1]), Some(&gix_object::Kind::Tree));
+    }
+
+    #[test]
+    fn object_kinds_from_git_dir_rejects_missing_objects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git_dir = dir.path().join("source.git");
+        git(
+            &["init", "--bare", git_dir.to_str().expect("git path UTF-8")],
+            None,
+        );
+        let missing = gix_hash::ObjectId::from_hex(b"0000000000000000000000000000000000000000")
+            .expect("missing object id");
+
+        let error = object_kinds_from_git_dir(&git_dir, &[missing]).expect_err("missing object");
+
+        assert!(matches!(error, PackError::ObjectKindQuery { .. }));
+    }
+
+    #[test]
+    fn object_kinds_from_git_dir_reports_repository_diagnostics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let object_id = gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+            .expect("object id");
+
+        let error = object_kinds_from_git_dir(dir.path(), &[object_id])
+            .expect_err("an uninitialized directory is not a Git repository");
+        let PackError::ObjectKindQuery { detail, .. } = error else {
+            panic!("expected object-kind query error");
+        };
+
+        assert!(detail.contains("not a git repository"), "{detail}");
     }
 
     #[test]

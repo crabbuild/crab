@@ -352,7 +352,33 @@ async fn commit_receive_inner(
     )
     .await
     {
-        Ok(digest) => Some(digest),
+        Ok(digest) => {
+            let catalog_ready = crab_metadata::git_visibility::ensure_catalog_bound(
+                ctx.store(),
+                ctx.router(),
+                &manifest,
+            )
+            .await;
+            match catalog_ready {
+                Ok(true) => Some(digest),
+                Ok(false) if !visibility_publication.is_published() => Some(digest),
+                Ok(false) => {
+                    tracing::warn!(
+                        generation = manifest.generation,
+                        "protected push committed; catalog visibility requires repair"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        generation = manifest.generation,
+                        "protected push committed; catalog visibility publication failed"
+                    );
+                    None
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -1071,10 +1097,7 @@ mod tests {
         )
         .await?;
         assert!(
-            visibility
-                .refs
-                .get("refs/heads/main")
-                .is_some_and(|objects| objects.binary_search(final_oid).is_ok()),
+            visibility.contains_hex_in_ref("refs/heads/main", final_oid),
             "the visibility proof must be durable when the protected ref commits"
         );
 

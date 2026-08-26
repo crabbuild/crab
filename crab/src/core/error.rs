@@ -1856,6 +1856,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
                 Self::Internal(format!("{context}: {source}"))
             }
             crab_metadata::error::MetadataError::Storage { source } => Self::from(source),
+            crab_metadata::error::MetadataError::ObjectStore { source } => Self::Storage(source),
             crab_metadata::error::MetadataError::SlateDbOpen { db, path, source } => {
                 Self::MetaDb(MetaDbError::Open { db, path, source })
             }
