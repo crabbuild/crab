@@ -518,6 +518,9 @@ fn lfs_endpoint_url(state: &AppState, headers: &HeaderMap, repository: &str) -> 
 }
 
 fn endpoint_scheme(headers: &HeaderMap, native_tls: bool) -> &'static str {
+    if native_tls {
+        return "https";
+    }
     if let Some(value) = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -531,7 +534,7 @@ fn endpoint_scheme(headers: &HeaderMap, native_tls: bool) -> &'static str {
             return "https";
         }
     }
-    if native_tls { "https" } else { "http" }
+    "http"
 }
 
 fn action_url(
@@ -1970,9 +1973,13 @@ mod tests {
 
     #[test]
     fn endpoint_scheme_defaults_to_native_tls_transport() {
-        let headers = HeaderMap::new();
+        let mut headers = HeaderMap::new();
         assert_eq!(endpoint_scheme(&headers, true), "https");
         assert_eq!(endpoint_scheme(&headers, false), "http");
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(endpoint_scheme(&headers, false), "https");
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert_eq!(endpoint_scheme(&headers, true), "https");
     }
 
     #[tokio::test]
