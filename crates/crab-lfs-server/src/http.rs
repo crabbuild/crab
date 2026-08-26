@@ -1082,6 +1082,7 @@ async fn download(
         Ok(range) => range,
         Err(response) => return response,
     };
+    let requested_range = range.is_some();
     let permit = match Arc::clone(&state.download_permits).acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -1096,10 +1097,10 @@ async fn download(
         Err(error) => return lfs_error_response(error),
     };
     let stream = timed_download_stream(stream, permit, state.config.request_timeout);
-    let status = if actual_range.start == 0 && actual_range.end == meta.size {
-        StatusCode::OK
-    } else {
+    let status = if requested_range {
         StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
     };
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
@@ -1878,6 +1879,27 @@ mod tests {
                 .expect("range body")
                 .as_ref(),
             &payload[2..6]
+        );
+
+        let full_range = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/repo/info/lfs/objects/{oid}"))
+                    .header(header::RANGE, "bytes=0-")
+                    .body(Body::empty())
+                    .expect("valid full range request"),
+            )
+            .await
+            .expect("full range response");
+        assert_eq!(full_range.status(), StatusCode::PARTIAL_CONTENT);
+        let expected_content_range =
+            HeaderValue::from_str(&format!("bytes 0-{}/{}", payload.len() - 1, payload.len()))
+                .expect("valid content range");
+        assert_eq!(
+            full_range.headers().get(header::CONTENT_RANGE),
+            Some(&expected_content_range)
         );
     }
 

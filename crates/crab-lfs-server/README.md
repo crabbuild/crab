@@ -18,6 +18,10 @@ The supported route shape is:
     /<repository>.git/info/lfs/objects/<sha256>/verify
     /<repository>.git/info/lfs/locks
 
+Basic downloads support one RFC 7233 byte range, including open-ended ranges;
+range requests always return `206 Partial Content` with `Content-Range`, even
+when the selected range covers the complete object.
+
 For deployments mounted below a reverse-proxy prefix, the equivalent
 `/lfs/<repository>/info/lfs` form is also accepted. `/healthz` is an
 unauthenticated process-liveness endpoint.
