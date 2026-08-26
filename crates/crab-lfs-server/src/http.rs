@@ -1954,6 +1954,14 @@ mod tests {
         )
         .await;
         assert_eq!(unauthenticated_batch.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthenticated_batch.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static(LFS_JSON))
+        );
+        assert_eq!(
+            unauthenticated_batch.headers().get("lfs-authenticate"),
+            Some(&HeaderValue::from_static("Basic realm=\"Git LFS\""))
+        );
 
         let uploaded = request(&app, Method::PUT, upload, Body::from(payload.as_slice())).await;
         assert_eq!(uploaded.status(), StatusCode::OK);

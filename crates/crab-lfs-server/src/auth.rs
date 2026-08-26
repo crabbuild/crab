@@ -266,10 +266,19 @@ fn unauthorized(config: &AuthConfig, reason: String) -> Response {
         axum::Json(serde_json::json!({ "message": reason })),
     )
         .into_response();
-    if matches!(config, AuthConfig::Basic { .. }) {
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/vnd.git-lfs+json"),
+    );
+    let challenge = match config {
+        AuthConfig::Basic { .. } => Some("Basic realm=\"Git LFS\""),
+        AuthConfig::Bearer { .. } => Some("Bearer"),
+        AuthConfig::None | AuthConfig::Mtls => None,
+    };
+    if let Some(challenge) = challenge {
         response.headers_mut().insert(
             header::HeaderName::from_static("lfs-authenticate"),
-            header::HeaderValue::from_static("Basic realm=\"Git LFS\""),
+            header::HeaderValue::from_static(challenge),
         );
     }
     response
