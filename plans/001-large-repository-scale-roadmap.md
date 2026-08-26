@@ -132,6 +132,40 @@ errors fail closed. This closes the capability-to-admission crash recovery gap
 found by the released-shape RustFS lifecycle while preserving the push
 acknowledgement boundary.
 
+The reader-fanout follow-up is committed as `fd95e8fd`. Protocol-v2
+upload-pack sessions now hold one of 16 repository-scoped object-store read
+leases for the session lifetime, renew the lease, cancel on renewal failure,
+and release it on every terminal path. Contended readers rotate and jitter a
+single slot per attempt, so admission is bounded by repository lease capacity
+instead of creating a metadata storm. Reader-side locator, visibility, and
+ref-journal repairs use non-blocking writer-lock probes; the owner path keeps
+the existing blocking serialization. The lease is deliberately internal and
+fixed-size: normal completion/error/cancellation releases it, while a crashed
+helper leaves only a bounded TTL lease for backend-clock reclaim.
+
+The exact post-commit RustFS team-load smoke
+`crabbuild-team-load-smoke-fd95` used the 100-commit synthetic fixture and the
+release binary whose embedded source revision is `fd95e8fd`. The standalone
+report verifier returned `status=ok` with 27 checks and 909 recorded commands:
+
+- 100/100 seed clones succeeded; total 26,853 ms, median client 20,949 ms,
+  p95 25,384 ms, p99 26,366 ms;
+- 100/100 concurrent incremental fetches succeeded; total 13,580 ms, median
+  client 6,933 ms, p95 11,913 ms, p99 12,924 ms;
+- 20/20 independent-ref pushes succeeded; total 5,323 ms, median client
+  2,034 ms, p95 3,623 ms, p99 5,303 ms;
+- same-ref contention produced exactly 1 success and 19 typed lock rejections;
+  total 785 ms, median client 378 ms, p95 617 ms, p99 773 ms, with zero
+  unexpected failures.
+
+This is current-binary smoke evidence, not completion of the full Kubernetes
+gate. The full Crab suite passed (3,745 library tests, 49 binary tests, and
+all enabled integration suites) with the documented 32 MiB macOS test-stack
+workaround; coordination passed 93/93 and the release build passed. Full
+Kubernetes repeatability, the 1,000-push differential, 10,000 ancestry and
+shallow differential proof, provider/fault/failover/canary evidence, and the
+remaining owner O(N) budgets remain open below.
+
 The active-marker recovery path is now complete for the discovered crash
 boundary: compaction promotes any prepared ref heads after the manifest CAS,
 retains the marker when that CAS repair fails, and releases the exact recorded
@@ -150,7 +184,8 @@ Implemented on the current branch (pre-lazy qualification evidence at
 `04655f3b`; latest admission hardening at `0ba86693`; qualification-contract
 fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
 recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
-transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
+transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
+reader-fanout hardening at `fd95e8fd`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -221,6 +256,9 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
 - generation-owner cycles execute at most one derived-state action, and owner
   samples identify the action reason and next eligibility for operational
   scheduling.
+- protocol-v2 upload-pack sessions use bounded repository-scoped read
+  admission with renewal, cancellation, crash-reclaimable TTL leases, and
+  non-blocking reader-side repair probes.
 
 Still required before the roadmap is DONE:
 
