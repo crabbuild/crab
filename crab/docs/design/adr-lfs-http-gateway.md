@@ -35,10 +35,14 @@ incoming copies and establish TLS before forwarding.
 
 ## Transfer and integrity
 
-Batch responses select basic and return actions against the gateway. Uploads
-are streamed to a local spool file under a concurrency semaphore, then
-crab-lfs verifies the declared size and SHA-256 digest before the object-store
-commit. Downloads verify the complete immutable object before opening the
+Batch responses select basic and return actions against the gateway. Object
+presence and integrity checks run with bounded ordered concurrency so response
+order remains stable without an unbounded object-store fan-out. Uploads are
+streamed to a local spool file under a concurrency semaphore, then crab-lfs
+verifies the declared size and SHA-256 digest before the object-store commit.
+Successful verification best-effort records a provider-validator receipt, so
+later checks can skip re-reading immutable bytes when the ETag or version still
+matches. Downloads verify the complete immutable object before opening the
 requested full or byte-range response. Object actions do not expose provider
 URLs or long-lived cloud credentials. When `server.action_secret` is set,
 Batch action URLs carry a short-lived signature bound to repository,

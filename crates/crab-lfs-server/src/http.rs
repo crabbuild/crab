@@ -30,6 +30,7 @@ const LFS_JSON: &str = "application/vnd.git-lfs+json";
 const MAX_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SMALL_BODY_BYTES: usize = 1024 * 1024;
 const MAX_LOCK_RESULTS: usize = 1_000;
+const MAX_BATCH_CONCURRENCY: usize = 32;
 pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 200;
 
 /// Shared state for one gateway process.
@@ -859,47 +860,57 @@ async fn batch(
     let store = lfs_store(state, repository);
     let endpoint = lfs_endpoint_url(state, headers, repository);
     let action_expires_in = action_expires_in(state);
-    let mut objects = Vec::with_capacity(parsed_objects.len());
-    for (object, oid) in parsed_objects {
-        let response = if request.operation == "upload" {
-            let upload_href = action_url(
-                state,
-                &endpoint,
-                repository,
-                &object.oid,
-                object.size,
-                ActionOperation::Upload,
-            );
-            let verify_href = action_url(
-                state,
-                &endpoint,
-                repository,
-                &object.oid,
-                object.size,
-                ActionOperation::Verify,
-            );
-            batch_upload_object(
-                &store,
-                &upload_href,
-                &verify_href,
-                action_expires_in,
-                object,
-                oid,
-            )
-            .await
-        } else {
-            let download_href = action_url(
-                state,
-                &endpoint,
-                repository,
-                &object.oid,
-                object.size,
-                ActionOperation::Download,
-            );
-            batch_download_object(&store, &download_href, action_expires_in, object, oid).await
-        };
-        objects.push(response);
-    }
+    let is_upload = request.operation == "upload";
+    let batch_concurrency = parsed_objects.len().clamp(1, MAX_BATCH_CONCURRENCY);
+    // Preserve request order for clients while allowing independent HEAD and
+    // integrity checks to overlap without turning one Batch request into an
+    // unbounded object-store fan-out.
+    let objects = futures_util::stream::iter(parsed_objects.into_iter().map(|(object, oid)| {
+        let endpoint = &endpoint;
+        let store = &store;
+        async move {
+            if is_upload {
+                let upload_href = action_url(
+                    state,
+                    endpoint,
+                    repository,
+                    &object.oid,
+                    object.size,
+                    ActionOperation::Upload,
+                );
+                let verify_href = action_url(
+                    state,
+                    endpoint,
+                    repository,
+                    &object.oid,
+                    object.size,
+                    ActionOperation::Verify,
+                );
+                batch_upload_object(
+                    store,
+                    &upload_href,
+                    &verify_href,
+                    action_expires_in,
+                    object,
+                    oid,
+                )
+                .await
+            } else {
+                let download_href = action_url(
+                    state,
+                    endpoint,
+                    repository,
+                    &object.oid,
+                    object.size,
+                    ActionOperation::Download,
+                );
+                batch_download_object(store, &download_href, action_expires_in, object, oid).await
+            }
+        }
+    }))
+    .buffered(batch_concurrency)
+    .collect::<Vec<_>>()
+    .await;
     json_response(
         StatusCode::OK,
         BatchResponse {

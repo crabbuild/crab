@@ -30,8 +30,11 @@ verified bytes through crab-storage
 `LfsObjectStore` provides idempotent `put`, bounded-memory `put_stream`,
 `get`, `exists`, and `verify` operations. Its stream APIs let an HTTP
 composition boundary verify an immutable object before serving a bounded
-range. A configured primary fallback can serve reads when a selected replica
-is stale or unavailable.
+range. Successful streamed verification records a validator-bound receipt when
+the provider exposes an ETag or version, allowing later presence checks to
+avoid re-reading the object body. A configured primary fallback can serve reads
+when a selected replica is stale or unavailable; receipts are written to the
+source that passed verification.
 
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
 `{prefix}/lfs/locks/{blake3(path)}`. The CLI and the standard HTTP gateway

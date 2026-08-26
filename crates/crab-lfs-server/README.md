@@ -22,6 +22,10 @@ Basic downloads support one RFC 7233 byte range, including open-ended ranges;
 range requests always return `206 Partial Content` with `Content-Range`, even
 when the selected range covers the complete object.
 
+Batch object checks run with bounded ordered concurrency, so large Git LFS
+batches retain the client-request order without issuing an unbounded burst of
+object-store requests.
+
 For deployments mounted below a reverse-proxy prefix, the equivalent
 `/lfs/<repository>/info/lfs` form is also accepted. `/healthz` is an
 unauthenticated process-liveness endpoint.

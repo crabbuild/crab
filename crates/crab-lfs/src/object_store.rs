@@ -454,7 +454,10 @@ impl LfsObjectStore {
     /// Verifies an LFS object without retaining its body in memory.
     pub async fn verify_size(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
         match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                Self::record_verification_receipt_at(&self.store, &self.prefix, oid).await;
+                Ok(())
+            }
             Err(error) => {
                 let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
                     return Err(error);
@@ -464,7 +467,16 @@ impl LfsObjectStore {
                     error = %error,
                     "LFS verification from selected remote failed; retrying primary"
                 );
-                Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size).await
+                match Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size)
+                    .await
+                {
+                    Ok(()) => {
+                        Self::record_verification_receipt_at(fallback_store, fallback_prefix, oid)
+                            .await;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
             }
         }
     }
@@ -588,6 +600,7 @@ impl LfsObjectStore {
         range: Option<Range<u64>>,
     ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
         Self::verify_size_at(store, prefix, oid, expected_size).await?;
+        Self::record_verification_receipt_at(store, prefix, oid).await;
         let path = Self::object_path_at(prefix, oid);
         let (meta, result_range, stream) = store
             .get_stream(&path, range)
@@ -688,8 +701,12 @@ impl LfsObjectStore {
     }
 
     async fn record_verification_receipt(&self, oid: &[u8; 32]) {
-        let object_path = self.object_path(oid);
-        let meta = match self.store.head(&object_path).await {
+        Self::record_verification_receipt_at(&self.store, &self.prefix, oid).await;
+    }
+
+    async fn record_verification_receipt_at(store: &Store, prefix: &str, oid: &[u8; 32]) {
+        let object_path = Self::object_path_at(prefix, oid);
+        let meta = match store.head(&object_path).await {
             Ok(meta) => meta,
             Err(error) => {
                 tracing::debug!(
@@ -721,12 +738,8 @@ impl LfsObjectStore {
             );
             return;
         };
-        let receipt_path = receipt_path_at(&self.prefix, oid);
-        if let Err(error) = self
-            .store
-            .put_overwrite(&receipt_path, Bytes::from(body))
-            .await
-        {
+        let receipt_path = receipt_path_at(prefix, oid);
+        if let Err(error) = store.put_overwrite(&receipt_path, Bytes::from(body)).await {
             // Receipts accelerate future presence checks; losing one is safe
             // because the next operation falls back to streamed hashing.
             tracing::debug!(
@@ -1357,6 +1370,25 @@ mod tests {
         store.put(&oid, bytes.clone()).await.unwrap();
         let got = store.verify(&oid).await.unwrap();
         assert_eq!(got, bytes);
+    }
+
+    #[tokio::test]
+    async fn verify_size_backfills_validator_receipt_for_external_object() {
+        let raw_store = test_base_store();
+        let store = LfsObjectStore::new(raw_store.clone(), "repo");
+        let data = Bytes::from_static(b"external object");
+        let oid = sha256_oid(&data);
+        let object_path = store.object_path_for(&oid);
+        raw_store
+            .inner()
+            .put(&object_path, data.clone().into())
+            .await
+            .unwrap();
+
+        store.verify_size(&oid, data.len() as u64).await.unwrap();
+
+        let receipt_path = receipt_path_at("repo", &oid);
+        assert!(raw_store.head(&receipt_path).await.is_ok());
     }
 
     #[tokio::test]
