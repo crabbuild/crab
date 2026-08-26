@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocatorSession, GitPackInventoryEntry,
+    GitLocatorCoverage, GitObjectLocatorSession, GitObjectLookup, GitPackInventoryEntry,
 };
 use crab_metadata::manifest_store::{read_bulk_pack_list, read_manifest};
 use crab_metadata::ref_journal::{list_active_transactions, materialize_ref_journal};
@@ -593,6 +593,119 @@ impl RemoteGitRepository {
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
         Ok(available)
+    }
+
+    /// Read and validate a V5 visibility proof without materializing its OID dictionary.
+    ///
+    /// Ref tips are checked with small exact catalog lookups. Later upload-pack
+    /// planning resolves only the ordinals selected by the request through its
+    /// own generation-pinned operation session.
+    pub async fn catalog_visibility_index(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<crab_metadata::git_visibility::GitCatalogVisibilityIndex> {
+        let runtime_cancellation = self.state.runtime.background_cancellation();
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        let coverage = self.state.coverage.ok_or_else(|| {
+            if self.state.refs.is_empty() {
+                Error::EmptyRepository
+            } else {
+                Error::RepositoryState {
+                    reason: RepositoryStateError::VisibilityProofMismatch,
+                }
+            }
+        })?;
+        let pack_index_hash = coverage.pack_index_hash.to_string();
+        let read = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = crab_metadata::git_visibility::read_catalog_with_format(
+                &self.state.store,
+                &self.state.layout,
+                self.state.generation,
+                &pack_index_hash,
+                &self.state.git_validation_digest,
+            ) => result.map_err(Error::Metadata)?,
+        };
+        if read.format != crab_metadata::git_visibility::GitVisibilityFormat::V5 {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+        let index = read.index;
+        if index.ref_count() != self.state.refs.entries.len()
+            || self
+                .state
+                .refs
+                .entries
+                .iter()
+                .any(|reference| !index.contains_ref(&reference.name))
+        {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+        let expected = self
+            .state
+            .refs
+            .entries
+            .iter()
+            .flat_map(|reference| {
+                [
+                    Some((reference.name.as_str(), reference.target)),
+                    reference.peeled.map(|oid| (reference.name.as_str(), oid)),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .map(|(name, oid)| {
+                oid.as_bytes()
+                    .try_into()
+                    .map(|oid| (name.to_owned(), oid))
+                    .map_err(|_| Error::RepositoryState {
+                        reason: RepositoryStateError::VisibilityProofMismatch,
+                    })
+            })
+            .collect::<Result<Vec<(String, [u8; 20])>>>()?;
+        let object_ids = expected
+            .iter()
+            .map(|(_, object_id)| *object_id)
+            .collect::<Vec<_>>();
+        let identity = index.catalog_identity().map_err(Error::Metadata)?;
+        let session = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = GitObjectLocatorSession::open_for_catalog(
+                Arc::clone(self.state.store.inner()),
+                self.state.layout.repo_prefix(),
+                identity,
+                Duration::from_secs(60 * 60),
+            ) => result.map_err(Error::Metadata)?,
+        };
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => Err(Error::Cancelled),
+            lookups = session.lookup_batch(&object_ids, &self.state.inventory) => {
+                let lookups = lookups.map_err(Error::Metadata)?;
+                if lookups.len() != expected.len()
+                    || lookups.iter().zip(&expected).any(|(lookup, (name, _))| {
+                        !matches!(lookup, GitObjectLookup::Hit(locator)
+                            if index.contains_ordinal_in_ref(name, locator.ordinal))
+                    })
+                {
+                    Err(Error::RepositoryState {
+                        reason: RepositoryStateError::VisibilityProofMismatch,
+                    })
+                } else {
+                    Ok(index)
+                }
+            }
+        };
+        finish_with_close(result, session.close().await)
     }
 
     /// Read the immutable object-visibility proof for this pinned generation.

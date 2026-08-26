@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
@@ -34,6 +34,8 @@ const SCAN_FETCH_TASKS: usize = 4;
 // degenerating into one object-store round trip per SlateDB block.
 const CATALOG_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
 const CATALOG_SCAN_FETCH_TASKS: usize = 8;
+const ORDINAL_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
+const ORDINAL_SCAN_FETCH_TASKS: usize = 8;
 // One cache is private to one short-lived reader process. This keeps 32
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
@@ -394,6 +396,12 @@ impl GitObjectLocatorSession {
         let Some(reader) = &self.reader else {
             return Ok(vec![None; ordinals.len()]);
         };
+        if ordinals.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(objects) = self.object_ids_by_ordinal_scan(reader, ordinals).await? {
+            return Ok(objects);
+        }
         let fetched = stream::iter(
             ordinals
                 .iter()
@@ -424,11 +432,95 @@ impl GitObjectLocatorSession {
         Ok(objects)
     }
 
+    async fn object_ids_by_ordinal_scan(
+        &self,
+        reader: &slatedb::DbReader,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<Option<[u8; 20]>>>> {
+        let expected = self.identity.map_or(0, |identity| identity.object_count);
+        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
+        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS || expected == 0 {
+            return Ok(None);
+        }
+        let first = *ordinals
+            .iter()
+            .min()
+            .ok_or_else(|| corrupt("ordinal", "ordinal scan lost its request"))?;
+        let last = *ordinals
+            .iter()
+            .max()
+            .ok_or_else(|| corrupt("ordinal", "ordinal scan lost its request"))?;
+        let span = u64::from(last)
+            .saturating_sub(u64::from(first))
+            .saturating_add(1);
+        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
+            return Ok(None);
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_scan",
+            requested_objects = ordinals.len(),
+            ordinal_span = span,
+            "compact Git ordinal lookup selected"
+        );
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(ORDINAL_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(ORDINAL_SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options(
+                [ORDINAL_FAMILY],
+                first.to_be_bytes().as_slice()..=last.to_be_bytes().as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut requested = ordinals.iter().copied().enumerate().collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        let mut request_index = 0usize;
+        let mut rows_scanned = 0u64;
+        let mut objects = vec![None; ordinals.len()];
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > span {
+                return Err(corrupt(
+                    "ordinal",
+                    "Git catalog ordinal scan returned too many rows",
+                ));
+            }
+            let ordinal = decode_ordinal_key(&row.key)
+                .ok_or_else(|| corrupt("ordinal", "invalid Git catalog ordinal key"))?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal < ordinal)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal == ordinal)
+            {
+                let (output_index, _) = requested[request_index];
+                objects[output_index] =
+                    Some(row.value.as_ref().try_into().map_err(|_| {
+                        corrupt("ordinal", "invalid Git catalog ordinal object ID")
+                    })?);
+                request_index += 1;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_scan",
+            requested_objects = ordinals.len(),
+            rows_scanned,
+            "compact Git ordinal lookup completed"
+        );
+        Ok(Some(objects))
+    }
+
     /// Read the complete dense OID order from this immutable catalog checkpoint.
     pub async fn all_object_ids(&self) -> Result<Vec<[u8; 20]>> {
         let Some(reader) = &self.reader else {
             return Ok(Vec::new());
         };
+        let started = Instant::now();
         let expected = self.identity.map_or(0, |identity| identity.object_count);
         let capacity = usize::try_from(expected)
             .map_err(|_| corrupt("metadata", "catalog object count cannot be represented"))?;
@@ -462,6 +554,12 @@ impl GitObjectLocatorSession {
                 "Git catalog ordinal count does not match metadata",
             ));
         }
+        tracing::info!(
+            telemetry_event = "catalog_materialization",
+            catalog_objects = objects.len(),
+            catalog_materialization_ms = started.elapsed().as_millis() as u64,
+            "materialized Git catalog OID dictionary"
+        );
         Ok(objects)
     }
 
@@ -1125,6 +1223,30 @@ mod tests {
         assert!(lookups.iter().enumerate().all(|(index, lookup)| {
             index == missing_index || matches!(lookup, GitObjectLookup::Hit(_))
         }));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn dense_ordinal_scan_preserves_request_order() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (object_ids, _inventory) =
+            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+        let ordinals = (0..object_ids.len() as u32)
+            .rev()
+            .collect::<Vec<GitObjectOrdinal>>();
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let resolved = session
+            .object_ids_by_ordinal(&ordinals)
+            .await
+            .expect("dense ordinal lookup");
+        let expected = ordinals
+            .iter()
+            .map(|ordinal| Some(object_ids[*ordinal as usize]))
+            .collect::<Vec<_>>();
+        assert_eq!(resolved, expected);
         session.close().await.expect("close reader");
     }
 

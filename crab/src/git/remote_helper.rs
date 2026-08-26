@@ -2423,12 +2423,13 @@ async fn try_fetch_exact_shallow_closure(
             entry.sha
         ))
     })?;
-    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
-        store.as_storage(),
-        router.repo_prefix(),
-        cancel,
-    )
-    .await?;
+    let (repository, visibility) =
+        crate::git::upload_pack_wire::open_repository_with_catalog_visibility(
+            store.as_storage(),
+            router.repo_prefix(),
+            cancel,
+        )
+        .await?;
     if repository.generation() != manifest.generation {
         return Ok(None);
     }
@@ -2526,12 +2527,13 @@ async fn fetch_promisor_objects(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let (repository, visibility) = crate::git::upload_pack_wire::open_repository_with_visibility(
-        store.as_storage(),
-        prefix,
-        cancel,
-    )
-    .await?;
+    let (repository, visibility) =
+        crate::git::upload_pack_wire::open_repository_with_catalog_visibility(
+            store.as_storage(),
+            prefix,
+            cancel,
+        )
+        .await?;
     let visible_refs =
         crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
     let request = crab_read::UploadPackRequest {
@@ -2539,9 +2541,14 @@ async fn fetch_promisor_objects(
         filter: crab_read::UploadPackFilter::None,
         ..Default::default()
     };
-    let plan =
-        crab_read::plan_upload_pack(&repository, &visibility, &visible_refs, &request, cancel)
-            .await?;
+    let plan = crab_read::plan_upload_pack_catalog(
+        &repository,
+        &visibility,
+        &visible_refs,
+        &request,
+        cancel,
+    )
+    .await?;
     let pack = repository
         .generate_pack(&plan.object_ids, cancel)
         .await

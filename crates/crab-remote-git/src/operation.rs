@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crab_metadata::git_object_locator::{GitObjectKind, GitObjectLocatorSession, GitObjectLookup};
+use crab_metadata::git_object_locator::{
+    GitObjectKind, GitObjectLocatorSession, GitObjectLookup, GitObjectOrdinal,
+};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -380,6 +382,73 @@ impl OperationContext {
                     stage: CorruptionStage::Locator,
                 }),
             })
+            .collect()
+    }
+
+    /// Resolve OIDs to dense ordinals in the operation's pinned catalog.
+    pub async fn catalog_object_ordinals(
+        &self,
+        object_ids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<Option<GitObjectOrdinal>>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        let object_ids = object_ids
+            .iter()
+            .map(|object_id| {
+                object_id.as_bytes().try_into().map_err(|_| Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                })
+            })
+            .collect::<Result<Vec<[u8; 20]>>>()?;
+        let lookups = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            lookups = session.lookup_batch(&object_ids, &self.state.inventory) => lookups?,
+        };
+        if lookups.len() != object_ids.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        lookups
+            .into_iter()
+            .map(|lookup| match lookup {
+                GitObjectLookup::Hit(locator) => Ok(Some(locator.ordinal)),
+                GitObjectLookup::Miss => Ok(None),
+                GitObjectLookup::Corrupt => Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                }),
+            })
+            .collect()
+    }
+
+    /// Resolve dense catalog ordinals to OIDs in the operation's pinned catalog.
+    pub async fn catalog_object_ids_by_ordinal(
+        &self,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Vec<Option<gix_hash::ObjectId>>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        let object_ids = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            object_ids = session.object_ids_by_ordinal(ordinals) => object_ids?,
+        };
+        object_ids
+            .into_iter()
+            .map(|object_id| Ok(object_id.map(gix_hash::ObjectId::from)))
             .collect()
     }
 

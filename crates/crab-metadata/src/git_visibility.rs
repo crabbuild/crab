@@ -353,6 +353,308 @@ pub struct GitVisibilityIndex {
     incremental_history: BTreeMap<String, Vec<GitVisibilityTransition>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitCatalogVisibilityTransition {
+    from_ordinal: u32,
+    to_ordinal: u32,
+    objects: GitVisibilityClosure,
+}
+
+/// Catalog-bound visibility proof that keeps the large OID dictionary lazy.
+///
+/// V5 proofs store ref closures as catalog ordinals. This view validates and
+/// queries those closures without reading every ordinal-to-OID row. Callers
+/// resolve only the ordinals selected for one operation through the pinned
+/// catalog session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCatalogVisibilityIndex {
+    /// Schema version of this object.
+    pub version: u32,
+    /// Manifest generation this proof describes.
+    pub generation: u64,
+    /// Pack-index hash this proof was built against.
+    pub pack_index_hash: String,
+    /// Digest binding the complete manifest Git state described by this proof.
+    pub git_validation_digest: String,
+    /// Digest naming the exact immutable catalog checkpoint.
+    pub catalog_digest: String,
+    /// Number of dense ordinals in the bound catalog.
+    pub object_count: u64,
+    refs: BTreeMap<String, GitVisibilityClosure>,
+    transitions: BTreeMap<String, Vec<GitCatalogVisibilityTransition>>,
+    incremental_history: BTreeMap<String, Vec<GitCatalogVisibilityTransition>>,
+}
+
+impl GitCatalogVisibilityIndex {
+    fn from_parts(
+        generation: u64,
+        pack_index_hash: String,
+        git_validation_digest: String,
+        catalog_digest: String,
+        object_count: u64,
+        refs: BTreeMap<String, GitVisibilityClosure>,
+        transitions: BTreeMap<String, Vec<GitCatalogVisibilityTransition>>,
+        incremental_history: BTreeMap<String, Vec<GitCatalogVisibilityTransition>>,
+    ) -> Result<Self> {
+        let index = Self {
+            version: GIT_VISIBILITY_INDEX_VERSION,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+            catalog_digest,
+            object_count,
+            refs,
+            transitions,
+            incremental_history,
+        };
+        index.validate()?;
+        Ok(index)
+    }
+
+    /// Validate the ordinal proof without opening the catalog dictionary.
+    pub fn validate(&self) -> Result<()> {
+        if self.version != GIT_VISIBILITY_INDEX_VERSION {
+            return Err(corrupt("visibility index version is unsupported"));
+        }
+        validate_hash(&self.pack_index_hash, "pack index hash")?;
+        validate_hash(&self.git_validation_digest, "Git validation digest")?;
+        validate_hash(&self.catalog_digest, "Git object catalog digest")?;
+        let object_count = usize::try_from(self.object_count)
+            .map_err(|_| corrupt("Git object catalog count cannot be represented"))?;
+        if self.object_count > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt(
+                "visibility object dictionary contains too many objects",
+            ));
+        }
+        if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
+            return Err(corrupt("visibility index contains too many refs"));
+        }
+        let mut membership_count = 0u64;
+        for (name, closure) in &self.refs {
+            validate_ref_name(name)?;
+            membership_count = membership_count
+                .checked_add(closure.validate(object_count)?)
+                .ok_or_else(|| corrupt("visibility index object count overflows"))?;
+            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(corrupt("visibility index contains too many objects"));
+            }
+        }
+        validate_catalog_transitions(
+            &self.refs,
+            &self.transitions,
+            object_count,
+            MAX_VISIBILITY_TRANSITIONS_PER_REF,
+            "visibility transitions",
+        )?;
+        validate_catalog_transitions(
+            &self.refs,
+            &self.incremental_history,
+            object_count,
+            MAX_VISIBILITY_HISTORY_TRANSITIONS_PER_REF,
+            "incremental visibility history",
+        )?;
+        Ok(())
+    }
+
+    /// Return the exact catalog checkpoint identity bound to this proof.
+    pub fn catalog_identity(&self) -> Result<crate::git_object_locator::GitObjectCatalogIdentity> {
+        Ok(crate::git_object_locator::GitObjectCatalogIdentity {
+            generation: self.generation,
+            pack_index_hash: crab_xet::hash::MerkleHash::from_hex(&self.pack_index_hash)
+                .map_err(|_| corrupt("invalid pack index hash"))?,
+            object_count: self.object_count,
+            catalog_digest: crab_xet::hash::MerkleHash::from_hex(&self.catalog_digest)
+                .map_err(|_| corrupt("invalid catalog digest"))?,
+        })
+    }
+
+    /// Return the number of refs in this proof.
+    #[must_use]
+    pub fn ref_count(&self) -> usize {
+        self.refs.len()
+    }
+
+    /// Return whether this proof contains the named ref.
+    #[must_use]
+    pub fn contains_ref(&self, name: &str) -> bool {
+        self.refs.contains_key(name)
+    }
+
+    /// Return whether one ref closure contains a catalog ordinal.
+    #[must_use]
+    pub fn contains_ordinal_in_ref(&self, name: &str, ordinal: u32) -> bool {
+        self.refs
+            .get(name)
+            .is_some_and(|closure| closure.contains(ordinal))
+    }
+
+    /// Return whether an ordinal is reachable from one visible ref.
+    #[must_use]
+    pub fn contains_ordinal_for_refs<'a, I>(&self, refs: I, ordinal: u32) -> bool
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        refs.into_iter()
+            .any(|name| self.contains_ordinal_in_ref(name, ordinal))
+    }
+
+    /// Return the union of objects rooted at the supplied refs as ordinals.
+    #[must_use]
+    pub fn ordinals_for_refs<'a, I>(&self, refs: I) -> Vec<u32>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        bitmap_positions(&self.union_for_refs(refs))
+    }
+
+    /// Return the selected-ref union minus the excluded-ref union.
+    #[must_use]
+    pub fn ordinals_for_ref_difference<'a, I, J>(&self, selected: I, excluded: J) -> Vec<u32>
+    where
+        I: IntoIterator<Item = &'a str>,
+        J: IntoIterator<Item = &'a str>,
+    {
+        let mut selected = self.union_for_refs(selected);
+        let excluded = self.union_for_refs(excluded);
+        for (selected, excluded) in selected.iter_mut().zip(excluded) {
+            *selected &= !excluded;
+        }
+        bitmap_positions(&selected)
+    }
+
+    /// Return a proven incremental closure for one exact prior ref tip.
+    #[must_use]
+    pub fn incremental_ordinals(
+        &self,
+        name: &str,
+        to_ordinal: u32,
+        haves: &[u32],
+    ) -> Option<Vec<u32>> {
+        if haves.contains(&to_ordinal) {
+            return Some(Vec::new());
+        }
+        if let Some(transition) = self
+            .transitions
+            .get(name)
+            .into_iter()
+            .flat_map(|transitions| transitions.iter().rev())
+            .find(|transition| {
+                transition.to_ordinal == to_ordinal && haves.contains(&transition.from_ordinal)
+            })
+        {
+            return Some(transition.objects.positions());
+        }
+
+        let history = self.incremental_history.get(name)?;
+        let by_from = history
+            .iter()
+            .map(|transition| (transition.from_ordinal, transition))
+            .collect::<HashMap<_, _>>();
+        for have in haves {
+            let mut current = *have;
+            let mut selected = vec![0_u8; usize::try_from(self.object_count).ok()?.div_ceil(8)];
+            let mut steps = 0usize;
+            while current != to_ordinal {
+                let Some(transition) = by_from.get(&current) else {
+                    break;
+                };
+                transition.objects.union_into(&mut selected);
+                current = transition.to_ordinal;
+                steps = steps.saturating_add(1);
+                if steps > history.len() {
+                    break;
+                }
+            }
+            if current == to_ordinal {
+                return Some(bitmap_positions(&selected));
+            }
+        }
+        None
+    }
+
+    /// Count distinct objects rooted at the supplied visible refs.
+    #[must_use]
+    pub fn object_count_for_refs<'a, I>(&self, refs: I) -> usize
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        self.union_for_refs(refs)
+            .iter()
+            .map(|byte| byte.count_ones() as usize)
+            .sum()
+    }
+
+    /// Return an authorization digest for the ordinal selection.
+    ///
+    /// The immutable catalog digest binds ordinals to their OIDs. Hashing the
+    /// selected ordinals avoids materializing the full dictionary while still
+    /// keeping response-pack cache keys generation- and authorization-bound.
+    #[must_use]
+    pub fn authorization_digest_for_refs<'a, I>(&self, refs: I) -> [u8; 32]
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"crab.git-visibility.authorization.ordinal.v1\0");
+        hash.update(self.git_validation_digest.as_bytes());
+        hash.update(self.catalog_digest.as_bytes());
+        for ordinal in self.ordinals_for_refs(refs) {
+            hash.update(&ordinal.to_be_bytes());
+        }
+        *hash.finalize().as_bytes()
+    }
+
+    /// Return total ref memberships without materializing object IDs.
+    #[must_use]
+    pub fn membership_count(&self) -> u64 {
+        self.refs.values().map(GitVisibilityClosure::len).sum()
+    }
+
+    fn union_for_refs<'a, I>(&self, refs: I) -> Vec<u8>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut union = vec![0u8; usize::try_from(self.object_count).unwrap_or(0).div_ceil(8)];
+        for closure in refs.into_iter().filter_map(|name| self.refs.get(name)) {
+            closure.union_into(&mut union);
+        }
+        union
+    }
+}
+
+fn validate_catalog_transitions(
+    refs: &BTreeMap<String, GitVisibilityClosure>,
+    transitions: &BTreeMap<String, Vec<GitCatalogVisibilityTransition>>,
+    object_count: usize,
+    maximum: usize,
+    field: &str,
+) -> Result<()> {
+    for (name, transitions) in transitions {
+        if !refs.contains_key(name) || transitions.len() > maximum {
+            return Err(corrupt(format!("{field} do not match their ref")));
+        }
+        let reference = refs
+            .get(name)
+            .ok_or_else(|| corrupt(format!("{field} ref closure is absent")))?;
+        for transition in transitions {
+            if usize::try_from(transition.from_ordinal).ok() >= Some(object_count)
+                || usize::try_from(transition.to_ordinal).ok() >= Some(object_count)
+                || !reference.contains(transition.from_ordinal)
+                || !reference.contains(transition.to_ordinal)
+                || transition.objects.validate(object_count)? > MAX_GIT_VISIBILITY_OBJECTS
+                || transition
+                    .objects
+                    .positions()
+                    .into_iter()
+                    .any(|position| !reference.contains(position))
+            {
+                return Err(corrupt(format!("{field} transition is invalid")));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GitVisibilityIndex {
     /// Build a normalized proof from ref-rooted object sets.
     pub fn new(
@@ -1058,9 +1360,9 @@ mod storage {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        GIT_VISIBILITY_INDEX_VERSION, GitVisibilityEdit, GitVisibilityIndex,
-        MAX_GIT_VISIBILITY_INDEX_BYTES, MAX_GIT_VISIBILITY_OBJECTS, MAX_GIT_VISIBILITY_REFS,
-        validate_hash, validate_oid, validate_ref_closures,
+        GIT_VISIBILITY_INDEX_VERSION, GitCatalogVisibilityIndex, GitVisibilityEdit,
+        GitVisibilityIndex, MAX_GIT_VISIBILITY_INDEX_BYTES, MAX_GIT_VISIBILITY_OBJECTS,
+        MAX_GIT_VISIBILITY_REFS, validate_hash, validate_oid, validate_ref_closures,
     };
     use crate::error::Result;
     use crate::manifests::Manifest;
@@ -1088,6 +1390,15 @@ mod storage {
     pub struct GitVisibilityRead {
         /// Normalized current-format proof.
         pub index: GitVisibilityIndex,
+        /// Stored format that supplied the proof.
+        pub format: GitVisibilityFormat,
+    }
+
+    /// Lazy catalog-bound visibility proof and its storage format.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GitCatalogVisibilityRead {
+        /// Ordinal proof that has not materialized the catalog OID dictionary.
+        pub index: GitCatalogVisibilityIndex,
         /// Stored format that supplied the proof.
         pub format: GitVisibilityFormat,
     }
@@ -1703,6 +2014,79 @@ mod storage {
             })
         }
 
+        fn into_catalog_index(self) -> Result<super::GitCatalogVisibilityIndex> {
+            if self.version != GIT_VISIBILITY_INDEX_VERSION {
+                return Err(super::corrupt(
+                    "visibility index storage version is unsupported",
+                ));
+            }
+            validate_hash(&self.pack_index_hash, "pack index hash")?;
+            validate_hash(&self.git_validation_digest, "Git validation digest")?;
+            validate_hash(&self.catalog_digest, "Git object catalog digest")?;
+            let object_count = usize::try_from(self.object_count)
+                .map_err(|_| super::corrupt("Git object catalog count cannot be represented"))?;
+            if self.object_count > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(super::corrupt(
+                    "visibility object dictionary contains too many objects",
+                ));
+            }
+            let refs = self
+                .refs
+                .into_iter()
+                .map(|(name, closure)| {
+                    Ok((
+                        name,
+                        super::GitVisibilityClosure::from_positions(
+                            closure.into_positions(object_count)?,
+                            object_count,
+                        )?,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            let decode_transitions = |source: BTreeMap<String, Vec<GitVisibilityTransitionV5>>| {
+                source
+                    .into_iter()
+                    .map(|(name, transitions)| {
+                        let transitions = transitions
+                            .into_iter()
+                            .map(|transition| {
+                                if usize::try_from(transition.from_ordinal).ok()
+                                    >= Some(object_count)
+                                    || usize::try_from(transition.to_ordinal).ok()
+                                        >= Some(object_count)
+                                {
+                                    return Err(super::corrupt(
+                                        "visibility transition endpoint is outside its catalog",
+                                    ));
+                                }
+                                Ok(super::GitCatalogVisibilityTransition {
+                                    from_ordinal: transition.from_ordinal,
+                                    to_ordinal: transition.to_ordinal,
+                                    objects: super::GitVisibilityClosure::from_positions(
+                                        transition.objects.into_positions(object_count)?,
+                                        object_count,
+                                    )?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok((name, transitions))
+                    })
+                    .collect::<Result<_>>()
+            };
+            let transitions = decode_transitions(self.transitions)?;
+            let incremental_history = decode_transitions(self.incremental_history)?;
+            super::GitCatalogVisibilityIndex::from_parts(
+                self.generation,
+                self.pack_index_hash,
+                self.git_validation_digest,
+                self.catalog_digest,
+                self.object_count,
+                refs,
+                transitions,
+                incremental_history,
+            )
+        }
+
         fn into_index(self, catalog: Vec<[u8; 20]>) -> Result<GitVisibilityIndex> {
             if self.version != GIT_VISIBILITY_INDEX_VERSION {
                 return Err(super::corrupt(
@@ -2004,6 +2388,26 @@ mod storage {
     }
 
     #[cfg(feature = "remote-index")]
+    async fn read_catalog_bound_lazy(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<(GitCatalogVisibilityIndex, GitVisibilityFormat)> {
+        let path = router.git_visibility_catalog_path(git_validation_digest);
+        let body = read_bounded(store, &path).await?;
+        let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!("invalid catalog visibility index JSON: {error}"),
+            }
+        })?;
+        stored.validate_binding(generation, pack_index_hash, git_validation_digest)?;
+        Ok((stored.into_catalog_index()?, GitVisibilityFormat::V5))
+    }
+
+    #[cfg(feature = "remote-index")]
     fn catalog_identity(
         stored: &GitVisibilityIndexV5,
         generation: u64,
@@ -2270,6 +2674,27 @@ mod storage {
             }),
             Err(error) => Err(error),
         }
+    }
+
+    /// Read a V5 catalog-bound proof without materializing its OID dictionary.
+    #[cfg(feature = "remote-index")]
+    pub async fn read_catalog_with_format(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<GitCatalogVisibilityRead> {
+        validate_hash(git_validation_digest, "Git validation digest")?;
+        let (index, format) = read_catalog_bound_lazy(
+            store,
+            router,
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+        )
+        .await?;
+        Ok(GitCatalogVisibilityRead { index, format })
     }
 
     /// Read and validate a visibility proof, including the shipped v1 migration path.
@@ -2614,7 +3039,7 @@ pub use storage::{
 };
 
 #[cfg(all(feature = "remote-index", feature = "storage"))]
-pub use storage::catalog_bound_available;
+pub use storage::{GitCatalogVisibilityRead, catalog_bound_available, read_catalog_with_format};
 
 #[cfg(test)]
 mod tests {
@@ -3315,6 +3740,22 @@ mod tests {
         );
         assert!(migrated.index.matches_manifest(&manifest));
 
+        let lazy = read_catalog_with_format(&store, &router, 7, &pack_hash, &digest)
+            .await
+            .expect("read lazy catalog proof");
+        assert_eq!(lazy.format, GitVisibilityFormat::V5);
+        assert_eq!(lazy.index.object_count, 2);
+        assert_eq!(
+            lazy.index.catalog_identity().expect("catalog identity"),
+            catalog_identity
+        );
+        assert_eq!(lazy.index.ordinals_for_refs(["refs/heads/main"]), [0, 1]);
+        assert!(lazy.index.contains_ordinal_for_refs(["refs/heads/main"], 0));
+        assert_eq!(
+            lazy.index.object_count_for_refs(["refs/heads/main"]),
+            migrated.index.object_count_for_refs(["refs/heads/main"])
+        );
+
         let mut history_index = index.clone();
         let closure = BTreeSet::from(["1".repeat(40), "2".repeat(40)]);
         let edit =
@@ -3353,6 +3794,21 @@ mod tests {
             stored_history
                 .index
                 .incremental_objects("refs/heads/main", &to, &[from]),
+            Some(Vec::new())
+        );
+        let lazy_history = read_catalog_with_format(
+            &store,
+            &router,
+            history_manifest.generation,
+            &history_manifest.pack_index_hash,
+            &history_manifest.git_validation_digest,
+        )
+        .await
+        .expect("read lazy catalog-bound visibility history");
+        assert_eq!(
+            lazy_history
+                .index
+                .incremental_ordinals("refs/heads/main", 0, &[1]),
             Some(Vec::new())
         );
     }

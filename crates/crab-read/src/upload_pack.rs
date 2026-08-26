@@ -6,8 +6,8 @@ use std::time::Instant;
 use bstr::ByteSlice;
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
-    CorruptionStage, Error as RemoteGitError, OperationContext, OperationKind, RemoteGitObject,
-    RemoteGitRepository, RepositoryRef, RepositoryStateError,
+    CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, OperationContext,
+    OperationKind, RemoteGitObject, RemoteGitRepository, RepositoryRef, RepositoryStateError,
 };
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
@@ -347,6 +347,174 @@ pub struct PackPlan {
     pub unshallow: Vec<ObjectId>,
 }
 
+enum VisibilitySource<'a> {
+    Materialized(&'a GitVisibilityIndex),
+    Catalog(&'a GitCatalogVisibilityIndex),
+}
+
+impl<'a> VisibilitySource<'a> {
+    async fn contains_in_ref(
+        &self,
+        operation: &OperationContext,
+        name: &str,
+        oid: &ObjectId,
+    ) -> crab_remote_git::Result<bool> {
+        match self {
+            Self::Materialized(visibility) => Ok(oid
+                .as_bytes()
+                .try_into()
+                .ok()
+                .is_some_and(|oid| visibility.contains_in_ref(name, &oid))),
+            Self::Catalog(visibility) => {
+                let Some(ordinal) = operation
+                    .catalog_object_ordinals(&[*oid])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                else {
+                    return Ok(false);
+                };
+                Ok(visibility.contains_ordinal_in_ref(name, ordinal))
+            }
+        }
+    }
+
+    async fn contains_for_refs(
+        &self,
+        operation: &OperationContext,
+        refs: &[String],
+        object_ids: &[ObjectId],
+    ) -> crab_remote_git::Result<Vec<bool>> {
+        match self {
+            Self::Materialized(visibility) => Ok(object_ids
+                .iter()
+                .map(|oid| {
+                    oid.as_bytes().try_into().ok().is_some_and(|oid| {
+                        visibility.contains_for_refs(refs.iter().map(String::as_str), &oid)
+                    })
+                })
+                .collect()),
+            Self::Catalog(visibility) => {
+                let ordinals = operation.catalog_object_ordinals(object_ids).await?;
+                if ordinals.len() != object_ids.len() {
+                    return Err(RemoteGitError::Corrupt {
+                        stage: CorruptionStage::Locator,
+                    });
+                }
+                Ok(ordinals
+                    .into_iter()
+                    .map(|ordinal| {
+                        ordinal.is_some_and(|ordinal| {
+                            visibility
+                                .contains_ordinal_for_refs(refs.iter().map(String::as_str), ordinal)
+                        })
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    async fn objects_for_refs(
+        &self,
+        operation: &OperationContext,
+        refs: &[String],
+    ) -> crab_remote_git::Result<Vec<ObjectId>> {
+        match self {
+            Self::Materialized(visibility) => Ok(visibility
+                .objects_for_refs(refs.iter().map(String::as_str))
+                .into_iter()
+                .map(ObjectId::from)
+                .collect()),
+            Self::Catalog(visibility) => {
+                let ordinals = visibility.ordinals_for_refs(refs.iter().map(String::as_str));
+                self.resolve_ordinals(operation, &ordinals).await
+            }
+        }
+    }
+
+    async fn objects_for_ref_difference(
+        &self,
+        operation: &OperationContext,
+        selected: &[&str],
+        excluded: &[&str],
+    ) -> crab_remote_git::Result<Vec<ObjectId>> {
+        match self {
+            Self::Materialized(visibility) => Ok(visibility
+                .objects_for_ref_difference(selected.iter().copied(), excluded.iter().copied())
+                .into_iter()
+                .map(ObjectId::from)
+                .collect()),
+            Self::Catalog(visibility) => {
+                let ordinals = visibility.ordinals_for_ref_difference(
+                    selected.iter().copied(),
+                    excluded.iter().copied(),
+                );
+                self.resolve_ordinals(operation, &ordinals).await
+            }
+        }
+    }
+
+    async fn incremental_objects(
+        &self,
+        operation: &OperationContext,
+        name: &str,
+        to_oid: &ObjectId,
+        haves: &[ObjectId],
+    ) -> crab_remote_git::Result<Option<Vec<ObjectId>>> {
+        match self {
+            Self::Materialized(visibility) => {
+                let to_oid = to_oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| RemoteGitError::AuthorizationDenied)?;
+                let haves = haves
+                    .iter()
+                    .filter_map(|oid| oid.as_bytes().try_into().ok())
+                    .collect::<Vec<[u8; 20]>>();
+                Ok(visibility
+                    .incremental_objects(name, &to_oid, &haves)
+                    .map(|objects| objects.into_iter().map(ObjectId::from).collect()))
+            }
+            Self::Catalog(visibility) => {
+                let mut requested = Vec::with_capacity(haves.len().saturating_add(1));
+                requested.push(*to_oid);
+                requested.extend_from_slice(haves);
+                let ordinals = operation.catalog_object_ordinals(&requested).await?;
+                let Some(to_ordinal) = ordinals.first().copied().flatten() else {
+                    return Ok(None);
+                };
+                let have_ordinals = ordinals[1..].iter().copied().flatten().collect::<Vec<_>>();
+                let Some(objects) =
+                    visibility.incremental_ordinals(name, to_ordinal, &have_ordinals)
+                else {
+                    return Ok(None);
+                };
+                self.resolve_ordinals(operation, &objects).await.map(Some)
+            }
+        }
+    }
+
+    async fn resolve_ordinals(
+        &self,
+        operation: &OperationContext,
+        ordinals: &[u32],
+    ) -> crab_remote_git::Result<Vec<ObjectId>> {
+        let VisibilitySource::Catalog(_) = self else {
+            return Err(RemoteGitError::InternalInvariant {
+                invariant: "materialized visibility attempted ordinal resolution",
+            });
+        };
+        let object_ids = operation.catalog_object_ids_by_ordinal(ordinals).await?;
+        if object_ids.len() != ordinals.len() || object_ids.iter().any(Option::is_none) {
+            return Err(RemoteGitError::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        Ok(object_ids.into_iter().flatten().collect())
+    }
+}
+
 /// Build an admitted pack plan from one generation-pinned repository.
 pub async fn plan_upload_pack(
     repository: &RemoteGitRepository,
@@ -355,8 +523,41 @@ pub async fn plan_upload_pack(
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> Result<PackPlan> {
-    authorize_wants(visibility, visible_ref_names, &request.wants)?;
+    plan_upload_pack_inner(
+        repository,
+        VisibilitySource::Materialized(visibility),
+        visible_ref_names,
+        request,
+        cancellation,
+    )
+    .await
+}
 
+/// Build an admitted pack plan from a lazy catalog-bound visibility proof.
+pub async fn plan_upload_pack_catalog(
+    repository: &RemoteGitRepository,
+    visibility: &GitCatalogVisibilityIndex,
+    visible_ref_names: &[String],
+    request: &UploadPackRequest,
+    cancellation: &CancellationToken,
+) -> Result<PackPlan> {
+    plan_upload_pack_inner(
+        repository,
+        VisibilitySource::Catalog(visibility),
+        visible_ref_names,
+        request,
+        cancellation,
+    )
+    .await
+}
+
+async fn plan_upload_pack_inner(
+    repository: &RemoteGitRepository,
+    visibility: VisibilitySource<'_>,
+    visible_ref_names: &[String],
+    request: &UploadPackRequest,
+    cancellation: &CancellationToken,
+) -> Result<PackPlan> {
     if request.deepen_relative && request.shallow.is_empty() {
         return Err(ReadError::Internal(
             "relative deepening requires a current shallow boundary".to_owned(),
@@ -369,7 +570,7 @@ pub async fn plan_upload_pack(
         repository,
         &operation,
         visible_ref_names,
-        visibility,
+        &visibility,
         request,
         cancellation,
     )
@@ -380,6 +581,25 @@ pub async fn plan_upload_pack(
     }
 }
 
+async fn authorize_wants_source(
+    operation: &OperationContext,
+    visibility: &VisibilitySource<'_>,
+    visible_ref_names: &[String],
+    wants: &[ObjectId],
+) -> crab_remote_git::Result<()> {
+    let authorized = visibility
+        .contains_for_refs(operation, visible_ref_names, wants)
+        .await?;
+    for (want, authorized) in wants.iter().zip(authorized) {
+        if !authorized {
+            tracing::debug!(want = %want, "upload-pack want is outside the visible catalog closure");
+            return Err(RemoteGitError::AuthorizationDenied);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn authorize_wants(
     visibility: &GitVisibilityIndex,
     visible_ref_names: &[String],
@@ -401,19 +621,23 @@ async fn plan_with_operation(
     repository: &RemoteGitRepository,
     operation: &OperationContext,
     visible_ref_names: &[String],
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<PackPlan> {
+    authorize_wants_source(operation, visibility, visible_ref_names, &request.wants).await?;
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
-    if let Some(plan) = plan_from_visibility(
+    if let Some(plan) = plan_from_visibility_source(
         &repository.refs().entries,
         visible_ref_names,
         visibility,
+        operation,
         request,
         maximum_objects,
-    )? {
+    )
+    .await?
+    {
         let strategy = if request.haves.is_empty() {
             "full_closure"
         } else {
@@ -474,15 +698,12 @@ async fn plan_with_operation(
         return Ok(plan);
     }
 
-    let common_haves = request
-        .haves
-        .iter()
-        .filter(|oid| {
-            oid.as_bytes().try_into().ok().is_some_and(|oid| {
-                visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
-            })
-        })
-        .copied()
+    let common_haves = visibility
+        .contains_for_refs(operation, visible_ref_names, &request.haves)
+        .await?
+        .into_iter()
+        .zip(&request.haves)
+        .filter_map(|(visible, oid)| visible.then_some(*oid))
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
     let deduplicate_by_oid =
@@ -545,7 +766,8 @@ async fn plan_with_operation(
             continue;
         }
 
-        let batch_oids = admit_batch(visibility, visible_ref_names, &batch)?;
+        let batch_oids =
+            admit_batch_source(operation, visibility, visible_ref_names, &batch).await?;
 
         let needs_blob_metadata = filter_requires_blob_size(&request.filter);
         let batch_objects = if needs_blob_metadata {
@@ -620,7 +842,8 @@ async fn plan_with_operation(
             }
             let mut tag_oid = reference.target;
             loop {
-                ensure_visible_objects(visibility, visible_ref_names, &[tag_oid])?;
+                ensure_visible_objects(operation, visibility, visible_ref_names, &[tag_oid])
+                    .await?;
                 if selected.contains(&tag_oid) {
                     break;
                 }
@@ -691,14 +914,15 @@ async fn plan_with_operation(
 }
 
 struct VisibilityObjectSelection {
-    objects: Vec<[u8; 20]>,
+    objects: Vec<ObjectId>,
     common_haves: Vec<ObjectId>,
 }
 
-fn visibility_object_selection(
+async fn visibility_object_selection(
+    operation: &OperationContext,
     references: &[RepositoryRef],
     visible_ref_names: &[String],
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<VisibilityObjectSelection>> {
@@ -706,6 +930,142 @@ fn visibility_object_selection(
         || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
+    {
+        return Ok(None);
+    }
+
+    let visible = visible_ref_names
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let Some(mut selected_refs) = request
+        .wants
+        .iter()
+        .map(|want| {
+            references
+                .iter()
+                .find(|reference| {
+                    visible.contains(reference.name.as_str()) && reference.target == *want
+                })
+                .map(|reference| reference.name.as_str())
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+
+    for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
+        if !visibility
+            .contains_in_ref(operation, reference_name, want)
+            .await?
+        {
+            return Err(RemoteGitError::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+    }
+
+    let mut common_haves = Vec::new();
+    let mut objects = if request.haves.is_empty() {
+        if request.include_tags {
+            let selected_refs_owned = selected_refs
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            let selected_objects = visibility
+                .objects_for_refs(operation, &selected_refs_owned)
+                .await?;
+            selected_refs.extend(references.iter().filter_map(|reference| {
+                let peeled = reference.peeled?;
+                (reference.name.starts_with("refs/tags/")
+                    && visible.contains(reference.name.as_str())
+                    && selected_objects.contains(&peeled))
+                .then_some(reference.name.as_str())
+            }));
+        }
+        let selected_refs_owned = selected_refs
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        visibility
+            .objects_for_refs(operation, &selected_refs_owned)
+            .await?
+    } else {
+        let visible_haves = visibility
+            .contains_for_refs(operation, visible_ref_names, &request.haves)
+            .await?;
+        let have_oids = request
+            .haves
+            .iter()
+            .zip(visible_haves)
+            .filter_map(|(have, visible)| visible.then_some(*have))
+            .collect::<Vec<_>>();
+        common_haves = have_oids.clone();
+        let mut objects = Vec::new();
+        for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
+            let Some(increment) = visibility
+                .incremental_objects(operation, reference_name, want, &have_oids)
+                .await?
+            else {
+                return Ok(None);
+            };
+            objects.extend(increment);
+        }
+
+        if request.include_tags {
+            let selected = objects.iter().copied().collect::<HashSet<_>>();
+            for reference in references {
+                let Some(peeled) = reference.peeled else {
+                    continue;
+                };
+                if reference.name.starts_with("refs/tags/")
+                    && visible.contains(reference.name.as_str())
+                    && selected.contains(&peeled)
+                {
+                    objects.extend(
+                        visibility
+                            .objects_for_ref_difference(
+                                operation,
+                                &[reference.name.as_str()],
+                                &selected_refs,
+                            )
+                            .await?,
+                    );
+                }
+            }
+        }
+        objects
+    };
+
+    objects.sort_unstable();
+    objects.dedup();
+    let actual = u64::try_from(objects.len()).unwrap_or(u64::MAX);
+    if actual > maximum_objects {
+        return Err(RemoteGitError::LimitExceeded {
+            limit: "upload-pack planned objects",
+            actual,
+            maximum: maximum_objects,
+        });
+    }
+    Ok(Some(VisibilityObjectSelection {
+        objects,
+        common_haves,
+    }))
+}
+
+#[cfg(test)]
+fn plan_from_visibility(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    visibility: &GitVisibilityIndex,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if request.wants.is_empty()
+        || !request.shallow.is_empty()
+        || request.deepen.is_some()
+        || request.deepen_relative
+        || !matches!(request.filter, UploadPackFilter::None)
     {
         return Ok(None);
     }
@@ -757,7 +1117,11 @@ fn visibility_object_selection(
                 .then_some(reference.name.as_str())
             }));
         }
-        visibility.objects_for_refs(selected_refs.iter().copied())
+        visibility
+            .objects_for_refs(selected_refs.iter().copied())
+            .into_iter()
+            .map(ObjectId::from)
+            .collect::<Vec<_>>()
     } else {
         let haves = request
             .haves
@@ -783,7 +1147,7 @@ fn visibility_object_selection(
             else {
                 return Ok(None);
             };
-            objects.extend(increment);
+            objects.extend(increment.into_iter().map(ObjectId::from));
         }
 
         if request.include_tags {
@@ -792,18 +1156,19 @@ fn visibility_object_selection(
                 let Some(peeled) = reference.peeled else {
                     continue;
                 };
-                let peeled: std::result::Result<[u8; 20], _> = peeled.as_bytes().try_into();
-                let Ok(peeled) = peeled else {
-                    continue;
-                };
                 if reference.name.starts_with("refs/tags/")
                     && visible.contains(reference.name.as_str())
                     && selected.contains(&peeled)
                 {
-                    objects.extend(visibility.objects_for_ref_difference(
-                        [reference.name.as_str()],
-                        selected_refs.iter().copied(),
-                    ));
+                    objects.extend(
+                        visibility
+                            .objects_for_ref_difference(
+                                [reference.name.as_str()],
+                                selected_refs.iter().copied(),
+                            )
+                            .into_iter()
+                            .map(ObjectId::from),
+                    );
                 }
             }
         }
@@ -820,9 +1185,15 @@ fn visibility_object_selection(
             maximum: maximum_objects,
         });
     }
-    Ok(Some(VisibilityObjectSelection {
-        objects,
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
         common_haves,
+        filter: request.filter.clone(),
+        include_tags: request.include_tags,
+        object_ids: objects,
+        required_bases: Vec::new(),
+        shallow: Vec::new(),
+        unshallow: Vec::new(),
     }))
 }
 
@@ -860,7 +1231,7 @@ async fn plan_from_visibility_catalog(
     operation: &OperationContext,
     references: &[RepositoryRef],
     visible_ref_names: &[String],
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
@@ -873,16 +1244,29 @@ async fn plan_from_visibility_catalog(
         return Ok(None);
     }
     let Some(selection) = visibility_object_selection(
+        operation,
         references,
         visible_ref_names,
         visibility,
         request,
         maximum_objects,
-    )?
+    )
+    .await?
     else {
         return Ok(None);
     };
-    let kinds = operation.catalog_object_kinds(&selection.objects).await?;
+    let object_bytes = selection
+        .objects
+        .iter()
+        .map(|oid| {
+            oid.as_bytes()
+                .try_into()
+                .map_err(|_| RemoteGitError::Corrupt {
+                    stage: CorruptionStage::Locator,
+                })
+        })
+        .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
+    let kinds = operation.catalog_object_kinds(&object_bytes).await?;
     if kinds.iter().any(Option::is_none) {
         tracing::debug!(
             requested_objects = selection.objects.len(),
@@ -897,8 +1281,7 @@ async fn plan_from_visibility_catalog(
         .zip(kinds)
         .filter_map(|(oid, kind)| {
             let kind = kind.map(gix_kind)?;
-            (roots.contains(&ObjectId::from(oid)) || catalog_filter_accepts(&request.filter, kind))
-                .then_some(ObjectId::from(oid))
+            (roots.contains(&oid) || catalog_filter_accepts(&request.filter, kind)).then_some(oid)
         })
         .collect::<Vec<_>>();
     Ok(Some(PackPlan {
@@ -917,7 +1300,7 @@ async fn plan_from_shallow_closure(
     operation: &OperationContext,
     references: &[RepositoryRef],
     visible_ref_names: &[String],
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
     request: &UploadPackRequest,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if !shallow_closure_request_supported(request) {
@@ -937,7 +1320,13 @@ async fn plan_from_shallow_closure(
     {
         return Ok(None);
     }
-    ensure_visible_objects(visibility, visible_ref_names, &selection.object_ids)?;
+    ensure_visible_objects(
+        operation,
+        visibility,
+        visible_ref_names,
+        &selection.object_ids,
+    )
+    .await?;
     Ok(Some(PackPlan {
         wants: request.wants.clone(),
         common_haves: Vec::new(),
@@ -979,10 +1368,11 @@ fn shallow_closure_tags_are_complete(
         })
 }
 
-fn plan_from_visibility(
+async fn plan_from_visibility_source(
     references: &[RepositoryRef],
     visible_ref_names: &[String],
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
+    operation: &OperationContext,
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
@@ -996,12 +1386,14 @@ fn plan_from_visibility(
     }
 
     let Some(selection) = visibility_object_selection(
+        operation,
         references,
         visible_ref_names,
         visibility,
         request,
         maximum_objects,
-    )?
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -1011,7 +1403,7 @@ fn plan_from_visibility(
         common_haves: selection.common_haves,
         filter: request.filter.clone(),
         include_tags: request.include_tags,
-        object_ids: selection.objects.into_iter().map(ObjectId::from).collect(),
+        object_ids: selection.objects,
         required_bases: Vec::new(),
         shallow: Vec::new(),
         unshallow: Vec::new(),
@@ -1047,7 +1439,7 @@ struct SparseMatchers {
 
 async fn prepare_sparse_matchers(
     operation: &OperationContext,
-    visibility: &GitVisibilityIndex,
+    visibility: &VisibilitySource<'_>,
     visible_ref_names: &[String],
     filter: &UploadPackFilter,
 ) -> crab_remote_git::Result<SparseMatchers> {
@@ -1058,7 +1450,7 @@ async fn prepare_sparse_matchers(
 
     let mut patterns = HashMap::with_capacity(sparse_oids.len());
     for oid in sparse_oids {
-        ensure_visible_objects(visibility, visible_ref_names, &[oid])?;
+        ensure_visible_objects(operation, visibility, visible_ref_names, &[oid]).await?;
         let object = operation.read_object(oid).await?;
         if object.kind != gix_object::Kind::Blob {
             return Err(RemoteGitError::InternalInvariant {
@@ -1166,11 +1558,41 @@ fn should_deduplicate_by_oid(request: &UploadPackRequest) -> bool {
     !request.deepen_relative && request.shallow.is_empty()
 }
 
-fn ensure_visible_objects(
-    visibility: &GitVisibilityIndex,
+async fn ensure_visible_objects(
+    operation: &OperationContext,
+    visibility: &VisibilitySource<'_>,
     visible_ref_names: &[String],
     object_ids: &[ObjectId],
 ) -> crab_remote_git::Result<()> {
+    if visibility
+        .contains_for_refs(operation, visible_ref_names, object_ids)
+        .await?
+        .into_iter()
+        .any(|visible| !visible)
+    {
+        return Err(RemoteGitError::AuthorizationDenied);
+    }
+    Ok(())
+}
+
+async fn admit_batch_source(
+    operation: &OperationContext,
+    visibility: &VisibilitySource<'_>,
+    visible_ref_names: &[String],
+    batch: &[QueueItem],
+) -> crab_remote_git::Result<Vec<ObjectId>> {
+    let object_ids = batch.iter().map(|item| item.oid).collect::<Vec<_>>();
+    ensure_visible_objects(operation, visibility, visible_ref_names, &object_ids).await?;
+    Ok(object_ids)
+}
+
+#[cfg(test)]
+fn admit_batch(
+    visibility: &GitVisibilityIndex,
+    visible_ref_names: &[String],
+    batch: &[QueueItem],
+) -> crab_remote_git::Result<Vec<ObjectId>> {
+    let object_ids = batch.iter().map(|item| item.oid).collect::<Vec<_>>();
     if object_ids.iter().any(|oid| {
         oid.as_bytes().try_into().ok().is_none_or(|oid| {
             !visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
@@ -1178,16 +1600,6 @@ fn ensure_visible_objects(
     }) {
         return Err(RemoteGitError::AuthorizationDenied);
     }
-    Ok(())
-}
-
-fn admit_batch(
-    visibility: &GitVisibilityIndex,
-    visible_ref_names: &[String],
-    batch: &[QueueItem],
-) -> crab_remote_git::Result<Vec<ObjectId>> {
-    let object_ids = batch.iter().map(|item| item.oid).collect::<Vec<_>>();
-    ensure_visible_objects(visibility, visible_ref_names, &object_ids)?;
     Ok(object_ids)
 }
 
