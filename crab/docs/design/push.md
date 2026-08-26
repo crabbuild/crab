@@ -764,15 +764,22 @@ remote.
    PUT {prefix}/packs/pack-{blake3_hash}.meta
        body = PackMetadata JSON { pack_id, ref_tips, object_count }
 
+   PUT {prefix}/packs/pack-{blake3_hash}.kinds
+       body = checksummed one-byte-per-object kind table in pack-offset order
+
 4. Install every pack locally and derive exact locators:
    Copy each pack + idx into .git/objects/pack/ so the NEXT push can
    compute an incremental remote-object set without a round-trip.
    Index construction, checksum binding, and canonical `.idx` upload are
-   pre-commit requirements. All pack entries are appended to one candidate
-   pack index and become visible through one manifest CAS. After that CAS,
-   exact offset/length/CRC rows for the whole set are published through one
-   renewed `git_object_catalog_db` writer session. Dense object ordinals and
-   the matching visibility proof are published after the manifest CAS;
+   pre-commit requirements. The `.kinds` sidecar is bound to the verified
+   Git pack checksum, index object count, and its BLAKE3 checksum, so the
+   generation owner can recover object kinds without downloading or parsing
+   the pack body. Missing legacy sidecars are repairable through the bounded
+   full-pack path. All pack entries are appended to one candidate pack index
+   and become visible through one manifest CAS. After that CAS, exact
+   offset/length/CRC rows for the whole set are published through one renewed
+   `git_object_catalog_db` writer session. Dense object ordinals and the
+   matching visibility proof are published after the manifest CAS;
    publication failure is repairable acceleration damage and does not roll
    back committed refs.
 ```
@@ -933,6 +940,7 @@ non-current-branch pushes are not rewritten.
  │  │ git rev-list |   │                                             │
  │  │ git pack-objects │─────────────────────────────────────────────┼──► packs/pack-{sha}.pack
  │  └──────────────────┘                                             │     packs/pack-{sha}.meta
+ │                                                                   │     packs/pack-{sha}.kinds
  │                                                                   │
  │  ┌──────────────────┐                                             │
  │  │ Step 11          │                                             │
@@ -1272,7 +1280,8 @@ s3://{bucket}/{prefix}/
 │
 ├── packs/
 │   ├── pack-{blake3}.pack          ← standard Git packfile
-│   └── pack-{blake3}.meta          ← JSON { pack_id, ref_tips, object_count }
+│   ├── pack-{blake3}.meta          ← JSON { pack_id, ref_tips, object_count }
+│   └── pack-{blake3}.kinds          ← checksummed kind byte per pack-offset object
 │
 ├── xorbs/
 │   └── {merkle_hash}               ← compressed chunk aggregate (xorb binary)
@@ -1315,6 +1324,7 @@ s3://{bucket}/{prefix}/
 | `shards/*`          | Immutable  | PUT once, never updated |
 | `packs/*.pack`      | Immutable  | PUT once, never updated |
 | `packs/*.meta`      | Immutable  | PUT once, never updated |
+| `packs/*.kinds`     | Immutable  | PUT once, never updated |
 
 **GC safety:** Immutable objects are never deleted by the push pipeline.
 Only the GC command deletes unreferenced immutable objects, and only

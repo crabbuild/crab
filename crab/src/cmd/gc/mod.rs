@@ -2307,12 +2307,13 @@ async fn stream_shallow_closure_reachable(
     Ok(())
 }
 
-fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 4] {
+fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 5] {
     [
         router.pack_path(pack_id).as_ref().to_owned(),
         router.pack_index_path(pack_id).as_ref().to_owned(),
         router.pack_reverse_index_path(pack_id).as_ref().to_owned(),
         router.pack_metadata_path(pack_id).as_ref().to_owned(),
+        router.pack_kind_metadata_path(pack_id).as_ref().to_owned(),
     ]
 }
 
@@ -2670,6 +2671,7 @@ fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut Hash
     reachable.insert(router.pack_index_path(pack_id).as_ref().to_owned());
     reachable.insert(router.pack_reverse_index_path(pack_id).as_ref().to_owned());
     reachable.insert(router.pack_metadata_path(pack_id).as_ref().to_owned());
+    reachable.insert(router.pack_kind_metadata_path(pack_id).as_ref().to_owned());
 }
 
 /// Add live workflow refs and their immutable objects to the repo mark set.
@@ -4050,6 +4052,7 @@ mod tests {
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.idx")));
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.rev")));
         assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.meta")));
+        assert!(reachable.contains(&format!("org/repo/packs/pack-{pack_id}.kinds")));
     }
 
     #[tokio::test]

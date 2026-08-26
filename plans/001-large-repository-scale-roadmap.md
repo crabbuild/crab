@@ -96,10 +96,12 @@ The 2026-08-26 follow-up is committed as `c57ee1f4`:
   target catalog checkpoint, validates sequential edits for the same ref, and
   publishes the V5 proof; the current manifest roots the pending object for
   repository-scoped GC.
-- Owner publication verifies pack indexes and scans only new or rebound pack
-  bodies once to populate optional kind metadata; covered stable pack bodies
-  are not downloaded. Filtered reads retain the canonical bounded traversal
-  path when kinds are absent.
+- Owner publication verifies pack indexes and reads an immutable `.kinds`
+  sidecar for each new or rebound pack, avoiding pack-body downloads during
+  normal generation handoff. Direct pushes, protected receives, and
+  synthesized packs publish the sidecar; legacy missing sidecars remain
+  repairable through the bounded full-pack path. Filtered reads retain the
+  canonical bounded traversal path when kind metadata is unavailable.
 - `repair_required` no longer treats incomplete bucket-wide discovery as
   repository-local repair failure. The bucket-wide state remains visible in
   diagnostics and destructive bucket GC remains disabled until its separate
@@ -287,10 +289,11 @@ Still required before the roadmap is DONE:
   disabled until its independent completeness gate is proven.
 - the post-`cbe848f4` Kubernetes qualification proves that normal protocol-v2
   and legacy helper admission emits no `catalog_materialization` event. The
-  owner publication path now avoids a full stable-pack body scan when only
-  locator rows are needed, but intentional O(N) owner repair/rebuild, missing
-  kind fallback, migration/compaction, graph, and repack paths still have
-  latency and memory budgets open;
+  owner publication path now reads the immutable `.kinds` sidecar instead of
+  downloading new pack bodies when only locator rows are needed, but
+  intentional O(N) owner repair/rebuild, legacy/invalid sidecar repair,
+  migration/compaction, graph, and repack paths still have latency and memory
+  budgets open;
 - the post-lazy depth-1/10 planner measured 11,659/15,553 ms before the
   large-batch scan change. Re-run those depths with `c57ee1f4` and require
   locator lookup-mode telemetry to prove the bounded scan removes the

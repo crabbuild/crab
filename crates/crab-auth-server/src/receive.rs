@@ -1316,14 +1316,74 @@ async fn download_service_locator_evidence_with_legacy_repair(
         Err(error) => return Err(error.into()),
     }
     validate_service_locator_evidence(pack, &idx_path, &rev_path, &git_sha1)?;
+    let kind_by_oid =
+        load_service_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?;
     Ok(ServiceLocatorEvidence {
         pack_id: merkle_hash_from_hex(&pack.pack_id, "committed pack id")?,
         _temp: temp,
         idx_path,
         rev_path,
         git_sha1,
-        kind_by_oid: None,
+        kind_by_oid,
     })
+}
+
+async fn load_service_pack_kind_metadata(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    pack: &PackManifestEntry,
+    idx_path: &Path,
+    rev_path: &Path,
+) -> Result<Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>> {
+    let path = router.pack_kind_metadata_path(&pack.pack_id);
+    let bytes = match store.get_with_etag(&path).await {
+        Ok((bytes, _)) => bytes,
+        Err(StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let idx_path = idx_path.to_owned();
+    let rev_path = rev_path.to_owned();
+    let pack_size = pack.size;
+    let object_count = usize::try_from(pack.object_count)
+        .map_err(|_| invalid("Git kind metadata object count does not fit in memory"))?;
+    let map = tokio::task::spawn_blocking(move || -> Result<_> {
+        let locations =
+            crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack_size)
+                .map_err(crab_git::pack::PackError::from)?;
+        let entries = crab_git::pack_locator::decode_pack_kind_metadata_iter(&bytes, locations)
+            .map_err(crab_git::pack::PackError::from)?;
+        let mut kinds = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            let (oid, kind) = entry.map_err(crab_git::pack::PackError::from)?;
+            let oid: [u8; 20] = oid
+                .as_bytes()
+                .try_into()
+                .map_err(|_| invalid("Git kind metadata contains a non-SHA1 object"))?;
+            let kind = match kind {
+                gix_object::Kind::Commit => {
+                    crab_metadata::git_object_locator::GitObjectKind::Commit
+                }
+                gix_object::Kind::Tree => crab_metadata::git_object_locator::GitObjectKind::Tree,
+                gix_object::Kind::Blob => crab_metadata::git_object_locator::GitObjectKind::Blob,
+                gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+            };
+            if kinds.insert(oid, kind).is_some() {
+                return Err(invalid("Git kind metadata contains a duplicate object"));
+            }
+        }
+        if kinds.len() != object_count {
+            return Err(invalid(format!(
+                "Git kind metadata contains {} objects, expected {object_count}",
+                kinds.len()
+            )));
+        }
+        Ok(Arc::new(kinds))
+    })
+    .await
+    .map_err(|error| {
+        AuthServerError::Internal(format!("Git object-kind metadata worker failed: {error}"))
+    })??;
+    Ok(Some(map))
 }
 
 #[derive(Clone, Copy)]
@@ -1362,6 +1422,7 @@ async fn derive_service_locator_evidence(
         rev_size,
         rev_hash,
         kind_by_oid,
+        kind_metadata,
     ) = tokio::task::spawn_blocking(move || {
         crab_git::initialize_bare_git_dir(temp.path()).map_err(AuthServerError::from)?;
         let pack_dir = temp.path().join("objects/pack");
@@ -1410,6 +1471,22 @@ async fn derive_service_locator_evidence(
                 "Git object-kind catalog returned an incomplete pack result".to_owned(),
             ));
         }
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| {
+                kinds.get(oid).copied().ok_or_else(|| {
+                    AuthServerError::Internal(
+                        "Git object-kind catalog omitted a pack object".to_owned(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
+            locations.pack_checksum(),
+            &ordered_kinds,
+        )
+        .map_err(crab_git::pack::PackError::from)
+        .map_err(AuthServerError::from)?;
         let kind_by_oid = kinds
             .into_iter()
             .map(|(oid, kind)| {
@@ -1455,6 +1532,7 @@ async fn derive_service_locator_evidence(
             rev_size,
             *rev_hasher.finalize().as_bytes(),
             kind_by_oid,
+            kind_metadata,
         ))
     })
     .await
@@ -1485,6 +1563,12 @@ async fn derive_service_locator_evidence(
             8 * 1024 * 1024,
             &tokio_util::sync::CancellationToken::new(),
             None,
+        )
+        .await?;
+    store
+        .put(
+            &router.pack_kind_metadata_path(&pack.pack_id),
+            bytes::Bytes::from(kind_metadata),
         )
         .await?;
     Ok(ServiceLocatorEvidence {
@@ -2278,6 +2362,19 @@ async fn validate_segmented_index(
                         .to_owned();
                     referenced_keys.insert(meta_key.clone());
                     validate_optional_pack_metadata(store, plan, &meta_key, &entry).await?;
+                    let kind_key = router
+                        .pack_kind_metadata_path(&entry.pack_id)
+                        .as_ref()
+                        .to_owned();
+                    if let Some(bytes) =
+                        read_optional_staged_object_bytes(store, plan, &kind_key).await?
+                    {
+                        referenced_keys.insert(kind_key.clone());
+                        validate_optional_pack_kind_metadata(
+                            store, router, plan, &kind_key, &bytes, &entry,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -2312,6 +2409,45 @@ async fn validate_optional_pack_metadata(
     };
     let metadata = parse_pack_metadata(&bytes, canonical_key)?;
     validate_pack_metadata_for_entry(&metadata, pack)?;
+    Ok(())
+}
+
+async fn validate_optional_pack_kind_metadata(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan: &ProtectedPushPlan,
+    canonical_key: &str,
+    bytes: &[u8],
+    pack: &PackManifestEntry,
+) -> Result<()> {
+    let canonical_pack_key = router.pack_path(&pack.pack_id).as_ref().to_owned();
+    let pack_path = if let Some(object) = plan
+        .staged_objects
+        .iter()
+        .find(|object| object.canonical_key == canonical_pack_key)
+    {
+        if object.size != pack.size {
+            return Err(invalid("staged pack size does not match pack metadata"));
+        }
+        object.staged_key.clone()
+    } else {
+        canonical_pack_key
+    };
+    let pack_checksum = if pack.size < 20 {
+        return Err(invalid(format!(
+            "pack is too short for kind metadata validation: {canonical_key}"
+        )));
+    } else {
+        let trailer = store
+            .range_get(&ObjectPath::from(pack_path), pack.size - 20..pack.size)
+            .await?;
+        gix_hash::ObjectId::from(
+            <[u8; 20]>::try_from(trailer.as_ref())
+                .map_err(|_| invalid("pack trailer is not 20 bytes"))?,
+        )
+    };
+    crab_git::pack_locator::validate_pack_kind_metadata(bytes, pack_checksum, pack.object_count)
+        .map_err(crab_git::pack::PackError::from)?;
     Ok(())
 }
 
@@ -2440,7 +2576,7 @@ fn is_allowed_pack_key(relative: &str) -> bool {
     let Some(rest) = relative.strip_prefix("packs/pack-") else {
         return false;
     };
-    [".pack", ".meta"].iter().any(|suffix| {
+    [".pack", ".meta", ".kinds"].iter().any(|suffix| {
         rest.strip_suffix(suffix)
             .is_some_and(|hash| validate_hash_component(hash, "pack hash").is_ok())
     })
@@ -2971,6 +3107,7 @@ mod tests {
             format!("{repo}/.crab/shards/bb/{}", hash('b')),
             format!("{repo}/packs/pack-{}.pack", hash('c')),
             format!("{repo}/packs/pack-{}.meta", hash('c')),
+            format!("{repo}/packs/pack-{}.kinds", hash('c')),
             format!("{repo}/metadata/pack/segments/{}.jsonl", hash('d')),
             format!("{repo}/metadata/pack/indexes/{}.json", hash('e')),
             format!("{repo}/metadata/shard/segments/{}.jsonl", hash('f')),

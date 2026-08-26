@@ -140,6 +140,7 @@ Paths are relative to `repo_prefix`.
 | `metadata/generation-receipts/{generation20}.json` | committed metadata-index coverage for one manifest generation | Immutable, idempotent create |
 | `packs/pack-{pack-id}.{pack,idx,rev}` | canonical Git pack body and indexes | Immutable |
 | `packs/pack-{pack-id}.meta` | pack metadata sidecar | Derived, replaceable |
+| `packs/pack-{pack-id}.kinds` | compact object-kind proof ordered by pack offset and bound to the Git pack checksum and object count | Immutable, idempotent create |
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
 | `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
 | `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |

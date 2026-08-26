@@ -122,6 +122,19 @@ async fn active_active_uploaded_objects(
     for pack in &materialized.packs {
         keys.insert(router.pack_path(&pack.pack_id).as_ref().to_owned());
         keys.insert(router.pack_metadata_path(&pack.pack_id).as_ref().to_owned());
+        let kind_metadata_path = router.pack_kind_metadata_path(&pack.pack_id);
+        let staged = plan
+            .staged_objects
+            .iter()
+            .any(|object| object.canonical_key == kind_metadata_path.as_ref());
+        let present = match store.head(&kind_metadata_path).await {
+            Ok(_) => true,
+            Err(crab_storage::StorageError::NotFound { .. }) => false,
+            Err(error) => return Err(AuthServerError::from(error)),
+        };
+        if staged || present {
+            keys.insert(kind_metadata_path.as_ref().to_owned());
+        }
     }
     add_active_active_index_objects(
         store,

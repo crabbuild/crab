@@ -1597,6 +1597,7 @@ struct UploadedGitPack {
     rev_path: PathBuf,
     git_sha1: String,
     kind_by_oid: Option<GitObjectKindMap>,
+    kind_metadata_published: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1649,13 +1650,54 @@ fn metadata_kind(kind: gix_object::Kind) -> crab_metadata::git_object_locator::G
     }
 }
 
+fn gix_kind(kind: crab_metadata::git_object_locator::GitObjectKind) -> gix_object::Kind {
+    match kind {
+        crab_metadata::git_object_locator::GitObjectKind::Commit => gix_object::Kind::Commit,
+        crab_metadata::git_object_locator::GitObjectKind::Tree => gix_object::Kind::Tree,
+        crab_metadata::git_object_locator::GitObjectKind::Blob => gix_object::Kind::Blob,
+        crab_metadata::git_object_locator::GitObjectKind::Tag => gix_object::Kind::Tag,
+    }
+}
+
+fn encode_pack_kind_metadata(
+    object_ids: &[gix_hash::ObjectId],
+    git_sha1: &str,
+    kind_by_oid: &GitObjectKindMap,
+) -> Result<Bytes> {
+    let pack_checksum = gix_hash::ObjectId::from_hex(git_sha1.as_bytes()).map_err(|error| {
+        CrabError::Internal(format!("generated pack has invalid Git checksum: {error}"))
+    })?;
+    let kinds = object_ids
+        .iter()
+        .map(|oid| {
+            let oid_bytes: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
+                CrabError::Internal("generated pack contains a non-SHA1 object".to_owned())
+            })?;
+            kind_by_oid
+                .get(&oid_bytes)
+                .copied()
+                .map(gix_kind)
+                .ok_or_else(|| {
+                    CrabError::Internal(format!(
+                        "Git object-kind catalog omitted generated object {oid}"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crab_git::pack_locator::encode_pack_kind_metadata(pack_checksum, &kinds)
+        .map(Bytes::from)
+        .map_err(|error| CrabError::from(crab_git::pack::PackError::from(error)))
+}
+
 async fn resolve_local_object_kinds(
     git_dir: &Path,
-    object_ids: Vec<gix_hash::ObjectId>,
+    object_ids: &[gix_hash::ObjectId],
 ) -> Option<GitObjectKindMap> {
     if object_ids.is_empty() {
         return Some(Arc::new(HashMap::new()));
     }
+    let expected_object_count = object_ids.len();
+    let object_ids = object_ids.to_owned();
     let path = git_dir.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         crab_git::object_kinds_from_git_dir(&path, &object_ids)
@@ -1682,6 +1724,14 @@ async fn resolve_local_object_kinds(
             }
         };
         metadata.insert(oid, metadata_kind(kind));
+    }
+    if metadata.len() != expected_object_count {
+        warn!(
+            expected = expected_object_count,
+            actual = metadata.len(),
+            "Git object-kind catalog returned incomplete metadata"
+        );
+        return None;
     }
     Some(Arc::new(metadata))
 }
@@ -2253,6 +2303,7 @@ fn build_active_active_push_plan(
     router: &StoreLayout,
     uploaded_shards: &[MerkleHash],
     uploaded_packs: &[PackManifestEntry],
+    kind_metadata_pack_ids: &[String],
     uploaded_xorbs: &[MerkleHash],
     visibility_proof_published: bool,
 ) -> Result<ActiveActivePushPlan> {
@@ -2262,6 +2313,7 @@ fn build_active_active_push_plan(
         bulk,
         uploaded_shards,
         uploaded_packs,
+        kind_metadata_pack_ids,
         uploaded_xorbs,
         candidate,
         visibility_proof_published,
@@ -2332,6 +2384,7 @@ fn active_active_uploaded_objects(
     bulk: &BulkData,
     uploaded_shards: &[MerkleHash],
     uploaded_packs: &[PackManifestEntry],
+    kind_metadata_pack_ids: &[String],
     uploaded_xorbs: &[MerkleHash],
     candidate: &Manifest,
     visibility_proof_published: bool,
@@ -2348,6 +2401,9 @@ fn active_active_uploaded_objects(
         keys.insert(router.pack_path(&pack.pack_id).as_ref().to_owned());
         keys.insert(router.pack_index_path(&pack.pack_id).as_ref().to_owned());
         keys.insert(router.pack_metadata_path(&pack.pack_id).as_ref().to_owned());
+    }
+    for pack_id in kind_metadata_pack_ids {
+        keys.insert(router.pack_kind_metadata_path(pack_id).as_ref().to_owned());
     }
     insert_segment_write_paths(&mut keys, router, &bulk.shard_index);
     insert_segment_write_paths(&mut keys, router, &bulk.pack_index);
@@ -5825,9 +5881,6 @@ async fn download_locator_pack_evidence(
         })?)
         .to_string();
     let temp = tempfile::tempdir().map_err(CrabError::Io)?;
-    if populate_kind_metadata {
-        crab_git::initialize_bare_git_dir(temp.path()).map_err(CrabError::from)?;
-    }
     let idx_path = temp.path().join("pack.idx");
     let rev_path = temp.path().join("pack.rev");
     store
@@ -5876,7 +5929,12 @@ async fn download_locator_pack_evidence(
         &expected_git_sha1,
         router.pack_index_path(&pack.pack_id).as_ref(),
     )?;
-    let kind_by_oid = if populate_kind_metadata {
+    let kind_by_oid = if let Some(kinds) =
+        load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?
+    {
+        Some(kinds)
+    } else if populate_kind_metadata {
+        crab_git::initialize_bare_git_dir(temp.path()).map_err(CrabError::from)?;
         let source = temp.path().join("source.pack");
         let downloaded = store
             .download_to_path(&router.pack_path(&pack.pack_id), &source)
@@ -5897,7 +5955,7 @@ async fn download_locator_pack_evidence(
         let reverse_index_path = rev_path.clone();
         let object_count = pack.object_count;
         let pack_size = pack.size;
-        let kinds = tokio::task::spawn_blocking(move || -> Result<_> {
+        let (kinds, kind_metadata) = tokio::task::spawn_blocking(move || -> Result<_> {
             std::fs::create_dir_all(&pack_dir)?;
             crab_git::pack::install_pack_file_from_path(
                 &pack_dir,
@@ -5937,7 +5995,23 @@ async fn download_locator_pack_evidence(
                     "Git object-kind catalog returned an incomplete pack result".to_owned(),
                 ));
             }
-            kinds
+            let ordered_kinds = object_ids
+                .iter()
+                .map(|oid| {
+                    kinds.get(oid).copied().ok_or_else(|| {
+                        CrabError::Internal(
+                            "Git object-kind catalog omitted a pack object".to_owned(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
+                locations.pack_checksum(),
+                &ordered_kinds,
+            )
+            .map_err(crab_git::pack::PackError::from)
+            .map_err(CrabError::from)?;
+            let kinds = kinds
                 .into_iter()
                 .map(|(oid, kind)| {
                     let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
@@ -5947,7 +6021,8 @@ async fn download_locator_pack_evidence(
                     })?;
                     Ok((oid, metadata_kind(kind)))
                 })
-                .collect::<Result<HashMap<_, _>>>()
+                .collect::<Result<HashMap<_, _>>>()?;
+            Ok((kinds, kind_metadata))
         })
         .await
         .map_err(|error| {
@@ -5955,6 +6030,12 @@ async fn download_locator_pack_evidence(
                 "Git object-kind catalog worker failed during owner maintenance: {error}"
             ))
         })??;
+        store
+            .put(
+                &router.pack_kind_metadata_path(&pack.pack_id),
+                Bytes::from(kind_metadata),
+            )
+            .await?;
         Some(Arc::new(kinds))
     } else {
         None
@@ -5972,6 +6053,65 @@ async fn download_locator_pack_evidence(
         kind_by_oid,
         _temp: Some(temp),
     })
+}
+
+async fn load_pack_kind_metadata(
+    store: &Store,
+    router: &StoreLayout,
+    pack: &PackManifestEntry,
+    idx_path: &Path,
+    rev_path: &Path,
+) -> Result<Option<GitObjectKindMap>> {
+    let path = router.pack_kind_metadata_path(&pack.pack_id);
+    let bytes = match store.get_with_etag(&path).await {
+        Ok((bytes, _)) => bytes,
+        Err(CrabError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let idx_path = idx_path.to_owned();
+    let rev_path = rev_path.to_owned();
+    let pack_size = pack.size;
+    let object_count =
+        usize::try_from(pack.object_count).map_err(|_| CrabError::CorruptObject {
+            path: "pack kind metadata".to_owned(),
+            reason: "kind metadata object count does not fit in memory".to_owned(),
+        })?;
+    let map = tokio::task::spawn_blocking(move || -> Result<GitObjectKindMap> {
+        let locations =
+            crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack_size)
+                .map_err(crab_git::pack::PackError::from)?;
+        let entries = crab_git::pack_locator::decode_pack_kind_metadata_iter(&bytes, locations)
+            .map_err(crab_git::pack::PackError::from)?;
+        let mut kinds = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            let (oid, kind) = entry.map_err(crab_git::pack::PackError::from)?;
+            let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
+                CrabError::Internal("Git kind metadata contains a non-SHA1 object".to_owned())
+            })?;
+            if kinds.insert(oid, metadata_kind(kind)).is_some() {
+                return Err(CrabError::CorruptObject {
+                    path: "pack kind metadata".to_owned(),
+                    reason: "kind metadata contains a duplicate object".to_owned(),
+                });
+            }
+        }
+        if kinds.len() != object_count {
+            return Err(CrabError::CorruptObject {
+                path: "pack kind metadata".to_owned(),
+                reason: format!(
+                    "kind metadata contains {} objects, expected {}",
+                    kinds.len(),
+                    object_count
+                ),
+            });
+        }
+        Ok(Arc::new(kinds))
+    })
+    .await
+    .map_err(|error| {
+        CrabError::Internal(format!("Git object-kind metadata worker failed: {error}"))
+    })??;
+    Ok(Some(map))
 }
 
 async fn acquire_current_git_locator_lock(
@@ -8269,6 +8409,14 @@ impl PushPipeline {
             .iter()
             .map(|pack| pack.entry.clone())
             .collect::<Vec<_>>();
+        let kind_metadata_pack_ids = self
+            .uploaded_packs
+            .lock()
+            .await
+            .iter()
+            .filter(|pack| pack.kind_metadata_published)
+            .map(|pack| pack.entry.pack_id.clone())
+            .collect::<Vec<_>>();
         let uploaded_xorbs: Vec<MerkleHash> = self
             .uploaded_xorbs
             .lock()
@@ -8289,6 +8437,7 @@ impl PushPipeline {
             &self.router,
             &uploaded_shards,
             &uploaded_packs,
+            &kind_metadata_pack_ids,
             &uploaded_xorbs,
             visibility_proof_published,
         )
@@ -12696,12 +12845,24 @@ impl PushPipeline {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(CrabError::from)?;
                 let kind_by_oid = match self.discover_git_dir() {
-                    Ok(git_dir) => resolve_local_object_kinds(&git_dir, object_ids).await,
+                    Ok(git_dir) => resolve_local_object_kinds(&git_dir, &object_ids).await,
                     Err(error) => {
                         warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
                         None
                     }
                 };
+                let kind_metadata = kind_by_oid
+                    .as_ref()
+                    .map(|kinds| encode_pack_kind_metadata(&object_ids, &installed.git_sha1, kinds))
+                    .transpose()?;
+                if let Some(kind_metadata) = &kind_metadata {
+                    store
+                        .put(
+                            &self.router.pack_kind_metadata_path(&pack_sha),
+                            kind_metadata.clone(),
+                        )
+                        .await?;
+                }
                 // Protected receive rebuilds and verifies the Git index from
                 // the staged pack; `.idx` is not an accepted wire object.
                 if store.staging_write_prefix().is_none() {
@@ -12793,6 +12954,7 @@ impl PushPipeline {
                     rev_path: installed.rev_path,
                     git_sha1: installed.git_sha1,
                     kind_by_oid,
+                    kind_metadata_published: kind_metadata.is_some(),
                 });
             }
             *self.uploaded_packs.lock().await = uploaded;
@@ -22410,10 +22572,17 @@ mod tests {
         .await
         .expect("acquire generation owner");
         assert!(
+            git_generation_owner_is_active(&store, &router)
+                .await
+                .expect("inspect active generation owner")
+        );
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(
             crate::git::upload_pack_wire::open_repository_with_visibility(
                 store.as_storage(),
                 repo_prefix,
-                &CancellationToken::new(),
+                &cancellation,
             )
             .await
             .is_err(),
@@ -24376,7 +24545,7 @@ mod tests {
     #[tokio::test]
     async fn generation_owner_populates_kind_metadata_for_new_pack() {
         let (store, router) = test_store_router("locator-owner-kind-metadata");
-        let (_fixture, pack_path, idx_path, rev_path, _git_sha1, oid, pack_size) =
+        let (_fixture, pack_path, idx_path, rev_path, git_sha1, oid, pack_size) =
             locator_pack_fixture_for(b"owner kind metadata object\n");
         let pack_id = "c".repeat(64);
         let pack = PackManifestEntry {
@@ -24427,6 +24596,20 @@ mod tests {
             )
             .await
             .expect("upload owner reverse-index evidence");
+        let pack_checksum =
+            gix_hash::ObjectId::from_hex(git_sha1.as_bytes()).expect("owner pack checksum");
+        let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
+            pack_checksum,
+            &[gix_object::Kind::Blob],
+        )
+        .expect("encode owner kind metadata");
+        store
+            .put(
+                &router.pack_kind_metadata_path(&pack_id),
+                Bytes::from(kind_metadata),
+            )
+            .await
+            .expect("upload owner kind metadata");
 
         let anchor = CommittedManifestAnchor {
             generation: manifest.generation,
@@ -32477,6 +32660,7 @@ mod tests {
                 rev_path: PathBuf::from("pack_abc.rev"),
                 git_sha1: "a".repeat(40),
                 kind_by_oid: None,
+                kind_metadata_published: false,
             },
             UploadedGitPack {
                 entry: PackManifestEntry {
@@ -32490,6 +32674,7 @@ mod tests {
                 rev_path: PathBuf::from("pack_def.rev"),
                 git_sha1: "b".repeat(40),
                 kind_by_oid: None,
+                kind_metadata_published: false,
             },
         ]);
         pipeline
@@ -32603,6 +32788,7 @@ mod tests {
             &router,
             &[shard_hash],
             &[pack, second_pack],
+            &[],
             &[xorb_hash],
             false,
         )
@@ -32708,6 +32894,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &router,
+            &[],
             &[],
             &[],
             &[],
