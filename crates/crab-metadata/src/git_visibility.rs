@@ -3648,7 +3648,7 @@ mod storage {
             (Ok(result), Ok(())) => Ok(result),
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
             (Err(error), Err(close_error)) => {
-                tracing::error!(
+                tracing::warn!(
                     error = %close_error,
                     "Git catalog handoff reader close also failed after operation error"
                 );
