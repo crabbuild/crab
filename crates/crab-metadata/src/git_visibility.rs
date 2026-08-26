@@ -386,6 +386,7 @@ pub struct GitCatalogVisibilityIndex {
 }
 
 impl GitCatalogVisibilityIndex {
+    #[cfg(feature = "remote-index")]
     fn from_parts(
         generation: u64,
         pack_index_hash: String,
@@ -622,6 +623,7 @@ impl GitCatalogVisibilityIndex {
         union
     }
 
+    #[cfg(feature = "remote-index")]
     fn resize_bitmaps(&mut self) -> Result<()> {
         let object_count = usize::try_from(self.object_count)
             .map_err(|_| corrupt("Git object catalog count cannot be represented"))?;
@@ -648,6 +650,7 @@ impl GitCatalogVisibilityIndex {
         Ok(())
     }
 
+    #[cfg(feature = "remote-index")]
     fn rebind_identity(
         &mut self,
         generation: u64,
@@ -670,12 +673,14 @@ impl GitCatalogVisibilityIndex {
         self.validate()
     }
 
+    #[cfg(feature = "remote-index")]
     fn remove_ref(&mut self, name: &str) {
         self.refs.remove(name);
         self.transitions.remove(name);
         self.incremental_history.remove(name);
     }
 
+    #[cfg(feature = "remote-index")]
     fn apply_ordinal_edit(
         &mut self,
         name: String,
@@ -895,6 +900,7 @@ impl GitVisibilityIndex {
         Ok(index)
     }
 
+    #[cfg(any(feature = "storage", test))]
     fn from_parts(
         version: u32,
         generation: u64,
@@ -1264,12 +1270,14 @@ impl GitVisibilityIndex {
         self.refs.values().map(GitVisibilityClosure::len).sum()
     }
 
+    #[cfg(feature = "storage")]
     fn remove_ref(&mut self, name: &str) {
         self.refs.remove(name);
         self.transitions.remove(name);
         self.incremental_history.remove(name);
     }
 
+    #[cfg(any(feature = "storage", test))]
     fn apply_edit(&mut self, name: String, edit: &GitVisibilityEdit) -> Result<()> {
         let prior = self.objects_for_ref(&name);
         let closure = edit.apply(prior.as_deref())?;
@@ -1370,6 +1378,7 @@ impl GitVisibilityIndex {
         Ok(())
     }
 
+    #[cfg(any(feature = "storage", test))]
     fn bind_identity(
         &mut self,
         generation: u64,
@@ -1475,6 +1484,7 @@ fn encode_oid(oid: &GitVisibilityOid) -> String {
     encoded
 }
 
+#[cfg(feature = "storage")]
 fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
     if refs.len() > MAX_GIT_VISIBILITY_REFS {
         return Err(corrupt("visibility index contains too many refs"));
