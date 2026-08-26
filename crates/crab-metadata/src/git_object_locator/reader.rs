@@ -10,9 +10,10 @@ use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
-    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
-    decode_object_location, decode_ordinal_key, decode_pack_key, decode_pack_record, object_key,
-    ordinal_key, validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
+    decode_metadata, decode_object_key, decode_object_location, decode_object_metadata,
+    decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_key, decode_pack_record,
+    object_key, ordinal_key, ordinal_metadata_key, validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocation, GitObjectLocator,
@@ -458,6 +459,148 @@ impl GitObjectLocatorSession {
             objects[index] = oid;
         }
         Ok(objects)
+    }
+
+    /// Return complete per-object metadata for the requested dense ordinals.
+    ///
+    /// `None` means this catalog predates the ordinal metadata sidecar or has
+    /// an incomplete sidecar. Callers must use their bounded canonical
+    /// traversal path in that case; a present sidecar row with unknown fields
+    /// is represented by the corresponding default metadata value.
+    pub async fn metadata_by_ordinal(
+        &self,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<super::GitObjectMetadata>>> {
+        let Some(reader) = &self.reader else {
+            return Ok(None);
+        };
+        if ordinals.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        if let Some(metadata) = self.metadata_by_ordinal_scan(reader, ordinals).await? {
+            return Ok(metadata.into_iter().collect());
+        }
+
+        let fetched = stream::iter(
+            ordinals
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, ordinal)| {
+                    let reader = Arc::clone(reader);
+                    async move {
+                        let value = reader
+                            .get(ordinal_metadata_key(ordinal))
+                            .await
+                            .map_err(read_error)?;
+                        let metadata = value
+                            .map(|value| {
+                                decode_object_metadata(&value).ok_or_else(|| {
+                                    corrupt(
+                                        "ordinal_metadata",
+                                        "invalid Git catalog ordinal metadata",
+                                    )
+                                })
+                            })
+                            .transpose()?;
+                        Ok::<_, MetadataError>((index, metadata))
+                    }
+                }),
+        )
+        .buffer_unordered(LOOKUP_CONCURRENCY.min(ordinals.len()).max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+        let mut metadata = vec![None; ordinals.len()];
+        for (index, value) in fetched {
+            metadata[index] = value;
+        }
+        Ok(metadata.into_iter().collect())
+    }
+
+    async fn metadata_by_ordinal_scan(
+        &self,
+        reader: &slatedb::DbReader,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<Option<super::GitObjectMetadata>>>> {
+        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
+        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS {
+            return Ok(None);
+        }
+        let first = *ordinals
+            .iter()
+            .min()
+            .ok_or_else(|| corrupt("ordinal_metadata", "metadata scan lost its request"))?;
+        let last = *ordinals
+            .iter()
+            .max()
+            .ok_or_else(|| corrupt("ordinal_metadata", "metadata scan lost its request"))?;
+        let span = u64::from(last)
+            .saturating_sub(u64::from(first))
+            .saturating_add(1);
+        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
+            return Ok(None);
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_metadata_scan",
+            requested_objects = ordinals.len(),
+            ordinal_span = span,
+            "compact Git ordinal metadata lookup selected"
+        );
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(ORDINAL_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(ORDINAL_SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options(
+                [ORDINAL_METADATA_FAMILY],
+                first.to_be_bytes().as_slice()..=last.to_be_bytes().as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut requested = ordinals.iter().copied().enumerate().collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        let mut request_index = 0usize;
+        let mut rows_scanned = 0u64;
+        let mut metadata = vec![None; ordinals.len()];
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > span {
+                return Err(corrupt(
+                    "ordinal_metadata",
+                    "Git catalog ordinal metadata scan returned too many rows",
+                ));
+            }
+            let ordinal = decode_ordinal_metadata_key(&row.key).ok_or_else(|| {
+                corrupt(
+                    "ordinal_metadata",
+                    "invalid Git catalog ordinal metadata key",
+                )
+            })?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal < ordinal)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal == ordinal)
+            {
+                let (output_index, _) = requested[request_index];
+                metadata[output_index] =
+                    Some(decode_object_metadata(&row.value).ok_or_else(|| {
+                        corrupt("ordinal_metadata", "invalid Git catalog ordinal metadata")
+                    })?);
+                request_index += 1;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_metadata_scan",
+            requested_objects = ordinals.len(),
+            rows_scanned,
+            "compact Git ordinal metadata lookup completed"
+        );
+        Ok(Some(metadata))
     }
 
     async fn object_ids_by_ordinal_scan(
@@ -1109,6 +1252,17 @@ mod tests {
             [GitObjectLookup::Hit(locator)]
                 if locator.metadata.kind == Some(GitObjectKind::Blob)
         ));
+        assert_eq!(
+            session
+                .metadata_by_ordinal(&[0])
+                .await
+                .expect("lookup ordinal metadata")
+                .expect("metadata sidecar"),
+            vec![GitObjectMetadata {
+                kind: Some(GitObjectKind::Blob),
+                ..Default::default()
+            }]
+        );
         session.close().await.expect("close reader");
     }
 
@@ -1291,6 +1445,27 @@ mod tests {
             .map(|ordinal| Some(object_ids[*ordinal as usize]))
             .collect::<Vec<_>>();
         assert_eq!(resolved, expected);
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn dense_ordinal_metadata_scan_preserves_request_order() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (object_ids, _inventory) =
+            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+        let ordinals = (0..object_ids.len() as u32)
+            .rev()
+            .collect::<Vec<GitObjectOrdinal>>();
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let metadata = session
+            .metadata_by_ordinal(&ordinals)
+            .await
+            .expect("dense ordinal metadata lookup")
+            .expect("metadata sidecar");
+        assert_eq!(metadata, vec![GitObjectMetadata::default(); ordinals.len()]);
         session.close().await.expect("close reader");
     }
 

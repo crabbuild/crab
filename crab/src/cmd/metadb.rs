@@ -735,9 +735,13 @@ async fn maintain_object_catalog(
     crab_metadata::git_object_locator::GitObjectCatalogStats,
 )> {
     let mut lock = acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
-    let writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open(
+    let planned_object_rows = packs
+        .iter()
+        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+    let writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
         Arc::clone(store.inner()),
         router.repo_prefix(),
+        planned_object_rows,
     )
     .await;
     let mut writer = match writer {
@@ -834,6 +838,36 @@ async fn maintain_split_commit_graph(
         rebuilt_hash = hash;
         (rebuilt_hash.as_str(), true)
     };
+    if !rebuilt {
+        let descriptor = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
+            storage,
+            &storage_router,
+            hash,
+            crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await?;
+        if descriptor.generation != manifest.generation
+            || descriptor.pack_index_hash != manifest.pack_index_hash
+            || descriptor.git_validation_digest != manifest.git_validation_digest
+        {
+            return Err(CrabError::CorruptObject {
+                path: storage_router
+                    .bulk_manifest_path("commit-graph", hash)
+                    .to_string(),
+                reason: "commit graph descriptor does not match the complete committed Git state"
+                    .to_owned(),
+            });
+        }
+        if !crab_metadata::split_commit_graph::split_commit_graph_compaction_due(&descriptor) {
+            return Ok(CommitGraphMaintenance {
+                action: "none",
+                layers: u64::try_from(descriptor.layers.len()).unwrap_or(u64::MAX),
+                bytes: descriptor.layers.iter().map(|layer| layer.bytes).sum(),
+                bytes_read: 0,
+                bytes_written: 0,
+            });
+        }
+    }
     let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
         storage,
         &storage_router,

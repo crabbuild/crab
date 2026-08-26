@@ -12,10 +12,11 @@ use slatedb::config::{
 use tracing::{debug, warn};
 
 use super::format::{
-    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, PACK_FAMILY, StoredObjectLocation, coverage,
-    decode_metadata, decode_object_key, decode_object_location, decode_pack_key,
-    decode_pack_record, encode_metadata, encode_object_location, encode_pack_record, object_key,
-    ordinal_key, pack_key, validate_location_for_pack,
+    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
+    StoredObjectLocation, coverage, decode_metadata, decode_object_key, decode_object_location,
+    decode_pack_key, decode_pack_record, encode_metadata, encode_object_location,
+    encode_object_metadata, encode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
+    pack_key, validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
@@ -29,10 +30,11 @@ const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
 const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
 const LOCATOR_L0_MAX_SSTS: usize = 32;
 const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
-// B-tree nodes and SlateDB bookkeeping make the in-memory row materially
-// larger than its 49 encoded bytes. This upper bound decides only whether to
-// start maintenance early; the hard L0 limit remains authoritative.
-const ESTIMATED_OBJECT_ROW_BYTES: u128 = 128;
+// Each object now contributes an OID row, reverse-ordinal row, and metadata
+// sidecar row. B-tree nodes and SlateDB bookkeeping make the in-memory rows
+// materially larger than their 147 encoded bytes. This bound only starts
+// maintenance early; the hard L0 limit remains authoritative.
+const ESTIMATED_OBJECT_ROW_BYTES: u128 = 192;
 const FIXED_PUBLICATION_SSTS: usize = 4;
 // Amortize one directory scan over a normal fan-out while bounding the number
 // of superseded locator generations. This cadence is cost policy, not safety.
@@ -460,8 +462,16 @@ impl GitObjectLocatorWriter {
             });
             batch.put(key, value);
             batch.put(ordinal_key(ordinal), entry.oid);
+            let metadata_key = ordinal_metadata_key(ordinal);
+            let metadata_value = encode_object_metadata(entry.metadata);
+            batch.put(metadata_key, metadata_value);
             batch_rows += 1;
-            batch_bytes += key.len() + value.len() + ordinal_key(ordinal).len() + entry.oid.len();
+            batch_bytes += key.len()
+                + value.len()
+                + ordinal_key(ordinal).len()
+                + entry.oid.len()
+                + metadata_key.len()
+                + metadata_value.len();
             if batch_rows >= MAX_BATCH_ROWS || batch_bytes >= MAX_BATCH_LOGICAL_BYTES {
                 batch.put(METADATA_KEY, encode_metadata(self.metadata));
                 write_batch(&self.db, batch, "write compact locator objects").await?;
@@ -557,7 +567,11 @@ impl GitObjectLocatorWriter {
     /// Historical checkpoints retain the prior universe. The caller must
     /// rewrite every current pack before advancing coverage.
     pub async fn replace_object_catalog(&mut self) -> Result<()> {
-        for family in [OBJECT_FAMILY, super::format::ORDINAL_FAMILY] {
+        for family in [
+            OBJECT_FAMILY,
+            super::format::ORDINAL_FAMILY,
+            ORDINAL_METADATA_FAMILY,
+        ] {
             let mut rows = self
                 .db
                 .scan_prefix([family], ..)
@@ -652,6 +666,7 @@ impl GitObjectLocatorWriter {
                 }
                 deletes.delete(row.key);
                 deletes.delete(ordinal_key(location.ordinal));
+                deletes.delete(ordinal_metadata_key(location.ordinal));
                 delete_count += 1;
                 stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
                 self.catalog_dirty = true;

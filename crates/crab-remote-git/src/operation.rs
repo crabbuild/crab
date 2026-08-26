@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crab_metadata::git_object_locator::{
-    GitObjectKind, GitObjectLocatorSession, GitObjectLookup, GitObjectOrdinal,
+    GitObjectKind, GitObjectLocatorSession, GitObjectLookup, GitObjectMetadata, GitObjectOrdinal,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -450,6 +450,29 @@ impl OperationContext {
             .into_iter()
             .map(|object_id| Ok(object_id.map(gix_hash::ObjectId::from)))
             .collect()
+    }
+
+    /// Resolve complete published object metadata by dense catalog ordinal.
+    ///
+    /// `None` means the pinned catalog does not have a complete ordinal
+    /// metadata sidecar; callers must use their bounded canonical fallback.
+    pub async fn catalog_object_metadata_by_ordinal(
+        &self,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<GitObjectMetadata>>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => Err(Error::Cancelled),
+            metadata = session.metadata_by_ordinal(ordinals) => metadata.map_err(Error::from),
+        }
     }
 
     /// Load an exact generation-bound shallow object closure when available.

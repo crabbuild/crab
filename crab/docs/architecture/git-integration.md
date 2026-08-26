@@ -298,6 +298,15 @@ slot, byte offset, entry length, and CRC32. Reverse ordinal rows provide the
 canonical object order used by visibility bitmaps and response-pack planning;
 there is no second runtime OID dictionary.
 
+The catalog also writes an additive fixed-width ordinal metadata family. Its
+key is the same dense ordinal and its value carries the proven kind, logical
+size, and delta-base facts already embedded in the OID locator row. The
+metadata family is published, replaced, and swept in the same write batches as
+the object and reverse-ordinal rows; the existing 20-byte reverse row is not
+reinterpreted. A catalog without a complete sidecar remains valid for ordinary
+reads, while kind-only filtered planning falls back to bounded canonical
+traversal until the sidecar is rebuilt.
+
 Exact coverage records the manifest generation, pack-index hash, object count,
 and catalog digest whose complete inventory was published. A digest-named
 SlateDB checkpoint pins that exact catalog while the mutable database advances.
@@ -314,9 +323,10 @@ new catalog checkpoint, then writes the target proof. The pending delta is
 immutable and rooted by the current manifest until that handoff completes; if
 the base checkpoint or evidence is unavailable, the owner uses the complete
 proof rebuild path instead. Catalog kind metadata is optional: owner catalog
-publication does not download stable pack bodies solely to populate it, and a
-filtered request with missing kinds uses the existing bounded canonical
-traversal path.
+publication does not download stable pack bodies solely to populate it. When
+the sidecar is complete, fresh kind-only filters select ordinals and resolve
+only the retained OIDs; an old or incomplete sidecar uses the bounded
+canonical traversal path.
 
 `crab metadb rebuild` is the repository-scoped migration and repair boundary.
 It ignores the retired `git_locator_db/` namespace, reconstructs the catalog

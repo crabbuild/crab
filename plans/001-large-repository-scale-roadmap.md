@@ -243,11 +243,11 @@ Still required before the roadmap is DONE:
   large-batch scan change. Re-run those depths with `c57ee1f4` and require
   locator lookup-mode telemetry to prove the bounded scan removes the
   point-read wave without increasing full-clone or incremental-fetch latency;
-- catalog-filter planning currently resolves selected ordinals to OIDs and then
-  performs kind lookups. A large blobless closure can therefore still approach
-  a full locator scan even though helper startup is lazy. A fused ordinal-kind
-  sidecar or equivalent measured optimization is a follow-up opportunity, not
-  a silently closed SLO;
+- catalog-filter planning now reads the additive ordinal-keyed metadata
+  sidecar, filters ordinals, and resolves only retained OIDs. Existing or
+  incomplete sidecars still use the bounded canonical fallback, so the
+  implementation gap is closed but the large-closure request/latency SLO still
+  needs fresh current-binary evidence;
 - cold and warm full-clone response-pack SLOs remain open: the Kubernetes
   repository still generates a roughly 1.2 GB response pack, so cache hits and
   pack-count bounds alone do not prove large-team clone fanout is affordable;

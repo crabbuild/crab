@@ -131,9 +131,12 @@ additional metadata requests.
 
 For large existing packs, owner catalog publication verifies the pack indexes
 and locator ranges without downloading pack bodies just to fill optional object
-kind metadata. A filtered request whose selected rows lack kind metadata falls
-back to the bounded canonical planner; direct pushes continue to publish kinds
-for newly introduced objects when the local Git source is available.
+kind metadata. New publications write the ordinal-keyed kind sidecar together
+with the object and reverse-ordinal rows. A complete sidecar lets fresh
+kind-only filters select ordinals without a second OID-family lookup; a
+filtered request whose selected rows lack kind metadata falls back to the
+bounded canonical planner. Direct pushes continue to publish kinds for newly
+introduced objects when the local Git source is available.
 
 `--once` executes one decision, not the entire backlog. Repeat it until
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per

@@ -1243,6 +1243,17 @@ async fn plan_from_visibility_catalog(
     {
         return Ok(None);
     }
+    if request.haves.is_empty() {
+        return plan_from_visibility_catalog_ordinals(
+            operation,
+            references,
+            visible_ref_names,
+            visibility,
+            request,
+            maximum_objects,
+        )
+        .await;
+    }
     let Some(selection) = visibility_object_selection(
         operation,
         references,
@@ -1290,6 +1301,143 @@ async fn plan_from_visibility_catalog(
         filter: request.filter.clone(),
         include_tags: request.include_tags,
         object_ids,
+        required_bases: Vec::new(),
+        shallow: Vec::new(),
+        unshallow: Vec::new(),
+    }))
+}
+
+async fn plan_from_visibility_catalog_ordinals(
+    operation: &OperationContext,
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    visibility: &VisibilitySource<'_>,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    let VisibilitySource::Catalog(catalog) = visibility else {
+        return Ok(None);
+    };
+    let visible = visible_ref_names
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let Some(mut selected_refs) = request
+        .wants
+        .iter()
+        .map(|want| {
+            references
+                .iter()
+                .find(|reference| {
+                    visible.contains(reference.name.as_str()) && reference.target == *want
+                })
+                .map(|reference| reference.name.as_str())
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+
+    for (reference_name, want) in selected_refs.iter().zip(&request.wants) {
+        if !visibility
+            .contains_in_ref(operation, reference_name, want)
+            .await?
+        {
+            return Err(RemoteGitError::RepositoryState {
+                reason: RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+    }
+
+    let mut selected_refs_owned = selected_refs
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let mut ordinals = catalog.ordinals_for_refs(selected_refs_owned.iter().map(String::as_str));
+    if request.include_tags {
+        let selected = ordinals.iter().copied().collect::<HashSet<_>>();
+        let tags = references
+            .iter()
+            .filter_map(|reference| {
+                let peeled = reference.peeled?;
+                (reference.name.starts_with("refs/tags/")
+                    && visible.contains(reference.name.as_str()))
+                .then_some((reference.name.as_str(), peeled))
+            })
+            .collect::<Vec<_>>();
+        let peeled = tags.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let tag_ordinals = operation.catalog_object_ordinals(&peeled).await?;
+        for ((name, _), ordinal) in tags.into_iter().zip(tag_ordinals) {
+            if ordinal.is_some_and(|ordinal| selected.contains(&ordinal)) {
+                selected_refs.push(name);
+                selected_refs_owned.push(name.to_owned());
+            }
+        }
+        ordinals = catalog.ordinals_for_refs(selected_refs_owned.iter().map(String::as_str));
+    }
+
+    let actual = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
+    if actual > maximum_objects {
+        return Err(RemoteGitError::LimitExceeded {
+            limit: "upload-pack planned objects",
+            actual,
+            maximum: maximum_objects,
+        });
+    }
+    let Some(metadata) = operation
+        .catalog_object_metadata_by_ordinal(&ordinals)
+        .await?
+    else {
+        tracing::debug!(
+            requested_objects = ordinals.len(),
+            "published ordinal metadata sidecar is incomplete; using bounded upload-pack traversal"
+        );
+        return Ok(None);
+    };
+    if metadata.len() != ordinals.len() || metadata.iter().any(|metadata| metadata.kind.is_none()) {
+        tracing::debug!(
+            requested_objects = ordinals.len(),
+            "published Git object-kind metadata is incomplete; using bounded upload-pack traversal"
+        );
+        return Ok(None);
+    }
+    let root_ordinals = operation.catalog_object_ordinals(&request.wants).await?;
+    let root_ordinals = root_ordinals
+        .into_iter()
+        .collect::<Option<HashSet<_>>>()
+        .ok_or(RemoteGitError::Corrupt {
+            stage: CorruptionStage::Locator,
+        })?;
+    let selected_ordinals = ordinals
+        .into_iter()
+        .zip(metadata)
+        .filter_map(|(ordinal, metadata)| {
+            (root_ordinals.contains(&ordinal)
+                || metadata
+                    .kind
+                    .is_some_and(|kind| catalog_filter_accepts(&request.filter, gix_kind(kind))))
+            .then_some(ordinal)
+        })
+        .collect::<Vec<_>>();
+    let object_ids = operation
+        .catalog_object_ids_by_ordinal(&selected_ordinals)
+        .await?;
+    if object_ids.len() != selected_ordinals.len() || object_ids.iter().any(Option::is_none) {
+        return Err(RemoteGitError::Corrupt {
+            stage: CorruptionStage::Locator,
+        });
+    }
+    tracing::debug!(
+        locator_lookup_mode = "ordinal_metadata",
+        requested_objects = selected_ordinals.len(),
+        "planned catalog filter from ordinal metadata"
+    );
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
+        common_haves: Vec::new(),
+        filter: request.filter.clone(),
+        include_tags: request.include_tags,
+        object_ids: object_ids.into_iter().flatten().collect(),
         required_bases: Vec::new(),
         shallow: Vec::new(),
         unshallow: Vec::new(),

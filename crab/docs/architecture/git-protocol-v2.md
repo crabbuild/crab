@@ -73,6 +73,13 @@ requested SHA-1 range. The scan abandons itself and returns to exact reads if
 stale rows would make it examine more than twice the requested object count,
 so sparse and stale-heavy repositories remain bounded.
 
+For fresh `blob:none` and `object:type` requests, the catalog visibility
+bitmap is consumed as ordinals. Crab reads the additive ordinal metadata
+sidecar, filters by the published object kinds, and resolves only retained
+ordinals back to OIDs. This removes the large-closure OID-to-kind lookup wave;
+catalogs from before the sidecar or with incomplete metadata use the bounded
+canonical traversal path instead.
+
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
 keeps request rejections distinguishable from truncated pack generation.
