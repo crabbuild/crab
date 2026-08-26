@@ -271,7 +271,7 @@ Keep new UI code aligned with the existing structure:
 - **Server-first rendering**: Use a server component unless the feature needs browser APIs, event handlers, local state, or animation lifecycle hooks
 - **Client boundaries**: Add `"use client"` only at the smallest component that needs it
 - **Styling**: Use Tailwind classes and `cn()` from `lib/utils.ts` for conditional class merging
-- **Visual restraint**: Use neutral hairline rules and quiet surfaces for containers. Avoid thick colored perimeters, offset block shadows, and full-width saturated bands; reserve brand and status colors for small semantic accents, focus, and active states
+- **Visual restraint**: Use theme-aware neutral hairline rules and quiet surfaces for containers. Avoid thick colored perimeters, offset block shadows, and full-width saturated bands; reserve brand and status colors for small semantic accents, focus, and active states. Every surface and state must remain legible in both light and dark themes
 - **Marketing components**: Put reusable landing-page sections in `components/marketing/`
 - **Documentation components**: Put docs-specific controls and presentation in `components/docs/`
 - **Diagrams**: Add reusable SVG diagrams as React components under `app/diagrams/`

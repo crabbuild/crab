@@ -35,7 +35,10 @@ export function LibraryProgress({ total }: { total: number }) {
     <div className="mt-7 max-w-2xl rounded-xl border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-4 text-xs font-bold">
         <span className="inline-flex items-center gap-2">
-          <ShieldCheck className="size-4 text-[#3d9b72]" aria-hidden="true" />
+          <ShieldCheck
+            className="size-4 text-emerald-600 dark:text-emerald-400"
+            aria-hidden="true"
+          />
           Knowledge proofs
         </span>
         <span aria-live="polite">
@@ -51,7 +54,7 @@ export function LibraryProgress({ total }: { total: number }) {
         aria-valuenow={safeCompleted}
       >
         <div
-          className="h-full rounded-full bg-[#3d9b72] transition-[width] duration-300"
+          className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 dark:bg-emerald-400"
           style={{ width: `${percent}%` }}
         />
       </div>
