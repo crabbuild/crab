@@ -369,7 +369,12 @@ mod tests {
     use std::io::Write;
     use std::process::Command;
 
-    fn init_repo(dir: &Path) {
+    fn init_repo(dir: &Path) -> crate::test::git_repo::CleanGitEnvGuard {
+        // Git environment overrides are process-global and other unit tests
+        // temporarily set them while running shell-based repository checks.
+        // Keep the guard alive through config writes and resolution so this
+        // test always operates on the repository passed to it.
+        let git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         assert!(
             Command::new("git")
                 .current_dir(dir)
@@ -378,6 +383,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        git_env
     }
 
     #[test]
@@ -425,7 +431,7 @@ mod tests {
     #[test]
     fn gitconfig_overrides_lfsconfig() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
+        let _git_env = init_repo(dir.path());
 
         // Create .git/config with one value.
         let gitconfig = dir.path().join(".git/config");
@@ -507,7 +513,7 @@ mod tests {
     #[test]
     fn lfs_dir_override() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
+        let _git_env = init_repo(dir.path());
         let lfsconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -521,7 +527,7 @@ mod tests {
     #[test]
     fn standard_lfs_storage_override() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
+        let _git_env = init_repo(dir.path());
         let lfsconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -540,7 +546,7 @@ mod tests {
     #[test]
     fn resolve_storage_dir_uses_repository_lfs_storage() {
         let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
+        let _git_env = init_repo(dir.path());
         let gitconfig = dir.path().join(".git/config");
         let mut file = std::fs::OpenOptions::new()
             .append(true)
