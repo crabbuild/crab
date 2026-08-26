@@ -5456,6 +5456,34 @@ async fn compact_ref_journal_until_idle(
             generation = compaction.manifest.generation,
             "ref journal compactor drained one visible transaction wave"
         );
+        for (ref_name, holder) in &compaction.edited_ref_lock_holders {
+            match PushLock::release_ref_if_holder(
+                store.inner(),
+                router.repo_prefix(),
+                ref_name,
+                holder,
+            )
+            .await
+            .map_err(CrabError::from)
+            {
+                Ok(true) => debug!(
+                    %ref_name,
+                    %holder,
+                    "released ref lock after journal compaction"
+                ),
+                Ok(false) => debug!(
+                    %ref_name,
+                    %holder,
+                    "ref lock was already handed off after journal compaction"
+                ),
+                Err(error) => warn!(
+                    %ref_name,
+                    %holder,
+                    %error,
+                    "ref lock cleanup after journal compaction failed"
+                ),
+            }
+        }
         latest = Some(compaction);
     }
     // Bound ownership so a continuous push stream cannot monopolize the
@@ -21147,6 +21175,44 @@ mod tests {
             unchanged.journal.transactions.len(),
             1,
             "capability discovery must not compact an active ref journal"
+        );
+
+        let crashed_holder = interrupted_snapshot
+            .journal
+            .ordered_edits
+            .iter()
+            .find(|edit| edit.ref_name == "refs/heads/main")
+            .and_then(|edit| edit.lock_holder.clone())
+            .expect("interrupted transaction should retain the killed writer holder");
+        let crashed_lock_path = crab_coordination::push_lock_path(repo_prefix, "refs/heads/main")
+            .expect("build the crashed ref lease path");
+        let crashed_lock_body = serde_json::to_vec(&crab_coordination::PushLockPayload::new(
+            crashed_holder,
+            crab_coordination::unix_now() + 60,
+            60,
+        ))
+        .expect("serialize the ref lease left by the killed writer");
+        store
+            .inner()
+            .put(
+                &Path::from(crashed_lock_path),
+                Bytes::from(crashed_lock_body).into(),
+            )
+            .await
+            .expect("recreate the ref lease left by the killed writer");
+        let (admitted, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("upload-pack admission should repair a prepared head after process death");
+        assert_eq!(admitted.generation(), initial.generation + 1);
+        assert!(
+            !PushLock::ref_lease_is_claimed(store.inner(), repo_prefix, "refs/heads/main")
+                .await
+                .expect("inspect recovered ref lease"),
+            "journal compaction must release the ref lease committed by the killed writer"
         );
 
         let restarted_pipeline = PushPipeline::new(

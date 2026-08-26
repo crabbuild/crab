@@ -1196,6 +1196,13 @@ release that holder immediately with a holder-checked CAS. Prepared
 transactions and mismatched holders cannot take this path, and the final CAS
 cannot clear a lock that has already been acquired by a successor.
 
+The generation-owner compactor also closes the crash window after the marker
+is written: once the compacted manifest is committed, it promotes any
+prepared ref heads for that transaction before deleting the marker, then
+releases each recorded holder with the same holder-checked CAS. A failed head
+promotion retains the marker for a later compaction pass, so upload-pack never
+mistakes a half-repaired generation for a stable repository state.
+
 An object-store failure before the active-marker write returns a structured,
 retryable `transient` outcome and runs the normal holder-checked release path;
 the ref remains invisible. If the immutable marker was stored but its success

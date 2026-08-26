@@ -371,7 +371,7 @@ pub async fn transaction_is_active(
     active_marker_exists(store, router, transaction_id).await
 }
 
-/// Remove compacted visibility markers once no failed head promotion needs them.
+/// Repair compacted head promotion before removing its visibility marker.
 pub async fn cleanup_compacted_transactions(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -389,8 +389,17 @@ pub async fn cleanup_compacted_transactions(
         for edit in &transaction.edits {
             match read_ref_head(store, router, &edit.ref_name).await {
                 Ok(head) => {
-                    promotion_pending |=
-                        head.head.prepared_transaction.as_deref() == Some(transaction_id);
+                    if head.head.prepared_transaction.as_deref() == Some(transaction_id)
+                        && let Err(error) = promote_head(store, router, head, transaction_id).await
+                    {
+                        warn!(
+                            %transaction_id,
+                            ref_name = %error.0,
+                            error = %error.1,
+                            "retaining compacted ref transaction marker after head promotion failure"
+                        );
+                        promotion_pending = true;
+                    }
                 }
                 Err(error) => {
                     warn!(%transaction_id, ref_name = %edit.ref_name, %error, "retaining compacted ref transaction marker");
@@ -1089,6 +1098,51 @@ mod tests {
                 .unwrap()
                 .visible_transaction,
             Some(next.id().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn compacted_transaction_repairs_prepared_head_before_marker_cleanup() {
+        let (store, layout) = fixture();
+        let (transaction, heads) =
+            transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
+        let transaction_id = transaction.id().unwrap();
+        store
+            .put_exact(
+                &layout.ref_journal_transaction_path(&transaction_id),
+                Bytes::from(serialize(&transaction).unwrap()),
+            )
+            .await
+            .unwrap();
+        prepare_head(&store, &layout, &heads[0], &transaction_id)
+            .await
+            .unwrap();
+        let marker = RefJournalActiveMarker {
+            version: REF_JOURNAL_VERSION,
+            transaction_id: transaction_id.clone(),
+        };
+        store
+            .put_exact(
+                &layout.ref_journal_active_path(&transaction_id),
+                Bytes::from(serialize(&marker).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        cleanup_compacted_transactions(&store, &layout, &[transaction_id.clone()]).await;
+
+        let head = read_ref_head(&store, &layout, "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            head.head.committed_transaction.as_deref(),
+            Some(transaction_id.as_str())
+        );
+        assert!(head.head.prepared_transaction.is_none());
+        assert!(
+            !transaction_is_active(&store, &layout, &transaction_id)
+                .await
+                .unwrap()
         );
     }
 
