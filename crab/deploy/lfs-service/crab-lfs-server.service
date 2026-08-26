@@ -1,0 +1,27 @@
+# Install as /etc/systemd/system/crab-lfs-server.service.
+
+[Unit]
+Description=Crab Git LFS HTTP gateway
+Documentation=https://crab.build/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crab-lfs-server --config /etc/crab-lfs/config.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+User=crab-lfs
+Group=crab-lfs
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/crab-lfs
+EnvironmentFile=-/etc/crab-lfs/env
+
+[Install]
+WantedBy=multi-user.target

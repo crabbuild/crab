@@ -1,0 +1,180 @@
+name: Git LFS HTTP Compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lfs-service.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/deploy/lfs-service/**"
+      - "crab/scripts/e2e/run_lfs_http_qualification.py"
+      - "crab/src/cmd/lfs.rs"
+      - "crab/src/lfs/**"
+      - "crates/crab-lfs/**"
+      - "crates/crab-lfs-server/**"
+      - "crates/crab-storage/**"
+  pull_request:
+    paths:
+      - ".github/workflows/lfs-service.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/deploy/lfs-service/**"
+      - "crab/scripts/e2e/run_lfs_http_qualification.py"
+      - "crab/src/cmd/lfs.rs"
+      - "crab/src/lfs/**"
+      - "crates/crab-lfs/**"
+      - "crates/crab-lfs-server/**"
+      - "crates/crab-storage/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/crab-lfs-http-target
+
+jobs:
+  test:
+    name: Build & test LFS HTTP service
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Git LFS
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git-lfs
+          git lfs version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test shared LFS crate
+        run: cargo test --locked -p crab-lfs
+
+      - name: Test LFS HTTP service
+        run: cargo test --locked -p crab-lfs-server --lib
+
+      - name: Lint LFS HTTP service
+        run: cargo clippy --locked -p crab-lfs-server --all-targets -- -D warnings
+
+      - name: Compile qualification harness
+        run: python3 -m py_compile crab/scripts/e2e/run_lfs_http_qualification.py
+
+      - name: Build LFS HTTP service image
+        run: docker build --file crab/deploy/lfs-service/Dockerfile --tag crab-lfs-server:ci .
+
+  rustfs-git-lfs:
+    name: RustFS and Git LFS black-box qualification
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 60
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: "true"
+      AWS_EC2_METADATA_DISABLED: "true"
+      LFS_HTTP_RUSTFS_BUCKET: crab
+      LFS_HTTP_RUSTFS_ROOT: ${{ runner.temp }}/crab-lfs-http-qualification
+      LFS_HTTP_RUSTFS_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install qualification dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl git-lfs pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          git lfs version
+          aws --version
+
+      - name: Build LFS HTTP service
+        run: cargo build --locked --release -p crab-lfs-server --bin crab-lfs-server
+
+      - name: Start RustFS
+        run: |
+          mkdir -p "${LFS_HTTP_RUSTFS_ROOT}" "${RUNNER_TEMP}/rustfs-data"
+          sudo chown 10001:10001 "${RUNNER_TEMP}/rustfs-data"
+          docker run -d \
+            --name crab-lfs-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY \
+            -e RUSTFS_SECRET_KEY \
+            -v "${RUNNER_TEMP}/rustfs-data:/data" \
+            "${RUSTFS_IMAGE}" \
+            server /data --address :9000
+
+          for _ in $(seq 1 60); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "${AWS_ENDPOINT_URL}" || true)"
+            if [ "${status:-000}" != "000" ] && [ "${status}" -lt 500 ]; then
+              break
+            fi
+            sleep 1
+          done
+          aws --endpoint-url "${AWS_ENDPOINT_URL}" s3api create-bucket \
+            --bucket "${LFS_HTTP_RUSTFS_BUCKET}"
+        env:
+          RUSTFS_ACCESS_KEY: ${{ env.AWS_ACCESS_KEY_ID }}
+          RUSTFS_SECRET_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Run real Git LFS qualification
+        run: |
+          python3 crab/scripts/e2e/run_lfs_http_qualification.py \
+            --server-bin "${CARGO_TARGET_DIR}/release/crab-lfs-server" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --bucket "${LFS_HTTP_RUSTFS_BUCKET}" \
+            --root "${LFS_HTTP_RUSTFS_ROOT}/${LFS_HTTP_RUSTFS_RUN_ID}" \
+            --object-count 12 \
+            --commit-count 4 \
+            --path-count 12 \
+            --min-size 1048576 \
+            --max-size 2097152
+
+      - name: Capture RustFS logs
+        if: always()
+        run: |
+          mkdir -p "${LFS_HTTP_RUSTFS_ROOT}"
+          docker logs crab-lfs-rustfs > "${LFS_HTTP_RUSTFS_ROOT}/rustfs.log" 2>&1 || true
+          docker rm -f crab-lfs-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfs-http-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LFS_HTTP_RUSTFS_ROOT }}/${{ env.LFS_HTTP_RUSTFS_RUN_ID }}/report.json
+            ${{ env.LFS_HTTP_RUSTFS_ROOT }}/${{ env.LFS_HTTP_RUSTFS_RUN_ID }}/server.log
+            ${{ env.LFS_HTTP_RUSTFS_ROOT }}/rustfs.log
+          if-no-files-found: warn
+          retention-days: 14

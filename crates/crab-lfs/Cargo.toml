@@ -14,8 +14,11 @@ path = "src/lib.rs"
 bytes = { workspace = true }
 crab-git = { workspace = true }
 crab-storage = { workspace = true }
+blake3 = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt"] }

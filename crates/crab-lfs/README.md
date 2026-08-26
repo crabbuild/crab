@@ -28,8 +28,15 @@ verified bytes through crab-storage
 ```
 
 `LfsObjectStore` provides idempotent `put`, bounded-memory `put_stream`,
-`get`, `exists`, and `verify` operations. A configured primary fallback can
-serve reads when a selected replica is stale or unavailable.
+`get`, `exists`, and `verify` operations. Its stream APIs let an HTTP
+composition boundary verify an immutable object before serving a bounded
+range. A configured primary fallback can serve reads when a selected replica
+is stale or unavailable.
+
+`LfsLockManager` provides the shared CAS-backed LFS lock record format at
+`{prefix}/lfs/locks/{blake3(path)}`. The CLI and the standard HTTP gateway
+must use this namespace so locks acquired by either client are visible to the
+other.
 
 ## Usage
 
@@ -59,6 +66,7 @@ multipart buffers and aborts an incomplete upload on hash failure. Use
 - [`crab-storage`](../crab-storage/README.md) builds the object store and maps provider
   errors.
 - The CLI and transfer-agent protocol remain in higher-level product crates.
+- `crab-lfs-server` owns standard HTTP protocol, authentication, and policy.
 
 The only content identity used here is the Git LFS SHA-256 OID. Crab-native
 file hashes, shards, and Xorbs are owned by [`crab-xet`](../crab-xet/README.md).

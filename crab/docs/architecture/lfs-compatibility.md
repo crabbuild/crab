@@ -13,7 +13,7 @@ discovery and requires repository-scoped Crab configuration and direct cloud
 authorization. The support contract below is the release boundary; tests and
 qualification evidence must name the profile they prove.
 
-Source: `crab/src/lfs/`
+Source: `crab-lfs-server` and `crab/src/lfs/`
 
 ## Support matrix
 
@@ -22,11 +22,13 @@ Source: `crab/src/lfs/`
 | `crab-native` | Crab filters and porcelain | Crab CLI; `git` | Direct object storage selected by Crab | Supported and tested |
 | `git-lfs-standalone-direct` | Git LFS custom transfer agent | Git LFS 3.7.x | Direct object-storage credentials available to Crab | Supported for qualified storage providers |
 | `git-lfs-standalone-managed` | Custom transfer agent with managed grants | Unmodified Git LFS | Protected, repository-scoped grants | Not supported until managed-transfer qualification passes |
-| `git-lfs-http` | Standard Batch/basic/File Locking HTTP APIs | Unmodified Git LFS | HTTPS gateway authentication | Not shipped; no Crab HTTP LFS endpoint is currently exposed |
+| `git-lfs-http` | Standard Batch/basic/File Locking HTTP APIs | Unmodified Git LFS | HTTPS gateway authentication | Implemented and qualified against Git LFS 3.7.1 + RustFS; CI/release provider matrix remains required |
 
-“Git LFS-compatible” in this repository means the named standalone-direct
-profile unless a document explicitly names another profile. It does not mean
-interoperability with an arbitrary HTTP LFS server.
+Compatibility claims are profile-specific. The HTTP profile is the standard
+Git LFS interoperability boundary; the standalone-direct and Crab-native
+profiles have separate client, authorization, and storage contracts. A
+passing claim names the profile, Git LFS version, provider, and qualification
+evidence rather than treating one profile as proof of all others.
 
 ## Two Operating Modes
 
@@ -164,7 +166,7 @@ Content: {"path":"models/large.bin","owner":"user@example.com","id":"...","locke
 | Force-unlock | CAS tombstone without owner check |
 | List | List objects under `lfs/locks/` prefix |
 
-Source: `crab/src/lfs/lock.rs`
+Source: `crates/crab-lfs/src/lock.rs`, `crab/src/lfs/lock.rs`
 
 ## Migration Engine
 
@@ -200,8 +202,8 @@ Source: `crab/src/lfs/config.rs`
 
 | Aspect | Official git-lfs | Crab LFS |
 |--------|-----------------|------------|
-| Server required | Yes | No |
-| Transport | HTTP Batch API | Direct S3 PUT/GET |
+| Server required | Yes | Native/direct: no; HTTP profile: yes |
+| Transport | HTTP Batch/basic/locking | Native/direct: direct object storage; HTTP: Batch/basic/locking |
 | Dedup | None (file-level) | CDC for crab-native files |
 | Locking | Server-side API | CAS on object storage |
 | Mixed formats | LFS only | LFS + crab in same repo |

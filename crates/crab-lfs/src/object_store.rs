@@ -5,10 +5,12 @@
 //! Verifies integrity on upload, accepts matching objects idempotently, and
 //! conditionally repairs corrupt objects.
 
+use std::ops::Range;
 use std::path::Path as StdPath;
+use std::pin::Pin;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
 use object_store::{MultipartUpload, ObjectMeta, ObjectStoreExt, PutPayload};
 use sha2::{Digest, Sha256};
@@ -19,6 +21,10 @@ use crab_storage::{ETag, StorageError, Store};
 
 /// Result alias for LFS object storage operations.
 pub type Result<T> = std::result::Result<T, LfsError>;
+
+/// Backpressured LFS object stream with storage failures mapped to the LFS
+/// error surface.
+pub type LfsByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
 /// Errors raised by LFS object storage operations.
 #[derive(thiserror::Error, Debug)]
@@ -145,6 +151,70 @@ impl LfsObjectStore {
     #[must_use]
     pub fn object_path_for_prefix(prefix: &str, oid: &[u8; 32]) -> Path {
         Self::object_path_at(prefix, oid)
+    }
+
+    /// Reads object metadata, retrying a configured primary fallback when the
+    /// selected replica is stale or unavailable.
+    pub async fn head(&self, oid: &[u8; 32]) -> Result<ObjectMeta> {
+        let path = self.object_path(oid);
+        match self.store.head(&path).await {
+            Ok(meta) => Ok(meta),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error.into());
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS metadata read from selected remote failed; retrying primary"
+                );
+                fallback_store
+                    .head(&Self::object_path_at(fallback_prefix, oid))
+                    .await
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    /// Verifies an object before opening a backpressured stream for an HTTP
+    /// response. Range reads are checked against the complete SHA-256 object
+    /// first, so a corrupt immutable key is never served as a successful
+    /// transfer.
+    pub async fn get_stream(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        match Self::get_verified_stream_at(
+            &self.store,
+            &self.prefix,
+            oid,
+            expected_size,
+            range.clone(),
+        )
+        .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS stream from selected remote failed integrity or availability checks; retrying primary"
+                );
+                Self::get_verified_stream_at(
+                    fallback_store,
+                    fallback_prefix,
+                    oid,
+                    expected_size,
+                    range,
+                )
+                .await
+            }
+        }
     }
 
     /// Returns the object store path for the given OID.
@@ -508,6 +578,31 @@ impl LfsObjectStore {
                 oid: hex_encode(oid),
             }),
         }
+    }
+
+    async fn get_verified_stream_at(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        Self::verify_size_at(store, prefix, oid, expected_size).await?;
+        let path = Self::object_path_at(prefix, oid);
+        let (meta, result_range, stream) = store
+            .get_stream(&path, range)
+            .await
+            .map_err(LfsError::from)?;
+        if meta.size != expected_size
+            || result_range.start > result_range.end
+            || result_range.end > meta.size
+        {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+        let stream = stream.map(|chunk| chunk.map_err(Into::into)).boxed();
+        Ok((meta, result_range, stream))
     }
 
     async fn download_from_to_file(
@@ -1201,6 +1296,37 @@ mod tests {
         let store = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
 
         let got = store.get(&oid).await.unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[tokio::test]
+    async fn get_stream_uses_primary_fallback_after_selected_remote_corruption() {
+        let selected = test_base_store();
+        let primary = test_base_store();
+        let primary_lfs = LfsObjectStore::new(primary.clone(), "repo");
+        let data = Bytes::from_static(b"primary stream integrity fallback");
+        let oid = sha256_oid(&data);
+        primary_lfs.put(&oid, data.clone()).await.unwrap();
+
+        let selected_lfs = LfsObjectStore::new(selected.clone(), "repo");
+        let selected_path = selected_lfs.object_path_for(&oid);
+        selected
+            .inner()
+            .put(&selected_path, Bytes::from(vec![b'x'; data.len()]).into())
+            .await
+            .unwrap();
+
+        let store = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+        let (_, range, mut stream) = store
+            .get_stream(&oid, data.len() as u64, None)
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            got.extend_from_slice(&chunk.unwrap());
+        }
+
+        assert_eq!(range, 0..data.len() as u64);
         assert_eq!(got, data);
     }
 

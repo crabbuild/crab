@@ -1,0 +1,28 @@
+# Production-oriented starting point for crab-lfs-server.
+# Replace every example value before startup. Keep this file and the policy
+# file outside the image and provide origin credentials through workload
+# identity, an instance role, or a secret manager.
+
+[server]
+listen_addr = "0.0.0.0:8444"
+public_url = "https://lfs.example.com"
+spool_dir = "/var/lib/crab-lfs/spool"
+policy_path = "/etc/crab-lfs/policy.yaml"
+max_batch_objects = 1000
+max_object_bytes = 68719476736
+max_uploads = 8
+request_timeout_secs = 3600
+# Prefer an environment variable in production so the secret is not stored in
+# the configuration volume.
+# action_secret = "replace-with-a-long-random-secret"
+action_ttl_secs = 900
+
+[auth]
+mechanism = "basic"
+# Replace the placeholder with the BLAKE3 hash of a non-empty password.
+# The hash is intentionally not a usable credential.
+[auth.users]
+operator = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[origin]
+url = "s3://replace-with-your-crab-bucket"
