@@ -1210,14 +1210,14 @@ class LargeRepositoryQualification:
             f"create {kind} push client {ordinal:03d}",
             timeout=2 * 60 * 60,
         )
+        branch = f"team-{kind}-{ordinal:03d}"
+        self.run_git(target, ["checkout", "-b", branch, base], f"checkout {kind} push client")
         self.run_git(
             target,
             ["remote", "remove", "origin"],
             f"remove {kind} push client source remote",
         )
         self.run_crab(target, ["init", self.remote_url], f"initialize {kind} push client")
-        branch = f"team-{kind}-{ordinal:03d}"
-        self.run_git(target, ["checkout", "-b", branch, base], f"checkout {kind} push client")
         filename = target / f"team-{kind}-{ordinal:03d}.txt"
         filename.write_text(
             f"Crab large-team qualification change {kind} {ordinal:03d}\n",
