@@ -32,10 +32,13 @@ export function LibraryProgress({ total }: { total: number }) {
   const percent = total === 0 ? 0 : Math.round((safeCompleted / total) * 100)
 
   return (
-    <div className="mt-7 max-w-2xl rounded-xl border border-[#b9c7d8] bg-white p-4">
+    <div className="mt-7 max-w-2xl rounded-xl border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-4 text-xs font-bold">
         <span className="inline-flex items-center gap-2">
-          <ShieldCheck className="size-4 text-[#3d9b72]" aria-hidden="true" />
+          <ShieldCheck
+            className="size-4 text-emerald-600 dark:text-emerald-400"
+            aria-hidden="true"
+          />
           Knowledge proofs
         </span>
         <span aria-live="polite">
@@ -43,7 +46,7 @@ export function LibraryProgress({ total }: { total: number }) {
         </span>
       </div>
       <div
-        className="mt-3 h-2 overflow-hidden rounded-full bg-[#dbe5f2]"
+        className="mt-3 h-2 overflow-hidden rounded-full bg-muted"
         role="progressbar"
         aria-label="Library knowledge checks completed"
         aria-valuemin={0}
@@ -51,7 +54,7 @@ export function LibraryProgress({ total }: { total: number }) {
         aria-valuenow={safeCompleted}
       >
         <div
-          className="h-full rounded-full bg-[#3d9b72] transition-[width] duration-300"
+          className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 dark:bg-emerald-400"
           style={{ width: `${percent}%` }}
         />
       </div>

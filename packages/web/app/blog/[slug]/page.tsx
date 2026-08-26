@@ -103,11 +103,11 @@ export default async function BlogPostPage({
     <MarketingLayout>
       <StructuredData data={structuredData} />
       <article>
-        <header className="border-b border-[#b9c7d8] bg-[#f4f7f9] text-[#142033]">
+        <header className="border-b border-border bg-background text-foreground">
           <div className="mx-auto max-w-6xl px-6 pt-24 pb-12 lg:pt-28 lg:pb-16">
             <Link
               href="/blog"
-              className="inline-flex min-h-11 items-center gap-2 text-sm font-medium text-[#52637a] transition-colors hover:text-[#142033] focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:outline-none"
+              className="inline-flex min-h-11 items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               <ArrowLeft className="size-4" aria-hidden="true" />
               Blog dashboard
@@ -117,20 +117,23 @@ export default async function BlogPostPage({
               <div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{post.category}</Badge>
-                  <Badge variant="outline" className="bg-white">
+                  <Badge variant="outline" className="bg-background">
                     {post.level}
                   </Badge>
-                  <time className="text-xs text-[#607188]" dateTime={post.date}>
+                  <time
+                    className="text-xs text-muted-foreground"
+                    dateTime={post.date}
+                  >
                     {formatBlogDate(post.date)}
                   </time>
                 </div>
                 <h1 className="mt-5 max-w-4xl text-4xl font-black tracking-[-0.045em] sm:text-5xl lg:text-6xl">
                   {post.title}
                 </h1>
-                <p className="mt-5 max-w-3xl text-lg leading-8 text-[#52637a]">
+                <p className="mt-5 max-w-3xl text-lg leading-8 text-muted-foreground">
                   {post.description}
                 </p>
-                <p className="mt-6 text-sm font-medium text-[#607188]">
+                <p className="mt-6 text-sm font-medium text-muted-foreground">
                   {post.author}
                 </p>
               </div>
@@ -147,10 +150,10 @@ export default async function BlogPostPage({
         </div>
       </article>
 
-      <section className="border-t-2 border-[#163052] bg-[#eaf1fc] text-[#142033]">
+      <section className="border-t border-border bg-background text-foreground">
         <div className="mx-auto flex max-w-5xl flex-col gap-5 px-6 py-10 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="font-mono text-[10px] font-black tracking-[0.18em] text-[#2f6fce]">
+            <p className="font-mono text-[10px] font-black tracking-[0.18em] text-primary">
               CONTINUE LEARNING
             </p>
             <h2 className="mt-2 text-xl font-bold">
@@ -159,7 +162,7 @@ export default async function BlogPostPage({
           </div>
           <Link
             href="/library"
-            className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg bg-[#163052] px-4 py-2 text-sm font-bold text-white hover:bg-[#23466f] focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-2 focus-visible:outline-none"
+            className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-bold text-background hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
           >
             <BookOpen className="size-4" aria-hidden="true" />
             Open the Library
@@ -185,11 +188,11 @@ function tocTitleToString(node: ReactNode): string {
 
 function ReaderContract({ post }: { post: BlogPostMeta }) {
   return (
-    <aside className="self-start overflow-hidden rounded-xl border-2 border-[#163052] bg-white shadow-[7px_7px_0_#dbe5f2]">
-      <div className="border-b-2 border-[#163052] px-4 py-3 font-mono text-[9px] font-black tracking-[0.17em]">
+    <aside className="self-start rounded-xl border border-border bg-card p-4 shadow-sm">
+      <div className="font-mono text-[9px] font-black tracking-[0.17em]">
         READER CONTRACT
       </div>
-      <div className="grid gap-3 p-4 text-xs text-[#52637a]">
+      <div className="mt-4 grid gap-3 text-xs text-muted-foreground">
         <Attribute
           icon={Clock}
           label="Reading time"
@@ -198,8 +201,8 @@ function ReaderContract({ post }: { post: BlogPostMeta }) {
         <Attribute icon={Gauge} label="Depth" value={post.level} />
         <Attribute icon={Users} label="For" value={post.audience} />
       </div>
-      <div className="border-t border-[#b9c7d8] p-4">
-        <div className="flex items-center gap-2 font-mono text-[9px] font-black tracking-[0.14em] text-[#607188]">
+      <div className="mt-4 border-t border-border pt-4">
+        <div className="flex items-center gap-2 font-mono text-[9px] font-black tracking-[0.14em] text-muted-foreground">
           <Tag className="size-3.5" aria-hidden="true" />
           TAGS
         </div>
@@ -207,7 +210,7 @@ function ReaderContract({ post }: { post: BlogPostMeta }) {
           {post.tags.map((tag) => (
             <span
               key={tag}
-              className="rounded-full border border-[#b9c7d8] px-2 py-0.5 text-[10px] text-[#52637a]"
+              className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground"
             >
               {tag}
             </span>
@@ -229,9 +232,9 @@ function Attribute({
 }) {
   return (
     <div className="grid grid-cols-[1rem_5rem_minmax(0,1fr)] items-start gap-2">
-      <Icon className="mt-0.5 size-3.5 text-[#2f6fce]" aria-hidden="true" />
+      <Icon className="mt-0.5 size-3.5 text-primary" aria-hidden="true" />
       <span>{label}</span>
-      <span className="font-bold text-[#142033]">{value}</span>
+      <span className="font-bold text-foreground">{value}</span>
     </div>
   )
 }

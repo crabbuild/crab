@@ -27,9 +27,9 @@ The main routes are implemented under `app/`:
 | `/cli`              | Crab CLI product page with installation examples and the push pipeline walkthrough |
 | `/docs`             | Documentation landing page                                                         |
 | `/docs/cli/...`     | Fumadocs-rendered CLI documentation                                                |
-| `/blog`             | Editorial dashboard generated from the blog MDX collection                        |
+| `/blog`             | Editorial dashboard generated from the blog MDX collection                         |
 | `/blog/[slug]`      | Individual metadata-rich blog articles                                             |
-| `/library`          | Ordered learning paths, filters, progress, and knowledge checks                   |
+| `/library`          | Ordered learning paths, filters, progress, and knowledge checks                    |
 | `/library/[slug]`   | Individual interactive learning guides                                             |
 | `/changelog`        | Published or repository-backed release entries                                     |
 | `/pricing`          | Storage provider pricing calculator                                                |
@@ -142,7 +142,7 @@ Run `npm run format` before handing off TypeScript or TSX changes. It does not f
 | `components/ui/`          | shadcn/ui primitives and small reusable interface components                                        |
 | `content/docs/cli/`       | CLI documentation written in MDX, organized by category                                             |
 | `content/blog/`           | Editorial posts written in MDX                                                                      |
-| `content/library/`        | Ordered learning guides with required knowledge checks                             |
+| `content/library/`        | Ordered learning guides with required knowledge checks                                              |
 | `lib/`                    | Fumadocs loaders, blog transforms, pricing data, integrations, changelog data, and shared utilities |
 | `public/`                 | Static images, icons, and the shell and PowerShell installer scripts                                |
 | `scripts/check-links.mjs` | Production-server crawler for internal links and URL fragments                                      |
@@ -271,6 +271,7 @@ Keep new UI code aligned with the existing structure:
 - **Server-first rendering**: Use a server component unless the feature needs browser APIs, event handlers, local state, or animation lifecycle hooks
 - **Client boundaries**: Add `"use client"` only at the smallest component that needs it
 - **Styling**: Use Tailwind classes and `cn()` from `lib/utils.ts` for conditional class merging
+- **Visual restraint**: Use theme-aware neutral hairline rules and quiet surfaces for containers. Avoid thick colored perimeters, offset block shadows, and full-width saturated bands; reserve brand and status colors for small semantic accents, focus, and active states. Every surface and state must remain legible in both light and dark themes
 - **Marketing components**: Put reusable landing-page sections in `components/marketing/`
 - **Documentation components**: Put docs-specific controls and presentation in `components/docs/`
 - **Diagrams**: Add reusable SVG diagrams as React components under `app/diagrams/`
