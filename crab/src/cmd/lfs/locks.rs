@@ -630,6 +630,7 @@ fn lock_cache_file(path: &Path) -> Result<File> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)
         .map_err(CrabError::Io)?;
     LockFileExt::lock_exclusive(&file).map_err(CrabError::Io)?;
