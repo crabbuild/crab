@@ -12,6 +12,130 @@ const CHANGED = {
 
 const VERSION_A = ["header", "weights 1", "weights 2", "optimizer", "footer"]
 const VERSION_B = ["header", "weights 1", "new weights", "optimizer", "footer"]
+const CHECKPOINTS = ["v1", "v2", "v3", "v4"]
+
+export function BinaryHistoryGrowthDiagram() {
+  const heading = {
+    fill: "var(--foreground)",
+    fontFamily: "Inter, ui-sans-serif, system-ui",
+    fontSize: 14,
+    fontWeight: 650,
+    textAnchor: "middle",
+  } as const
+  const detail = {
+    fill: "var(--muted-foreground)",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 10,
+    textAnchor: "middle",
+  } as const
+
+  return (
+    <DiagramFrame
+      title="Four checkpoints: full objects or unique chunks"
+      caption="Illustrative model: each 8 GB checkpoint preserves 7.5 GB of encoded bytes from the previous version. The totals exclude compression and metadata overhead."
+    >
+      <svg
+        viewBox="0 0 760 228"
+        className="h-auto w-full min-w-[40rem]"
+        role="img"
+        aria-label="Four 8 gigabyte Git blobs total 32 gigabytes, while compact pointers and reusable chunks add 9.5 gigabytes of unique data to object storage"
+      >
+        <line
+          x1="380"
+          y1="18"
+          x2="380"
+          y2="210"
+          stroke="var(--border)"
+          strokeDasharray="4 5"
+        />
+        <text x="190" y="30" {...heading}>
+          Ordinary Git blobs
+        </text>
+        <text x="570" y="30" {...heading}>
+          Crab pointer path
+        </text>
+
+        {CHECKPOINTS.map((version, index) => {
+          const gitX = 36 + index * 80
+          const pointerX = 430 + index * 82
+          return (
+            <g key={version}>
+              <rect
+                x={gitX}
+                y="60"
+                width="66"
+                height="66"
+                rx="9"
+                fill="color-mix(in srgb, #f97316 10%, var(--card))"
+                stroke="#f97316"
+                strokeWidth="1.5"
+              />
+              <text x={gitX + 33} y="87" {...heading} fontSize="12">
+                {version}
+              </text>
+              <text x={gitX + 33} y="106" {...detail}>
+                8 GB
+              </text>
+              <rect
+                x={pointerX}
+                y="60"
+                width="58"
+                height="36"
+                rx="7"
+                fill="color-mix(in srgb, #f97316 10%, var(--card))"
+                stroke="#f97316"
+                strokeWidth="1.5"
+              />
+              <text x={pointerX + 29} y="83" {...heading} fontSize="11">
+                {version}
+              </text>
+            </g>
+          )
+        })}
+
+        <text x="190" y="162" {...heading} fontSize="15" fontWeight="700">
+          32 GB reachable history
+        </text>
+        <text x="190" y="182" {...detail}>
+          every version remains a complete Git object
+        </text>
+
+        <rect
+          x="430"
+          y="126"
+          width="235"
+          height="44"
+          rx="8"
+          fill="color-mix(in srgb, #06b6d4 12%, var(--card))"
+          stroke="#06b6d4"
+          strokeWidth="1.5"
+        />
+        <text x="547.5" y="152" {...heading} fontSize="12">
+          8 GB reusable base
+        </text>
+        {[0, 1, 2].map((index) => (
+          <rect
+            key={index}
+            x={671 + index * 18}
+            y="126"
+            width="14"
+            height="44"
+            rx="4"
+            fill="color-mix(in srgb, #f59e0b 12%, var(--card))"
+            stroke="#f59e0b"
+            strokeWidth="1.5"
+          />
+        ))}
+        <text x="570" y="194" {...heading} fontSize="13" fontWeight="700">
+          9.5 GB unique data + compact Git pointers
+        </text>
+        <text x="570" y="212" {...detail}>
+          8 GB base + 3 × 0.5 GB new content
+        </text>
+      </svg>
+    </DiagramFrame>
+  )
+}
 
 export function ChunkReuseDiagram() {
   const startX = 126

@@ -1,206 +1,159 @@
 ---
 title: "How do you verify your first Crab push?"
-description: "Trace one tracked file through the Git index, object storage, a fresh clone, hydration, and integrity checks."
+description: "Push one 64 MiB sample, inspect its Git pointer, confirm the remote ref, then hydrate and hash-check it from a fresh clone."
 date: "2026-05-29"
 author: "Crab Team"
 category: "tutorial"
 tags: ["beginner", "tutorial", "verification"]
-excerpt: "A hands-on push that proves the Git pointer and stored large-file data agree."
+excerpt: "Five visible checks prove that one tracked file reached the remote and came back byte-for-byte."
 level: "beginner"
 path: "first-workflow"
 order: 2
 concepts: ["push", "verification", "pointer", "hydration"]
 prerequisites: ["How do you set up a Crab repository?"]
 outcome: "Prove that one tracked file was filtered, uploaded, published, cloned, and reconstructed correctly."
-diagramType: "Push verification"
+diagramType: "Interactive push trace"
 meta:
   contentType: "Tutorial"
   goal: "Teach a source-to-result verification loop for a first Crab push."
   audience: "New Crab users who want evidence that each integration boundary works."
 ---
 
-A successful `crab push` has more than one visible result. Git must record a pointer, object storage must contain the referenced data, the remote ref must advance, and another checkout must reconstruct the original bytes.
+A progress bar only proves that Crab did some work. A verified push needs five visible results: **Git stores a pointer, Crab publishes the branch, a fresh clone finds that pointer, hydration rebuilds the file, and the rebuilt bytes match the original.**
 
 <FirstPushStateDiagram />
 
-## Establish the pre-push state
+## 1. Start from a clean test branch
 
-Begin from a clean branch whose remote tip you know. This makes the later ref result attributable to the test instead of an unrelated local change.
+Use a configured repository and keep this first test away from a shared production branch.
 
 ```bash
 git status --short
-git branch --show-current
-git rev-parse HEAD
-git ls-remote origin "refs/heads/$(git branch --show-current)"
 crab doctor
+export CRAB_VERIFY_REMOTE="$(git remote get-url origin)"
+git switch -c verify-crab-push
 ```
 
-The worktree should be clean before you create the sample file. The local and remote object IDs should agree when the branch already exists. If they differ, fetch and reconcile that history before using the push as a storage test.
+If `git status --short` prints anything, commit or stash it first. Fix any `crab doctor` failure before creating test data.
 
-Save the pre-push commit ID with the test evidence. It becomes the expected-old value that explains whether Crab advanced the intended branch state or rejected a stale writer.
+The `CRAB_VERIFY_REMOTE` variable keeps the same remote URL for the fresh-clone check later. Run the tutorial in one shell so the variable remains available.
 
-## Prepare a deterministic test file
+## 2. Create one file with a known hash
 
-Start in a configured repository with a tracked `*.bin` pattern. Create a file and record its BLAKE3 hash outside the repository so you can compare it after hydration.
+This sample is deliberately simple. It proves the storage path, not real-world deduplication performance.
 
 ```bash
 mkdir -p models
-dd if=/dev/zero of=models/checkpoint.bin bs=1m count=64
-b3sum models/checkpoint.bin > ../checkpoint.b3
-crab track '*.bin'
+dd if=/dev/zero of=models/checkpoint.bin bs=1048576 count=64
+git hash-object models/checkpoint.bin > ../checkpoint.git-hash
 ```
 
-If `b3sum` is unavailable, use another cryptographic hash tool consistently on both copies.
+`git hash-object` gives the file a repeatable content ID using Git's own hashing tool. Saving it outside the repository prevents the evidence file from entering the test commit.
 
-## Verify that Git uses the Crab filter
-
-Ask Git which attributes apply before staging the file:
+Now route `.bin` files through Crab:
 
 ```bash
-git check-attr filter diff merge -- models/checkpoint.bin
+crab track '*.bin'
+git add .gitattributes
+git check-attr filter -- models/checkpoint.bin
 ```
 
-The filter attribute should resolve to the Crab driver. Now stage the file through Crab and inspect the index object without changing the working-tree file.
+The last command should report `filter: crab`. If it does not, stop here and fix the tracking rule.
+
+## 3. Stage the file and inspect Git's copy
 
 ```bash
 crab add models/checkpoint.bin
 git show :models/checkpoint.bin
 ```
 
-The index output should be a compact pointer, not 64 MiB of zero bytes. Your working tree still contains the materialized file.
+The output should be a short text pointer with a version, `file-hash`, and `size`. Your working-tree file remains 64 MiB; only Git's staged representation is small.
 
-Inspect the pointer as data, not as an opaque success marker. It should record a supported pointer version, the expected file identity, and the decimal size. The full file hash must describe the working-tree bytes you staged.
+If `git show` emits binary data, do not commit it. The file missed the Crab filter.
 
-The pointer does not need to record every chunk location. Chunk placement can change through packing or repair while the committed file identity remains stable. Local staging connects this new pointer to its complete recipe until push makes that recipe durable for other clients.
+| Surface | What should exist now |
+| --- | --- |
+| Worktree | Complete 64 MiB file |
+| Git index | Compact Crab pointer |
+| Local Crab staging | Chunks and the reconstruction recipe |
+| Remote | Nothing from this new commit yet |
 
-If `git show :models/checkpoint.bin` emits the complete binary, stop before committing. The path did not take the Crab clean path, and a later push cannot retroactively turn that Git blob into a pointer.
-
-## Commit and push
-
-Commit the pointer and publish through Crab:
+## 4. Commit and publish
 
 ```bash
-git commit -m "Add checkpoint"
-crab push origin main
+git commit -m "Verify first Crab push"
+crab push
 ```
 
-The push stages and flushes large-file data before it publishes metadata and advances the branch ref. If the process fails before the ref update, readers continue to see the previous complete state.
+Step through the trace below. Crab uploads immutable Git and large-file data, verifies that the pointer can be reconstructed, and only then advances the branch.
 
-Capture the process exit status and the final ref result. Progress bars and uploaded-byte counts describe preparation, while the ref outcome describes publication. An interrupted command can upload reusable immutable objects without changing the branch.
+<GitArchitecturePlayer story="push" />
 
-After success, compare the new local commit with `git ls-remote`. Matching object IDs prove that remote discovery reports the new Git state. They do not yet prove that a different client can hydrate the managed file, which is why the fresh-clone step remains required.
+Check the two commit IDs:
 
-## Interpret the push as three proofs
+```bash
+git rev-parse HEAD
+git ls-remote origin refs/heads/verify-crab-push
+```
 
-The command output describes work, but the underlying result has three independent proofs. Git connectivity proves that the new commit, tree, and blobs exist at the origin. Pointer closure proves that every Crab pointer resolves to durable metadata and xorb data. The expected-old comparison proves that the branch still names the base commit you planned against.
+The hashes should match. That proves the remote branch names your commit—but not yet that another client can reconstruct the file.
 
-A successful upload without a ref update is not a published push. A visible Git commit without pointer closure would be unsafe, so Crab blocks that state. A stale expected-old value means another writer published first, even if your immutable uploads completed.
-
-Use the error boundary to choose the next action:
-
-- **Discovery error**: restage the tracked file so its pointer has a complete local recipe
-- **Object-store error**: restore credentials or connectivity, then retry the immutable upload
-- **Closure error**: run `crab fsck` and repair missing remote dependencies before publication
-- **Ref conflict**: fetch the current branch, reconcile Git history, and retry against the new tip
-
-Do not force a branch update to bypass a missing large-file dependency. Force changes ref ancestry rules, not pointer durability requirements.
-
-## Check the repository state
-
-Run local diagnostics after the push:
+Run the repository checks:
 
 ```bash
 crab status
-crab doctor
 crab fsck
 ```
 
-`crab status` reports tracked-file state. `crab doctor` checks configuration and access. `crab fsck` performs repository integrity checks against the stored metadata and data paths.
+`crab status` checks the tracked file's local state. `crab fsck` checks pointer, metadata, chunk, and remote-object relationships.
 
-These commands answer different questions. A clean `crab status` means the worktree agrees with its committed representation. A passing `crab doctor` means the current environment can reach its configured boundaries. A passing `crab fsck` tests repository relationships beyond the current working-tree file.
+## 5. Prove it from a fresh clone
 
-Keep the first failure from each command. Later errors may be consequences of the same missing credential, pointer recipe, shard, or object range.
-
-## Clone and reconstruct the file
-
-Use a separate directory so local caches cannot hide a remote-storage problem.
+Leave the writer repository. Clone the test branch lazily so the new worktree starts with the pointer:
 
 ```bash
 cd ..
-crab clone crab://team-data/vision-search vision-search-verify
+crab clone --branch verify-crab-push "$CRAB_VERIFY_REMOTE" vision-search-verify
 cd vision-search-verify
 crab status
-crab hydrate 'models/checkpoint.bin'
-b3sum --check ../checkpoint.b3
 ```
 
-The final hash check proves that hydration reconstructed the same bytes that entered the original repository.
-
-## Prove that the test did not use writer-only state
-
-A second directory on the same machine is better than the original worktree, but it may still share process caches, provider credentials, or a configured shared cache. For stronger evidence, use a clean container, runner, or another machine with its own Crab cache directory.
-
-The reader needs only the published repository state and authorized object access. It must not receive the writer's staging directory or temporary reconstruction output. If hydration works only after copying local Crab state, the remote repository is incomplete.
-
-Run one controlled negative check as well. Remove access from the isolated reader or point it at an unauthorized prefix, then confirm hydration fails without replacing the pointer with partial bytes. Restore the correct credentials and rerun the same hydration successfully.
-
-This check proves that errors stay visible at the data boundary. It also confirms that the test environment reads the configured origin instead of an unintended local copy.
-
-## Verify a changed version as well
-
-One file version proves transport. A second version proves that the repository can preserve history and reuse content without confusing file identities.
-
-Modify or replace part of the source file, then repeat the explicit workflow:
+`crab status` should mark `models/checkpoint.bin` as a pointer. Materialize only that file:
 
 ```bash
-crab add models/checkpoint.bin
-git commit -m "Update checkpoint"
-crab push origin main
-crab stat perf
+crab hydrate models/checkpoint.bin
+test "$(git hash-object models/checkpoint.bin)" = "$(cat ../checkpoint.git-hash)" \
+  && echo "hash matches"
 ```
 
-Save the second BLAKE3 hash under a different evidence file. A fresh clone should be able to hydrate either commit after checkout, subject to your retained-history policy.
+The final line should print `hash matches`. That is the end-to-end proof: the reader reconstructed the same bytes without the writer's staging directory.
 
-```bash
-git checkout HEAD~1
-crab hydrate 'models/checkpoint.bin'
-b3sum models/checkpoint.bin
+<HydrationPlanDiagram />
 
-git checkout main
-crab hydrate 'models/checkpoint.bin'
-b3sum models/checkpoint.bin
-```
+For stronger evidence, repeat the clone in a clean container, runner, or another machine. A second directory on the writer's machine may still share credentials or an optional cache.
 
-The two hashes should match the corresponding source versions. The amount uploaded for the second version may be lower when the physical bytes overlap.
+## When a check fails
 
-## Capture evidence suitable for automation
+| Failure | Next action |
+| --- | --- |
+| `git check-attr` does not report Crab | Run `crab track '*.bin'`, inspect `.gitattributes`, then check the path again |
+| The staged Git object is the full binary | Stop before committing; rerun `crab doctor` and restage after fixing the filter |
+| `crab push` reports credentials or storage access | Fix the boundary reported by `crab doctor`, then rerun `crab push` |
+| The local and remote commit IDs differ | Fetch and reconcile the branch; do not force past a stale ref |
+| Hydration fails or the hash differs | Run `crab fsck`; the repository is not verified |
 
-Manual inspection helps during setup, but automated environments need structured results. Crab commands that support `--json` or `--jsonl` can feed build logs and policy checks without parsing human prose.
-
-Record the commit object ID, destination ref, Crab command version, original file hash, hydration hash, and `crab fsck` result. Keep credentials and signed URLs out of the artifact.
-
-This evidence distinguishes a Git-only success from an end-to-end repository success. A green pipeline should mean another client can discover the commit and reconstruct its managed files.
-
-Use separate fields for source bytes, uploaded bytes, and hydrated bytes. Deduplication can make the upload smaller than the file, while a cold hydration still reads enough chunk ranges to reconstruct the complete output.
-
-Retain the destination repository identity and ref with the artifact. A hash without its repository and commit context proves byte equality, but it cannot show which published state produced those bytes.
-
-## Clean up without deleting shared proof
-
-After the verification, remove only disposable local clones and sample files that the test created. Do not delete bucket objects by path because xorbs may contain chunks reused by other file versions.
-
-If the tutorial used a dedicated repository prefix, apply repository-scoped retention and garbage collection after the evidence window. Keep the published commits when the test repository will become a fixture for future client or release checks.
+A failed upload may leave complete immutable objects that a retry can reuse. It must not advance the ref to a state with missing reachable data.
 
 ## Keep five pieces of evidence
 
 <ConceptChecklist
   items={[
-    "Git attributes route the path through the Crab filter.",
+    "Git attributes route checkpoint.bin through the Crab filter.",
     "The staged Git object is a compact pointer.",
-    "The push advances the intended remote ref without an integrity error.",
-    "A fresh clone can resolve and hydrate the pointer.",
-    "The hydrated file matches the original cryptographic hash."
+    "The remote branch points to the new commit.",
+    "A fresh clone can hydrate checkpoint.bin.",
+    "The hydrated file has the original Git content hash."
   ]}
 />
 
-This verification isolates the important boundaries. Once it passes, read [How does Crab connect to Git?](/blog/git-remote-helpers-filter-processes) to understand which Git protocols produced each result.
+Once all five pass, the repository has crossed the complete write-and-read path. Continue with [How does Crab connect to Git?](/blog/git-remote-helpers-filter-processes) to see which Git protocols produced each result.

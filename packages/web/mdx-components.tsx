@@ -18,6 +18,49 @@ import {
 import { GitArchitecturePlayer } from "@/components/blog/git-architecture-player"
 import { BlogProcessPlayer } from "@/components/blog/blog-process-player"
 import {
+  ChunkAddressMap,
+  DedupBoundaryLab,
+  DedupEvidenceLadder,
+} from "@/components/blog/deduplication-visuals"
+import {
+  CacheObjectPassport,
+  CacheRouteTicket,
+  RangePlanningTape,
+} from "@/components/blog/cache-visuals"
+import {
+  HydrationSafetyGate,
+  ReconstructionArrivalBoard,
+  ReconstructionWorkbench,
+} from "@/components/blog/reconstruction-visuals"
+import {
+  ConcurrentPushRaceBoard,
+  LeaseClockInspector,
+  RefVisibilitySignal,
+} from "@/components/blog/consistency-visuals"
+import {
+  DiskBudgetWorkbench,
+  MaterializationPackingDesk,
+  MountedReadCutaway,
+} from "@/components/blog/lazy-checkout-visuals"
+import { GcObjectEvidenceLab, GcRaceReplay } from "@/components/blog/gc-visuals"
+import { GcRunPermit } from "@/components/blog/gc-run-permit"
+import { CostReceiptMixer } from "@/components/blog/cost-ledger-visual"
+import {
+  RestoreDispatchBoard,
+  TierEligibilitySorter,
+} from "@/components/blog/tiering-visuals"
+import {
+  LfsIdentityLab,
+  LfsRehearsalConsole,
+  LfsRewriteMap,
+} from "@/components/blog/lfs-compatibility-visuals"
+import {
+  PushDataLanesDiagram,
+  PushPipelineBoard,
+  PushVisibilityLab,
+} from "@/components/blog/push-pipeline-visuals"
+import {
+  BinaryHistoryGrowthDiagram,
   ChunkReuseDiagram,
   GarbageCollectionReachabilityDiagram,
 } from "@/components/blog/blog-detail-diagrams"
@@ -126,6 +169,34 @@ export function getMDXComponents(components?: MDXComponents) {
     TakeawayBox,
     GitArchitecturePlayer,
     BlogProcessPlayer,
+    ChunkAddressMap,
+    DedupBoundaryLab,
+    DedupEvidenceLadder,
+    CacheObjectPassport,
+    CacheRouteTicket,
+    RangePlanningTape,
+    HydrationSafetyGate,
+    ReconstructionArrivalBoard,
+    ReconstructionWorkbench,
+    ConcurrentPushRaceBoard,
+    LeaseClockInspector,
+    RefVisibilitySignal,
+    DiskBudgetWorkbench,
+    MaterializationPackingDesk,
+    MountedReadCutaway,
+    GcObjectEvidenceLab,
+    GcRaceReplay,
+    GcRunPermit,
+    CostReceiptMixer,
+    RestoreDispatchBoard,
+    TierEligibilitySorter,
+    LfsIdentityLab,
+    LfsRehearsalConsole,
+    LfsRewriteMap,
+    PushDataLanesDiagram,
+    PushPipelineBoard,
+    PushVisibilityLab,
+    BinaryHistoryGrowthDiagram,
     ChunkReuseDiagram,
     GarbageCollectionReachabilityDiagram,
     CacheHierarchyDiagram,

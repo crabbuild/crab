@@ -1,198 +1,140 @@
 ---
 title: "How does Crab rebuild a file from chunks?"
-description: "Trace hydration from a Git pointer through shard terms and xorb ranges to an atomically replaced, verified file."
+description: "Follow one pointer through file terms, xorb reads, ordered assembly, BLAKE3 verification, and atomic replacement."
 date: "2026-07-03"
 author: "Crab Team"
 category: "architecture"
 tags: ["hydration", "shard", "xorb", "blake3", "reconstruction"]
-excerpt: "Hydration resolves every chunk, plans bounded range reads, assembles bytes in recipe order, and verifies the result before replacement."
+excerpt: "Hydration resolves every recipe position, restores logical order, and replaces the pointer only after the complete file matches."
 level: "deep-dive"
 path: "core-internals"
 order: 4
 concepts: ["hydration", "shard", "xorb", "verification"]
 prerequisites: ["How does Crab avoid repeated object-store reads?"]
-outcome: "Explain the complete reconstruction and verification path for one Crab pointer."
-diagramType: "Hydration proof pipeline"
+outcome: "Trace one recipe from pointer to verified working-tree file and identify where failures stop it."
+diagramType: "Interactive reconstruction workbench"
 meta:
   contentType: "Conceptual"
-  goal: "Explain why hydration is both a download plan and an integrity proof."
-  audience: "Developers investigating checkout behavior, corruption, or read performance."
+  goal: "Explain reconstruction through one small repeated-chunk recipe."
+  audience: "Developers investigating checkout behavior, missing chunks, or integrity failures."
 ---
 
-A Crab pointer contains the file identity and size, but not the file bytes. Hydration resolves that identity into a complete ordered recipe, finds each chunk inside immutable xorbs, and verifies the assembled file before replacing the pointer.
+Git checks out a small Crab pointer. You need the original multi-gigabyte file.
 
-<HydrationPlanDiagram />
+Hydration has one job:
 
-## The pointer names the expected result
+> Produce exactly the bytes named by the pointer—or leave the pointer in place and return an error.
 
-The Git blob records a BLAKE3 file hash, decimal byte size, and optional shard hint. These fields define what a successful hydration must produce.
+The download is only one part. Crab must also find every chunk, restore recipe order, verify the complete file, and replace the pointer safely.
+
+## The pointer defines success
+
+A pointer records the expected file identity and size:
 
 ```text
 version https://crab.dev/spec/v1
-file-hash <64 hexadecimal characters>
-size <decimal bytes>
-shard-hint <optional 64-character hash>
+file-hash 8f2c…91a4
+size 348160
+shard-hint 41de…770b
 ```
 
-The hint can shorten lookup, but correctness cannot depend on a stale hint. Crab still resolves canonical metadata for the requested file identity.
+- `file-hash` is the expected BLAKE3 of the complete file.
+- `size` catches missing or extra bytes.
+- `shard-hint` can accelerate lookup, but it is not authority. Crab falls back to the file index when the hint is stale or absent.
 
-## The file index separates identity from recipe storage
+The pointer does not list thousands of chunks. Metadata outside Git holds that larger recipe.
 
-The full-file hash is the stable lookup key. File-index metadata connects that key to the recipe information needed for reconstruction, while shard metadata connects chunk identities to physical ranges.
+## Follow one five-position recipe
 
-This indirection lets Crab change storage layout without rewriting Git history. Repacking can move a chunk into another xorb and publish updated location metadata. The pointer still names the same expected file bytes.
-
-It also keeps pointers compact. A file with thousands of chunks does not place thousands of terms in Git. Git stores the file identity, while object storage holds the larger reconstruction structures that hydration reads only when needed.
-
-## A recipe can span files, revisions, and xorbs
-
-Imagine a file recipe with four ordered chunks: `A`, `B`, `C`, and `D`. Shard metadata may locate `A` and `C` in one older xorb, `B` in a newer xorb, and `D` in the local verified cache.
-
-The recipe does not require chunks to share an upload or commit. Content identity lets the file reuse any durable matching chunk. Reconstruction order comes from the recipe, not object creation time.
+Use this toy file:
 
 ```text
-file recipe:  A → B → C → D
-xorb 17:      A, C, unrelated chunk E
-xorb 42:      B, unrelated chunk F
-local cache:  D
+recipe: A → B → C → D → B
 ```
 
-The planner turns this logical order into physical reads, then the assembler restores the logical order after data arrives.
+Chunk `B` appears twice in the output. Storage needs one verified copy; assembly writes it at positions 2 and 5.
 
-## Trace one recipe into a concrete read plan
+Select any output slot below to see its physical placement.
 
-Suppose the recipe is `A, B, C, D, B`. The last term repeats chunk `B`, so the output contains those bytes twice even though storage needs one durable copy.
+<ReconstructionWorkbench />
 
-Shard resolution produces these locations:
+This separation matters:
+
+| Structure        | What it answers                              | Example field             |
+| ---------------- | -------------------------------------------- | ------------------------- |
+| Pointer          | What final file is expected?                 | file hash and size        |
+| File recipe      | Which chunks, in what order?                 | `A, B, C, D, B`           |
+| `ChunkPlacement` | Where is one chunk packed?                   | xorb hash and chunk index |
+| `FileTerm`       | Which contiguous xorb range serves the file? | `chunk_start..chunk_end`  |
+
+A `FileTerm` also records `unpacked_bytes`. Its end index is exclusive, so `3..4` contains one xorb-local chunk.
+
+## Planning physical reads does not change file order
+
+Crab groups compatible terms by xorb. In the example, `A` and `C` can share one read from `xorb-17`; `B` comes from `xorb-42`; `D` may already be cached.
+
+Those sources finish independently. Change the completion order:
+
+<ReconstructionArrivalBoard />
+
+The output remains `A, B, C, D, B` every time.
+
+That is the key distinction:
 
 ```text
-A -> xorb-17 bytes 0..4095
-B -> xorb-42 bytes 8192..12287
-C -> xorb-17 bytes 4096..8191
-D -> local verified cache
-B -> reuse the verified xorb-42 result
+physical plan → minimize reads and reuse verified bytes
+logical recipe → define the only valid output order
 ```
 
-The planner can coalesce `A` and `C` into one compatible range from `xorb-17`. It requests `B` once from `xorb-42`, obtains `D` locally, and records that the verified `B` result fills two recipe positions.
+Concurrency can change when bytes arrive. It cannot change what the file means.
 
-The assembler writes `A`, `B`, `C`, `D`, and `B` in that order. Range completion order and xorb object order do not change the output sequence.
+## Every recipe position must be covered
 
-The final expected size catches missing or extra bytes. The full-file BLAKE3 hash catches wrong content or order even when every individual source chunk passed its own identity check.
+Before reconstruction spends bandwidth, Crab checks that shard terms cover the expected file. A missing term is not treated as a smaller valid file.
 
-## Shard terms locate every chunk
+For the toy recipe, coverage means five output positions even though only four chunk identities are unique:
 
-The file recipe lists chunks in reconstruction order. Shard metadata maps those chunk identities to xorb objects and byte ranges.
+```text
+positions expected: 5
+positions resolved: 5
+unpacked bytes:      348160
+```
 
-A complete plan must cover every chunk for the file version. Missing or conflicting terms are an error; Crab does not create a shorter file and call the hydration complete.
+If position 4 has no placement, the plan stops. Crab does not fetch `A`, `B`, and `C`, write a short file, and hope the final hash explains the problem later.
 
-Shard lookup can use the optional pointer hint to begin near likely metadata. If the hint does not contain every term, Crab continues through canonical index state.
+## Verification happens at two scales
 
-Each resolved term includes enough information to locate and verify its chunk. A term that names a missing xorb range fails before final publication to the worktree.
+Chunk verification answers: “Did this range return the bytes for chunk C?”
 
-Metadata can span shard generations because files reuse chunks created at different times. The resolver gathers terms until it covers the complete ordered recipe. Finding the first matching shard is not enough when later chunks live elsewhere.
+Final verification answers: “Did all chunks produce the exact file, in the exact order, at the expected size?”
 
-Duplicate location terms are acceptable only when they describe valid copies of the same chunk identity. Conflicting identities or ranges cannot be resolved by choosing whichever response arrives first. Crab needs one verified source for every recipe term.
+Both are needed. Every chunk can be individually valid while the assembled order is wrong.
 
-This rule supports repair and replication. A chunk can gain another durable location without changing the file recipe, and hydration can choose an available verified copy.
+<HydrationSafetyGate />
 
-## The planner groups remote work
+The successful path is:
 
-Chunks that belong to the same xorb can share a range request when their locations are compatible. Crab groups the terms by xorb, coalesces compatible ranges, and fetches independent work with bounded concurrency.
+1. Resolve complete reconstruction terms.
+2. Fetch or reuse verified chunk data.
+3. Stream chunks to a sibling temporary file in recipe order.
+4. Update the BLAKE3 hasher as bytes are written.
+5. Compare final hash and byte count with the pointer.
+6. Atomically rename the temporary file over the pointer.
 
-Local cache hits can remove ranges from the remote plan. Archived xorbs may require a restore before their ranges become readable, and `crab hydrate --restore` makes that policy explicit.
+On cancellation, a missing term, or a hash mismatch, temporary output is removed. The tracked path remains a pointer instead of exposing a partial file.
 
-Bounded concurrency protects the client while several ranges are in flight. The reader limits simultaneous requests, decompression, and buffered output rather than loading the complete file into memory.
+## Hydrate one file and keep evidence
 
-Coalescing also has a boundary. Crab can join nearby ranges when extra bytes cost less than another request. It should not download an entire large xorb for one distant chunk by default.
+Run a narrow example first:
 
-The plan also separates dependencies from scheduling. Recipe order defines the output. Xorb grouping defines efficient reads. Concurrency defines when independent reads execute.
+```bash
+crab hydrate 'models/encoder.safetensors' --jsonl | tee hydration.jsonl
+crab status
+```
 
-Keeping those concerns separate prevents a performance optimization from changing file meaning. Ranges may complete in any order, but the assembler consumes verified chunks at their declared logical positions.
+The JSONL stream preserves progress and the terminal result for diagnosis. `crab status` shows whether the working-tree path is hydrated or still a pointer.
 
-Before issuing reads, the planner can remove chunks already available in local staging or verified cache. It retains their recipe positions so local and remote results join the same assembly plan.
-
-## Archived data introduces a waiting state
-
-Some storage classes cannot serve a range read until the provider restores the object. Hydration can request restoration, wait for readability, and then resume the same verified reconstruction plan.
-
-`--no-restore` changes that policy into an immediate error. This option fits latency-sensitive automation that must not wait or incur an unplanned retrieval charge.
-
-The pointer and recipe remain valid while the xorb is archived. Archive state changes availability and cost, not content identity.
-
-Restore planning should group files by required archived xorbs. Ten files may share one cold xorb, so requesting restore per file would create duplicate provider work.
-
-The client can report which objects need restore, which requests already exist, and the earliest provider availability. Operators then decide whether to wait, choose a different retained version, or move the workflow to a latency-tolerant queue.
-
-After restoration, the same range, chunk, and final-file verification applies. Provider restore success means the object is readable; it does not replace Crab's integrity proof.
-
-## Assembly follows recipe order
-
-Download completion order does not define file order. The assembler writes verified chunks according to the file recipe, even when later ranges arrive first.
-
-The output is built away from the committed pointer path. Only a complete, verified result can replace the working-tree pointer, which prevents a cancelled or failed hydration from appearing successful.
-
-Assembly should stream whenever possible. The client does not need to hold a multi-gigabyte file in memory, but it may need bounded buffers for decompression, out-of-order range completion, and final writes.
-
-Backpressure connects these buffers to the read scheduler. If the destination disk cannot consume output, Crab limits additional range work instead of accumulating the remaining file in memory.
-
-Repeated recipe terms still write repeated output. Deduplication reduces stored and transferred sources, while assembly restores every logical occurrence required by the file.
-
-## Verification closes the loop
-
-Chunk identities detect incorrect range content. The final BLAKE3 file hash and expected size verify the assembled result as a whole.
-
-This contract is binary: hydration returns the byte-identical original or an error. A corrupted cache entry, incomplete range, missing shard term, or wrong final hash cannot produce a successful materialized file.
-
-## Atomic replacement protects local work
-
-Crab assembles hydrated output away from the committed pointer path. It verifies chunk identities, final size, and full-file hash before replacing the pointer.
-
-A cancelled process can leave temporary local work, but it must not leave a truncated file at the tracked path. Cleanup removes or ignores incomplete temporary output on the next operation.
-
-Hydration also checks working-tree state before replacement. A locally modified materialized file should not be overwritten as though it were an unchanged pointer.
-
-The temporary output should live on a filesystem that supports an atomic replacement into the destination path. When platform constraints prevent that shape, Crab must preserve the same observable contract through an equivalent safe sequence.
-
-Permissions and executable bits belong to the checkout path around content replacement. Hydration proves bytes; Git's tree and worktree logic determine path metadata. A content repair should not silently invent a new mode.
-
-## Failure signals identify the broken layer
-
-| Failure | Likely boundary | Safe response |
-| --- | --- | --- |
-| Pointer parse error | Git blob or path selection | Inspect the committed blob and tracking rule |
-| File recipe not found | File index or retained metadata | Sync metadata and run `crab fsck` |
-| Missing chunk term | Shard closure | Stop hydration and repair repository metadata |
-| Xorb range unavailable | Object access, deletion, or archive state | Restore access or archived data |
-| Chunk hash mismatch | Cache, range response, or stored object | Discard cached bytes and verify origin |
-| Final file hash mismatch | Recipe order or assembled content | Keep the pointer and report integrity failure |
-
-Do not work around an integrity error by copying the temporary output into place. Preserve the pointer and diagnostic evidence until the repository boundary is repaired.
-
-## Retry only the failed dependency work
-
-A transient range-read failure does not invalidate chunks already verified from other xorbs. A retry can reuse those cache entries and request the missing ranges again.
-
-A metadata refresh can repair a stale location view, but it cannot make a genuinely missing xorb appear. After refresh, the same unresolved chunk identity is repository-integrity evidence and should reach `crab fsck` or repair tooling.
-
-Final hash failure requires a broader response. Individual chunk hashes may all pass while recipe order, length, or duplicate placement is wrong. Keep the complete recipe and assembly diagnostics because retrying the same ranges alone will reproduce the result.
-
-Archive waiting is not an integrity failure. It is an availability state with an explicit restore policy. Report it separately so operators do not repair valid metadata or delete cache state while the provider restores the object.
-
-## Replicas and repaired locations preserve file identity
-
-A chunk can have more than one durable source after replication or repair. Shard metadata can expose eligible locations while the recipe continues to name one content identity.
-
-The reader may choose a location based on provider availability, region, storage class, or measured latency. It still verifies the returned bytes against the chunk hash before assembly.
-
-If one replica fails verification, discard that result and report the bad location. Another verified replica can satisfy the read without changing the pointer or recipe. Repair tooling can then restore the damaged copy from known-good content.
-
-Location choice must not hide a systemic metadata conflict. Two ranges that claim the same identity but return different bytes require integrity investigation, even when one copy allows hydration to finish.
-
-<GitArchitecturePlayer story="hydrate" />
-
-## Selective hydration uses the same proof
-
-Patterns only choose which pointers enter the pipeline. They do not weaken reconstruction or verification.
+Patterns only choose which pointers enter the pipeline. They do not weaken verification:
 
 ```bash
 crab hydrate '*.safetensors'
@@ -200,29 +142,56 @@ crab hydrate --manifest .crab/manifests/ci.txt
 crab hydrate --all
 ```
 
-Already hydrated files can be skipped. Clean committed files can later return to pointers with `crab dehydrate`, freeing local disk while preserving remote data.
+Already hydrated files can be skipped. Use `crab dehydrate` later to replace clean materialized content with pointers and reclaim working-tree space.
 
-## Verify hydration independently
+## Archived xorbs add waiting, not uncertainty
 
-Save a cryptographic hash before the original push, then compare it after hydration on a separate machine. An isolated cache ensures the test reads canonical remote dependencies.
+An archived xorb can still be the correct source; it is temporarily unreadable.
 
-Run `crab fsck` after representative hydrations. The file hash proves one output; repository integrity checks cover broader metadata and storage relationships.
+```bash
+crab hydrate 'archive/model.bin' --restore
+```
 
-For performance evidence, record file size, number of chunks, number of xorbs, coalesced range count, cache bytes, origin bytes, and total duration. These measurements show whether the bottleneck is lookup, retrieval, assembly, or verification.
+`--restore` allows the provider restore workflow. `--no-restore` turns the same condition into an immediate error for automation that cannot wait or accept retrieval cost.
 
-Test more than the branch tip. Select one current file, one file reused across revisions, and one historical file near the retention boundary. Hydrate each from an isolated client and compare its expected full-file hash.
+After restoration, the same chunk and final-file verification still runs. Provider readability is not an integrity proof.
 
-The sample tests identity and access across different metadata ages. Repository-wide integrity checks then cover the wider set of recipes and shard relationships that the sample did not materialize.
+## Read failures by boundary
 
-For cancellation testing, stop hydration during metadata lookup, range reads, and final assembly. Each case should preserve the committed pointer or the prior clean file and leave no truncated destination presented as success.
+| Signal                | Broken boundary                       | Next check                                    |
+| --------------------- | ------------------------------------- | --------------------------------------------- |
+| Pointer parse error   | Git blob                              | inspect the committed pointer                 |
+| File recipe not found | file index                            | sync metadata and inspect repository health   |
+| Missing term          | shard coverage                        | repair or republish the incomplete data chain |
+| Xorb unavailable      | object access or archive state        | restore access or the archived object         |
+| Chunk hash mismatch   | cache, range response, or stored xorb | discard bad cached data and verify origin     |
+| Final hash mismatch   | order, length, or assembled bytes     | preserve the recipe and assembly evidence     |
 
-For cache testing, run the same file cold and warm. The origin byte count should decrease when verified ranges remain local, while the final hash and size stay identical across both runs.
+Do not copy failed temporary output into place. It is diagnostic material, not a hydrated file.
 
-For repair testing, use a disposable repository or injected failure layer. Production object mutation is not an acceptable way to prove corruption handling.
+If the original file still exists elsewhere, Crab can try local recovery before remote reconstruction:
+
+```bash
+crab hydrate 'models/encoder.safetensors' --recover-from /mnt/recovery/models
+```
+
+The recovered candidate must still match the pointer identity.
+
+## Measure the slow stage, not just total time
+
+For one representative file, record:
+
+- metadata lookup time
+- number of xorb reads
+- local versus origin bytes
+- assembly and final-hash time
+- destination-disk throughput
+
+A warm cache removes remote work, not ordered writes or final hashing. If cold and warm runs take similar time, the destination disk or verification pass may be the bottleneck.
 
 <TakeawayBox title="Hydration has one valid result">
-  Resolve every term, read the required ranges, assemble in recipe order, and
-  publish only after the final identity matches.
+  Cover every recipe position, fetch verified bytes, restore logical order, and
+  replace the pointer only after the complete identity matches.
 </TakeawayBox>
 
 For the complete code-and-data story, continue with [How does Crab keep one history across two data paths?](/blog/crab-interpreted-one-history-two-data-paths).

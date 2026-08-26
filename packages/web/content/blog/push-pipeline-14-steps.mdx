@@ -1,17 +1,17 @@
 ---
 title: "What happens during a Crab push?"
-description: "Step through the fourteen stages that discover dependencies, upload immutable objects, prove closure, and publish one ref transaction."
+description: "Follow one Crab push from local commit to durable objects and one atomic ref update."
 date: "2026-06-19"
 author: "Crab Team"
 category: "architecture"
 tags: ["push", "pipeline", "deduplication", "xorb", "consistency"]
-excerpt: "A Crab push prepares thirteen stages of immutable state before the fourteenth stage changes branch visibility."
+excerpt: "A visual walkthrough of the fourteen stages behind one safe Crab push."
 level: "deep-dive"
 path: "core-internals"
 order: 2
 concepts: ["push", "staging", "dedup upload", "atomic refs"]
 prerequisites: ["How does Crab avoid storing duplicate data?"]
-outcome: "Locate the durability, recovery, and concurrency boundaries in a Crab push."
+outcome: "Explain what Crab uploads, what it proves, and when a pushed commit becomes visible."
 diagramType: "Interactive transaction trace"
 meta:
   contentType: "Conceptual"
@@ -19,184 +19,180 @@ meta:
   audience: "Developers operating Crab or reviewing its consistency model."
 ---
 
-A Crab push is a transaction assembled from immutable object uploads and one final ref update. The client can retry preparation work, but it must not expose the new commit until every Git and large-file dependency is durable.
+A Crab push has one hard rule:
 
-<BlogProcessPlayer story="pipeline" />
+> **Upload first. Prove everything exists. Move the branch last.**
 
-## The fourteen stages form one evidence chain
+The implementation has fourteen stages, but you only need four ideas to understand it: **plan, upload, prove, publish**.
 
-The numbered stages are easier to remember when each produces evidence required by a later decision:
+<PushPipelineBoard />
 
-| Stage | Operation | Evidence produced |
-| --- | --- | --- |
-| 1 | Parse the source and destination refspec | Intended ref edit |
-| 2 | Read the destination tip | Expected-old object ID |
-| 3 | Acquire the destination lease | Contention boundary |
-| 4 | Discover reachable Git objects and Crab pointers | Complete dependency plan |
-| 5 | Classify known and new chunks | Upload set |
-| 6 | Build the Git pack | Git transport object |
-| 7 | Pack new chunks into xorbs | Immutable data objects |
-| 8 | Flush and upload staged xorbs | Durable chunk bytes |
-| 9 | Upload the Git pack | Durable Git objects |
-| 10 | Publish shard and file metadata | Durable reconstruction terms |
-| 11 | Verify Git connectivity | Complete Git closure |
-| 12 | Verify pointer closure | Complete Crab closure |
-| 13 | Compare the destination with expected-old | Freshness decision |
-| 14 | Commit the ref transaction | Visible branch update |
+## Start with one real push
 
-Implementation can overlap independent immutable work, but the dependency order remains. For example, xorb and Git-pack uploads can use bounded concurrency. Neither can justify a visible ref before both closure checks pass.
+Imagine `main` points to commit `A`. Your local commit `B` changes two files:
 
-## Stages 1–4 define the intended state
+```text
+src/train.rs          4 KiB source change
+models/ranker.bin    12 GiB model update
+```
 
-The push begins by resolving the source, destination, and expected old object ID. It acquires a short lock for the destination ref, walks the reachable Git graph, and resolves every Crab pointer in that graph.
+The new model shares about 80% of its chunks with the previous version. That percentage is illustrative; actual reuse depends on the file content.
 
-This is the rejection boundary for incomplete local state. A pointer without staged content or durable remote proof cannot enter a publishable plan.
+```bash
+git add src/train.rs models/ranker.bin
+git commit -m "Improve ranking model"
+crab push origin main
+```
 
-The discovery walk treats ordinary Git blobs and Crab pointers differently after Git identifies them. Ordinary blobs need Git-pack connectivity. Crab pointers add a second dependency closure through file recipes, shards, and xorbs.
+`crab push` uses Crab's native concurrent path. A normal `git push` to a `crab://` remote enters the same publication model through Git's remote helper.
 
-A source-only push can therefore complete without creating xorb or shard data. A mixed push prepares both lanes but still publishes one destination ref transaction.
+The intended result is simple:
 
-## Stages 5–7 decide what must be created
+```text
+main: A ───────────────► B
+      visible            visible only after proof
+```
 
-Crab classifies chunks as known or new, builds a standard Git pack for reachable Git objects, and packs new chunks into xorbs. Existing chunks can be reused only when canonical metadata proves their remote location.
+While the push runs, readers continue to see `A`. Uploaded bytes do not make `B` visible.
 
-Staged xorbs must flush before the push can continue to publication. This ordering prevents a file recipe from referring to bytes that exist only in a short-lived local process.
+## The fourteen stages fit into four phases
 
-Classification can reuse chunks from the same add session, earlier local work, or canonical remote indexes. The source of the hint changes lookup cost, but the publication proof still requires a durable remote location.
+| Phase | Stages | Question Crab answers | Visible branch |
+| --- | ---: | --- | --- |
+| **Plan** | 1–4 | What ref and objects does `B` need? | `A` |
+| **Upload** | 5–10 | Are the Git and large-file objects durable? | `A` |
+| **Prove** | 11–12 | Can another client reconstruct everything? | `A` |
+| **Publish** | 13–14 | Is `A` still current, and may the ref move? | `A`, then `B` |
 
-The Git pack remains compatible Git data. Crab does not embed large-file xorbs inside that pack because Git clients and object storage have different access and lifecycle requirements.
+That last cell is the key. Stage 14 is the only visibility change.
 
-## Stages 8–10 make immutable dependencies durable
+## Phase 1: plan the complete push
 
-The client uploads the Git pack and xorbs with bounded concurrency. It then creates and uploads shard metadata that records complete reconstruction terms for each file.
+Stages 1–4 resolve the ref edit, read the destination tip, acquire the ref lock, and walk commit `B`.
 
-An interruption here can leave an unreferenced immutable object. That object is safe because no visible ref names it. A later retry can reuse it, and garbage collection can reclaim it after the grace period if it remains unreachable.
+The walk finds two kinds of dependencies:
 
-The write journal records enough progress to distinguish completed uploads from pending work. A retry can skip immutable objects that canonical storage already contains.
+- Git objects: commit, trees, source blobs, and Crab pointer blobs.
+- Crab objects: file recipes, chunks, xorbs, and shards needed by each pointer.
 
-Retry safety depends on immutable identity. Repeating an upload for the same content cannot replace a different object's meaning. Mutable state remains concentrated in the final ref decision.
+For the example, the plan records `A` as the **expected old** value of `main`. If the model pointer has neither staged content nor proven remote metadata, the push stops here.
 
-## Stages 11–12 prove closure
+## Phase 2: upload immutable objects
 
-Before publishing, Crab proves two closures. Git connectivity confirms that the proposed commit graph is complete at the origin. Pointer closure confirms that every Crab pointer resolves through durable metadata to durable xorb bytes.
+Stages 5–10 prepare both data lanes. Select a lane to isolate its work.
 
-This proof uses canonical storage state. A local cache can accelerate the checks, but it cannot substitute for the remote dependency contract.
+<PushDataLanesDiagram />
 
-Closure proof also protects readers in other regions or machines. The writer's local cache may contain every required byte while the shared origin is incomplete. Publication waits for the shared state, not the writer's ability to reconstruct locally.
+Crab classifies the model chunks before uploading. With the illustrative 80% reuse:
 
-## Stages 13–14 decide visibility
+| Model content | Approximate size | Push action |
+| --- | ---: | --- |
+| Already proven at the origin | 9.6 GiB | Reuse existing chunk locations |
+| New content | 2.4 GiB | Pack into xorbs and upload |
+| File mapping | Small metadata | Publish complete shard terms |
 
-The push compares the branch's current value with the expected old object ID. If another writer changed the ref, the stale push is rejected instead of overwriting newer history.
+Crab can build and upload independent immutable objects concurrently. It still preserves the dependency order: staged xorbs flush before metadata can refer to them.
 
-Only after that comparison succeeds does Crab append the ref transaction that makes the new tip visible. The lock can then be released.
+An interrupted upload may leave a complete but unreachable object. That is safe. No ref points to it, a retry can reuse it, and garbage collection can reclaim it after the grace period.
 
-The expected-old check applies to creation and deletion as well as ordinary updates. Creating a ref expects it not to exist. Updating expects the observed object ID. Deleting expects the ref still to name the object the client intended to remove.
-
-Multi-ref pushes preserve a result for each destination. Shared immutable preparation can serve several edits, but Crab must not report a rejected destination as updated. Scripts should inspect the per-ref results rather than treating uploaded bytes as a batch-wide success.
-
-## Locking and compare-and-swap solve different problems
-
-The ref lock reduces duplicate work by keeping same-ref writers from performing contested publication concurrently. Lease expiration means the lock cannot provide permanent correctness on its own.
-
-Compare-and-swap checks the expected old object ID at the visibility boundary. A writer with an expired lease or stale plan cannot overwrite a branch that changed after discovery.
-
-Different refs can progress in parallel because their visibility decisions are independent. They may still reuse the same immutable Git packs or xorbs.
-
-<TakeawayBox title="One publication point">
-  Git packs, xorbs, shards, and closure proofs prepare the update. The ref
-  transaction is the only step that makes the new commit visible to readers.
+<TakeawayBox title="Uploads are preparation">
+  Seeing a Git pack, xorb, or shard in object storage does not mean the push is
+  visible. Readers still follow the old ref.
 </TakeawayBox>
 
-## Recovery follows the last durable boundary
+## Phase 3: prove both closures
 
-The write journal records progress for interrupted operations. A retry can determine which immutable uploads already completed and continue without pretending that the ref moved.
+Stages 11–12 ask two different questions:
 
-A failure after the ref transaction is different: the update is visible and its dependencies were already proven. Cleanup releases the lock and closes local staging, but it does not roll back a complete published state.
+1. **Git closure:** Can the origin reach every commit, tree, and blob required by `B`?
+2. **Pointer closure:** Can every Crab pointer resolve through durable shards to durable xorb bytes?
 
-The retry should begin by reading canonical state, not by trusting the previous process's final log line. An object upload may have completed even if the client lost the response. A ref transaction may have committed even if cleanup or response delivery failed afterward.
+A local cache can make these checks faster, but it cannot supply the proof. The shared origin must contain the dependencies because another machine will not have the writer's cache.
 
-Content identities and transaction records let Crab distinguish those cases. Retrying an immutable object is safe, while repeating a ref edit requires another current expected-old comparison.
+For `models/ranker.bin`, pointer closure means the recipe covers every ordered chunk—including the reused 9.6 GiB and the new 2.4 GiB.
 
-## Failure location determines visible state
+## Phase 4: compare, then publish
 
-| Failure point | Durable side effect | Visible ref result | Retry action |
+Stage 13 reads `main` again and compares it with expected-old `A`.
+
+- If `main` is still `A`, stage 14 can commit `A → B`.
+- If another writer changed it to `C`, Crab rejects this ref update.
+
+The rejected push may have uploaded useful immutable data. It did **not** overwrite `C`. After reconciling the history, a retry can reuse objects that are already durable.
+
+<PushVisibilityLab />
+
+The lock and expected-old check have different jobs:
+
+| Mechanism | Job |
+| --- | --- |
+| Ref lock | Avoid duplicate contested work on the same destination |
+| Expected-old comparison | Prevent a stale writer from replacing newer history |
+
+Locks can expire. The expected-old check at the visibility boundary is what protects the ref decision.
+
+## What happens when a stage fails?
+
+Use the incident selector above to move between an interrupted upload, a failed proof, two competing writers, and post-commit cleanup. The visible state is always a complete ref.
+
+| Failure point | What may remain | What readers see | Next move |
 | --- | --- | --- | --- |
-| Before discovery completes | None required | Old ref remains | Fix local input and restart |
-| During xorb or pack upload | Some immutable objects may exist | Old ref remains | Restore access and reuse completed uploads |
-| During shard publication | Data objects may exist | Old ref remains | Publish missing metadata and prove closure |
-| During expected-old comparison | All dependencies may exist | Stale edit is rejected | Fetch and reconcile history |
-| After ref transaction | Complete update exists | New ref is visible | Finish cleanup; do not roll back dependencies |
+| Discovery | Local staging | `A` | Fix the missing input |
+| Object upload | Complete immutable objects | `A` | Retry and reuse them |
+| Closure proof | Uploaded but incomplete dependency set | `A` | Restore the missing dependency |
+| Expected-old check | All uploaded dependencies | Winning ref, such as `C` | Fetch, reconcile, retry |
+| After ref commit | Complete published state | `B` | Finish cleanup; do not roll back |
 
-The table explains why object inventory can contain data that no branch currently reaches. Immutable upload is preparation, not publication.
+Crab does not delete uploaded objects when a stale ref loses. Another writer may already reuse those objects. Repository garbage collection decides when unreachable data is safe to remove.
 
-## The user-facing failures are specific
+## Source-only, model-only, and mixed pushes
 
-A missing recipe fails during discovery. An object-store error fails during upload. A closure failure blocks publication.
+The transaction shape stays the same even when one lane has little work.
 
-A compare-and-swap conflict rejects the stale ref edit. Each outcome preserves the previous complete branch view.
+| Commit type | Git lane | Crab lane | Publication |
+| --- | --- | --- | --- |
+| Source only | New Git pack data | No new chunks | One ref transaction |
+| Model only | Commit, tree, pointer | Reused and/or new xorbs | One ref transaction |
+| Mixed | Source blobs and pointer | Reused and/or new xorbs | One ref transaction |
 
-## Deletion follows the same visibility discipline
+One history never gets two meanings of “pushed.” Every successful case ends at the same ref boundary.
 
-A branch deletion does not delete Git packs, xorbs, or shards during the push. It appends a ref transaction that removes the current destination after validating expected-old state.
+## Verify from a reader's point of view
 
-Separating ref deletion from object deletion protects other branches, tags, recovery roots, and concurrent work that may share immutable objects. Repository garbage collection later walks every retained root and applies a grace period before classifying data for deletion.
+A successful command exit is useful. A fresh reader is stronger proof.
 
-This separation also makes branch restoration possible while recovery history remains retained. An operator can reason about history policy before an irreversible storage action occurs.
+```bash
+# In a second clone or an isolated cache
+git pull --ff-only origin main
+git rev-parse HEAD
+git show HEAD:models/ranker.bin
+crab hydrate models/ranker.bin
+crab fsck
+```
 
-## Source-only and mixed pushes use the same transaction
+Check four things:
 
-A source-only change has no new Crab chunks, but it still needs Git connectivity and a fresh ref comparison. A managed-file-only change still creates a Git commit and pointer blob. A mixed change needs both dependency closures.
+- The fetched object ID is the pushed commit.
+- Git can read the pointer blob.
+- Hydration reconstructs the expected file.
+- `crab fsck` reports a complete repository.
 
-Keeping one transaction shape prevents a branch from acquiring a second publication mechanism based on file type. The preparation set becomes smaller when one lane has no work, while stage 14 remains the only visibility change.
+For a concurrency test, start two writers from `A`. One may publish. The other must receive a conflict instead of silently replacing the winner.
 
-This is also why a pointer copied from another commit is not automatically unsafe. If its recipe and durable ranges already exist, closure can prove the dependency without uploading new xorb bytes.
+<FlowSteps
+  title="The push contract"
+  steps={[
+    "Plan every Git and Crab dependency behind the proposed commit.",
+    "Upload immutable Git packs, xorbs, and complete shard metadata.",
+    "Prove Git connectivity and pointer closure from canonical storage.",
+    "Compare expected-old state and commit exactly one ref transaction.",
+  ]}
+/>
 
-## Walk one mixed push through the stages
-
-Assume commit `B` changes `src/train.rs` and updates `models/current.bin` from a branch currently at commit `A`. The model shares 80 percent of its chunks with the prior version.
-
-Stages 1 through 4 record `A` as expected-old, acquire the `main` lease, and walk commit `B`. The walk discovers the new pointer.
-
-Stages 5 through 7 prove reused chunks and pack only unproven chunks into xorbs. Git also builds a pack with the commit, tree, source blob, and pointer blob.
-
-Stages 8 through 10 upload the Git pack and new xorbs, then publish recipe and shard terms that combine old and new chunk locations. The new model remains invisible at `main` during this work.
-
-Stages 11 and 12 prove that commit `B` and every pointer behind it are reconstructable from shared storage. Stage 13 confirms `main` still names `A`. Stage 14 commits `A → B` and returns success for the destination.
-
-If stage 13 finds commit `C`, the push rejects `B` even though all model data is durable. The contributor can reconcile `B` with `C` and reuse the completed xorb work in a new plan.
-
-## Publication does not require destructive rollback
-
-Traditional mutable transactions may undo writes when the final decision fails. Crab can leave immutable preparation objects because they do not become history until a ref reaches them.
-
-This reduces recovery risk. Deleting uploaded xorbs during a stale-ref rejection could remove chunks another writer reused between upload and cleanup. Leaving them unreferenced lets repository-wide GC evaluate all roots after the grace period.
-
-The cost is temporary storage. Operators should expect a bounded orphan set after interrupted or rejected pushes and monitor its age. Immediate zero-orphan cleanup would require broader coordination and weaken writer independence.
-
-Journals provide retry evidence during the protection window. Once no retained operation or ref reaches an old preparation object, collection can reclaim it safely.
-
-## Verify the transaction from another client
-
-The writer can inspect local status and logs, but another client supplies stronger evidence. Fetch the destination ref from an empty or isolated cache, then hydrate representative managed paths.
-
-Record the new commit object ID, ref result, pointer count, hydration hashes, and `crab fsck` result. For concurrent-push testing, start two edits from the same old tip and confirm that one stale writer receives a conflict.
-
-This evidence reaches beyond a successful process exit. It proves that the visible ref, Git closure, Crab metadata, and immutable data agree from a reader's perspective.
-
-Test interruption boundaries in a disposable destination. Stop a push during an immutable upload and confirm the old ref remains. Create two writers from the same base and confirm one stale edit is rejected. Retry the interrupted writer and confirm completed objects can be reused.
-
-Do not inject failures into a production ref without an agreed maintenance window. The safety model protects repository correctness, but repeated interrupted uploads can consume temporary storage and create operational noise until garbage collection runs.
-
-Automate a transaction matrix in a dedicated repository:
-
-- **Source only**: no new xorb bytes, complete Git ref update
-- **Managed file only**: new pointer closure and complete hydration
-- **Mixed commit**: both lanes publish through one ref outcome
-- **Interrupted upload**: old ref remains visible
-- **Stale writer**: complete dependencies but rejected ref
-- **Retry**: completed immutable objects are reused
-- **Deletion**: ref disappears while retained data follows GC policy
-
-The matrix tests the invariant across different plan shapes. One successful mixed push does not prove interruption, concurrency, or deletion behavior.
+<TakeawayBox title="Remember the visibility boundary">
+  Stages 1–13 prepare or validate the new state. Stage 14 moves the ref. A
+  reader therefore sees the old complete commit or the new complete commit—not
+  a branch that points at missing data.
+</TakeawayBox>
 
 Next, [see how local caches reduce the reads that prepare and verify these stages](/blog/multi-layer-caching).

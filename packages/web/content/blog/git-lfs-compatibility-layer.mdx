@@ -1,43 +1,42 @@
 ---
 title: "How do you move a Git LFS repository to Crab?"
-description: "Choose between a compatible Crab transfer agent and a coordinated history rewrite from LFS pointers to native Crab pointers."
+description: "Keep existing LFS pointers with Crab's transfer agent, or rewrite selected history into native Crab pointers."
 date: "2026-08-14"
 author: "Crab Team"
 category: "architecture"
 tags: ["git-lfs", "migration", "compatibility", "history-rewrite"]
-excerpt: "Preserve LFS pointers first if you need a low-risk bridge; rewrite history only when the team is ready for new commit identities."
+excerpt: "Use the transfer bridge when commit identity must stay stable. Rewrite history only when native chunk reuse is worth a coordinated cutover."
 level: "intermediate"
 path: "advanced-operations"
 order: 5
 concepts: ["Git LFS", "custom transfer", "migration", ".gitattributes"]
-prerequisites: ["How do you control Crab object-storage cost?", "Should you use Crab or Git LFS?"]
-outcome: "Plan and verify either a compatible LFS transfer path or a native Crab history conversion."
-diagramType: "Migration decision flow"
+prerequisites:
+  [
+    "How do you control Crab object-storage cost?",
+    "Should you use Crab or Git LFS?",
+  ]
+outcome: "Choose, test, and verify either an LFS-compatible bridge or a native Crab conversion."
+diagramType: "Interactive migration lab"
 meta:
   contentType: "How-to"
-  goal: "Separate reversible transfer-agent adoption from coordinated history rewriting."
+  goal: "Show exactly which identities and data structures change on each migration path."
   audience: "Teams with existing Git LFS pointers, automation, and remote objects."
 ---
 
-Crab offers two different paths for an LFS repository. The compatibility path keeps LFS pointer format and commands while using Crab as Git LFS's custom transfer agent. The native path rewrites selected LFS history into Crab pointers backed by chunks, xorbs, and shards.
+Suppose `models/encoder.safetensors` is an 8 GB LFS file used by developers, CI, and old release tags.
 
-<LfsMigrationDiagram />
+Crab gives that repository two paths:
 
-## Separate pointer format, transfer path, and storage layout
+- **Bridge:** keep the LFS pointer and commit IDs; route LFS transfers through Crab.
+- **Convert:** replace selected LFS pointers with native Crab pointers; rewrite affected commits.
 
-Migration discussions can combine three independent choices:
+These are different migrations. Pick the boundary before picking the command.
 
-- **Pointer format**: the blob stored in Git history, either LFS or native Crab
-- **Transfer path**: the client integration that uploads and downloads managed objects
-- **Storage layout**: whole-file LFS objects or native chunk, xorb, and shard data
+<LfsIdentityLab />
 
-The transfer-agent path changes transfer routing while preserving LFS pointers and commit IDs. Native conversion changes the pointer and storage layout, which rewrites every affected commit and descendant.
+## First, prove the source is complete
 
-State the desired end condition before running a command. A team seeking direct bucket ownership may need only the compatibility bridge. A team seeking chunk reuse and native hydration needs conversion and the history coordination that follows.
-
-## Inventory pointers and tracking rules first
-
-Run the migration from a disposable clone with a clean working tree. Record current refs, remotes, `.gitattributes`, and pointer inventory before changing configuration.
+Use a disposable clone. Do not learn that an old object is missing halfway through a rewrite.
 
 ```bash
 git status --short
@@ -46,21 +45,26 @@ git lfs ls-files
 crab lfs migrate info --pointers only --everything
 ```
 
-Verify that every required LFS object is still available from its current remote. A history rewrite cannot recover bytes that no source can provide.
+Check four things:
 
-Save hashes for representative large files before changing transfer or history. The later compatibility and native checks should reconstruct those exact bytes.
+| Evidence                                    | Why it matters                                      |
+| ------------------------------------------- | --------------------------------------------------- |
+| LFS object exists locally or remotely       | A pointer cannot recreate missing bytes             |
+| Branch and tag inventory is complete        | An old tag may be the only user of an object        |
+| `.gitattributes` matches the intended paths | Filters decide which pointer format Git expects     |
+| CI and bootstrap scripts are known          | They may call `git lfs` even when developers do not |
 
-Inventory automation as well as repository data. Continuous integration images, developer bootstrap scripts, hooks, and deployment jobs may call `git lfs` directly even when contributors do not.
+Hash a few representative files now. After migration, a fresh client should produce the same bytes.
 
-Classify LFS objects by availability. Some may exist in the local clone, some only at the current LFS endpoint, and some may be missing from both. Record missing object IDs before choosing a migration scope.
+```bash
+shasum -a 256 models/encoder.safetensors
+```
 
-Inspect all selected refs, including annotated tags and release branches. A current checkout can appear healthy while an older tag points at an LFS object the server no longer retains.
+Signed commits and tags need a separate plan: rewritten Git objects get new IDs, so old signatures no longer describe them.
 
-Record signed commits and tags as well. Rewriting their object IDs invalidates existing signatures and requires an explicit signing and provenance plan.
+## Path 1: keep LFS semantics, change the route
 
-## Use the transfer agent for a compatible bridge
-
-Install Crab as the repository's LFS transfer agent:
+Install Crab as Git LFS’s custom transfer agent:
 
 ```bash
 crab lfs install
@@ -70,27 +74,38 @@ crab lfs checkout
 crab lfs fsck
 ```
 
-This path preserves LFS pointers and familiar LFS operations. It is useful when existing CI, clients, or downstream tools still require LFS semantics.
+`install` configures the transfer agent, LFS filters, and a pre-push gate. Git still commits the standard LFS pointer:
 
-The compatibility layer does not make an LFS pointer a native Crab pointer. Treat it as a stable bridge, not as evidence that chunk-level native storage has already replaced LFS object history.
+```text
+version https://git-lfs.github.com/spec/v1
+oid sha256:91ae…b72c
+size 8589934592
+```
 
-Git continues to store the LFS pointer format and invokes the configured custom transfer agent for object upload and download. Existing pointer object IDs and commit identities remain unchanged.
+That means:
 
-This path narrows cutover risk because clients can adopt the new transfer route without rewriting refs. It also preserves whole-file LFS object semantics, so changed versions do not automatically gain native Crab chunk reuse.
+- existing commits keep their IDs;
+- tools that require LFS pointers can keep using them;
+- rollback is a configuration change, not a ref rewrite;
+- the stored unit is still the whole LFS object.
 
-Keep a rollback record of the prior Git configuration. `crab lfs uninstall` removes Crab's transfer-agent entries, but the team still needs a working LFS endpoint before switching clients back.
+The last point matters. The bridge changes transport and ownership, but it does **not** turn an LFS object into Crab chunks. A slightly changed 8 GB model still has a new whole-file LFS object ID.
 
-Test upload and download separately. Publish one new LFS object through the transfer agent, remove the local LFS object cache in a disposable clone, and fetch it again through the configured path. Existing object download alone does not prove new writes use the intended destination.
+Test both directions. Push one new LFS object, then fetch it from a disposable clone with an empty local LFS cache. Reading old data alone does not prove that new writes use the Crab route.
 
-Confirm how non-Crab clients behave. A contributor without the custom transfer configuration may continue contacting the prior LFS endpoint or fail to materialize files. Decide whether that mixed-client period is supported and how bootstrap tooling enforces the configuration.
+Also test one machine without the Crab configuration. Decide whether that client should keep using the old endpoint or fail with a clear bootstrap instruction. An accidental mixed-client period is not a migration plan.
 
-During the bridge, monitor both systems. Existing historical objects may still come from the old endpoint while newly transferred objects use the Crab path. Keep retention on the old source until inventory proves the supported ref set no longer depends on it.
+To remove Crab’s transfer configuration later:
 
-## Use native conversion when chunk reuse matters
+```bash
+crab lfs uninstall
+```
 
-`crab lfs migrate export --to-crab` resolves selected LFS objects and rewrites their Git blobs as native Crab pointers. This changes commit IDs for rewritten commits and every descendant.
+Keep the previous LFS endpoint available until supported refs no longer depend on it.
 
-Test the exact scope in an isolated clone. Write an object map so old and new commit identities can be audited:
+## Path 2: convert to native Crab pointers
+
+Use native conversion when chunk reuse, native hydration, and Crab’s storage layout justify new Git identities.
 
 ```bash
 crab lfs migrate export \
@@ -100,119 +115,77 @@ crab lfs migrate export \
   --object-map ../lfs-to-crab.csv
 ```
 
-Do not publish rewritten refs until the converted repository passes verification and the team has agreed on a cutover window.
+For every matched LFS blob, Crab resolves the original bytes, creates native content and metadata, replaces the blob with a Crab pointer, updates tracking rules, and rewrites descendants.
 
-The converter must resolve each selected LFS object, create native Crab content and metadata, replace the Git blob, and rewrite descendant commit identities. Tags, branch protections, submodules, release references, and external build records may all name old object IDs.
+```text
+version https://crab.dev/spec/v1
+file-hash 4cb9…731a
+size 8589934592
+```
 
-Use the object map to connect old and new commits during review. Keep it outside the repository being rewritten so a reset or fresh clone cannot remove the evidence.
+The object map records old and new commit IDs. Keep it outside the rewritten clone so it survives a reset or replacement clone.
 
-Choose the rewrite scope explicitly. `--everything` can include branches and tags beyond the default path. Include and exclude patterns can limit file paths, but any rewritten blob still changes its containing commit and descendants.
+<LfsRewriteMap />
 
-Mixed pointer history is possible when conversion selects only some patterns or refs. That state requires both integration paths until the remaining LFS pointers leave the supported history. Prefer one documented boundary over an accidental mixture.
+A path pattern limits which blobs convert. Ref selection limits which history is rewritten. They solve different problems.
 
-Native conversion should preserve file bytes, executable modes, path names, authorship, messages, and parent relationships apart from the necessary new object IDs. The object map and fresh-clone validation supply evidence for those claims.
+If the model first appears in commit B, converting that blob changes B and every selected descendant—even commits that never touch the model again. Branch protections, release records, submodules, and open work may all name the old IDs.
 
-## Rehearse with the production ref shape
+Partial conversion is possible, but it leaves two pointer systems in supported history. Document exactly which paths and refs remain LFS-backed, or choose one clean boundary.
 
-A default-branch trial does not prove an all-history cutover. Rehearse the same branch and tag selection planned for production.
+## Rehearse the failure, not just the command
 
-The rehearsal should cover these phases:
+Use an isolated Crab destination and the same branch/tag scope planned for production.
 
-1. Freeze writes to the disposable source clone and fetch the selected refs.
-2. Confirm all LFS objects are available and hash representative files.
-3. Configure a separate Crab destination prefix for the rehearsal.
-4. Run the conversion and preserve the object map.
-5. Push rewritten refs to an isolated remote namespace.
-6. Clone from an empty client cache and hydrate representative files from several historical refs.
-7. Record duration, uploaded bytes, failed paths, new commit IDs, and integrity results.
+<LfsRehearsalConsole />
 
-Repeat the rehearsal after fixing any missing object or automation dependency. A successful retry from a partially populated destination also tests immutable-upload reuse.
+A useful rehearsal has observable gates:
 
-Use a destination that cannot be mistaken for production. Distinct bucket prefixes, remote names, and branch namespaces reduce the chance that rehearsal refs become contributor inputs.
+1. Fetch the selected refs and resolve every required LFS object.
+2. Run the bridge or conversion against a separate destination prefix.
+3. Push to an isolated remote namespace.
+4. Clone with an empty cache on another machine or runner.
+5. Materialize files from the default branch and an old release tag.
+6. Compare hashes, run the real workload, and record old/new commit IDs.
 
-Time each phase independently: source fetch, LFS object resolution, chunking and upload, Git rewrite, ref push, fresh clone, and hydration. This identifies whether the cutover window is limited by history computation, source bandwidth, or destination publication.
-
-Test the contributor reset procedure against the rehearsal remote. A migration is incomplete when the converted repository works only for the operator who performed the rewrite.
-
-## Verify content and repository closure
-
-After conversion, inspect attributes and pointer state, then push to a test location and hydrate from a fresh clone.
+For a native conversion, verify the repository as well as sample bytes:
 
 ```bash
-git status --short
 git log --all --oneline --decorate
 crab status
 crab fsck
 ```
 
-For representative files, compare cryptographic hashes before migration and after fresh hydration. Verify every branch and tag included in the cutover, not only the default branch.
+Check that every selected ref exists at its mapped ID, parent relationships preserve the intended topology, tracking rules match each historical pointer format, and every remaining LFS pointer still has a supported source.
 
-Inspect `.gitattributes` in rewritten historical commits, not only the current worktree. The path rules must agree with the pointer representation at each migrated state.
+Byte equality proves the migration copied data correctly. A build, training smoke test, or model load proves automation still finds it.
 
-Run source builds or model validation against the fresh clone. Byte equality proves migration integrity, while workload validation proves that automation still finds the expected paths and commands.
+## Cut over only after an independent client passes
 
-Compare more than sample file hashes:
+The bridge can roll out gradually if every supported client has the transfer configuration. A native rewrite needs a write freeze and one coordinated publication event.
 
-- **Ref coverage**: every selected branch and tag exists at its mapped new object ID
-- **Commit topology**: parent relationships preserve the intended history shape
-- **Attributes**: each historical path selects the pointer representation stored in that commit
-- **Large-file closure**: every native pointer resolves through durable Crab metadata
-- **Remaining LFS closure**: every intentionally retained LFS pointer still has a supported transfer source
-- **Signatures**: rewritten signed objects follow the approved replacement policy
+For native cutover:
 
-Save machine-readable inventories before and after conversion. Review count differences instead of relying on a successful default-branch checkout.
+1. Announce the freeze and preserve the final old refs.
+2. Run the rehearsed conversion from the final production state.
+3. Verify hashes, topology, attributes, and object closure.
+4. Publish mapped refs under the agreed protection exception.
+5. Update CI, release records, branch protections, and submodule references.
+6. Have an independent clean client hydrate and run the workload.
+7. Reopen writes only after that client passes.
 
-## Coordinate the history cutover
+Contributors with unpushed work need a backup ref and a deliberate rebase or cherry-pick onto mapped history. Avoid blanket “force pull” instructions: they can destroy unrelated work.
 
-A rewrite requires contributors to stop pushing, preserve or rebase unmerged work, and replace old local refs after the new history is published. Protected branches and CI references may need an explicit update.
+## Retire the old endpoint later
 
-Keep the old remote or backup refs read-only until the verification and rollback window closes. Document the object map and the date after which new work must use the rewritten history.
+A successful migration proves the new path. It does not authorize immediate deletion of the old LFS objects.
 
-The cutover sequence should name one owner for each action:
+Keep the old refs, object inventory, and commit map through the rollback window. Remove old storage only after supported tags, CI, releases, and contributor recovery no longer need it—and run that deletion through its own preview and approval.
 
-1. Announce the write freeze and confirm protected automation has stopped.
-2. Fetch the final production ref state into the migration clone.
-3. Verify LFS object availability and rerun the practiced conversion.
-4. Run content, topology, attribute, and closure checks.
-5. Publish rewritten refs under the agreed protection exception.
-6. Update build references, release metadata, and branch protections.
-7. Ask a clean client to follow the published reset procedure.
-8. Reopen writes only after the independent client passes.
-
-Record the final old and new default-branch object IDs in the announcement. Contributors can then detect whether a local branch still belongs to the old history.
-
-## Define rollback before the write freeze
-
-Compatibility rollback restores the prior LFS endpoint and transfer configuration because commit identities did not change. Native rollback is a ref cutover: restore the preserved old refs and direct clients back to the original object source.
-
-Do not delete the original LFS objects during the migration window. Native Crab verification may pass for sampled files while an untested historical ref still depends on an object you missed.
-
-Set a clear rollback deadline and retention period. After the deadline, archive the object map and migration evidence before applying the separate deletion policy for old LFS storage.
-
-## Publish a contributor reset procedure
-
-History rewrite changes the base of open work. Contributors need commands tailored to whether they have no local work, local commits, or uncommitted changes.
-
-The procedure should name the new canonical refs, the backup location, and the expected object IDs. It should also explain how to preserve local work before replacing old branches.
-
-Avoid a generic instruction to force-pull or delete every local branch. Those commands can destroy unrelated work. Test the reset procedure with representative contributor states during rehearsal.
-
-Provide separate paths for clean clones, local unpushed commits, and dirty worktrees. The clean case can replace the local canonical branch. The local-commit case needs a backup ref and a deliberate rebase or cherry-pick onto mapped history. The dirty case must save or commit work before any ref replacement.
-
-Include verification after reset. Contributors should confirm the new canonical object ID, inspect tracking attributes, hydrate one representative file, and run the repository's integrity check.
-
-## Retire the old LFS path only after the evidence window
-
-Removing old LFS objects is a separate destructive decision. Wait until supported refs, CI, releases, and contributor recovery no longer depend on the old endpoint.
-
-Keep the pre-migration ref snapshot, object inventory, and mapping through the rollback period. If policy requires longer provenance retention, archive those records even after the old object bytes become eligible for deletion.
-
-Apply the old-system deletion policy with its own preview and approval. A successful native migration proves the new repository; it does not authorize immediate removal of every historical LFS copy.
-
-<TakeawayBox title="Choose the smallest migration boundary">
-  Install the transfer agent when compatibility is enough. Rewrite history
-  only when native Crab pointers provide a measured benefit worth coordinating
-  new commit identities.
+<TakeawayBox title="Preserve identity until native storage pays for the rewrite">
+  Use the transfer bridge when LFS compatibility is the requirement. Convert
+  history only when measured chunk reuse or native hydration is worth changing
+  shared Git identities.
 </TakeawayBox>
 
-Use the [`crab lfs`](/docs/cli/reference/crab-lfs) reference for exact subcommand options during a migration rehearsal.
+See the [`crab lfs`](/docs/cli/reference/crab-lfs) reference for exact options before a rehearsal.
