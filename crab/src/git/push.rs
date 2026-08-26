@@ -12695,9 +12695,12 @@ impl PushPipeline {
                     })
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(CrabError::from)?;
-                let kind_by_oid = match self.config.git_dir.as_deref() {
-                    Some(git_dir) => resolve_local_object_kinds(git_dir, object_ids).await,
-                    None => None,
+                let kind_by_oid = match self.discover_git_dir() {
+                    Ok(git_dir) => resolve_local_object_kinds(&git_dir, object_ids).await,
+                    Err(error) => {
+                        warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
+                        None
+                    }
                 };
                 // Protected receive rebuilds and verifies the Git index from
                 // the staged pack; `.idx` is not an accepted wire object.
