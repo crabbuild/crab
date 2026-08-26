@@ -22,7 +22,9 @@ remains an optional immutable cache.
   credentials in this repository, image, policy file, or Git remote URL.
 - Mount `/var/lib/crab-lfs` on durable local storage sized for
   `max_uploads * max_object_bytes` plus headroom. Uploads are deleted when a
-  request finishes or fails.
+  request finishes or fails; startup also removes stale files owned by the
+  gateway (`.crab-lfs-upload-*`) after twice `server.request_timeout`.
+  Keep unrelated files out of the spool directory.
 
 ## Build and run
 

@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::middleware::AddExtension;
 use axum::{Extension, Router};
@@ -24,6 +25,8 @@ use crate::auth::{AuthPolicy, TlsClientIdentity};
 use crate::config::LfsServerConfig;
 use crate::error::{LfsServerError, Result};
 use crate::http::{AppState, build_router};
+
+pub(crate) const UPLOAD_SPOOL_PREFIX: &str = ".crab-lfs-upload-";
 
 /// Controls optional startup work for tests and embedding applications.
 #[derive(Debug, Clone, Copy, Default)]
@@ -46,6 +49,7 @@ pub fn prepare_server(
             config.spool_dir.display()
         ))
     })?;
+    recover_upload_spool(&config.spool_dir, config.request_timeout)?;
     let origin = build_url_object_store(&config.origin_url)
         .map_err(|source| LfsServerError::OriginConfig(source.to_string()))?;
     let policy = config
@@ -69,6 +73,42 @@ pub fn prepare_server(
     Ok(PreparedServer {
         state: Arc::new(state),
     })
+}
+
+fn recover_upload_spool(path: &Path, request_timeout: Duration) -> Result<()> {
+    let stale_after = request_timeout.checked_mul(2).unwrap_or(request_timeout);
+    let cutoff = SystemTime::now()
+        .checked_sub(stale_after)
+        .unwrap_or(UNIX_EPOCH);
+    recover_upload_spool_before(path, cutoff)
+}
+
+fn recover_upload_spool_before(path: &Path, cutoff: SystemTime) -> Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if !file_name
+            .to_str()
+            .is_some_and(|name| name.starts_with(UPLOAD_SPOOL_PREFIX))
+        {
+            continue;
+        }
+        if entry.metadata()?.modified()? > cutoff {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => tracing::info!(
+                path = %entry.path().display(),
+                "removed stale LFS upload spool file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Runs the gateway until the process receives its shutdown signal.
@@ -295,5 +335,43 @@ async fn shutdown_signal() {
         if let Err(source) = tokio::signal::ctrl_c().await {
             tracing::error!(%source, "failed to register ctrl-c handler");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spool_recovery_removes_only_owned_files_before_cutoff() {
+        let directory = tempfile::tempdir().expect("spool directory");
+        let owned = directory.path().join(format!("{UPLOAD_SPOOL_PREFIX}stale"));
+        let unrelated = directory.path().join("unrelated-upload");
+        std::fs::write(&owned, b"stale").expect("owned spool file");
+        std::fs::write(&unrelated, b"keep").expect("unrelated file");
+
+        let cutoff = SystemTime::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("valid cutoff");
+        recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds");
+
+        assert!(!owned.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn spool_recovery_keeps_recent_owned_files() {
+        let directory = tempfile::tempdir().expect("spool directory");
+        let owned = directory
+            .path()
+            .join(format!("{UPLOAD_SPOOL_PREFIX}recent"));
+        std::fs::write(&owned, b"recent").expect("owned spool file");
+
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("valid cutoff");
+        recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds");
+
+        assert!(owned.exists());
     }
 }

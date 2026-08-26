@@ -39,7 +39,10 @@ gateway rejects proxy identity headers unless that trust is configured.
 Production deployments should use HTTPS, a policy file that grants
 read/write/admin actions per repository, and `server.action_secret` (or
 `CRAB_LFS_ACTION_SECRET`) so Batch actions are short-lived and bound to their
-repository, operation, OID, and size.
+repository, operation, OID, and size. The dedicated spool directory is scanned
+at startup and stale `.crab-lfs-upload-*` files older than twice
+`server.request_timeout` are removed; keep unrelated files out of that
+directory.
 
 Signed Batch actions also include Git LFS `expires_in` metadata, matching the
 capability lifetime advertised by the URL.

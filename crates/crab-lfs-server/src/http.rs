@@ -24,6 +24,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::{AuthPolicy, ClientIdentity};
 use crate::config::{ActionSecret, LfsServerConfig};
+use crate::server::UPLOAD_SPOOL_PREFIX;
 
 const LFS_JSON: &str = "application/vnd.git-lfs+json";
 const MAX_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -1198,7 +1199,10 @@ async fn upload(
             );
         }
     };
-    let temporary = match tempfile::NamedTempFile::new_in(&state.config.spool_dir) {
+    let temporary = match tempfile::Builder::new()
+        .prefix(UPLOAD_SPOOL_PREFIX)
+        .tempfile_in(&state.config.spool_dir)
+    {
         Ok(file) => file.into_temp_path(),
         Err(source) => {
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, source.to_string());
