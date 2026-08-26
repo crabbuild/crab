@@ -82,6 +82,35 @@ baseline for this branch, but its push/clone comparison is explicitly invalid
 for performance promotion. Repeatability and the remaining large-team
 rollout gates are still open.
 
+The 2026-08-26 follow-up is committed as `c57ee1f4`:
+
+- `GitObjectLocatorWriter` keeps exact OID point reads for sparse batches but
+  switches to one validated object-family scan once accumulated candidates
+  cover at least 1/64 of the current ordinal universe. New rows remain in the
+  same in-memory map, so the scan is amortized across the writer lifetime.
+- Suffix consolidation asks Git to reuse existing objects and deltas, and the
+  catalog writer keeps the dense ordinal universe across pure repacks. A full
+  ordinal rebuild is still required only after object rows are actually lost.
+- Ref-journal compaction can stage an immutable, target-digest-bound ordinal
+  visibility handoff. The owner resolves only changed tips/evidence after the
+  target catalog checkpoint, validates sequential edits for the same ref, and
+  publishes the V5 proof; the current manifest roots the pending object for
+  repository-scoped GC.
+- Owner publication verifies pack indexes and locator rows without downloading
+  every stable pack body solely to populate optional kind metadata. Filtered
+  reads retain the canonical bounded traversal path when kinds are absent.
+- `repair_required` no longer treats incomplete bucket-wide discovery as
+  repository-local repair failure. The bucket-wide state remains visible in
+  diagnostics and destructive bucket GC remains disabled until its separate
+  completeness gate is proven.
+
+Focused source proof for this follow-up passes formatting, `cargo check -p
+crab`, 30 catalog-visibility tests, 39 locator tests with one intentional
+stress test ignored, five repack tests, and 23 upload-pack tests. The fresh
+release-binary Kubernetes/RustFS run, 10,000-push differential, and team-scale
+fault/provider/concurrency evidence are intentionally not claimed by this
+commit.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is
@@ -198,20 +227,22 @@ Still required before the roadmap is DONE:
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.
-- the current owner report's `repair_required` state must be explained and
-  cleared: the current generation receipt is valid, but bucket-registry
-  discovery remains incomplete and destructive bucket GC remains disabled.
-  This diagnostic cannot be treated as harmless while claiming production
-  readiness.
+- the owner report's remaining `repair_required` state must be explained and
+  cleared for repository-local acceleration: generation receipts, repository
+  registry coverage, and derived-index coverage still need valid evidence.
+  Bucket-wide registry discovery is now a separate diagnostic state and does
+  not by itself require repo-scoped repair; destructive bucket GC remains
+  disabled until its independent completeness gate is proven.
 - the post-`cbe848f4` Kubernetes qualification proves that normal protocol-v2
   and legacy helper admission emits no `catalog_materialization` event. The
-  intentional O(N) owner repair/rebuild path and migration/compaction paths
-  still materialize the complete catalog; their latency and memory budgets
-  remain open;
+  owner publication path now avoids a full stable-pack body scan when only
+  locator rows are needed, but intentional O(N) owner repair/rebuild, missing
+  kind fallback, migration/compaction, graph, and repack paths still have
+  latency and memory budgets open;
 - the post-lazy depth-1/10 planner measured 11,659/15,553 ms before the
-  large-batch scan change. Re-run those depths and require locator lookup-mode
-  telemetry to prove the new full-scan policy removes the point-read wave
-  without increasing full-clone or incremental-fetch latency;
+  large-batch scan change. Re-run those depths with `c57ee1f4` and require
+  locator lookup-mode telemetry to prove the bounded scan removes the
+  point-read wave without increasing full-clone or incremental-fetch latency;
 - catalog-filter planning currently resolves selected ordinals to OIDs and then
   performs kind lookups. A large blobless closure can therefore still approach
   a full locator scan even though helper startup is lazy. A fused ordinal-kind
@@ -1063,12 +1094,12 @@ environment dumps, or credentials.
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
-| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4` | Normal seed/full/warm/blobless/shallow helper logs contain no `catalog_materialization`; owner maintenance intentionally does. Dense ordinal resolution has bounded read-ahead, and the large-batch locator scan follow-up is now source-verified but needs a fresh release run |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Final inventory is 2 active packs with 1,263,705,690 bytes; cold/warm full clones are 199,311/72,101 ms, blobless is 110,384 ms, and depth-1/10/100/1,000 are 45,570/58,702/174,452/191,898 ms. Physical history has 1,004 immutable pack objects, while the active inventory remains 2; response-pack egress, fanout, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Artifact shape is bounded, but maintenance latency and memory remain large-team bottlenecks |
-| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `cbe848f4` | Incremental fetch at pushes 1/10/100/1,000 used 51/60/74/662 ms of visibility planning and 2/6/33/226 requests; shallow planner times were 11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 before the new large-batch scan policy. The comparison verifier marked push/clone invalid for host contention; 10,000-pair differential, response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | All acceleration checkpoints have valid current locator/visibility/graph artifacts, but `repair_required=true` remains because bucket-registry discovery is incomplete and destructive bucket GC stays disabled. Interruption, 10,000-push, and GC matrix remain pending |
-| 6 | PARTIAL | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Current single-client correctness and warm-cache checks pass; shallow planner optimization, large-team concurrency, fault, cache-server, provider, owner-failover, and canary gates remain pending |
+| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4` | Normal seed/full/warm/blobless/shallow helper logs contain no `catalog_materialization`; owner maintenance intentionally does. Dense ordinal resolution has bounded read-ahead, and the large-batch locator scan is source-verified but needs a fresh release run |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Final inventory is 2 active packs with 1,263,705,690 bytes; cold/warm full clones are 199,311/72,101 ms, blobless is 110,384 ms, and depth-1/10/100/1,000 are 45,570/58,702/174,452/191,898 ms. Physical history has 1,004 immutable pack objects, while the active inventory remains 2; suffix reuse is covered by focused repack tests, but response-pack egress, fanout, and provider SLOs remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Owner publication now skips stable pack-body downloads for optional kinds, but maintenance latency, memory, and full rebuild paths remain large-team bottlenecks |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `cbe848f4`; `c57ee1f4` | Incremental fetch at pushes 1/10/100/1,000 used 51/60/74/662 ms of visibility planning and 2/6/33/226 requests; shallow planner times were 11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 before the large-batch scan policy. The ordinal handoff covers sequential same-ref edits in focused tests; 10,000-pair differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Current-manifest GC roots now retain a pending catalog handoff, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Interruption, receipt/registry completeness, 10,000-push, and GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Current single-client correctness and warm-cache checks pass; fresh post-follow-up K8s evidence, shallow planner optimization, large-team concurrency, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
