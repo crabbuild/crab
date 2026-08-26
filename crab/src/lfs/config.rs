@@ -70,6 +70,17 @@ impl LfsConfig {
         }
     }
 
+    /// Resolve the configured local LFS storage directory for a repository.
+    ///
+    /// Git's LFS storage is shared by linked worktrees, so relative storage
+    /// paths are resolved against the common Git directory rather than the
+    /// current worktree's private Git directory.
+    pub(crate) fn resolve_storage_dir(repo_root: &Path) -> Result<PathBuf> {
+        let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
+        let config = Self::resolve(&worktree.current_worktree_root)?;
+        Ok(config.storage_dir(&worktree.common_git_dir))
+    }
+
     /// Resolve LFS configuration from all sources.
     ///
     /// Precedence (highest to lowest):
@@ -523,6 +534,27 @@ mod tests {
         assert_eq!(
             config.storage_dir(Path::new("/repo/.git")),
             PathBuf::from("/repo/.git/relative-lfs-cache")
+        );
+    }
+
+    #[test]
+    fn resolve_storage_dir_uses_repository_lfs_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let gitconfig = dir.path().join(".git/config");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(gitconfig)
+            .unwrap();
+        writeln!(file, "[lfs]").unwrap();
+        writeln!(file, "    storage = custom-lfs-cache").unwrap();
+
+        assert_eq!(
+            LfsConfig::resolve_storage_dir(dir.path()).unwrap(),
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join(".git/custom-lfs-cache")
         );
     }
 

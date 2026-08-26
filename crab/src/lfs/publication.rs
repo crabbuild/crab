@@ -61,7 +61,7 @@ pub(crate) async fn publish_reachable(
 
     let config = LfsConfig::resolve(&lfs_config_root(&git_dir))?;
     let remote = Arc::new(LfsObjectStore::new(store, &prefix));
-    let local_lfs_dir = git_dir.join("lfs");
+    let local_lfs_dir = config.storage_dir(&git_dir);
     let pointers = Arc::new(pointers);
     let requests = pointers.values().map(transfer_request).collect::<Vec<_>>();
 
@@ -287,13 +287,8 @@ mod tests {
     async fn publication_uploads_and_verifies_reachable_lfs_objects() {
         let (repo, pointer, content, head) = fixture();
         let git_dir = repo.path().join(".git");
-        crate::lfs::cache::install_bytes(
-            &git_dir.join("lfs"),
-            &pointer.oid,
-            pointer.size,
-            &content,
-        )
-        .unwrap();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
         let store = crab_storage::Store::new(Arc::new(InMemory::new()));
 
         publish_reachable(

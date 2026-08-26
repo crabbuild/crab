@@ -244,12 +244,28 @@ fn local_lfs_dir(repo_root: &Path, remote: Option<&LfsRemoteContext>) -> Result<
         });
     }
 
-    let git_dir = crate::git::discover::discover_git_dir_from(repo_root)?;
-    Ok(if git_dir.is_absolute() {
-        git_dir.join("lfs")
-    } else {
-        repo_root.join(git_dir).join("lfs")
-    })
+    let config = crate::lfs::config::LfsConfig::resolve(repo_root)?;
+    match crate::git::worktree::WorktreeContext::resolve_from_path(repo_root) {
+        Ok(worktree) => Ok(config.storage_dir(&worktree.common_git_dir)),
+        Err(error) => {
+            // Keep merge-driver callers that provide a lightweight Git
+            // directory working, while still honoring their parsed LFS
+            // configuration. Complete worktrees use the shared path above.
+            tracing::debug!(
+                root = %repo_root.display(),
+                error = %error,
+                "Git worktree metadata unavailable; using discovered Git directory for LFS cache"
+            );
+            let git_dir = crate::git::discover::discover_git_dir_from(repo_root)?;
+            let git_dir = if git_dir.is_absolute() {
+                git_dir
+            } else {
+                repo_root.join(git_dir)
+            };
+            let common_git_dir = crate::git::discover::resolve_common_dir(&git_dir);
+            Ok(config.storage_dir(&common_git_dir))
+        }
+    }
 }
 
 fn merge_program_replacements(

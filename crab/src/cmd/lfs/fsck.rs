@@ -439,11 +439,12 @@ fn cat_file_blob(blob_hash: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Discover the `.git/lfs/objects` directory from the current repo.
+/// Discover the configured local LFS objects directory from the current repo.
 fn discover_lfs_objects_dir() -> Result<PathBuf> {
-    Ok(crate::git::discover::discover_common_git_dir()?
-        .join("lfs")
-        .join("objects"))
+    Ok(crate::lfs::config::LfsConfig::resolve_storage_dir(
+        &std::env::current_dir().map_err(CrabError::Io)?,
+    )?
+    .join("objects"))
 }
 
 fn lfs_object_path(lfs_objects_dir: &Path, oid_hex: &str) -> PathBuf {

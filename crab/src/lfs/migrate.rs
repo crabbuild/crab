@@ -2726,14 +2726,16 @@ fn collect_pointer_info(
 // ---------------------------------------------------------------------------
 
 fn cache_lfs_object(oid: &[u8; 32], size: u64, content: &[u8]) -> Result<()> {
-    let git_dir = crate::git::discover::discover_common_git_dir()?;
-    crate::lfs::cache::install_bytes(&git_dir.join("lfs"), oid, size, content)?;
+    let repo_root = std::env::current_dir().map_err(CrabError::Io)?;
+    let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)?;
+    crate::lfs::cache::install_bytes(&lfs_dir, oid, size, content)?;
     Ok(())
 }
 
 fn try_local_lfs_cache(pointer: &LfsPointer) -> Result<Option<Vec<u8>>> {
-    let git_dir = crate::git::discover::discover_common_git_dir()?;
-    match crate::lfs::cache::read_pointer(&git_dir.join("lfs"), pointer) {
+    let repo_root = std::env::current_dir().map_err(CrabError::Io)?;
+    let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)?;
+    match crate::lfs::cache::read_pointer(&lfs_dir, pointer) {
         Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
         result => result,
     }

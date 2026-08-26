@@ -785,6 +785,12 @@ async fn do_download<W: Write + Send>(
 /// Returns the `.git/lfs/tmp/` directory path for completed transfer files.
 ///
 fn lfs_tmp_dir() -> PathBuf {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(lfs_dir) = crate::lfs::config::LfsConfig::resolve_storage_dir(&cwd)
+    {
+        return lfs_dir.join("tmp");
+    }
+
     let git_dir = crate::git::discover::discover_common_git_dir().unwrap_or_else(|_| {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))

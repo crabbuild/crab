@@ -109,8 +109,8 @@ fn checkout_stage(options: &LfsCheckoutOptions) -> Result<Option<ConflictStage>>
 
 /// Resolve LFS content for a given pointer from the local cache.
 fn resolve_lfs_content(repo_root: &Path, pointer: &LfsPointer) -> Result<Option<Vec<u8>>> {
-    let git_dir = crate::git::discover::discover_common_git_dir_from(repo_root)?;
-    crate::lfs::cache::read_pointer(&git_dir.join("lfs"), pointer)
+    let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(repo_root)?;
+    crate::lfs::cache::read_pointer(&lfs_dir, pointer)
 }
 
 fn require_lfs_content(repo_root: &Path, pointer: &LfsPointer) -> Result<Vec<u8>> {

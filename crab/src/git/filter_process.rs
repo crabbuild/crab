@@ -43,6 +43,11 @@ struct FilterWorktreePaths {
     shared_staging_root: PathBuf,
 }
 
+enum SmudgeOutput {
+    Bytes(Bytes),
+    File(PathBuf),
+}
+
 /// How long the filter process will wait for the next command before
 /// assuming git has exited without closing stdin (SIGKILL, crash, IDE
 /// integration dropping the pipe) and shutting down cleanly.
@@ -1129,19 +1134,29 @@ fn dispatch_command<R: Read, W: Write>(
                 return Ok(());
             }
 
-            let result_bytes = smudge_content(
+            let result = match try_stream_lfs_smudge(
                 &content,
                 &cmd.pathname,
-                lazy,
                 lfs_store,
                 session,
-                hydrator,
+                lazy,
                 handle,
-            )?;
+            )? {
+                Some(output) => output,
+                None => SmudgeOutput::Bytes(smudge_content(
+                    &content,
+                    &cmd.pathname,
+                    lazy,
+                    lfs_store,
+                    session,
+                    hydrator,
+                    handle,
+                )?),
+            };
 
             write_status(output, "success")?;
             write_flush(output)?;
-            write_content(output, &result_bytes)?;
+            write_smudge_output(output, &result)?;
             write_flush(output)?;
             write_flush(output)?;
             output.flush().map_err(CrabError::Io)?;
@@ -1185,6 +1200,82 @@ fn write_delayed_response<W: Write>(output: &mut W) -> Result<()> {
     Ok(())
 }
 
+/// Stream a common LFS smudge case directly from the verified cache file.
+///
+/// The packet-line response can be written incrementally, so ordinary
+/// extension-free LFS objects do not need to be retained as a second full
+/// payload in the filter process. Extension-bearing objects fall back to the
+/// existing byte-oriented pipeline because extensions transform the content.
+fn try_stream_lfs_smudge(
+    content: &[u8],
+    pathname: &str,
+    lfs_store: Option<&Arc<LfsObjectStore>>,
+    session: &super::clean::CleanSession,
+    lazy: bool,
+    handle: Option<&tokio::runtime::Handle>,
+) -> Result<Option<SmudgeOutput>> {
+    if lazy || !session.should_lfs_smudge(pathname) {
+        return Ok(None);
+    }
+    if matches!(
+        session.resolve_filter_for(pathname),
+        Some(crate::git::filter_attr_cache::FilterKind::Crab)
+    ) {
+        return Ok(None);
+    }
+
+    let PointerKind::Lfs(pointer) = classify(content) else {
+        return Ok(None);
+    };
+    if !pointer.extensions.is_empty() {
+        return Ok(None);
+    }
+
+    let lfs_dir = match session_lfs_storage_dir(session) {
+        Ok(Some(path)) => path,
+        Ok(None) | Err(_) => return Ok(None),
+    };
+    let local_path = crate::lfs::cache::object_path(&lfs_dir, &pointer.oid);
+    if crate::lfs::cache::is_valid(&lfs_dir, &pointer.oid, pointer.size)? {
+        return Ok(Some(SmudgeOutput::File(local_path)));
+    }
+
+    let Some(store) = lfs_store else {
+        return if session.should_skip_lfs_download_errors() {
+            Ok(Some(SmudgeOutput::Bytes(Bytes::copy_from_slice(content))))
+        } else {
+            Ok(None)
+        };
+    };
+
+    let temp = crate::lfs::cache::new_temp_path(&lfs_dir)?;
+    let temp_path = temp.to_path_buf();
+    let Some(handle) = handle else {
+        return Ok(None);
+    };
+    let result = handle.block_on(store.download_to_file(&pointer.oid, pointer.size, &temp_path));
+    match result {
+        Ok(()) => {
+            let installed = crate::lfs::cache::install_verified_temp_path(
+                &lfs_dir,
+                &pointer.oid,
+                pointer.size,
+                temp,
+            )?;
+            Ok(Some(SmudgeOutput::File(installed)))
+        }
+        Err(error) if session.should_skip_lfs_download_errors() => {
+            tracing::warn!(
+                oid = %crab_git::lfs_pointer::hex_encode(&pointer.oid),
+                error = %error,
+                "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+            );
+            Ok(Some(SmudgeOutput::Bytes(Bytes::copy_from_slice(content))))
+        }
+        Err(error) => Err(CrabError::from(error)),
+    }
+}
+
 /// Classify incoming smudge content and return the appropriate output bytes.
 ///
 /// Dispatches based on pointer type:
@@ -1226,7 +1317,7 @@ fn smudge_content(
             // Try LFS smudge regardless of blob content type.
             if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
                 let oid_hex = crab_git::lfs_pointer::hex_encode(&ptr.oid);
-                if let Some(local) = try_local_lfs_cache(&ptr, session.repo_root())? {
+                if let Some(local) = try_local_lfs_cache(&ptr, session)? {
                     tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
                     return Ok(Bytes::from(content));
@@ -1246,7 +1337,7 @@ fn smudge_content(
                         }
                         Err(error) => return Err(CrabError::from(error)),
                     };
-                    cache_lfs_locally(&ptr, &bytes, session.repo_root())?;
+                    cache_lfs_locally(&ptr, &bytes, session)?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
                     return Ok(Bytes::from(content));
@@ -1332,7 +1423,7 @@ fn smudge_by_blob_classification(
             let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
 
             // Non-lazy: try local .git/lfs/objects/ cache first, then remote.
-            if let Some(local) = try_local_lfs_cache(&pointer, session.repo_root())? {
+            if let Some(local) = try_local_lfs_cache(&pointer, session)? {
                 tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
                 let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
                 return Ok(Bytes::from(content));
@@ -1359,7 +1450,7 @@ fn smudge_by_blob_classification(
                     Err(error) => return Err(CrabError::from(error)),
                 };
                 // Cache locally for future checkouts.
-                cache_lfs_locally(&pointer, &bytes, session.repo_root())?;
+                cache_lfs_locally(&pointer, &bytes, session)?;
                 let content =
                     crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
                 return Ok(Bytes::from(content));
@@ -1672,67 +1763,87 @@ fn write_content<W: Write>(output: &mut W, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn write_smudge_output<W: Write>(output: &mut W, content: &SmudgeOutput) -> Result<()> {
+    match content {
+        SmudgeOutput::Bytes(data) => write_content(output, data),
+        SmudgeOutput::File(path) => write_content_file(output, path),
+    }
+}
+
+fn write_content_file<W: Write>(output: &mut W, path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path).map_err(CrabError::Io)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(CrabError::Io)?;
+        if read == 0 {
+            return Ok(());
+        }
+        write_content(output, &buffer[..read])?;
+    }
+}
+
 /// Write a flush packet (0000).
 fn write_flush<W: Write>(output: &mut W) -> Result<()> {
     output.write_all(b"0000").map_err(CrabError::Io)?;
     Ok(())
 }
 
-/// Try to read an LFS object from the local `.git/lfs/objects/` cache.
+fn session_lfs_storage_dir(session: &super::clean::CleanSession) -> Result<Option<PathBuf>> {
+    if let Some(path) = session.lfs_storage_dir() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    let Some(root) = session.repo_root() else {
+        return Ok(None);
+    };
+    let worktree = match WorktreeContext::resolve_from_path(root) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                error = %error,
+                "local LFS cache unavailable outside a Git worktree"
+            );
+            return Ok(None);
+        }
+    };
+    let config = match crate::lfs::config::LfsConfig::resolve(&worktree.current_worktree_root) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                error = %error,
+                "invalid LFS config; using the default local cache path"
+            );
+            crate::lfs::config::LfsConfig::default()
+        }
+    };
+    Ok(Some(config.storage_dir(&worktree.common_git_dir)))
+}
+
+/// Try to read an LFS object from the configured local cache.
 fn try_local_lfs_cache(
     pointer: &crab_git::lfs_pointer::LfsPointer,
-    repo_root: Option<&Path>,
+    session: &super::clean::CleanSession,
 ) -> Result<Option<Vec<u8>>> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
+    let Some(lfs_dir) = session_lfs_storage_dir(session)? else {
+        return Ok(None);
     };
-    match crate::lfs::cache::read_pointer(&ctx.common_git_dir.join("lfs"), pointer) {
+    match crate::lfs::cache::read_pointer(&lfs_dir, pointer) {
         Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
         result => result,
     }
 }
 
-/// Cache an LFS object in the local `.git/lfs/objects/` directory.
+/// Cache an LFS object in the configured local LFS directory.
 fn cache_lfs_locally(
     pointer: &crab_git::lfs_pointer::LfsPointer,
     content: &[u8],
-    repo_root: Option<&Path>,
+    session: &super::clean::CleanSession,
 ) -> Result<()> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
+    let Some(lfs_dir) = session_lfs_storage_dir(session)? else {
+        return Ok(());
     };
-    crate::lfs::cache::install_bytes(
-        &ctx.common_git_dir.join("lfs"),
-        &pointer.oid,
-        pointer.size,
-        content,
-    )?;
+    crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, content)?;
     Ok(())
 }
 
@@ -2083,6 +2194,82 @@ mod tests {
         let output = smudge_content(b"", "empty.bin", false, None, &session, None, None).unwrap();
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn lfs_smudge_streams_from_configured_cache_path() {
+        use crab_git::lfs_pointer::LfsPointer;
+        use sha2::{Digest, Sha256};
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "lfs.storage", "custom-lfs-cache"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let content = b"local LFS cache content";
+        let oid: [u8; 32] = Sha256::digest(content).into();
+        let pointer = LfsPointer {
+            oid,
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let lfs_dir = repo.path().join(".git/custom-lfs-cache");
+        crate::lfs::cache::install_bytes(&lfs_dir, &oid, pointer.size, content).unwrap();
+        let lfs_dir = lfs_dir.canonicalize().unwrap();
+
+        let _env = GitEnvGuard::set(
+            &repo.path().join(".git"),
+            repo.path(),
+            &repo.path().join(".git"),
+        );
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let result = try_stream_lfs_smudge(
+            &pointer.serialize(),
+            "model.bin",
+            None,
+            &session,
+            false,
+            None,
+        )
+        .unwrap()
+        .expect("valid local LFS object should use the file-backed path");
+
+        let path = match &result {
+            SmudgeOutput::File(path) => path,
+            SmudgeOutput::Bytes(_) => {
+                panic!("local LFS object should not be materialized in memory")
+            }
+        };
+        assert_eq!(path, &crate::lfs::cache::object_path(&lfs_dir, &oid));
+
+        let mut output = Vec::new();
+        write_smudge_output(&mut output, &result).unwrap();
+        assert!(
+            output
+                .windows(content.len())
+                .any(|window| window == content),
+            "file-backed smudge output should contain the cached content"
+        );
     }
 
     /// Build a packet-line text frame: 4-hex-length + data + \n.

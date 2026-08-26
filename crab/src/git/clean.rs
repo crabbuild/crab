@@ -883,6 +883,8 @@ pub struct CleanSession {
     lfs_fetch_filter: Option<crate::lfs::fetch_filter::FetchPathFilter>,
     /// Preserve Git LFS's explicit skip-download-errors behavior for smudge.
     lfs_skip_download_errors: bool,
+    /// Resolved local LFS storage for this filter-process session.
+    lfs_storage_dir: Option<PathBuf>,
     /// Repository root directory, used to locate `.gitattributes`.
     /// `None` when the repo root could not be determined.
     repo_root: Option<PathBuf>,
@@ -964,6 +966,7 @@ impl CleanSession {
             lfs_store: None,
             lfs_fetch_filter: None,
             lfs_skip_download_errors: false,
+            lfs_storage_dir: None,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1008,6 +1011,7 @@ impl CleanSession {
             lfs_store: None,
             lfs_fetch_filter: None,
             lfs_skip_download_errors: false,
+            lfs_storage_dir: None,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1216,6 +1220,19 @@ impl CleanSession {
         self.lfs_skip_download_errors = lfs_config
             .as_ref()
             .is_ok_and(|config| config.skip_download_errors);
+        self.lfs_storage_dir = crate::git::worktree::WorktreeContext::resolve_from_path(&root)
+            .ok()
+            .map(|worktree| match lfs_config.as_ref() {
+                Ok(config) => config.storage_dir(&worktree.common_git_dir),
+                Err(error) => {
+                    tracing::debug!(
+                        root = %root.display(),
+                        error = %error,
+                        "invalid LFS config; using the default local cache path"
+                    );
+                    crate::lfs::config::LfsConfig::default().storage_dir(&worktree.common_git_dir)
+                }
+            });
         self.lfs_fetch_filter = match lfs_config
             .and_then(|config| crate::lfs::fetch_filter::FetchPathFilter::from_config(&config))
         {
@@ -1281,6 +1298,12 @@ impl CleanSession {
     #[must_use]
     pub fn repo_root(&self) -> Option<&Path> {
         self.repo_root.as_deref()
+    }
+
+    /// Return the resolved local LFS storage directory for this session.
+    #[must_use]
+    pub fn lfs_storage_dir(&self) -> Option<&Path> {
+        self.lfs_storage_dir.as_deref()
     }
 
     /// Check whether an LFS-tracked path should be smudged under LFS fetch filters.
@@ -1611,7 +1634,11 @@ impl CleanSession {
                 origin: "repository root is unavailable".to_owned(),
             })?;
         let ctx = crate::git::worktree::WorktreeContext::resolve_from_path(root)?;
-        Ok(ctx.common_git_dir.join("lfs"))
+        if let Some(path) = self.lfs_storage_dir() {
+            return Ok(path.to_path_buf());
+        }
+        let config = crate::lfs::config::LfsConfig::resolve(&ctx.current_worktree_root)?;
+        Ok(config.storage_dir(&ctx.common_git_dir))
     }
 
     /// Crab clean path: Blake3 hash + CDC chunk in a single pass, stage, return pointer.

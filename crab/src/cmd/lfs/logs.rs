@@ -17,8 +17,8 @@ pub struct LfsLogsOptions {
 
 /// Run `crab lfs logs`.
 pub fn run_lfs_logs(options: LfsLogsOptions) -> Result<()> {
-    let git_dir = discover_git_dir()?;
-    let log_dir = git_dir.join("lfs").join("logs");
+    let repo_root = std::env::current_dir().map_err(CrabError::Io)?;
+    let log_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)?.join("logs");
 
     if options.transfer_history {
         return run_transfer_history(&log_dir, options.last, options.clear);
@@ -182,11 +182,14 @@ fn write_sample_error_log(log_dir: &Path) -> Result<()> {
 
 /// Append a transfer event to the log file.
 pub fn log_transfer_event(operation: &str, count: u64, elapsed_secs: f64) {
-    let Ok(git_dir) = discover_git_dir() else {
+    let Ok(repo_root) = std::env::current_dir() else {
         return;
     };
-
-    let log_dir = git_dir.join("lfs").join("logs");
+    let Ok(log_dir) = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)
+        .map(|path| path.join("logs"))
+    else {
+        return;
+    };
     let _ = std::fs::create_dir_all(&log_dir);
 
     let log_path = log_dir.join("transfers.log");
@@ -204,10 +207,6 @@ pub fn log_transfer_event(operation: &str, count: u64, elapsed_secs: f64) {
     {
         let _ = f.write_all(entry.as_bytes());
     }
-}
-
-fn discover_git_dir() -> Result<std::path::PathBuf> {
-    crate::git::discover::discover_common_git_dir()
 }
 
 #[cfg(test)]

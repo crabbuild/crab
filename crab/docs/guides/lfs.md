@@ -23,6 +23,12 @@ clean/smudge, custom transfer-agent,
 push, fetch, pull, checkout, pointer inspection, status, local fsck, local
 pruning, direct LFS/Crab conversion, and safe local deduplication.
 
+Crab honors the standard `lfs.storage` local cache control consistently across
+filters and LFS commands. Relative paths are resolved from the repository's
+common Git directory, so linked worktrees share the same cache. Crab also
+accepts the legacy `lfs.lfsdir` and `GIT_LFS_DIR` aliases; use `lfs.storage`
+when sharing a cache with an unmodified Git LFS client.
+
 ## Subcommands Overview
 
 | Command | Description |

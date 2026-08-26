@@ -133,6 +133,7 @@ impl BatchResolver {
         exclude: Option<&PatternFilter>,
     ) -> Result<Vec<LfsPointer>> {
         let mut missing = Vec::new();
+        let mut seen_sizes = HashMap::new();
         for (path, pointer) in entries {
             if let Some(inc) = include
                 && !inc.matches(path)
@@ -144,6 +145,15 @@ impl BatchResolver {
             {
                 continue;
             }
+            if let Some(existing_size) = seen_sizes.get(&pointer.oid) {
+                if *existing_size != pointer.size {
+                    return Err(CrabError::LfsObjectCorrupt {
+                        oid: hex_encode(&pointer.oid),
+                    });
+                }
+                continue;
+            }
+            seen_sizes.insert(pointer.oid, pointer.size);
             if !self.local_object_exists(pointer)? {
                 missing.push(pointer.clone());
             }

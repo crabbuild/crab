@@ -86,6 +86,13 @@ Remote:  {prefix}/lfs/objects/{oid[:2]}/{oid[2:4]}/{oid}
 Local:   .git/lfs/objects/{oid[:2]}/{oid[2:4]}/{oid}
 ```
 
+The local path is the Git LFS default. The standard `lfs.storage` override is
+resolved against the repository's common Git directory and is honored by
+filters, transfer commands, fsck, prune, logs, and status reporting. Crab also
+accepts its legacy `lfs.lfsdir` and `GIT_LFS_DIR` aliases; use `lfs.storage`
+when the same cache must be shared with an unmodified Git LFS client. A
+tracked `.lfsconfig` cannot redirect local storage.
+
 Two-level hex fan-out prevents flat-directory performance issues.
 
 ### Integrity
