@@ -13,6 +13,14 @@ concepts: ["concurrency", "lease locks", "compare-and-swap", "journals"]
 prerequisites: ["What happens during a Crab push?"]
 outcome: "Distinguish lock contention, stale-ref rejection, and the transaction that makes a complete push visible."
 diagramType: "Interactive concurrent push signal box"
+knowledgeCheck:
+  question: "What finally prevents a stale writer from replacing a newer branch tip?"
+  options:
+    - "Uploading its xorbs first"
+    - "Waiting for the lease to expire"
+    - "The expected-old comparison in the ref transaction"
+  answer: 2
+  explanation: "The lease reduces overlap. The expected-old check is the correctness boundary that rejects a plan based on stale history."
 meta:
   contentType: "Conceptual"
   goal: "Explain consistency through one same-ref race instead of a catalog of coordination mechanisms."
@@ -191,4 +199,4 @@ A stale push rejection can coexist with a healthy lock system. The concerning ou
   complete state visible.
 </TakeawayBox>
 
-Next, [choose how much repository content should become local](/blog/lazy-checkout-fuse).
+Next, [choose how much repository content should become local](/library/lazy-checkout-fuse).

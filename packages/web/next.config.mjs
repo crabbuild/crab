@@ -1,5 +1,29 @@
 import { createMDX } from 'fumadocs-mdx/next';
 
+const libraryGuideSlugs = [
+  'cost-optimization-s3-storage',
+  'crab-interpreted-one-history-two-data-paths',
+  'crab-vs-git-lfs',
+  'distributed-locking-consistency',
+  'first-crab-push',
+  'garbage-collection-serverless',
+  'getting-started-crab',
+  'git-lfs-compatibility-layer',
+  'git-remote-helpers-filter-processes',
+  'lazy-checkout-fuse',
+  'multi-layer-caching',
+  'push-pipeline-14-steps',
+  'shard-reconstruction-hydration',
+  'why-we-built-crab',
+  'xet-protocol-deduplication',
+];
+
+const libraryGuideRedirects = libraryGuideSlugs.map((slug) => ({
+  source: `/blog/${slug}`,
+  destination: `/library/${slug}`,
+  permanent: true,
+}));
+
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
@@ -17,6 +41,7 @@ const config = {
   },
   async redirects() {
     return [
+      ...libraryGuideRedirects,
       // Public company and policy pages
       { source: '/about', destination: '/about-us', permanent: true },
       { source: '/privacy-policy', destination: '/privacy', permanent: true },

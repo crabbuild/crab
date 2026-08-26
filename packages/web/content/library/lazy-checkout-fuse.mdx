@@ -13,6 +13,14 @@ concepts: ["lazy checkout", "mount", "hydration", "range reads"]
 prerequisites: ["How does Crab rebuild a file from chunks?"]
 outcome: "Select and operate the right materialization strategy for a large repository."
 diagramType: "Access strategy comparison"
+knowledgeCheck:
+  question: "Which strategy best fits unpredictable reads across a 4 TB repository on a 256 GB laptop?"
+  options:
+    - "Hydrate the entire repository"
+    - "Keep every file as a pointer forever"
+    - "Use an on-demand mount with a bounded cache"
+  answer: 2
+  explanation: "A mount serves reads as applications request them and lets the cache enforce the local disk budget."
 meta:
   contentType: "Tutorial"
   goal: "Help readers choose between pointers, hydration, and mounts based on access shape."

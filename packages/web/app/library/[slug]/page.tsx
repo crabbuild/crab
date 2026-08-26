@@ -17,25 +17,26 @@ import {
 } from "lucide-react"
 
 import { MarketingLayout } from "@/components/marketing-layout"
+import { KnowledgeCheck } from "@/components/library/knowledge-check"
 import { Reveal } from "@/components/marketing/reveal"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardHeader, CardTitle } from "@/components/ui/card"
 import {
-  getAdjacentPathPosts,
-  getLearningPath,
-  getPathPosts,
-  getRelatedPosts,
-  type BlogLearningPathKey,
-  type BlogPostMeta,
-} from "@/lib/blog"
+  getAdjacentPathGuides,
+  getLibraryPath,
+  getPathGuides,
+  getRelatedGuides,
+  type LibraryPathKey,
+  type LibraryGuideMeta,
+} from "@/lib/library"
 import { formatBlogDate } from "@/lib/blog-date"
-import { blogSource } from "@/lib/blog-source"
-import { getBlogPost, getBlogPosts } from "@/lib/blog-posts"
+import { librarySource } from "@/lib/library-source"
+import { getLibraryGuide, getLibraryGuides } from "@/lib/library-guides"
 import { createPageMetadata } from "@/lib/metadata"
 import { cn } from "@/lib/utils"
 import { getMDXComponents } from "@/mdx-components"
 
-const categoryIcons: Record<BlogPostMeta["category"], typeof Package> = {
+const categoryIcons: Record<LibraryGuideMeta["category"], typeof Package> = {
   Product: Package,
   Tutorial: BookOpen,
   Architecture: Network,
@@ -43,7 +44,7 @@ const categoryIcons: Record<BlogPostMeta["category"], typeof Package> = {
   Release: Rocket,
 }
 
-const pathIcons: Record<BlogLearningPathKey, typeof BookOpen> = {
+const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
   "core-internals": Network,
@@ -51,7 +52,7 @@ const pathIcons: Record<BlogLearningPathKey, typeof BookOpen> = {
 }
 
 export function generateStaticParams() {
-  return blogSource.getPages().map((page) => ({
+  return librarySource.getPages().map((page) => ({
     slug: page.slugs[0],
   }))
 }
@@ -62,16 +63,17 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>
 }): Promise<Metadata> {
   const { slug } = await params
-  const page = blogSource.getPage([slug])
+  const page = librarySource.getPage([slug])
   if (!page) return {}
 
   const { title, description } = page.data
-  const post = getBlogPost(slug)
+  const post = getLibraryGuide(slug)
 
   return createPageMetadata({
-    title: title ? `${title} — Crab Blog` : "Crab Blog",
-    description: description ?? "Technical guides from the Crab team.",
-    path: `/blog/${slug}`,
+    title: title ? `${title} — Crab Library` : "Crab Library",
+    description:
+      description ?? "Interactive learning guides from the Crab team.",
+    path: `/library/${slug}`,
     absoluteTitle: true,
     article: post
       ? {
@@ -83,23 +85,23 @@ export async function generateMetadata({
   })
 }
 
-export default async function BlogPostPage({
+export default async function LibraryGuidePage({
   params,
 }: {
   params: Promise<{ slug: string }>
 }) {
   const { slug } = await params
-  const page = blogSource.getPage([slug])
-  const currentPost = getBlogPost(slug)
+  const page = librarySource.getPage([slug])
+  const currentPost = getLibraryGuide(slug)
 
   if (!page || !currentPost) notFound()
 
   const MDX = page.data.body
-  const allPosts = getBlogPosts()
-  const learningPath = getLearningPath(currentPost.path)
-  const pathPosts = getPathPosts(currentPost.path, allPosts)
-  const adjacentPosts = getAdjacentPathPosts(currentPost, allPosts)
-  const relatedPosts = getRelatedPosts(currentPost, allPosts)
+  const allPosts = getLibraryGuides()
+  const learningPath = getLibraryPath(currentPost.path)
+  const pathPosts = getPathGuides(currentPost.path, allPosts)
+  const adjacentPosts = getAdjacentPathGuides(currentPost, allPosts)
+  const relatedPosts = getRelatedGuides(currentPost, allPosts)
   const CategoryIcon = categoryIcons[currentPost.category] ?? Package
   const PathIcon = pathIcons[currentPost.path] ?? BookOpen
 
@@ -109,7 +111,7 @@ export default async function BlogPostPage({
         <section className="mx-auto max-w-6xl px-4 pt-24 pb-10 sm:px-6 lg:px-8 lg:pt-28">
           <nav className="mb-8">
             <Link
-              href="/blog"
+              href="/library"
               className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
             >
               <ArrowLeft size={14} />
@@ -127,7 +129,7 @@ export default async function BlogPostPage({
                   </Badge>
                 </Link>
                 <Link
-                  href={`/blog?category=${encodeURIComponent(currentPost.category)}`}
+                  href={`/library?category=${encodeURIComponent(currentPost.category)}`}
                 >
                   <Badge variant="outline" className="gap-1">
                     <CategoryIcon size={12} />
@@ -163,7 +165,7 @@ export default async function BlogPostPage({
                   {currentPost.tags.map((tag) => (
                     <Link
                       key={tag}
-                      href={`/blog?tag=${encodeURIComponent(tag)}`}
+                      href={`/library?tag=${encodeURIComponent(tag)}`}
                       className="rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
                     >
                       {tag}
@@ -188,6 +190,7 @@ export default async function BlogPostPage({
                 />
                 <InfoRow label="Path" value={learningPath.label} />
                 <InfoRow label="Audience" value={learningPath.audience} />
+                <InfoRow label="Proof" value="1 knowledge check" />
               </div>
 
               {currentPost.prerequisites.length > 0 && (
@@ -218,8 +221,14 @@ export default async function BlogPostPage({
 
         <section className="mx-auto grid max-w-6xl gap-10 px-4 pb-16 has-[.wide-article-visual]:max-w-7xl sm:px-6 lg:grid-cols-[minmax(0,44rem)_18rem] lg:px-8 lg:has-[.wide-article-visual]:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="min-w-0">
-            <div className="prose-neutral dark:prose-invert prose mx-auto max-w-[44rem] prose-headings:scroll-mt-24 prose-img:rounded-lg">
+            <div className="prose-neutral dark:prose-invert mx-auto prose max-w-[44rem] prose-headings:scroll-mt-24 prose-img:rounded-lg">
               <MDX components={getMDXComponents({})} />
+            </div>
+            <div className="mx-auto max-w-[44rem]">
+              <KnowledgeCheck
+                slug={currentPost.slug}
+                check={currentPost.knowledgeCheck}
+              />
             </div>
           </div>
 
@@ -238,13 +247,13 @@ export default async function BlogPostPage({
             <NextStepCard
               label="Previous in path"
               post={adjacentPosts.previous}
-              fallbackHref={`/blog?path=${currentPost.path}`}
+              fallbackHref={`/library?path=${currentPost.path}`}
               fallbackTitle={`Browse ${learningPath.label}`}
             />
             <NextStepCard
               label="Next in path"
               post={adjacentPosts.next}
-              fallbackHref="/blog"
+              fallbackHref="/library"
               fallbackTitle="Explore all guides"
             />
           </div>
@@ -261,7 +270,7 @@ export default async function BlogPostPage({
                   const Icon = categoryIcons[post.category] ?? Package
 
                   return (
-                    <Link key={post.slug} href={`/blog/${post.slug}`}>
+                    <Link key={post.slug} href={`/library/${post.slug}`}>
                       <Card
                         size="sm"
                         className="h-full transition-all duration-(--duration-normal) hover:shadow-md hover:ring-1 hover:ring-primary/20"
@@ -288,8 +297,8 @@ export default async function BlogPostPage({
   )
 }
 
-function getPathFilterHref(path: BlogLearningPathKey) {
-  return `/blog?path=${encodeURIComponent(path)}#all-guides`
+function getPathFilterHref(path: LibraryPathKey) {
+  return `/library?path=${encodeURIComponent(path)}#all-guides`
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {
@@ -305,10 +314,10 @@ function LearningRail({
   posts,
   currentPost,
 }: {
-  posts: BlogPostMeta[]
-  currentPost: BlogPostMeta
+  posts: LibraryGuideMeta[]
+  currentPost: LibraryGuideMeta
 }) {
-  const learningPath = getLearningPath(currentPost.path)
+  const learningPath = getLibraryPath(currentPost.path)
 
   return (
     <nav
@@ -325,7 +334,7 @@ function LearningRail({
           return (
             <Link
               key={post.slug}
-              href={`/blog/${post.slug}`}
+              href={`/library/${post.slug}`}
               aria-current={isCurrent ? "page" : undefined}
               className={cn(
                 "block rounded-md px-3 py-2 text-xs leading-5 transition-colors",
@@ -344,7 +353,7 @@ function LearningRail({
   )
 }
 
-function ConceptPanel({ post }: { post: BlogPostMeta }) {
+function ConceptPanel({ post }: { post: LibraryGuideMeta }) {
   if (post.concepts.length === 0) return null
 
   return (
@@ -356,7 +365,7 @@ function ConceptPanel({ post }: { post: BlogPostMeta }) {
         {post.concepts.map((concept) => (
           <Link
             key={concept}
-            href={`/blog?tag=${encodeURIComponent(concept)}`}
+            href={`/library?tag=${encodeURIComponent(concept)}`}
             className="rounded-full border border-border px-2 py-0.5 text-[0.68rem] text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
           >
             {concept}
@@ -374,11 +383,11 @@ function NextStepCard({
   fallbackTitle,
 }: {
   label: string
-  post?: BlogPostMeta
+  post?: LibraryGuideMeta
   fallbackHref: string
   fallbackTitle: string
 }) {
-  const href = post ? `/blog/${post.slug}` : fallbackHref
+  const href = post ? `/library/${post.slug}` : fallbackHref
   const title = post?.title ?? fallbackTitle
   const description =
     post?.outcome ?? "Continue through the Crab learning library."

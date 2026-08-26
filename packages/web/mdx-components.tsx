@@ -16,6 +16,7 @@ import {
   TakeawayBox,
 } from "@/components/blog/blog-mdx-helpers"
 import { GitArchitecturePlayer } from "@/components/blog/git-architecture-player"
+import { CrabIntroductionWorkbench } from "@/components/blog/crab-introduction-workbench"
 import { BlogProcessPlayer } from "@/components/blog/blog-process-player"
 import {
   ChunkAddressMap,
@@ -168,6 +169,7 @@ export function getMDXComponents(components?: MDXComponents) {
     SystemNote,
     TakeawayBox,
     GitArchitecturePlayer,
+    CrabIntroductionWorkbench,
     BlogProcessPlayer,
     ChunkAddressMap,
     DedupBoundaryLab,

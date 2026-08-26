@@ -6,27 +6,27 @@ import { Search, Tag, X } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
-  BLOG_LEARNING_PATHS,
-  BLOG_LEVELS,
+  LIBRARY_PATHS,
+  LIBRARY_LEVELS,
   filterByCategory,
   filterByLevel,
   filterByPath,
   filterByTag,
   searchPosts,
-  type BlogPostMeta,
-} from "@/lib/blog"
+  type LibraryGuideMeta,
+} from "@/lib/library"
 
-interface BlogCategoryFilterProps {
+interface LibraryGuideFilterProps {
   categories: string[]
-  posts: BlogPostMeta[]
-  children: (filteredPosts: BlogPostMeta[]) => React.ReactNode
+  posts: LibraryGuideMeta[]
+  children: (filteredPosts: LibraryGuideMeta[]) => React.ReactNode
 }
 
-export function BlogCategoryFilter({
+export function LibraryGuideFilter({
   categories,
   posts,
   children,
-}: BlogCategoryFilterProps) {
+}: LibraryGuideFilterProps) {
   const searchParams = useSearchParams()
   const router = useRouter()
 
@@ -65,7 +65,7 @@ export function BlogCategoryFilter({
     if (category !== "All") params.set("category", category)
     if (tag) params.set("tag", tag)
     const qs = params.toString()
-    router.replace(qs ? `/blog?${qs}` : "/blog", { scroll: false })
+    router.replace(qs ? `/library?${qs}` : "/library", { scroll: false })
   }
 
   function handleCategoryChange(category: string) {
@@ -100,7 +100,7 @@ export function BlogCategoryFilter({
             >
               All paths
             </FilterButton>
-            {BLOG_LEARNING_PATHS.map((path) => (
+            {LIBRARY_PATHS.map((path) => (
               <FilterButton
                 key={path.key}
                 active={activePath === path.key}
@@ -118,7 +118,7 @@ export function BlogCategoryFilter({
             >
               Any depth
             </FilterButton>
-            {BLOG_LEVELS.map((level) => (
+            {LIBRARY_LEVELS.map((level) => (
               <FilterButton
                 key={level}
                 active={activeLevel === level}
@@ -150,12 +150,12 @@ export function BlogCategoryFilter({
             />
             <input
               type="search"
-              placeholder="Search concepts, posts, tags..."
-              aria-label="Search blog posts"
+              placeholder="Search concepts, guides, tags..."
+              aria-label="Search library guides"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className={cn(
-                "w-full rounded-md border border-border bg-background py-2.5 pr-4 pl-9 text-sm",
+                "min-h-11 w-full rounded-md border border-border bg-background py-2.5 pr-4 pl-9 text-sm",
                 "placeholder:text-muted-foreground",
                 "focus:ring-2 focus:ring-ring focus:outline-none"
               )}
@@ -167,7 +167,7 @@ export function BlogCategoryFilter({
             <span className="font-medium text-foreground">
               {filteredPosts.length}
             </span>{" "}
-            of {posts.length} posts
+            of {posts.length} guides
           </div>
         </div>
       </div>
@@ -180,7 +180,7 @@ export function BlogCategoryFilter({
           </span>
           <button
             onClick={clearTag}
-            className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/20"
+            className="inline-flex min-h-11 items-center gap-1 rounded-full bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-primary/20"
           >
             {activeTag}
             <X size={12} />
@@ -195,7 +195,7 @@ export function BlogCategoryFilter({
             <button
               key={tag}
               onClick={() => handleTagChange(tag)}
-              className="rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+              className="min-h-11 rounded-full border border-border px-2.5 py-2 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
             >
               {tag}
             </button>
@@ -209,7 +209,8 @@ export function BlogCategoryFilter({
       >
         {filteredPosts.length === 0 ? (
           <p className="py-12 text-center text-muted-foreground">
-            No posts found matching your filters.
+            No guides match these filters. Clear a filter or try another
+            concept.
           </p>
         ) : (
           children(filteredPosts)
@@ -249,7 +250,7 @@ function FilterButton({
     <button
       onClick={onClick}
       className={cn(
-        "rounded-full px-3 py-1.5 text-xs font-medium transition-colors duration-(--duration-fast) sm:text-sm",
+        "min-h-11 rounded-full px-3 py-2 text-xs font-medium transition-colors duration-(--duration-fast) sm:text-sm",
         active
           ? "bg-primary text-primary-foreground"
           : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground"

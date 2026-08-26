@@ -1,6 +1,6 @@
 ---
 title: "What is Crab, and when should you use it?"
-description: "Understand how Crab keeps Git as the interface while storing large-file data directly in object storage."
+description: "Follow one repository through tracking, commit, push, and hydration to understand exactly how Crab works."
 date: "2026-05-01"
 author: "Crab Team"
 category: "product"
@@ -12,7 +12,7 @@ order: 1
 concepts: ["serverless git", "object storage", "large files"]
 prerequisites: []
 outcome: "Decide whether Crab's Git-plus-object-storage model fits your repository."
-diagramType: "Mental model"
+diagramType: "Interactive system tour"
 meta:
   contentType: "Conceptual"
   goal: "Explain Crab's mental model and help readers decide whether to continue."
@@ -25,6 +25,8 @@ Crab is a Git remote helper for repositories that contain large binary files. Gi
   One repository keeps one Git history, but ordinary files and tracked large
   files take different storage paths.
 </TakeawayBox>
+
+<CrabIntroductionWorkbench />
 
 <CrabMentalModelDiagram />
 
@@ -185,4 +187,4 @@ crab ship . -m "Add the first model"
 
 `crab configure` connects the repository and installs the Git integration. `crab track` writes the large-file pattern. `crab ship` stages, commits, and pushes through the configured Crab remote.
 
-For a guided setup, continue with [How do you set up a Crab repository?](/blog/getting-started-crab). To compare architectures first, read [Should you use Crab or Git LFS?](/blog/crab-vs-git-lfs).
+For a guided setup, continue with [How do you set up a Crab repository?](/library/getting-started-crab). To compare architectures first, read [Should you use Crab or Git LFS?](/library/crab-vs-git-lfs).

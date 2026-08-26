@@ -1,16 +1,16 @@
 import fs from "node:fs"
 import path from "node:path"
 
-import { blogSource } from "@/lib/blog-source"
+import { librarySource } from "@/lib/library-source"
 import {
-  BLOG_LEARNING_PATHS,
+  LIBRARY_PATHS,
   calculateReadingTime,
-  type BlogLearningPathKey,
-  type BlogPostLevel,
-  type BlogPostMeta,
-} from "@/lib/blog"
+  type LibraryPathKey,
+  type LibraryGuideLevel,
+  type LibraryGuideMeta,
+} from "@/lib/library"
 
-type RawBlogData = {
+type RawLibraryData = {
   title?: string
   description?: string
   date?: string
@@ -25,9 +25,15 @@ type RawBlogData = {
   prerequisites?: string[]
   outcome?: string
   diagramType?: string
+  knowledgeCheck: {
+    question: string
+    options: string[]
+    answer: number
+    explanation: string
+  }
 }
 
-const CATEGORY_MAP: Record<string, BlogPostMeta["category"]> = {
+const CATEGORY_MAP: Record<string, LibraryGuideMeta["category"]> = {
   product: "Product",
   tutorial: "Tutorial",
   architecture: "Architecture",
@@ -35,34 +41,34 @@ const CATEGORY_MAP: Record<string, BlogPostMeta["category"]> = {
   release: "Release",
 }
 
-const LEVEL_MAP: Record<string, BlogPostLevel> = {
+const LEVEL_MAP: Record<string, LibraryGuideLevel> = {
   beginner: "Beginner",
   intermediate: "Intermediate",
   "deep-dive": "Deep Dive",
 }
 
-const PATH_KEYS = new Set<string>(BLOG_LEARNING_PATHS.map((entry) => entry.key))
+const PATH_KEYS = new Set<string>(LIBRARY_PATHS.map((entry) => entry.key))
 
-export function mapBlogCategory(raw: string | undefined): BlogPostMeta["category"] {
+export function mapLibraryCategory(
+  raw: string | undefined
+): LibraryGuideMeta["category"] {
   return CATEGORY_MAP[raw ?? ""] ?? "Product"
 }
 
-function mapLevel(raw: string | undefined): BlogPostLevel {
+function mapLevel(raw: string | undefined): LibraryGuideLevel {
   return LEVEL_MAP[raw ?? ""] ?? "Beginner"
 }
 
-function mapPath(raw: string | undefined): BlogLearningPathKey {
-  return PATH_KEYS.has(raw ?? "")
-    ? (raw as BlogLearningPathKey)
-    : "start-here"
+function mapPath(raw: string | undefined): LibraryPathKey {
+  return PATH_KEYS.has(raw ?? "") ? (raw as LibraryPathKey) : "start-here"
 }
 
 /**
  * Counts words in an MDX file's prose content, excluding frontmatter,
  * fenced code blocks, and Mermaid diagrams.
  */
-export function countWordsFromFile(slug: string): number {
-  const filePath = path.join(process.cwd(), "content", "blog", `${slug}.mdx`)
+export function countWordsFromGuideFile(slug: string): number {
+  const filePath = path.join(process.cwd(), "content", "library", `${slug}.mdx`)
 
   try {
     const content = fs.readFileSync(filePath, "utf-8")
@@ -75,13 +81,13 @@ export function countWordsFromFile(slug: string): number {
   }
 }
 
-export function getBlogPosts(): BlogPostMeta[] {
-  return blogSource
+export function getLibraryGuides(): LibraryGuideMeta[] {
+  return librarySource
     .getPages()
     .map((page) => {
-      const data = page.data as RawBlogData
+      const data = page.data as RawLibraryData
       const slug = page.slugs[0] ?? ""
-      const wordCount = countWordsFromFile(slug)
+      const wordCount = countWordsFromGuideFile(slug)
       const description = data.excerpt ?? data.description ?? ""
 
       return {
@@ -93,7 +99,7 @@ export function getBlogPosts(): BlogPostMeta[] {
           name: data.author ?? "Crab Team",
           bio: "Building serverless Git workflows for large files, cloud object storage, and fast technical teams.",
         },
-        category: mapBlogCategory(data.category),
+        category: mapLibraryCategory(data.category),
         tags: data.tags ?? [],
         readingTimeMinutes: calculateReadingTime(wordCount),
         level: mapLevel(data.level),
@@ -103,12 +109,13 @@ export function getBlogPosts(): BlogPostMeta[] {
         prerequisites: data.prerequisites ?? [],
         outcome: data.outcome ?? description,
         diagramType: data.diagramType,
-      } satisfies BlogPostMeta
+        knowledgeCheck: data.knowledgeCheck,
+      } satisfies LibraryGuideMeta
     })
     .sort((a, b) => {
       const pathDelta =
-        BLOG_LEARNING_PATHS.find((entry) => entry.key === a.path)!.order -
-        BLOG_LEARNING_PATHS.find((entry) => entry.key === b.path)!.order
+        LIBRARY_PATHS.find((entry) => entry.key === a.path)!.order -
+        LIBRARY_PATHS.find((entry) => entry.key === b.path)!.order
 
       if (pathDelta !== 0) return pathDelta
       if (a.pathOrder !== b.pathOrder) return a.pathOrder - b.pathOrder
@@ -117,6 +124,6 @@ export function getBlogPosts(): BlogPostMeta[] {
     })
 }
 
-export function getBlogPost(slug: string): BlogPostMeta | undefined {
-  return getBlogPosts().find((post) => post.slug === slug)
+export function getLibraryGuide(slug: string): LibraryGuideMeta | undefined {
+  return getLibraryGuides().find((post) => post.slug === slug)
 }

@@ -13,6 +13,14 @@ concepts: ["cache", "range reads", "metadata indexes", "object storage"]
 prerequisites: ["What happens during a Crab push?"]
 outcome: "Predict which source serves a read and measure the difference between cold and warm hydration."
 diagramType: "Interactive cache routing"
+knowledgeCheck:
+  question: "Where should Crab look first for bytes that were already verified on the same machine?"
+  options:
+    - "The local cache"
+    - "Canonical object storage"
+    - "The mutable branch ref"
+  answer: 0
+  explanation: "Immutable verified bytes can be served locally before Crab falls back through shared cache and canonical storage."
 meta:
   contentType: "Conceptual"
   goal: "Explain caching through one repeated hydration instead of a list of cache layers."
@@ -168,4 +176,4 @@ Keep the experiment controlled. Repeatedly clearing healthy cache state only pro
   storage remains the durable fallback and authority.
 </TakeawayBox>
 
-Continue with [How does Crab rebuild a file from chunks?](/blog/shard-reconstruction-hydration) to follow the selected ranges into one verified file.
+Continue with [How does Crab rebuild a file from chunks?](/library/shard-reconstruction-hydration) to follow the selected ranges into one verified file.

@@ -13,6 +13,14 @@ concepts: ["install", "configure", "push", "clone"]
 prerequisites: ["What is Crab, and when should you use it?"]
 outcome: "Create and verify a working Crab repository backed by object storage."
 diagramType: "Command flow"
+knowledgeCheck:
+  question: "Where should the rule for tracking `*.safetensors` with Crab live?"
+  options:
+    - "In the committed `.gitattributes` file"
+    - "Only in one developer's shell history"
+    - "Inside the object-storage bucket policy"
+  answer: 0
+  explanation: "The committed attribute rule makes file representation shared and reviewable across contributors and CI."
 meta:
   contentType: "Tutorial"
   goal: "Take a reader from an existing Git repository to a working Crab push and hydrated clone."
@@ -195,4 +203,4 @@ Treat a fresh-clone verification job as repository health evidence. It should ob
   clone can reconstruct the tracked file.
 </TakeawayBox>
 
-For a more explicit verification workflow, continue with [How do you verify your first Crab push?](/blog/first-crab-push). For command options, use the [`crab configure`](/docs/cli/reference/crab-configure), [`crab track`](/docs/cli/reference/crab-track), and [`crab hydrate`](/docs/cli/reference/crab-hydrate) references.
+For a more explicit verification workflow, continue with [How do you verify your first Crab push?](/library/first-crab-push). For command options, use the [`crab configure`](/docs/cli/reference/crab-configure), [`crab track`](/docs/cli/reference/crab-track), and [`crab hydrate`](/docs/cli/reference/crab-hydrate) references.

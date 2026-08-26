@@ -16,6 +16,7 @@ const footerGroups = [
     title: "Resources",
     links: [
       { label: "CLI docs", href: "/docs/cli" },
+      { label: "Learning Library", href: "/library" },
       { label: "Blog", href: "/blog" },
       { label: "Changelog", href: "/changelog" },
     ],

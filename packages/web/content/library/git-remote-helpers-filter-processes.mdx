@@ -13,6 +13,14 @@ concepts: ["remote helper", "filter process", "clean", "smudge", "pointer blob"]
 prerequisites: ["How do you verify your first Crab push?"]
 outcome: "Explain which Crab process Git invokes for add, checkout, fetch, and push."
 diagramType: "Interactive integration trace"
+knowledgeCheck:
+  question: "Which Git extension points does Crab use for a tracked model and a remote push?"
+  options:
+    - "A merge driver for both operations"
+    - "A filter process for representation and a remote helper for repository transport"
+    - "A custom Git fork that replaces the object database"
+  answer: 1
+  explanation: "Git invokes Crab through standard filter-process and remote-helper contracts; Crab does not patch Git."
 meta:
   contentType: "Conceptual"
   goal: "Explain Crab's Git integration contracts without burying the reader in protocol transcripts."
@@ -230,4 +238,4 @@ Start with the earliest failed check. Changing the remote helper cannot repair a
 | Clean and smudge | `crab/src/git/clean.rs`, `crab/src/git/smudge.rs` |
 | Remote-helper protocol | `crab/src/git/remote_helper.rs` |
 
-Continue with [How does Crab avoid storing duplicate data?](/blog/xet-protocol-deduplication) to follow the bytes after clean begins.
+Continue with [How does Crab avoid storing duplicate data?](/library/xet-protocol-deduplication) to follow the bytes after clean begins.
