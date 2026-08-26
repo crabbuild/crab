@@ -14,11 +14,13 @@ import { isValidElement, type ReactElement, type ReactNode } from "react"
 
 import { FeatureBlogArticle } from "@/components/blog/feature-blog-article"
 import { MarketingLayout } from "@/components/marketing-layout"
+import { StructuredData } from "@/components/structured-data"
 import { Badge } from "@/components/ui/badge"
 import { formatBlogDate } from "@/lib/blog-date"
 import { getBlogPost, type BlogPostMeta } from "@/lib/blog-posts"
 import { blogSource } from "@/lib/blog-source"
 import { createPageMetadata } from "@/lib/metadata"
+import { createArticleStructuredData } from "@/lib/structured-data"
 import { getMDXComponents } from "@/mdx-components"
 
 export function generateStaticParams() {
@@ -50,6 +52,7 @@ export async function generateMetadata({
     article: {
       publishedTime: new Date(post.date).toISOString(),
       authors: [post.author],
+      section: post.category,
       tags: post.tags,
     },
   })
@@ -66,6 +69,18 @@ export default async function BlogPostPage({
   if (!page || !post) notFound()
 
   const MDX = page.data.body
+  const structuredData = createArticleStructuredData({
+    type: "BlogPosting",
+    title: post.title,
+    description: post.description,
+    path: `/blog/${slug}`,
+    imagePath: `/blog/${slug}/opengraph-image`,
+    publishedTime: post.date,
+    author: post.author,
+    section: post.category,
+    tags: post.tags,
+    breadcrumbs: [{ name: "Blog", path: "/blog" }, { name: post.title }],
+  })
 
   if (page.data.presentation === "feature") {
     const toc = page.data.toc.map((item) => ({
@@ -75,14 +90,18 @@ export default async function BlogPostPage({
     }))
 
     return (
-      <FeatureBlogArticle post={post} toc={toc}>
-        <MDX components={getMDXComponents({})} />
-      </FeatureBlogArticle>
+      <>
+        <StructuredData data={structuredData} />
+        <FeatureBlogArticle post={post} toc={toc}>
+          <MDX components={getMDXComponents({})} />
+        </FeatureBlogArticle>
+      </>
     )
   }
 
   return (
     <MarketingLayout>
+      <StructuredData data={structuredData} />
       <article>
         <header className="border-b border-[#b9c7d8] bg-[#f4f7f9] text-[#142033]">
           <div className="mx-auto max-w-6xl px-6 pt-24 pb-12 lg:pt-28 lg:pb-16">

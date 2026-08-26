@@ -35,7 +35,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     .getPages()
     .map((post) => ({
       url: `${SITE_URL}/blog/${post.slugs[0]}`,
-      lastModified: post.data.date ? new Date(post.data.date) : new Date(),
+      ...(post.data.date ? { lastModified: new Date(post.data.date) } : {}),
       changeFrequency: "monthly",
       priority: 0.7,
     }))
@@ -44,7 +44,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     .getPages()
     .map((guide) => ({
       url: `${SITE_URL}/library/${guide.slugs[0]}`,
-      lastModified: guide.data.date ? new Date(guide.data.date) : new Date(),
+      ...(guide.data.date ? { lastModified: new Date(guide.data.date) } : {}),
       changeFrequency: "monthly",
       priority: 0.8,
     }))

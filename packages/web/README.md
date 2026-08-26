@@ -13,7 +13,7 @@ The site combines several content and product surfaces:
 - **Technical blog**: MDX articles with learning paths, categories, tags, diagrams, and related-post navigation
 - **Release communication**: A source-backed changelog rendered from typed data in `lib/changelog.ts`
 - **Public installers**: Shell and PowerShell scripts in `public/`, exposed through `/install.sh` and `/install.ps1`
-- **Search and discovery**: CLI documentation search at `/api/search` and a generated sitemap at `/sitemap.xml`
+- **Search and discovery**: CLI documentation search, canonical metadata, social cards, JSON-LD for articles and breadcrumbs, and a generated sitemap at `/sitemap.xml`
 
 The app renders content through Next.js App Router routes. Most pages are server components. Client components are reserved for browser interactions such as animations, filters, theme switching, and interactive demos.
 
@@ -195,7 +195,7 @@ The top-level order is defined in `content/docs/cli/meta.json`. When you add a n
 
 ## Author blog posts
 
-Editorial posts live in `content/blog/` as individual `.mdx` files. Adding a file automatically creates its dashboard card, `/blog/<filename>` page, and sitemap entry. Reading time is calculated from the article body.
+Editorial posts live in `content/blog/` as individual `.mdx` files. Adding a file automatically creates its dashboard card, `/blog/<filename>` page, social images, BlogPosting and breadcrumb structured data, and sitemap entry. Reading time is calculated from the article body.
 
 Use frontmatter like this:
 

@@ -19,6 +19,7 @@ import {
 import { MarketingLayout } from "@/components/marketing-layout"
 import { KnowledgeCheck } from "@/components/library/knowledge-check"
 import { Reveal } from "@/components/marketing/reveal"
+import { StructuredData } from "@/components/structured-data"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -33,6 +34,7 @@ import { formatBlogDate } from "@/lib/blog-date"
 import { librarySource } from "@/lib/library-source"
 import { getLibraryGuide, getLibraryGuides } from "@/lib/library-guides"
 import { createPageMetadata } from "@/lib/metadata"
+import { createArticleStructuredData } from "@/lib/structured-data"
 import { cn } from "@/lib/utils"
 import { getMDXComponents } from "@/mdx-components"
 
@@ -84,6 +86,7 @@ export async function generateMetadata({
       ? {
           publishedTime: new Date(post.date).toISOString(),
           authors: [post.author.name],
+          section: getLibraryPath(post.path).label,
           tags: post.tags,
         }
       : undefined,
@@ -109,9 +112,25 @@ export default async function LibraryGuidePage({
   const relatedPosts = getRelatedGuides(currentPost, allPosts)
   const CategoryIcon = categoryIcons[currentPost.category] ?? Package
   const PathIcon = pathIcons[currentPost.path] ?? BookOpen
+  const structuredData = createArticleStructuredData({
+    type: "Article",
+    title: currentPost.title,
+    description: currentPost.description,
+    path: `/library/${slug}`,
+    imagePath: `/library/${slug}/opengraph-image`,
+    publishedTime: currentPost.date,
+    author: currentPost.author.name,
+    section: learningPath.label,
+    tags: currentPost.tags,
+    breadcrumbs: [
+      { name: "Learning library", path: "/library" },
+      { name: currentPost.title },
+    ],
+  })
 
   return (
     <MarketingLayout>
+      <StructuredData data={structuredData} />
       <article className="border-b border-border">
         <section className="mx-auto max-w-6xl px-4 pt-24 pb-10 sm:px-6 lg:px-8 lg:pt-28">
           <nav className="mb-8">
