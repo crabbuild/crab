@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next"
+import { blogSource } from "@/lib/blog-source"
 import { librarySource } from "@/lib/library-source"
 import { SITE_URL } from "@/lib/metadata"
 import { cliSource } from "@/lib/source"
@@ -30,6 +31,15 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.8,
     }))
 
+  const blogEntries: MetadataRoute.Sitemap = blogSource
+    .getPages()
+    .map((post) => ({
+      url: `${SITE_URL}/blog/${post.slugs[0]}`,
+      lastModified: post.data.date ? new Date(post.data.date) : new Date(),
+      changeFrequency: "monthly",
+      priority: 0.7,
+    }))
+
   const libraryEntries: MetadataRoute.Sitemap = librarySource
     .getPages()
     .map((guide) => ({
@@ -39,5 +49,5 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.8,
     }))
 
-  return [...staticRoutes, ...libraryEntries, ...cliDocEntries]
+  return [...staticRoutes, ...blogEntries, ...libraryEntries, ...cliDocEntries]
 }
