@@ -828,6 +828,13 @@ impl GitVisibilityIndex {
                 }
             }
         }
+        for transitions in self.transitions.values_mut() {
+            for transition in transitions {
+                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+                    bitmap.resize(bitmap_len, 0);
+                }
+            }
+        }
         self.refs.insert(
             name.clone(),
             GitVisibilityClosure::from_positions(positions, self.objects.len())?,
@@ -2992,6 +2999,50 @@ mod tests {
             .map(|value| decode_oid(&value).expect("valid expected OID"))
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unrelated_ref_transition_bitmaps_follow_dictionary_growth() {
+        let oid = |value: usize| format!("{value:040x}");
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            BTreeMap::from([
+                (
+                    "refs/heads/main".to_owned(),
+                    (0..64).map(oid).collect::<Vec<_>>(),
+                ),
+                (
+                    "refs/heads/other".to_owned(),
+                    (100..164).map(oid).collect::<Vec<_>>(),
+                ),
+            ]),
+        )
+        .expect("valid visibility index");
+
+        let other_old = (100..164).map(oid).collect::<BTreeSet<_>>();
+        let other_new = (100..196).map(oid).collect::<BTreeSet<_>>();
+        index
+            .apply_edit(
+                "refs/heads/other".to_owned(),
+                &GitVisibilityEdit::delta(Some(oid(163)), oid(195), &other_old, &other_new),
+            )
+            .expect("create a dense transition bitmap");
+
+        let main_old = (0..64).map(oid).collect::<BTreeSet<_>>();
+        let mut main_new = main_old.clone();
+        main_new.insert(oid(196));
+        index
+            .apply_edit(
+                "refs/heads/main".to_owned(),
+                &GitVisibilityEdit::delta(Some(oid(63)), oid(196), &main_old, &main_new),
+            )
+            .expect("grow the shared object dictionary");
+
+        index
+            .bind_identity(5, &"c".repeat(64), &"d".repeat(64))
+            .expect("all transition bitmaps must match the grown dictionary");
     }
 
     #[cfg(feature = "storage")]
