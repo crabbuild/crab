@@ -13,6 +13,14 @@ concepts: ["push", "verification", "pointer", "hydration"]
 prerequisites: ["How do you set up a Crab repository?"]
 outcome: "Prove that one tracked file was filtered, uploaded, published, cloned, and reconstructed correctly."
 diagramType: "Interactive push trace"
+knowledgeCheck:
+  question: "Which result is the strongest end-to-end proof of a first Crab push?"
+  options:
+    - "The upload progress reached 100%"
+    - "The local commit contains a pointer"
+    - "A fresh clone hydrates the file and its hash matches the original"
+  answer: 2
+  explanation: "A fresh clone crosses Git, remote metadata, object storage, reconstruction, and final byte verification."
 meta:
   contentType: "Tutorial"
   goal: "Teach a source-to-result verification loop for a first Crab push."
@@ -156,4 +164,4 @@ A failed upload may leave complete immutable objects that a retry can reuse. It 
   ]}
 />
 
-Once all five pass, the repository has crossed the complete write-and-read path. Continue with [How does Crab connect to Git?](/blog/git-remote-helpers-filter-processes) to see which Git protocols produced each result.
+Once all five pass, the repository has crossed the complete write-and-read path. Continue with [How does Crab connect to Git?](/library/git-remote-helpers-filter-processes) to see which Git protocols produced each result.

@@ -27,8 +27,9 @@ The main routes are implemented under `app/`:
 | `/cli`              | Crab CLI product page with installation examples and the push pipeline walkthrough |
 | `/docs`             | Documentation landing page                                                         |
 | `/docs/cli/...`     | Fumadocs-rendered CLI documentation                                                |
-| `/blog`             | Blog index with learning paths, categories, levels, tags, and search               |
-| `/blog/[slug]`      | Individual blog posts                                                              |
+| `/blog`             | Crab's comprehensive interactive introduction and editorial surface              |
+| `/library`          | Ordered learning paths, filters, progress, and knowledge checks                   |
+| `/library/[slug]`   | Individual interactive learning guides                                             |
 | `/changelog`        | Published or repository-backed release entries                                     |
 | `/pricing`          | Storage provider pricing calculator                                                |
 | `/integrations`     | Cloud, CI/CD, machine learning, and version-control integrations                   |
@@ -42,7 +43,7 @@ The main routes are implemented under `app/`:
 | `/api/search`       | Fumadocs search endpoint for CLI docs                                              |
 | `/api/install`      | Returns the shell installer from `public/install.sh`                               |
 | `/api/install-ps1`  | Returns the PowerShell installer from `public/install.ps1`                         |
-| `/sitemap.xml`      | Generated sitemap for static pages, blog posts, and CLI docs                       |
+| `/sitemap.xml`      | Generated sitemap for static pages, blog posts, library guides, and CLI docs       |
 
 `next.config.mjs` also owns canonical redirects for older company, installer, and documentation URLs. Update those redirects when moving a public route so existing links continue to resolve.
 
@@ -139,7 +140,8 @@ Run `npm run format` before handing off TypeScript or TSX changes. It does not f
 | `components/navigation/`  | Header, footer, menus, skip links, and navigation behavior                                          |
 | `components/ui/`          | shadcn/ui primitives and small reusable interface components                                        |
 | `content/docs/cli/`       | CLI documentation written in MDX, organized by category                                             |
-| `content/blog/`           | Blog posts written in MDX                                                                           |
+| `content/blog/`           | Editorial posts written in MDX                                                                      |
+| `content/library/`        | Ordered learning guides with required knowledge checks                             |
 | `lib/`                    | Fumadocs loaders, blog transforms, pricing data, integrations, changelog data, and shared utilities |
 | `public/`                 | Static images, icons, and the shell and PowerShell installer scripts                                |
 | `scripts/check-links.mjs` | Production-server crawler for internal links and URL fragments                                      |
@@ -151,14 +153,15 @@ Run `npm run format` before handing off TypeScript or TSX changes. It does not f
 
 ## How content becomes a page
 
-The app has two MDX collections and one static-data layer:
+The app has three MDX collections and one static-data layer:
 
 1. `content/docs/cli/**/*.mdx` is loaded by `source.config.ts` as the `cliDocs` collection.
 2. `lib/source.ts` creates the `/docs/cli` loader, attaches sidebar icons, and removes internal `design` content from the public sidebar.
 3. `app/docs/cli/[[...slug]]/page.tsx` resolves a documentation slug and renders its MDX body through `mdx-components.tsx`.
 4. `app/api/search/route.ts` builds a Fumadocs search index from the same CLI page source.
-5. `content/blog/*.mdx` is loaded as the `blog` collection and transformed by `lib/blog-posts.ts` for filtering, learning paths, reading time, and related posts.
-6. `lib/integrations.ts`, `lib/pricing-data.ts`, and `lib/changelog.ts` provide typed, build-time data for their corresponding product pages.
+5. `content/blog/what-is-crab.mdx` is loaded as the `blog` collection and rendered directly at `/blog`.
+6. `content/library/*.mdx` is loaded as the `library` collection and transformed by `lib/library-guides.ts` for learning paths, reading time, related guides, and required knowledge checks.
+7. `lib/integrations.ts`, `lib/pricing-data.ts`, and `lib/changelog.ts` provide typed, build-time data for their corresponding product pages.
 
 Fumadocs generates collection artifacts under `.source/`. Change the source MDX, schema, or loader instead of editing generated files.
 
@@ -191,7 +194,9 @@ The top-level order is defined in `content/docs/cli/meta.json`. When you add a n
 
 ## Author blog posts
 
-Blog posts live in `content/blog/` as individual `.mdx` files. The schema is defined in `source.config.ts`, and `lib/blog-posts.ts` maps the lowercase frontmatter values to the display labels used by the blog UI.
+Editorial posts live in `content/blog/` as individual `.mdx` files. The schema is defined in `source.config.ts`, and `lib/blog-source.ts` exposes them to the blog routes.
+
+Learning guides live in `content/library/`. `lib/library-guides.ts` maps their frontmatter into the Library UI. Each guide must include a question that checks the reader's understanding of a system boundary or decision.
 
 Use frontmatter like this:
 
@@ -211,6 +216,14 @@ concepts: ["installation", "push", "hydration"]
 prerequisites: ["What is Crab"]
 outcome: "Install Crab and complete a first push workflow."
 diagramType: "Command flow"
+knowledgeCheck:
+  question: "Which result proves the push is usable from another machine?"
+  options:
+    - "The upload command exits successfully"
+    - "A fresh clone reconstructs and verifies the file"
+    - "The local cache contains the file"
+  answer: 1
+  explanation: "A fresh clone exercises the published ref, metadata, and durable object data together."
 ---
 
 # A useful Crab article title
@@ -224,7 +237,7 @@ The accepted values are:
 - **Levels**: `beginner`, `intermediate`, `deep-dive`
 - **Learning paths**: `start-here`, `first-workflow`, `core-internals`, `advanced-operations`
 
-The blog loader discovers `.mdx` files automatically. You do not need a separate registration file, but each post needs complete frontmatter so cards, filters, navigation, search, and the sitemap remain useful.
+Both loaders discover `.mdx` files automatically. You do not need a separate registration file. Library guides need complete learning metadata and a valid `knowledgeCheck`; blog posts only need the editorial metadata their page uses.
 
 ## Update product data
 

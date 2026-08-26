@@ -16,12 +16,12 @@ import {
 
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { BlogCategoryFilter } from "@/components/blog/blog-category-filter"
+import { LibraryGuideFilter } from "@/components/library/library-guide-filter"
 import {
-  getLearningPath,
-  type BlogLearningPathKey,
-  type BlogPostMeta,
-} from "@/lib/blog"
+  getLibraryPath,
+  type LibraryPathKey,
+  type LibraryGuideMeta,
+} from "@/lib/library"
 import { formatBlogDate } from "@/lib/blog-date"
 import { cn } from "@/lib/utils"
 
@@ -33,20 +33,20 @@ const categoryIcons: Record<string, typeof Package> = {
   Release: Rocket,
 }
 
-const pathIcons: Record<BlogLearningPathKey, typeof BookOpen> = {
+const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
   "core-internals": Network,
   "advanced-operations": Layers,
 }
 
-function PostCard({ post }: { post: BlogPostMeta }) {
+function PostCard({ post }: { post: LibraryGuideMeta }) {
   const Icon = categoryIcons[post.category] ?? Package
-  const learningPath = getLearningPath(post.path)
+  const learningPath = getLibraryPath(post.path)
   const PathIcon = pathIcons[post.path] ?? BookOpen
 
   return (
-    <Link href={`/blog/${post.slug}`} className="block h-full">
+    <Link href={`/library/${post.slug}`} className="block h-full">
       <Card
         className={cn(
           "h-full transition-all duration-(--duration-normal)",
@@ -115,16 +115,19 @@ function PostCard({ post }: { post: BlogPostMeta }) {
   )
 }
 
-interface BlogIndexContentProps {
+interface LibraryIndexContentProps {
   categories: string[]
-  posts: BlogPostMeta[]
+  posts: LibraryGuideMeta[]
 }
 
-export function BlogIndexContent({ categories, posts }: BlogIndexContentProps) {
+export function LibraryIndexContent({
+  categories,
+  posts,
+}: LibraryIndexContentProps) {
   return (
-    <BlogCategoryFilter categories={categories} posts={posts}>
+    <LibraryGuideFilter categories={categories} posts={posts}>
       {(filteredPosts) => (
-        <section aria-label="Filtered blog posts" className="space-y-4">
+        <section aria-label="Filtered library guides" className="space-y-4">
           <div className="flex items-end justify-between gap-4">
             <div>
               <h2 className="text-xl font-semibold tracking-tight">
@@ -143,6 +146,6 @@ export function BlogIndexContent({ categories, posts }: BlogIndexContentProps) {
           </div>
         </section>
       )}
-    </BlogCategoryFilter>
+    </LibraryGuideFilter>
   )
 }

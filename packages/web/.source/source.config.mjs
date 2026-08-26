@@ -50,28 +50,42 @@ var cliDocs = defineDocs({
     schema: externalDocsSchema
   }
 });
+var guideSchema = pageSchema.extend({
+  date: z.string().optional(),
+  author: z.string().optional(),
+  category: z.enum(["product", "tutorial", "architecture", "use-case", "release"]).optional(),
+  tags: z.array(z.string()).optional(),
+  excerpt: z.string().optional(),
+  level: z.enum(["beginner", "intermediate", "deep-dive"]).optional(),
+  path: z.enum([
+    "start-here",
+    "first-workflow",
+    "core-internals",
+    "advanced-operations",
+    "migration"
+  ]).optional(),
+  order: z.number().optional(),
+  concepts: z.array(z.string()).optional(),
+  prerequisites: z.array(z.string()).optional(),
+  outcome: z.string().optional(),
+  diagramType: z.string().optional()
+});
 var blog = defineDocs({
   dir: "content/blog",
   docs: {
-    schema: pageSchema.extend({
-      date: z.string().optional(),
-      author: z.string().optional(),
-      category: z.enum(["product", "tutorial", "architecture", "use-case", "release"]).optional(),
-      tags: z.array(z.string()).optional(),
-      excerpt: z.string().optional(),
-      level: z.enum(["beginner", "intermediate", "deep-dive"]).optional(),
-      path: z.enum([
-        "start-here",
-        "first-workflow",
-        "core-internals",
-        "advanced-operations",
-        "migration"
-      ]).optional(),
-      order: z.number().optional(),
-      concepts: z.array(z.string()).optional(),
-      prerequisites: z.array(z.string()).optional(),
-      outcome: z.string().optional(),
-      diagramType: z.string().optional()
+    schema: guideSchema
+  }
+});
+var library = defineDocs({
+  dir: "content/library",
+  docs: {
+    schema: guideSchema.extend({
+      knowledgeCheck: z.object({
+        question: z.string(),
+        options: z.array(z.string()).min(2),
+        answer: z.number().int().nonnegative(),
+        explanation: z.string()
+      })
     })
   }
 });
@@ -90,5 +104,6 @@ var source_config_default = defineConfig({
 export {
   blog,
   cliDocs,
-  source_config_default as default
+  source_config_default as default,
+  library
 };

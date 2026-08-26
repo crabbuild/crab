@@ -8,11 +8,19 @@ tags: ["beginner", "comparison", "git-lfs"]
 excerpt: "Both keep large bytes out of normal Git blobs. The important difference is what gets transferred and who owns the data path."
 level: "beginner"
 path: "start-here"
-order: 3
+order: 2
 concepts: ["Git LFS", "comparison", "serverless git"]
 prerequisites: ["What is Crab, and when should you use it?"]
 outcome: "Choose between Crab and Git LFS using repository and operations constraints."
 diagramType: "Comparison flow"
+knowledgeCheck:
+  question: "An 8 GB model changes by 500 MB of reusable byte regions. What difference should you measure?"
+  options:
+    - "Both systems always upload exactly 500 MB"
+    - "Git LFS addresses the new whole-file object; Crab can upload only unproven chunks"
+    - "Git LFS rewrites Git history while Crab preserves it"
+  answer: 1
+  explanation: "LFS identifies a complete file object. Crab identifies reusable chunks inside versions, subject to the actual encoded bytes."
 meta:
   contentType: "Conceptual"
   goal: "Help readers choose a large-file architecture without treating either option as universally better."
@@ -182,4 +190,4 @@ Choose **a pilot** when files are compressed, encrypted, or regenerated. Their e
   reuse, transfer, checkout, and operating model you will pay for every day.
 </TakeawayBox>
 
-If Crab fits, continue with [How do you set up a Crab repository?](/blog/getting-started-crab). If you already use LFS, read [How do you move a Git LFS repository to Crab?](/blog/git-lfs-compatibility-layer) before changing history.
+If Crab fits, continue with [How do you set up a Crab repository?](/library/getting-started-crab). If you already use LFS, read [How do you move a Git LFS repository to Crab?](/library/git-lfs-compatibility-layer) before changing history.

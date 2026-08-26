@@ -1,4 +1,4 @@
-export interface BlogPostMeta {
+export interface LibraryGuideMeta {
   slug: string
   title: string
   description: string
@@ -11,25 +11,33 @@ export interface BlogPostMeta {
   category: "Product" | "Tutorial" | "Architecture" | "Use Case" | "Release"
   tags: string[]
   readingTimeMinutes: number
-  level: BlogPostLevel
-  path: BlogLearningPathKey
+  level: LibraryGuideLevel
+  path: LibraryPathKey
   pathOrder: number
   concepts: string[]
   prerequisites: string[]
   outcome: string
   diagramType?: string
+  knowledgeCheck: KnowledgeCheckData
 }
 
-export type BlogPostLevel = "Beginner" | "Intermediate" | "Deep Dive"
+export interface KnowledgeCheckData {
+  question: string
+  options: string[]
+  answer: number
+  explanation: string
+}
 
-export type BlogLearningPathKey =
+export type LibraryGuideLevel = "Beginner" | "Intermediate" | "Deep Dive"
+
+export type LibraryPathKey =
   | "start-here"
   | "first-workflow"
   | "core-internals"
   | "advanced-operations"
 
-export interface BlogLearningPath {
-  key: BlogLearningPathKey
+export interface LibraryPath {
+  key: LibraryPathKey
   label: string
   shortLabel: string
   description: string
@@ -37,7 +45,7 @@ export interface BlogLearningPath {
   order: number
 }
 
-export const BLOG_LEARNING_PATHS: BlogLearningPath[] = [
+export const LIBRARY_PATHS: LibraryPath[] = [
   {
     key: "start-here",
     label: "Start Here",
@@ -76,36 +84,33 @@ export const BLOG_LEARNING_PATHS: BlogLearningPath[] = [
   },
 ]
 
-export const BLOG_LEVELS: BlogPostLevel[] = [
+export const LIBRARY_LEVELS: LibraryGuideLevel[] = [
   "Beginner",
   "Intermediate",
   "Deep Dive",
 ]
 
-export function getLearningPath(key: BlogLearningPathKey): BlogLearningPath {
-  return (
-    BLOG_LEARNING_PATHS.find((path) => path.key === key) ??
-    BLOG_LEARNING_PATHS[0]
-  )
+export function getLibraryPath(key: LibraryPathKey): LibraryPath {
+  return LIBRARY_PATHS.find((path) => path.key === key) ?? LIBRARY_PATHS[0]
 }
 
-export function getPathPosts(
-  path: BlogLearningPathKey,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+export function getPathGuides(
+  path: LibraryPathKey,
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   return posts
     .filter((post) => post.path === path)
     .sort((a, b) => a.pathOrder - b.pathOrder)
 }
 
-export function getAdjacentPathPosts(
-  post: BlogPostMeta,
-  posts: BlogPostMeta[]
+export function getAdjacentPathGuides(
+  post: LibraryGuideMeta,
+  posts: LibraryGuideMeta[]
 ): {
-  previous?: BlogPostMeta
-  next?: BlogPostMeta
+  previous?: LibraryGuideMeta
+  next?: LibraryGuideMeta
 } {
-  const pathPosts = getPathPosts(post.path, posts)
+  const pathPosts = getPathGuides(post.path, posts)
   const index = pathPosts.findIndex((candidate) => candidate.slug === post.slug)
 
   if (index < 0) return {}
@@ -130,8 +135,8 @@ export function calculateReadingTime(wordCount: number): number {
  */
 export function filterByCategory(
   category: string,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   if (category === "All") return posts
   return posts.filter((post) => post.category === category)
 }
@@ -141,8 +146,8 @@ export function filterByCategory(
  */
 export function filterByTag(
   tag: string | undefined,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   if (!tag) return posts
   const normalized = tag.toLowerCase()
   return posts.filter(
@@ -158,8 +163,8 @@ export function filterByTag(
  */
 export function searchPosts(
   query: string,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   const trimmed = query.trim().toLowerCase()
   if (trimmed === "") return posts
   return posts.filter(
@@ -168,7 +173,7 @@ export function searchPosts(
       post.description.toLowerCase().includes(trimmed) ||
       post.outcome.toLowerCase().includes(trimmed) ||
       post.level.toLowerCase().includes(trimmed) ||
-      getLearningPath(post.path).label.toLowerCase().includes(trimmed) ||
+      getLibraryPath(post.path).label.toLowerCase().includes(trimmed) ||
       post.concepts.some((concept) =>
         concept.toLowerCase().includes(trimmed)
       ) ||
@@ -178,16 +183,16 @@ export function searchPosts(
 
 export function filterByPath(
   path: string,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   if (path === "All") return posts
   return posts.filter((post) => post.path === path)
 }
 
 export function filterByLevel(
   level: string,
-  posts: BlogPostMeta[]
-): BlogPostMeta[] {
+  posts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   if (level === "All") return posts
   return posts.filter((post) => post.level === level)
 }
@@ -197,10 +202,10 @@ export function filterByLevel(
  * given post. Prefer the same learning path and shared concepts, then
  * fall back to category and recency.
  */
-export function getRelatedPosts(
-  post: BlogPostMeta,
-  allPosts: BlogPostMeta[]
-): BlogPostMeta[] {
+export function getRelatedGuides(
+  post: LibraryGuideMeta,
+  allPosts: LibraryGuideMeta[]
+): LibraryGuideMeta[] {
   return allPosts
     .filter((p) => p.slug !== post.slug)
     .map((candidate) => {

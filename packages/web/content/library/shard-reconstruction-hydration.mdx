@@ -13,6 +13,14 @@ concepts: ["hydration", "shard", "xorb", "verification"]
 prerequisites: ["How does Crab avoid repeated object-store reads?"]
 outcome: "Trace one recipe from pointer to verified working-tree file and identify where failures stop it."
 diagramType: "Interactive reconstruction workbench"
+knowledgeCheck:
+  question: "When may hydration replace the pointer in the working tree?"
+  options:
+    - "After the first chunk arrives"
+    - "After the complete file matches the pointer's expected hash and size"
+    - "As soon as a shard contains any matching term"
+  answer: 1
+  explanation: "Crab assembles into temporary output and replaces the pointer atomically only after complete identity verification."
 meta:
   contentType: "Conceptual"
   goal: "Explain reconstruction through one small repeated-chunk recipe."
@@ -194,4 +202,4 @@ A warm cache removes remote work, not ordered writes or final hashing. If cold a
   replace the pointer only after the complete identity matches.
 </TakeawayBox>
 
-For the complete code-and-data story, continue with [How does Crab keep one history across two data paths?](/blog/crab-interpreted-one-history-two-data-paths).
+For the complete code-and-data story, continue with [How does Crab keep one history across two data paths?](/library/crab-interpreted-one-history-two-data-paths).

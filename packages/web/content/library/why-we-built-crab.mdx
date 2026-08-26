@@ -8,11 +8,19 @@ tags: ["beginner", "motivation", "git"]
 excerpt: "Large binaries turn every version into transfer and storage work. Crab keeps their identity in Git and their bytes in object storage."
 level: "beginner"
 path: "start-here"
-order: 2
+order: 1
 concepts: ["large files", "git limits", "serverless architecture"]
 prerequisites: ["What is Crab, and when should you use it?"]
 outcome: "Explain the scaling problem Crab is designed to solve and the tradeoffs of its architecture."
 diagramType: "Interactive cost and failure model"
+knowledgeCheck:
+  question: "Why does keeping many large binary versions directly in Git become expensive?"
+  options:
+    - "Reachable history makes clones, mirrors, scans, and storage account for each version"
+    - "Git refuses to hash files larger than 1 GB"
+    - "Binary files cannot belong to commits"
+  answer: 0
+  explanation: "Git can store large binaries, but reachable whole-file history amplifies transfer, storage, backup, and maintenance work."
 meta:
   contentType: "Conceptual"
   goal: "Explain why large binary history needs a different data path."
@@ -155,4 +163,4 @@ A few stable release archives may work fine in Git LFS or plain object storage. 
 
 We built Crab for the middle ground: keep Git's history and workflow, but stop making every clone carry every large-file version.
 
-Next, [compare Crab and Git LFS using your repository's constraints](/blog/crab-vs-git-lfs).
+Next, [compare Crab and Git LFS using your repository's constraints](/library/crab-vs-git-lfs).

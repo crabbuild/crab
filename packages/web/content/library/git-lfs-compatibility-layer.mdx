@@ -17,6 +17,14 @@ prerequisites:
   ]
 outcome: "Choose, test, and verify either an LFS-compatible bridge or a native Crab conversion."
 diagramType: "Interactive migration lab"
+knowledgeCheck:
+  question: "Which migration path keeps existing LFS pointer blobs and commit IDs unchanged?"
+  options:
+    - "Install Crab as the LFS transfer agent"
+    - "Run `migrate export --to-crab` across all refs"
+    - "Rewrite `.gitattributes` in every historical commit"
+  answer: 0
+  explanation: "The transfer bridge changes routing and configuration. Native conversion changes pointer blobs and therefore rewritten commit identities."
 meta:
   contentType: "How-to"
   goal: "Show exactly which identities and data structures change on each migration path."

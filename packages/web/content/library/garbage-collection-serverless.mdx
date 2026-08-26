@@ -13,6 +13,14 @@ concepts: ["garbage collection", "mark sweep", "grace period", "recovery roots"]
 prerequisites: ["How does Crab keep concurrent pushes consistent?"]
 outcome: "Preview and run repository-scoped GC without confusing branch deletion with immediate object deletion."
 diagramType: "GC lifecycle"
+knowledgeCheck:
+  question: "A branch was deleted. When may Crab delete an object that branch used?"
+  options:
+    - "Immediately after the ref disappears"
+    - "Only after no retained root reaches it and the grace window has elapsed"
+    - "As soon as another branch uploads a newer version"
+  answer: 1
+  explanation: "Branch deletion changes one root. GC must prove global unreachability across retained roots and honor the protection window."
 meta:
   contentType: "Conceptual"
   goal: "Explain which roots protect data and how to operate repository GC safely."
@@ -217,4 +225,4 @@ only durable bytes behind a retained pointer.
   Unknown evidence keeps the object.
 </TakeawayBox>
 
-For exact flags and structured output, see the [`crab gc`](/docs/cli/reference/crab-gc) reference. Next, [build a cost model before changing storage classes](/blog/cost-optimization-s3-storage).
+For exact flags and structured output, see the [`crab gc`](/docs/cli/reference/crab-gc) reference. Next, [build a cost model before changing storage classes](/library/cost-optimization-s3-storage).

@@ -13,6 +13,14 @@ concepts: ["deduplication", "chunking", "xorb", "BLAKE3"]
 prerequisites: ["How does Crab connect to Git?"]
 outcome: "Predict which bytes a changed file can reuse and which evidence makes that reuse safe."
 diagramType: "Interactive chunk laboratory"
+knowledgeCheck:
+  question: "When is it safe for Crab to skip uploading a chunk?"
+  options:
+    - "When the local cache has a file with the same name"
+    - "When two files have the same size"
+    - "When canonical evidence proves that chunk identity maps to readable remote xorb bytes"
+  answer: 2
+  explanation: "Deduplication requires remote proof, not a local guess. Another client must be able to resolve the reused chunk from durable storage."
 meta:
   contentType: "Conceptual"
   goal: "Explain Crab's reuse unit and the proof required to skip an upload."
@@ -179,4 +187,4 @@ Keep cold hydration separate. Deduplication reduces new storage and push transfe
   it cannot prove that identical bytes already have a durable remote location.
 </TakeawayBox>
 
-Next, [trace how those proven objects become visible through one ref transaction](/blog/push-pipeline-14-steps).
+Next, [trace how those proven objects become visible through one ref transaction](/library/push-pipeline-14-steps).

@@ -13,6 +13,14 @@ concepts: ["Git interpretability", "pointer blobs", "xorbs", "shards", "ref jour
 prerequisites: ["How does Crab rebuild a file from chunks?"]
 outcome: "Operate a mixed repository and explain how its two data paths remain one atomic Git update."
 diagramType: "Interactive Git transaction traces"
+knowledgeCheck:
+  question: "How can source code and a large model belong to one Crab commit?"
+  options:
+    - "They use separate branches that synchronize later"
+    - "Git stores the source blob and a model pointer in one tree while Crab stores the model data"
+    - "The complete model is copied into every Git commit"
+  answer: 1
+  explanation: "One Git tree closes over ordinary blobs and Crab pointers. The data paths differ, but the visible history stays unified."
 meta:
   contentType: "Conceptual"
   goal: "Unify Crab's user workflow and architecture around one concrete mixed repository."

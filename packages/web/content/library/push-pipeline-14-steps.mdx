@@ -13,6 +13,14 @@ concepts: ["push", "staging", "dedup upload", "atomic refs"]
 prerequisites: ["How does Crab avoid storing duplicate data?"]
 outcome: "Explain what Crab uploads, what it proves, and when a pushed commit becomes visible."
 diagramType: "Interactive transaction trace"
+knowledgeCheck:
+  question: "At what point does a prepared Crab push become visible to other readers?"
+  options:
+    - "When the first xorb upload starts"
+    - "When the local commit is created"
+    - "When the final ref transaction commits after dependency proof"
+  answer: 2
+  explanation: "Immutable data and metadata are prepared first. The ref transaction is the single visibility boundary."
 meta:
   contentType: "Conceptual"
   goal: "Make the push transaction understandable as preparation, proof, and publication."
@@ -195,4 +203,4 @@ For a concurrency test, start two writers from `A`. One may publish. The other m
   a branch that points at missing data.
 </TakeawayBox>
 
-Next, [see how local caches reduce the reads that prepare and verify these stages](/blog/multi-layer-caching).
+Next, [see how local caches reduce the reads that prepare and verify these stages](/library/multi-layer-caching).

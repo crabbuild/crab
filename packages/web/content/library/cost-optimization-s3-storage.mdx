@@ -13,6 +13,14 @@ concepts: ["cost model", "lifecycle rules", "xorb tiering", "request batching"]
 prerequisites: ["How does Crab reclaim unreferenced data safely?"]
 outcome: "Create a provider-aware cost plan without archiving metadata or relying on stale price examples."
 diagramType: "Storage lifecycle"
+knowledgeCheck:
+  question: "What should you do before moving Crab objects to a cheaper storage class?"
+  options:
+    - "Archive every old object immediately"
+    - "Measure access, retrieval, requests, and transfer, then map each cost to a control"
+    - "Move shards and refs to the coldest class first"
+  answer: 1
+  explanation: "Storage price is only one bill term. Measure the workload first, and keep repository metadata readable."
 meta:
   contentType: "How-to"
   goal: "Connect each object-storage cost term to a measurable Crab control."
