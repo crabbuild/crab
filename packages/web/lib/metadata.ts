@@ -14,6 +14,7 @@ interface PageMetadataOptions {
   article?: {
     publishedTime: string
     authors: string[]
+    section?: string
     tags?: string[]
   }
   image?: {
@@ -59,6 +60,7 @@ export function createPageMetadata({
           type: "article",
           publishedTime: article.publishedTime,
           authors: article.authors,
+          section: article.section,
           tags: article.tags,
         }
       : { ...sharedOpenGraph, type: "website" },

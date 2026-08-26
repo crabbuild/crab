@@ -4,6 +4,8 @@ import { getMDXComponents } from '@/mdx-components';
 import { notFound, permanentRedirect } from 'next/navigation';
 import type { Metadata } from 'next';
 import { createPageMetadata } from '@/lib/metadata';
+import { StructuredData } from '@/components/structured-data';
+import { createBreadcrumbStructuredData } from '@/lib/structured-data';
 
 export default async function CliDocPage({
   params,
@@ -20,13 +22,20 @@ export default async function CliDocPage({
   if (!page) notFound();
 
   const MDX = page.data.body;
+  const structuredData = createBreadcrumbStructuredData([
+    { name: 'Documentation', path: '/docs' },
+    { name: page.data.title ?? 'Crab CLI Documentation' },
+  ]);
 
   return (
-    <DocsPage toc={page.data.toc} id="main-content">
-      <DocsBody>
-        <MDX components={getMDXComponents({})} />
-      </DocsBody>
-    </DocsPage>
+    <>
+      <StructuredData data={structuredData} />
+      <DocsPage toc={page.data.toc} id="main-content">
+        <DocsBody>
+          <MDX components={getMDXComponents({})} />
+        </DocsBody>
+      </DocsPage>
+    </>
   );
 }
 

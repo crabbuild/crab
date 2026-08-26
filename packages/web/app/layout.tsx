@@ -5,6 +5,7 @@ import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { RootProvider } from "fumadocs-ui/provider/next"
 import { SkipNavLink } from "@/components/navigation/skip-nav-link"
+import { StructuredData } from "@/components/structured-data"
 import {
   CRAB_LOGO_PATH,
   SITE_DESCRIPTION,
@@ -121,10 +122,7 @@ export default function RootLayout({
       )}
     >
       <body>
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
-        />
+        <StructuredData data={structuredData} />
         <SkipNavLink />
         <RootProvider>
           <ThemeProvider>{children}</ThemeProvider>
