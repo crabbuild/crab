@@ -87,12 +87,13 @@ objects directly in cloud object storage alongside xorbs.**
 
 ## 1. Overview
 
-Crab provides a Crab-managed LFS implementation without requiring a
-centralized LFS server. The standard `git-lfs` client uses an HTTP Batch API
-to negotiate upload/download URLs with a server. Crab's currently shipped
-interoperability path instead uses the Git LFS standalone custom transfer
-agent, so it requires repository-scoped configuration and direct cloud
-authorization. Crab does not currently expose the standard HTTP LFS API.
+Crab provides a Crab-managed LFS implementation with both direct object-store
+and standard HTTP gateway profiles. The standard `git-lfs` client uses an HTTP
+Batch API to negotiate upload/download URLs with a server. Crab's CLI also
+supports the Git LFS standalone custom transfer agent, which requires
+repository-scoped configuration and direct cloud authorization. The separate
+`crab-lfs-server` package exposes the standard HTTP Batch, basic-transfer,
+verify, byte-range, and File Locking APIs for unmodified Git LFS clients.
 
 The supported profiles are:
 
@@ -101,11 +102,13 @@ The supported profiles are:
 | `crab-native` | Crab filters, porcelain, and direct object storage | Supported |
 | `git-lfs-standalone-direct` | Git LFS custom transfer agent with direct Crab storage access | Supported for qualified providers |
 | `git-lfs-standalone-managed` | Custom agent with short-lived repository grants | Planned; not shipped |
-| `git-lfs-http` | Standard Batch/basic/File Locking HTTPS API | Planned; not shipped |
+| `git-lfs-http` | Standard Batch/basic/File Locking HTTPS API | Implemented and qualified against Git LFS 3.7.1 + RustFS; provider matrix remains required |
 
-“Compatible” below refers to the named standalone-direct profile unless the
-profile is stated explicitly. No section should describe the current product
-as interchangeable with an arbitrary Git LFS HTTP server.
+“Compatible” below refers to the named profile. The CLI sections primarily
+describe the standalone-direct profile; the HTTP gateway is the standard
+unmodified-client interoperability boundary. Neither profile claims support
+for arbitrary custom, managed, SSH, or TUS adapters without separate
+qualification.
 
 Crab operates in two LFS modes simultaneously:
 
@@ -769,15 +772,15 @@ before Crab deletes the local copy; missing remote objects are kept locally.
 
 | Aspect | Official git-lfs | crab LFS |
 |--------|-----------------|------------|
-| **Server required** | Yes (LFS server) | No (direct object storage) |
-| **Transport** | HTTP Batch API | Direct S3/GCS/Azure PUT/GET |
-| **Transfer protocol** | HTTP + custom transfer agents | Standalone transfer agent (JSON lines) |
+| **Server required** | Yes (LFS server) | No for native/direct; yes for the HTTP gateway |
+| **Transport** | HTTP Batch API | Direct S3/GCS/Azure PUT/GET, or HTTP Batch/basic/locking via `crab-lfs-server` |
+| **Transfer protocol** | HTTP + custom transfer agents | Standalone JSON lines, or standard HTTP basic transfer |
 | **Pointer format** | SHA-256 LFS pointer | SHA-256 LFS pointer (compatible) |
 | **Hashing** | SHA-256 only | SHA-256 (LFS) + Blake3 (crab native) |
 | **Dedup** | None (file-level) | CDC chunking for crab-tracked files |
 | **Locking** | Server-side lock API | CAS on object storage |
 | **Concurrency** | Server-controlled | Client-side semaphore (default 8) |
-| **Resume** | TUS protocol (server-dependent) | Multipart upload + range-request download |
+| **Resume** | TUS protocol (server-dependent) | Multipart upload + range-request download in the qualified HTTP gateway |
 | **Mixed formats** | LFS only | LFS + crab pointers in same repo |
 | **Migration** | import/export/info | import/export/info + crab↔LFS conversion |
 

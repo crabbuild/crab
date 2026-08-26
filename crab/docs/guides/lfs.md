@@ -11,12 +11,13 @@ crab lfs <subcommand> [OPTIONS]
 ## Description
 
 `crab lfs` provides Crab-managed LFS operations against cloud object storage
-without a centralized LFS server. The supported Git LFS interoperability
-profile is the repository-scoped standalone transfer agent, which requires
-Git LFS to be configured to invoke Crab and requires Crab to have access to
-the selected object store. Crab does not currently provide the standard Git
-LFS HTTP Batch or File Locking service, so it cannot replace an arbitrary Git
-LFS HTTP server.
+without a centralized LFS server. The CLI supports the repository-scoped
+standalone transfer-agent profile, which requires Git LFS to be configured to
+invoke Crab and requires Crab to have access to the selected object store.
+For unmodified Git LFS clients, the separate `crab-lfs-server` package
+provides the standard HTTP Batch, basic-transfer, verify, byte-range, and File
+Locking APIs. That gateway is qualified for the standard HTTP profile; custom
+managed, SSH, and TUS transfer adapters remain separate compatibility work.
 
 The core transfer flow mirrors the supported standalone Git LFS profile:
 clean/smudge, custom transfer-agent,
