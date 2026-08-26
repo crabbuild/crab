@@ -18,6 +18,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -516,6 +517,8 @@ class Qualification:
         )
         self.enable_lock_verification(self.conflict, "conflict")
         conflict_path = self.conflict / lock_path
+        if conflict_path.exists():
+            conflict_path.chmod(conflict_path.stat().st_mode | stat.S_IWRITE)
         write_payload(
             conflict_path,
             self.args.min_size,
