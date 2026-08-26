@@ -23,8 +23,8 @@
 - **Category**: performance, correctness, architecture, operations
 - **Planned at**: commit `aa150868`, 2026-08-23
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
-- **Implementation PR**: https://github.com/crabbuild/crab-oss/pull/75 (merged before
-  the lazy-catalog follow-up commit)
+- **Implementation PR**: https://github.com/crabbuild/crab-oss/pull/75 (merged)
+- **Large-repository follow-up**: https://github.com/crabbuild/crab-oss/pull/87
 
 ### 2026-08-25 execution update
 
