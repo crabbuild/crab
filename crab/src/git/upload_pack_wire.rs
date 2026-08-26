@@ -31,6 +31,7 @@ use tokio::io::{
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result};
+use crate::storage::retry::{RetryClass, retry_class};
 
 const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
@@ -337,22 +338,66 @@ async fn acquire_read_admission(
         if cancellation.is_cancelled() {
             return Err(CrabError::Cancelled);
         }
-        if ticket.try_admit().await.map_err(CrabError::from)? {
-            let waited_ms = started.elapsed().as_millis();
-            tracing::debug!(
-                waited_ms,
-                capacity = crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
-                "upload-pack read admission acquired"
-            );
-            return Ok(ticket);
-        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(CrabError::Throttled {
                 retry_after: Some(READ_ADMISSION_RETRY_CAP),
             });
         }
-        let delay = read_admission_retry_delay(attempt).min(remaining);
+
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = tokio::time::timeout(remaining, ticket.try_admit()) => match result {
+                Ok(result) => result.map_err(CrabError::from),
+                Err(_) => Err(CrabError::Throttled {
+                    retry_after: Some(READ_ADMISSION_RETRY_CAP),
+                }),
+            },
+        };
+        match result {
+            Ok(true) => {
+                let waited_ms = started.elapsed().as_millis();
+                tracing::debug!(
+                    waited_ms,
+                    capacity = crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+                    "upload-pack read admission acquired"
+                );
+                return Ok(ticket);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let retry_after = match retry_class(&error) {
+                    RetryClass::Transient => None,
+                    RetryClass::Throttled { retry_after } => retry_after,
+                    _ => return Err(error),
+                };
+                tracing::debug!(
+                    error = %error,
+                    attempt,
+                    "upload-pack read admission probe will retry"
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                let delay = read_admission_retry_delay(attempt, retry_after).min(remaining);
+                attempt = attempt.saturating_add(1);
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                }
+                continue;
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CrabError::Throttled {
+                retry_after: Some(READ_ADMISSION_RETRY_CAP),
+            });
+        }
+        let delay = read_admission_retry_delay(attempt, None).min(remaining);
         attempt = attempt.saturating_add(1);
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -361,13 +406,17 @@ async fn acquire_read_admission(
     }
 }
 
-fn read_admission_retry_delay(attempt: usize) -> Duration {
+fn read_admission_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
     let multiplier = 1_u32.checked_shl(attempt.min(6) as u32).unwrap_or(u32::MAX);
     let bound = READ_ADMISSION_RETRY_BASE
         .saturating_mul(multiplier)
         .min(READ_ADMISSION_RETRY_CAP);
     let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
-    Duration::from_nanos(rand::rng().random_range(0..=bound_nanos))
+    retry_after
+        .unwrap_or_default()
+        .saturating_add(Duration::from_nanos(
+            rand::rng().random_range(0..=bound_nanos),
+        ))
 }
 
 async fn serve_with_read_admission<R, W>(
@@ -1807,6 +1856,23 @@ mod tests {
             options.operation_limits().max_response_bytes
                 < options.operation_limits().max_inflated_bytes
         );
+    }
+
+    #[test]
+    fn read_admission_retry_delay_honors_provider_hint() {
+        let hint = Duration::from_secs(2);
+
+        let delay = read_admission_retry_delay(0, Some(hint));
+
+        assert!(delay >= hint);
+        assert!(delay <= hint.saturating_add(READ_ADMISSION_RETRY_BASE));
+    }
+
+    #[test]
+    fn read_admission_retry_delay_is_capped_without_provider_hint() {
+        let delay = read_admission_retry_delay(usize::MAX, None);
+
+        assert!(delay <= READ_ADMISSION_RETRY_CAP);
     }
 
     #[tokio::test]

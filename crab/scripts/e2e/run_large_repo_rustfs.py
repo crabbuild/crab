@@ -50,7 +50,7 @@ CRAB_DIR = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
 START_RUSTFS = CRAB_DIR / "scripts" / "start-rustfs.sh"
 QUALIFICATION_DEBUG_LOG = (
-    "crab=info,crab_remote_git=info,"
+    "crab=debug,crab_coordination=debug,crab_remote_git=info,"
     "crab_read::upload_pack=debug,"
     "crab_metadata::git_object_locator::reader=debug"
 )
