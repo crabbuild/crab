@@ -28,7 +28,10 @@ object-store requests.
 
 For deployments mounted below a reverse-proxy prefix, the equivalent
 `/lfs/<repository>/info/lfs` form is also accepted. `/healthz` is an
-unauthenticated process-liveness endpoint.
+unauthenticated process-liveness endpoint. `/readyz` checks that the upload
+spool directory remains available, and `/metrics` exposes process-wide
+Prometheus counters without repository or path labels; both are unauthenticated
+operational endpoints.
 
 Repository names are normalized by removing a final .git suffix, matching
 Git LFS server discovery. The origin URL prefix and normalized repository

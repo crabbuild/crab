@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
-use axum::middleware;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
@@ -47,6 +47,8 @@ pub struct AppState {
     pub upload_permits: Arc<tokio::sync::Semaphore>,
     /// Bounds concurrent streamed downloads for the lifetime of each body.
     pub download_permits: Arc<tokio::sync::Semaphore>,
+    /// Process-local request and saturation counters.
+    pub metrics: Arc<crate::metrics::LfsMetrics>,
 }
 
 impl AppState {
@@ -64,6 +66,8 @@ impl AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(health_response))
+        .route("/readyz", get(readiness_response))
+        .route("/metrics", get(metrics_response))
         .route("/lfs/{*path}", any(dispatch))
         .route("/{*path}", any(dispatch))
         .layer(middleware::from_fn_with_state(
@@ -81,6 +85,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .timeout(state.config.request_timeout)
                 .layer(TraceLayer::new_for_http().make_span_with(lfs_request_span)),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
         .with_state(state)
 }
 
@@ -94,6 +102,49 @@ fn lfs_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
 
 async fn health_response() -> StatusCode {
     StatusCode::OK
+}
+
+async fn readiness_response(State(state): State<Arc<AppState>>) -> StatusCode {
+    match tokio::fs::metadata(&state.config.spool_dir).await {
+        Ok(metadata) if metadata.is_dir() => StatusCode::OK,
+        Ok(_) | Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+async fn metrics_response(State(state): State<Arc<AppState>>) -> Response {
+    let mut response = Response::new(Body::from(state.metrics.render()));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    response
+}
+
+async fn metrics_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let request_bytes = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    state.metrics.request_started();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let response_bytes = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    state.metrics.request_finished(
+        response.status(),
+        started.elapsed(),
+        request_bytes,
+        response_bytes,
+    );
+    response
 }
 
 async fn handle_middleware_error(error: tower::BoxError) -> impl IntoResponse {
@@ -1780,6 +1831,7 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             upload_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             download_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            metrics: Arc::new(crate::metrics::LfsMetrics::default()),
         });
         (build_router(state), spool)
     }
@@ -1808,6 +1860,36 @@ mod tests {
             .expect("discovery body");
         let discovery: serde_json::Value = serde_json::from_slice(&body).expect("discovery JSON");
         assert_eq!(discovery["href"], "/team/model.git/info/lfs");
+    }
+
+    #[tokio::test]
+    async fn readiness_and_metrics_are_public_operational_endpoints() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_owned(), *blake3::hash(b"secret").as_bytes());
+        let (app, _spool) = app_with_action_secret_and_auth(
+            Some("test action secret"),
+            crate::auth::AuthConfig::Basic { users },
+        );
+
+        let readiness = request(&app, Method::GET, "/readyz", Body::empty()).await;
+        assert_eq!(readiness.status(), StatusCode::OK);
+
+        let metrics = request(&app, Method::GET, "/metrics", Body::empty()).await;
+        assert_eq!(metrics.status(), StatusCode::OK);
+        assert_eq!(
+            metrics.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static(
+                "text/plain; version=0.0.4; charset=utf-8"
+            ))
+        );
+        let body = to_bytes(metrics.into_body(), MAX_SMALL_BODY_BYTES)
+            .await
+            .expect("metrics body");
+        assert!(
+            String::from_utf8(body.to_vec())
+                .expect("metrics text")
+                .contains("crab_lfs_http_requests_total")
+        );
     }
 
     #[tokio::test]

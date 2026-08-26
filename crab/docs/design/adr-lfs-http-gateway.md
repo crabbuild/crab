@@ -17,7 +17,9 @@ discovery, Batch, the basic transfer adapter, upload verification, byte-range
 downloads, and File Locking. A final .git on the repository URL is removed for
 storage routing, and the origin URL prefix plus repository name is the only
 object namespace the request can address. `/healthz` is an unauthenticated
-process-liveness endpoint.
+process-liveness endpoint. `/readyz` checks the upload spool directory, and
+`/metrics` exposes bounded-cardinality process counters as unauthenticated
+operational endpoints.
 
 ## Authentication and authorization
 
@@ -59,7 +61,9 @@ transfers.
 The gateway applies a bounded Batch body, per-object size limit, request
 timeout, concurrent request limit, upload concurrency limit, streamed-download
 concurrency bound, temporary disk spooling, and bounded lock-list page
-retention. Lock creation is exclusive, and unlock CAS operations are bound to
+retention. The gateway exports process-wide request/status/byte counters
+without repository or path labels, and readiness detects a missing spool
+directory. Lock creation is exclusive, and unlock CAS operations are bound to
 the requested lock ID. The origin URL is built only through crab-storage.
 Native mTLS or an explicitly configured trusted proxy is required for mTLS
 identity; an untrusted `x-client-cn` header is never accepted. Metrics,

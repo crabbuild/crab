@@ -140,7 +140,7 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path() == "/healthz" {
+    if matches!(request.uri().path(), "/healthz" | "/readyz" | "/metrics") {
         return next.run(request).await;
     }
     let signed_action_candidate = state.config.action_secret.is_some()

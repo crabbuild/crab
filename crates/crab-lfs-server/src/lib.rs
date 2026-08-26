@@ -8,9 +8,11 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod http;
+pub mod metrics;
 pub mod server;
 
 pub use auth::{AuthConfig, AuthPolicy, ClientIdentity, PolicyRule, TlsClientIdentity};
 pub use config::{ActionSecret, LfsServerConfig, TlsConfig};
 pub use error::{LfsServerError, Result};
+pub use metrics::LfsMetrics;
 pub use server::{PreparedServer, ServerStartupOptions, prepare_server, run_server};

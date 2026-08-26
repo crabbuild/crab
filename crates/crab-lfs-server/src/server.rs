@@ -66,6 +66,7 @@ pub fn prepare_server(
         download_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::http::MAX_CONCURRENT_REQUESTS,
         )),
+        metrics: Arc::new(crate::metrics::LfsMetrics::default()),
         config: Arc::new(config),
         origin,
         policy,

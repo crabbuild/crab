@@ -36,7 +36,9 @@ Mount `config/server-config.toml` as `/etc/crab-lfs/config.toml` and
 `config/policy.example.yaml` as `/etc/crab-lfs/policy.yaml` after replacing
 the example principal and repository rules. Provide
 `CRAB_LFS_ACTION_SECRET` and provider credentials through the runtime secret
-mechanism. The image exposes port 8444 and reports liveness at `/healthz`.
+mechanism. The image exposes port 8444 and reports liveness at `/healthz`;
+use `/readyz` for the spool-volume readiness probe and scrape `/metrics` for
+Prometheus-compatible process counters.
 
 For a VM, install the `crab-lfs-server` binary, the example systemd unit, and
 the configuration under `/etc/crab-lfs`. Run the service as the dedicated

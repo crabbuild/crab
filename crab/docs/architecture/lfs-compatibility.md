@@ -30,6 +30,11 @@ profiles have separate client, authorization, and storage contracts. A
 passing claim names the profile, Git LFS version, provider, and qualification
 evidence rather than treating one profile as proof of all others.
 
+The HTTP gateway also exposes `/healthz` for process liveness, `/readyz` for
+upload-spool readiness, and `/metrics` for bounded-cardinality process
+counters. These operational endpoints are not part of the Git LFS protocol
+profile and do not expose repository or object-path labels.
+
 ## Two Operating Modes
 
 ### Native Mode
