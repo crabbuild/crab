@@ -53,17 +53,18 @@ planning, 72 ms response operation, and 4 ms pack generation), but the full
 clone helper still spent roughly 90 seconds before its first request because
 the old path opened the visibility dictionary twice. That report remains
 diagnostic evidence; the full-profile report below is the pre-lazy baseline,
-and a post-`cbe848f4` Kubernetes run is required before claiming the lazy
-startup SLO.
+and the post-`cbe848f4` run below proves the lazy startup path. The latency
+comparison remains open because the first post-lazy run was not isolated
+enough for a valid differential result.
 
 ### Current execution state
 
 The implementation work for Phases 1 through 5 is assembled on one integration
 branch so reviewers can inspect the complete generation-binding contract across
-push, read, maintenance, and GC. The committed full-profile qualification
-predates `cbe848f4` and remains a correctness baseline; the lazy-catalog
-performance qualification, repeatability, 10,000-push differential, fault,
-provider, concurrency, and rollout gates are still open.
+push, read, maintenance, and GC. The post-lazy full-profile qualification is
+now complete for one K8s/RustFS run and remains a single-run result; repeatability,
+the 10,000-push differential, fault, provider, concurrency, and rollout gates
+are still open.
 
 `local-k8s-final-04655f3b-1000-20260825` used Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated external RustFS, and the
@@ -76,10 +77,10 @@ RustFS prefix was cleaned. Correctness fingerprint:
 `7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
 
 The earlier 100-push smoke and pre-rebase 1,000-push reports remain useful
-historical baselines; the pre-lazy full-profile result above is the current
-correctness baseline. It must be repeated with the lazy-catalog binary before
-performance conclusions are promoted. Repeatability and the remaining
-large-team rollout gates are still open.
+historical baselines. The post-lazy run below is the current correctness
+baseline for this branch, but its push/clone comparison is explicitly invalid
+for performance promotion. Repeatability and the remaining large-team
+rollout gates are still open.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
@@ -147,7 +148,10 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
   shallow-fetch, promisor-fetch, and legacy remote-helper paths, removing the
   full OID dictionary materialization from normal helper admission;
 - catalog ordinal scan read-ahead and bounded fetch parallelism for dense
-  selected-object resolution.
+  selected-object resolution;
+- a large-batch locator scan policy that replaces tens of thousands of exact
+  OID point reads with one bounded, read-ahead scan while retaining the exact
+  lookup path for sparse or small requests.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;
@@ -177,9 +181,11 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
 
 Still required before the roadmap is DONE:
 
-- an independent repeatability full-profile report from the current lazy binary;
-- 1,000-push growth and latency comparison across multiple runs, not only the
-  completed pre-lazy baseline report;
+- an independent repeatability full-profile report from the current lazy binary
+  after the large-batch locator scan change;
+- a valid 1,000-push growth and latency comparison across isolated runs; the
+  current post-lazy comparison is invalid because push and clone medians drifted
+  by roughly 41% on the shared host;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
 - full shallow differential proof and the final response-pack SLO report. The
@@ -197,11 +203,15 @@ Still required before the roadmap is DONE:
   discovery remains incomplete and destructive bucket GC remains disabled.
   This diagnostic cannot be treated as harmless while claiming production
   readiness.
-- a post-`cbe848f4` Kubernetes qualification must prove that normal
-  protocol-v2 and legacy helper admission emits no
-  `catalog_materialization` event. The intentional O(N) owner repair/rebuild
-  path and migration/compaction paths still materialize the complete catalog;
-  their latency and memory budgets remain open;
+- the post-`cbe848f4` Kubernetes qualification proves that normal protocol-v2
+  and legacy helper admission emits no `catalog_materialization` event. The
+  intentional O(N) owner repair/rebuild path and migration/compaction paths
+  still materialize the complete catalog; their latency and memory budgets
+  remain open;
+- the post-lazy depth-1/10 planner measured 11,659/15,553 ms before the
+  large-batch scan change. Re-run those depths and require locator lookup-mode
+  telemetry to prove the new full-scan policy removes the point-read wave
+  without increasing full-clone or incremental-fetch latency;
 - catalog-filter planning currently resolves selected ordinals to OIDs and then
   performs kind lookups. A large blobless closure can therefore still approach
   a full locator scan even though helper startup is lazy. A fused ordinal-kind
@@ -1052,13 +1062,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | PRE-LAZY FULL PROFILE PASS; POST-LAZY RERUN/REPEATABILITY PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` (prefix cleaned) | `04655f3b` / binary `git_sha=04655f3b` | Full profile, 1,001 pushes, 22/22 checks, exact refs/fsck/sample/cleanup all pass for the pre-lazy baseline. The post-`cbe848f4` rerun, repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
-| 1 | IMPLEMENTED; RELEASE LIFECYCLE PASS; LAZY-PATH QUALIFICATION/SLO PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `04655f3b`; `01d588ea`; `cbe848f4` | Full-closure visibility planning is 70 ms; blobless planning is 2,203 ms on the pre-lazy baseline. The transition-bitmap growth regression is fixed, the released-shape/compatibility matrix passes, and the lazy ordinal path has focused source proof. Post-lazy K8s, provider, fault, and kind-lookup SLOs remain open |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Final inventory is 2 active packs with 1,263,723,813 bytes; cold/warm clones are 184,248/56,788 ms, blobless is 78,162 ms, and depth-1/10/100/1,000 are 32,842/43,552/145,423/201,211 ms. Reference-pack SLO, fanout, and provider evidence remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Owner convergence at checkpoints 1/10/100/1,000 was 100.821/209.100/403.914/1,993.181 s; the 1,000 checkpoint used six passes, ended at 2 packs, and peaked at 1.846 GB RSS. Artifact shape is bounded, but maintenance latency and memory remain large-team bottlenecks |
-| 4 | IMPLEMENTED; LAZY-PATH DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b`; `cbe848f4` | Pre-lazy depth-1/10/100/1,000 visibility planning was 12/17/316/502 ms, with 6,178/7,281/3/3 storage requests; incremental fetch at push 1/10/100/1,000 remained exact. Lazy-path replay, 10,000-pair differential, sustained response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | All acceleration checkpoints have valid generation receipts and current locator/visibility/graph artifacts; `repair_required` remains because bucket-registry discovery is incomplete. Interruption, 10,000-push, and GC matrix remain pending |
-| 6 | PARTIAL | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Current single-client correctness and warm-cache checks pass; shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
+| 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
+| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4` | Normal seed/full/warm/blobless/shallow helper logs contain no `catalog_materialization`; owner maintenance intentionally does. Dense ordinal resolution has bounded read-ahead, and the large-batch locator scan follow-up is now source-verified but needs a fresh release run |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Final inventory is 2 active packs with 1,263,705,690 bytes; cold/warm full clones are 199,311/72,101 ms, blobless is 110,384 ms, and depth-1/10/100/1,000 are 45,570/58,702/174,452/191,898 ms. Physical history has 1,004 immutable pack objects, while the active inventory remains 2; response-pack egress, fanout, and provider SLOs remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Artifact shape is bounded, but maintenance latency and memory remain large-team bottlenecks |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `cbe848f4` | Incremental fetch at pushes 1/10/100/1,000 used 51/60/74/662 ms of visibility planning and 2/6/33/226 requests; shallow planner times were 11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 before the new large-batch scan policy. The comparison verifier marked push/clone invalid for host contention; 10,000-pair differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | All acceleration checkpoints have valid current locator/visibility/graph artifacts, but `repair_required=true` remains because bucket-registry discovery is incomplete and destructive bucket GC stays disabled. Interruption, 10,000-push, and GC matrix remain pending |
+| 6 | PARTIAL | PR #75 | `lazy-cbe848f4-1000-20260825` | `7ff92545` | Current single-client correctness and warm-cache checks pass; shallow planner optimization, large-team concurrency, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -1081,10 +1091,10 @@ The earlier broad proof was run with the roadmap target directory:
   `crab-metadata`, `crab-git`, `crab-remote-git`, and `crab-read` also passed.
 
 The repository-wide `make clippy` gate is not recorded as passing: it reaches
-pre-existing warnings in untouched `crab-vfs` code. The pre-lazy full
-Kubernetes/RustFS qualification is green; the post-lazy replay, Phase 6
-rollout evidence, and the remaining SLO/differential/fault/provider gates are
-not complete.
+pre-existing warnings in untouched `crab-vfs` code. The post-lazy full
+Kubernetes/RustFS qualification is green for correctness, but its performance
+comparison is invalid and the Phase 6 rollout evidence plus the remaining
+SLO/differential/fault/provider gates are not complete.
 
 The current committed tree additionally passes the focused remote-helper
 transcript suite (`42` tests with `RUST_MIN_STACK=33554432`), architecture
@@ -1131,6 +1141,13 @@ proof with the isolated target directory:
 - `RUST_MIN_STACK=33554432 cargo test -p crab --locked --test
   remote_helper_transcript -- --nocapture`: 42 passed.
 
+The large-batch locator follow-up additionally passes the same metadata
+locator suite (`39` passed, `1` ignored). It keeps exact point reads for small
+or sparse requests and selects a bounded 16 MiB read-ahead scan when a large
+request covers at least one sixty-fourth of the pinned catalog. The K8s run
+below predates this follow-up, so its depth-1/10 planning numbers remain the
+before-change measurement.
+
 The last command needs the explicit larger test stack for
 `protocol_edges::eof_mid_fetch_batch_finalizes_without_blank_line`; the exact
 test also fails on the pre-change `68ddf2fc` baseline with the default macOS
@@ -1166,6 +1183,58 @@ does not prove the post-`cbe848f4` lazy-admission behavior and does not close
 the owner-latency/memory SLO, roughly 1.2 GB cold response-pack egress,
 blobless kind-lookup cost, differential, fault, provider, concurrency, or
 rollout gates listed above.
+
+### Post-lazy Kubernetes/RustFS qualification
+
+Run profile: `lazy-cbe848f4-1000-20260825`, the same Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, 1,000
+first-parent replay pushes, and the release binary whose provenance reports
+`git_sha=7ff92545`. The standalone verifier reports `status=ok`,
+`profile=full`, and 22/22 checks passed. Advertised refs and full/incremental
+clone tips matched the source, both fsck checks passed, 1,000 sampled objects
+were byte-identical, the source checkout was unchanged, and the run-owned
+remote prefix was cleaned. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Normal seed, full, warm, blobless, and depth-1/10/100/1,000 helper logs
+  emitted no `catalog_materialization` event. The owner repair/rebuild path
+  intentionally emitted that event, so the result proves lazy admission but
+  not an O(N)-free maintenance cycle.
+- Replay-only pushes had 671/2,543/8,193/19,731/57,809 ms for
+  min/median/p95/p99/max. Active packs stayed at 2 after the seed and through
+  checkpoint 1,000, with 1,263,705,690 active bytes; the store retained 1,004
+  immutable historical pack objects, which is the physical-retention versus
+  active-inventory distinction the GC/repack work must continue to enforce.
+- Incremental fetch server planning/response remained bounded: visibility
+  planning at pushes 1/10/100/1,000 was 51/60/74/662 ms, with
+  37/420/4,810/38,745 logical objects and 2/6/33/226 storage requests.
+- Before the large-batch locator follow-up, the indexed shallow planner took
+  11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 and selected
+  30,031/44,026/1,001,853/1,643,211 objects. The depth-1/10 cost was traced to
+  tens of thousands of exact OID authorization reads; the follow-up adds a
+  bounded full scan for large requests and retains exact reads for sparse
+  requests. A fresh release run must prove the improvement.
+- Clone wall times were 199,311 ms cold full, 72,101 ms warm full, 110,384 ms
+  blobless, and 45,570/58,702/174,452/191,898 ms for depth 1/10/100/1,000.
+  The cold and deep responses still reach roughly 1.2 GB, so response-pack
+  egress and fanout remain open SLOs.
+- Owner convergence took 146,947/244,227/373,872/2,729,094 ms at checkpoints
+  seed/1/10/100/1,000. Checkpoint 1,000 used six passes, peaked at
+  1,837,449,216 bytes of child RSS, and read 1,478,153,950 bytes. Every
+  acceleration receipt was current and valid, but `repair_required=true`
+  remained because bucket-registry discovery is incomplete and destructive
+  bucket GC remains disabled.
+- The verifier comparison against the pre-lazy baseline is intentionally
+  invalid: push median drifted +40.7% and clone median +41.2%, exceeding the
+  20% limit, while fetch median improved 12.0%. Repeat the comparison on an
+  idle isolated host before treating any latency change as a regression or
+  improvement.
+
+This run closes post-lazy single-client correctness and proves that normal
+read admission no longer materializes the complete OID dictionary. It does not
+close the large-batch shallow SLO, owner latency/memory, catalog-filter kind
+lookup, response-pack, 10,000-push, differential, interruption/GC, provider,
+concurrency, owner-failover, or rollout gates.
 
 ### Historical pre-handoff diagnostic
 

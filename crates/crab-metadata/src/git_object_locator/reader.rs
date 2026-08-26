@@ -27,6 +27,10 @@ const LOOKUP_CONCURRENCY: usize = 256;
 // rows per requested object before the exact-key path becomes cheaper.
 const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
 const MAX_SCAN_AMPLIFICATION: usize = 2;
+// Large shallow closures are cheaper to resolve with one bounded sequential
+// scan than with tens of thousands of independent OID point reads.
+const FULL_SCAN_MIN_LOOKUP_OBJECTS: usize = MIN_SCAN_LOOKUP_OBJECTS * 16;
+const FULL_SCAN_REQUEST_RATIO: u64 = 64;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
 // Catalog reads materialize one immutable dense dictionary. A larger
@@ -46,6 +50,7 @@ const SESSION_CACHE_SHARDS: usize = 8;
 enum LookupStrategy {
     Exact,
     Scan { row_limit: usize },
+    FullScan { row_limit: usize },
 }
 
 /// Result of validating one compact row against a pinned pack inventory.
@@ -244,13 +249,25 @@ impl GitObjectLocatorSession {
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let mut unique_objects = object_ids.len();
         let mut strategy = lookup_strategy(unique_objects, inventory_objects);
-        if matches!(strategy, LookupStrategy::Scan { .. }) {
+        if !matches!(strategy, LookupStrategy::Exact) {
             unique_objects = object_ids.iter().collect::<HashSet<_>>().len();
             strategy = lookup_strategy(unique_objects, inventory_objects);
         }
-        if let LookupStrategy::Scan { row_limit } = strategy {
+        let scan = match strategy {
+            LookupStrategy::Exact => None,
+            LookupStrategy::Scan { row_limit } => {
+                Some((row_limit, SCAN_READ_AHEAD_BYTES, SCAN_FETCH_TASKS, "scan"))
+            }
+            LookupStrategy::FullScan { row_limit } => Some((
+                row_limit,
+                CATALOG_SCAN_READ_AHEAD_BYTES,
+                CATALOG_SCAN_FETCH_TASKS,
+                "full_scan",
+            )),
+        };
+        if let Some((row_limit, read_ahead_bytes, fetch_tasks, mode)) = scan {
             tracing::debug!(
-                locator_lookup_mode = "scan",
+                locator_lookup_mode = mode,
                 requested_objects = object_ids.len(),
                 unique_objects,
                 inventory_objects,
@@ -258,7 +275,15 @@ impl GitObjectLocatorSession {
                 "compact Git locator lookup selected"
             );
             if let Some(lookups) = self
-                .lookup_batch_by_scan(reader, object_ids, inventory, row_limit)
+                .lookup_batch_by_scan(
+                    reader,
+                    object_ids,
+                    inventory,
+                    row_limit,
+                    read_ahead_bytes,
+                    fetch_tasks,
+                    mode,
+                )
                 .await?
             {
                 return Ok(lookups);
@@ -311,6 +336,9 @@ impl GitObjectLocatorSession {
         object_ids: &[[u8; 20]],
         inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
         row_limit: usize,
+        read_ahead_bytes: usize,
+        fetch_tasks: usize,
+        mode: &'static str,
     ) -> Result<Option<Vec<GitObjectLookup>>> {
         let mut requested = object_ids
             .iter()
@@ -327,8 +355,8 @@ impl GitObjectLocatorSession {
             .map(|(oid, _)| oid)
             .ok_or_else(|| MetadataError::Internal("locator scan lost its request".to_owned()))?;
         let options = ScanOptions::default()
-            .with_read_ahead_bytes(SCAN_READ_AHEAD_BYTES)
-            .with_max_fetch_tasks(SCAN_FETCH_TASKS);
+            .with_read_ahead_bytes(read_ahead_bytes)
+            .with_max_fetch_tasks(fetch_tasks);
         let mut rows = reader
             .scan_prefix_with_options(
                 [OBJECT_FAMILY],
@@ -366,7 +394,7 @@ impl GitObjectLocatorSession {
             }
         }
         tracing::debug!(
-            locator_lookup_mode = "scan",
+            locator_lookup_mode = mode,
             requested_objects = object_ids.len(),
             rows_scanned,
             "compact Git locator lookup completed"
@@ -596,10 +624,17 @@ impl GitObjectLocatorSession {
 
 fn lookup_strategy(requested_objects: usize, inventory_objects: u64) -> LookupStrategy {
     let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
-    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS
-        || inventory_objects == 0
-        || requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects
+    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS || inventory_objects == 0 {
+        return LookupStrategy::Exact;
+    }
+    if requested_objects >= FULL_SCAN_MIN_LOOKUP_OBJECTS
+        && requested.saturating_mul(FULL_SCAN_REQUEST_RATIO) >= inventory_objects
     {
+        return LookupStrategy::FullScan {
+            row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
+        };
+    }
+    if requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects {
         return LookupStrategy::Exact;
     }
     LookupStrategy::Scan {
@@ -909,6 +944,15 @@ mod tests {
             ),
             LookupStrategy::Exact
         );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+            ),
+            LookupStrategy::FullScan {
+                row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * FULL_SCAN_REQUEST_RATIO as usize,
+            }
+        );
     }
 
     async fn publish(
@@ -1206,7 +1250,7 @@ mod tests {
     async fn dense_scan_preserves_request_order_and_reports_missing_ids() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (mut object_ids, inventory) =
-            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+            publish_many(Arc::clone(&store), FULL_SCAN_MIN_LOOKUP_OBJECTS).await;
         object_ids.reverse();
         let missing_index = MIN_SCAN_LOOKUP_OBJECTS / 2;
         object_ids[missing_index] = [0xff; 20];
@@ -1261,7 +1305,15 @@ mod tests {
 
         assert_eq!(
             session
-                .lookup_batch_by_scan(reader, &[object_ids[0], object_ids[2]], &inventory, 1)
+                .lookup_batch_by_scan(
+                    reader,
+                    &[object_ids[0], object_ids[2]],
+                    &inventory,
+                    1,
+                    SCAN_READ_AHEAD_BYTES,
+                    SCAN_FETCH_TASKS,
+                    "scan",
+                )
                 .await
                 .expect("bounded scan"),
             None
