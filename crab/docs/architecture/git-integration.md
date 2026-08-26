@@ -323,10 +323,10 @@ new catalog checkpoint, then writes the target proof. The pending delta is
 immutable and rooted by the current manifest until that handoff completes; if
 the base checkpoint or evidence is unavailable, the owner uses the complete
 proof rebuild path instead. Catalog kind metadata is optional: owner catalog
-publication does not download stable pack bodies solely to populate it. When
-the sidecar is complete, fresh kind-only filters select ordinals and resolve
-only the retained OIDs; an old or incomplete sidecar uses the bounded
-canonical traversal path.
+publication scans only new or rebound pack bodies once to populate it and does
+not download covered stable packs. When the sidecar is complete, fresh
+kind-only filters select ordinals and resolve only the retained OIDs; an old or
+incomplete sidecar uses the bounded canonical traversal path.
 
 `crab metadb rebuild` is the repository-scoped migration and repair boundary.
 It ignores the retired `git_locator_db/` namespace, reconstructs the catalog

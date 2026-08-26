@@ -96,9 +96,10 @@ The 2026-08-26 follow-up is committed as `c57ee1f4`:
   target catalog checkpoint, validates sequential edits for the same ref, and
   publishes the V5 proof; the current manifest roots the pending object for
   repository-scoped GC.
-- Owner publication verifies pack indexes and locator rows without downloading
-  every stable pack body solely to populate optional kind metadata. Filtered
-  reads retain the canonical bounded traversal path when kinds are absent.
+- Owner publication verifies pack indexes and scans only new or rebound pack
+  bodies once to populate optional kind metadata; covered stable pack bodies
+  are not downloaded. Filtered reads retain the canonical bounded traversal
+  path when kinds are absent.
 - `repair_required` no longer treats incomplete bucket-wide discovery as
   repository-local repair failure. The bucket-wide state remains visible in
   diagnostics and destructive bucket GC remains disabled until its separate

@@ -6124,10 +6124,10 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
         &mut local_evidence,
         anchor,
         current_packs,
-        // Owner publication only needs verified pack indexes and locator
-        // rows. Missing kind metadata makes filtered reads use their existing
-        // bounded traversal path, avoiding a full pack download and scan here.
-        false,
+        // New or rebound packs need one body scan to make the ordinal metadata
+        // sidecar useful for filtered reads. Covered immutable packs are
+        // skipped above, so routine owner passes never rescan stable history.
+        true,
     )
     .await?;
     if updated {
@@ -23380,6 +23380,129 @@ mod tests {
         .expect("inspect exact coverage");
         assert!(!already_covered);
         blocker.release().await.expect("release locator writer");
+    }
+
+    #[tokio::test]
+    async fn generation_owner_populates_kind_metadata_for_new_pack() {
+        let (store, router) = test_store_router("locator-owner-kind-metadata");
+        let (_fixture, pack_path, idx_path, rev_path, _git_sha1, oid, pack_size) =
+            locator_pack_fixture_for(b"owner kind metadata object\n");
+        let pack_id = "c".repeat(64);
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_size,
+            content_hash: pack_id.clone(),
+            ref_tips: vec!["1".repeat(40)],
+            object_count: 1,
+        };
+        let (pack_index_hash, _, pack_write) =
+            crate::metadata::manifest::compact_pack_index(11, &[pack.clone()])
+                .expect("build owner pack index");
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index: pack_write,
+            },
+        )
+        .await
+        .expect("upload owner pack index");
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 11;
+        manifest.pack_index_hash = pack_index_hash.clone();
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest)
+            .await
+            .expect("publish owner manifest");
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack_path).expect("read owner pack")),
+            )
+            .await
+            .expect("upload owner pack body");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read owner pack index")),
+            )
+            .await
+            .expect("upload owner pack index evidence");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&rev_path).expect("read owner reverse index")),
+            )
+            .await
+            .expect("upload owner reverse-index evidence");
+
+        let anchor = CommittedManifestAnchor {
+            generation: manifest.generation,
+            shard_index_hash: MerkleHash::default(),
+            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).expect("owner pack hash"),
+        };
+        let mut writer =
+            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+                pack.object_count,
+            )
+            .await
+            .expect("open owner locator writer");
+        assert!(
+            publish_pack_locator_inventory_for_owner(
+                &mut writer,
+                &store,
+                &router,
+                anchor,
+                &[pack],
+            )
+            .await
+            .expect("publish owner locator")
+        );
+        writer.close().await.expect("close owner locator writer");
+
+        let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .expect("open owner locator session");
+        assert_eq!(
+            session
+                .metadata_by_ordinal(&[0])
+                .await
+                .expect("read owner ordinal metadata")
+                .expect("owner metadata sidecar"),
+            vec![crab_metadata::git_object_locator::GitObjectMetadata {
+                kind: Some(crab_metadata::git_object_locator::GitObjectKind::Blob),
+                ..Default::default()
+            }]
+        );
+        let oid_bytes: [u8; 20] = oid.as_bytes().try_into().expect("owner SHA-1 oid");
+        let pack_id = MerkleHash::from_hex(&pack_id).expect("owner pack id");
+        let lookup = session
+            .lookup_batch(
+                &[oid_bytes],
+                &HashMap::from([(
+                    pack_id,
+                    crab_metadata::git_object_locator::GitPackInventoryEntry {
+                        pack_id,
+                        object_count: 1,
+                        pack_size,
+                    },
+                )]),
+            )
+            .await
+            .expect("lookup owner object");
+        assert!(matches!(
+            lookup.as_slice(),
+            [crab_metadata::git_object_locator::GitObjectLookup::Hit(locator)]
+                if locator.metadata.kind
+                    == Some(crab_metadata::git_object_locator::GitObjectKind::Blob)
+        ));
+        session.close().await.expect("close owner locator session");
     }
 
     #[tokio::test]
