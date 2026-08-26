@@ -52,8 +52,10 @@ that process-local budget is exhausted. Set `server.max_requests_per_second`
 and `server.request_burst` for process-local `429` admission protection;
 responses include `Retry-After` and Git LFS may retry them. The dedicated
 spool directory is scanned at startup and stale `.crab-lfs-upload-*` files
-older than twice `server.request_timeout` are removed; keep unrelated files
-out of that directory.
+older than twice `server.request_timeout` are removed. Recent gateway-owned
+files are charged against the startup spool budget; startup fails closed when
+their size already exceeds `server.max_spool_bytes`. Keep unrelated files out
+of that directory.
 
 Signed Batch actions also include Git LFS `expires_in` metadata, matching the
 capability lifetime advertised by the URL.

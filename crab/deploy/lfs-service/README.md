@@ -27,7 +27,9 @@ remains an optional immutable cache.
   bound request admission; rejected requests return `429` with `Retry-After`.
   Uploads are deleted when a request finishes or fails; startup also removes
   stale files owned by the gateway (`.crab-lfs-upload-*`) after twice
-  `server.request_timeout`. Keep unrelated files out of the spool directory.
+  `server.request_timeout`. Recent gateway-owned files count against the
+  startup budget, and startup fails if they already exceed it. Keep unrelated
+  files out of the spool directory.
 
 ## Build and run
 

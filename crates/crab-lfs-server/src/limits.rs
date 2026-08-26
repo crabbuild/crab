@@ -11,11 +11,11 @@ pub(crate) struct SpoolBudget {
 }
 
 impl SpoolBudget {
-    pub(crate) fn new(limit: u64) -> Self {
-        Self {
+    pub(crate) fn with_reserved(limit: u64, reserved: u64) -> Option<Self> {
+        (reserved <= limit).then_some(Self {
             limit,
-            reserved: AtomicU64::new(0),
-        }
+            reserved: AtomicU64::new(reserved),
+        })
     }
 
     fn try_reserve(&self, bytes: u64) -> bool {
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn reservations_are_bounded_and_released() {
-        let budget = Arc::new(SpoolBudget::new(10));
+        let budget = Arc::new(SpoolBudget::with_reserved(10, 0).expect("valid budget"));
         let mut first = SpoolReservation::acquire(Arc::clone(&budget), 6).expect("reservation");
         assert!(SpoolReservation::acquire(Arc::clone(&budget), 5).is_none());
         assert!(!first.extend(5));

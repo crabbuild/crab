@@ -1918,7 +1918,10 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             upload_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             download_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-            spool_budget: Arc::new(crate::limits::SpoolBudget::new(max_spool_bytes)),
+            spool_budget: Arc::new(
+                crate::limits::SpoolBudget::with_reserved(max_spool_bytes, 0)
+                    .expect("valid spool budget"),
+            ),
             auth_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::auth::MAX_AUTH_CONCURRENCY,
             )),

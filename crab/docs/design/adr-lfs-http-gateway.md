@@ -68,8 +68,10 @@ verification concurrency, aggregate process-local spool-byte budget,
 streamed-download concurrency bound, temporary disk spooling, and bounded
 lock-list page retention. The gateway exports process-wide request/status/byte counters
 without repository or path labels, and readiness detects a missing spool
-directory. Lock creation is exclusive, and unlock CAS operations are bound to
-the requested lock ID. The origin URL is built only through crab-storage.
+directory. Startup recovery charges recent gateway-owned spool files against the
+same aggregate budget and refuses to start when retained bytes exceed it. Lock
+creation is exclusive, and unlock CAS operations are bound to the requested
+lock ID. The origin URL is built only through crab-storage.
 Native mTLS or an explicitly configured trusted proxy is required for mTLS
 identity; an untrusted `x-client-cn` header is never accepted. The request
 rate limit is process-local and protects each replica; durable cross-replica

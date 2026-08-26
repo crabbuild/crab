@@ -25,6 +25,7 @@ use crate::auth::{AuthPolicy, TlsClientIdentity};
 use crate::config::LfsServerConfig;
 use crate::error::{LfsServerError, Result};
 use crate::http::{AppState, build_router};
+use crate::limits::SpoolBudget;
 
 pub(crate) const UPLOAD_SPOOL_PREFIX: &str = ".crab-lfs-upload-";
 
@@ -49,7 +50,14 @@ pub fn prepare_server(
             config.spool_dir.display()
         ))
     })?;
-    recover_upload_spool(&config.spool_dir, config.request_timeout)?;
+    let retained_spool_bytes = recover_upload_spool(&config.spool_dir, config.request_timeout)?;
+    let spool_budget = SpoolBudget::with_reserved(config.max_spool_bytes, retained_spool_bytes)
+        .ok_or_else(|| {
+            LfsServerError::Config(format!(
+                "retained upload spool bytes ({retained_spool_bytes}) exceed server.max_spool_bytes ({})",
+                config.max_spool_bytes
+            ))
+        })?;
     let origin = build_url_object_store(&config.origin_url)
         .map_err(|source| LfsServerError::OriginConfig(source.to_string()))?;
     let policy = config
@@ -66,7 +74,7 @@ pub fn prepare_server(
         download_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::http::MAX_CONCURRENT_REQUESTS,
         )),
-        spool_budget: Arc::new(crate::limits::SpoolBudget::new(config.max_spool_bytes)),
+        spool_budget: Arc::new(spool_budget),
         auth_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::auth::MAX_AUTH_CONCURRENCY,
         )),
@@ -84,7 +92,7 @@ pub fn prepare_server(
     })
 }
 
-fn recover_upload_spool(path: &Path, request_timeout: Duration) -> Result<()> {
+fn recover_upload_spool(path: &Path, request_timeout: Duration) -> Result<u64> {
     let stale_after = request_timeout.checked_mul(2).unwrap_or(request_timeout);
     let cutoff = SystemTime::now()
         .checked_sub(stale_after)
@@ -92,7 +100,8 @@ fn recover_upload_spool(path: &Path, request_timeout: Duration) -> Result<()> {
     recover_upload_spool_before(path, cutoff)
 }
 
-fn recover_upload_spool_before(path: &Path, cutoff: SystemTime) -> Result<()> {
+fn recover_upload_spool_before(path: &Path, cutoff: SystemTime) -> Result<u64> {
+    let mut retained_bytes = 0u64;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -105,7 +114,11 @@ fn recover_upload_spool_before(path: &Path, cutoff: SystemTime) -> Result<()> {
         {
             continue;
         }
-        if entry.metadata()?.modified()? > cutoff {
+        let metadata = entry.metadata()?;
+        if metadata.modified()? > cutoff {
+            retained_bytes = retained_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                LfsServerError::Config("upload spool byte count overflowed".to_owned())
+            })?;
             continue;
         }
         match std::fs::remove_file(entry.path()) {
@@ -117,7 +130,7 @@ fn recover_upload_spool_before(path: &Path, cutoff: SystemTime) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(())
+    Ok(retained_bytes)
 }
 
 /// Runs the gateway until the process receives its shutdown signal.
@@ -362,7 +375,10 @@ mod tests {
         let cutoff = SystemTime::now()
             .checked_add(Duration::from_secs(1))
             .expect("valid cutoff");
-        recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds");
+        assert_eq!(
+            recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds"),
+            0
+        );
 
         assert!(!owned.exists());
         assert!(unrelated.exists());
@@ -379,8 +395,68 @@ mod tests {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(1))
             .expect("valid cutoff");
-        recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds");
+        assert_eq!(
+            recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds"),
+            b"recent".len() as u64
+        );
 
         assert!(owned.exists());
+    }
+
+    #[test]
+    fn spool_recovery_counts_all_recent_owned_files() {
+        let directory = tempfile::tempdir().expect("spool directory");
+        let first = directory.path().join(format!("{UPLOAD_SPOOL_PREFIX}first"));
+        let second = directory
+            .path()
+            .join(format!("{UPLOAD_SPOOL_PREFIX}second"));
+        std::fs::write(&first, b"1234").expect("first spool file");
+        std::fs::write(&second, b"567890").expect("second spool file");
+
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("valid cutoff");
+        assert_eq!(
+            recover_upload_spool_before(directory.path(), cutoff).expect("recovery succeeds"),
+            10
+        );
+    }
+
+    #[test]
+    fn startup_rejects_retained_spool_over_budget() {
+        let directory = tempfile::tempdir().expect("spool directory");
+        let owned = directory
+            .path()
+            .join(format!("{UPLOAD_SPOOL_PREFIX}recent"));
+        std::fs::write(&owned, b"too large").expect("spool file");
+
+        let result = prepare_server(
+            LfsServerConfig {
+                listen_addr: "127.0.0.1:0".parse().expect("address"),
+                public_url: None,
+                spool_dir: directory.path().to_owned(),
+                tls: None,
+                auth: crate::auth::AuthConfig::None,
+                trust_proxy_mtls: false,
+                policy_path: None,
+                max_batch_objects: 1,
+                max_object_bytes: 1024,
+                max_uploads: 1,
+                max_spool_bytes: 1,
+                max_requests_per_second: 1,
+                request_burst: 1,
+                request_timeout: Duration::from_secs(60),
+                action_secret: None,
+                action_ttl: Duration::from_secs(60),
+                origin_url: "memory://".to_owned(),
+            },
+            ServerStartupOptions,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LfsServerError::Config(message))
+                if message.contains("retained upload spool bytes")
+        ));
     }
 }
