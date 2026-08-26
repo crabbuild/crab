@@ -77,7 +77,7 @@ const MAX_RECEIPT_SIZE: u64 = 16 * 1024;
 
 enum ExistingObject {
     Missing,
-    Valid(u64),
+    Valid(ObjectMeta),
     Corrupt(ETag),
 }
 
@@ -257,8 +257,9 @@ impl LfsObjectStore {
         let path = self.object_path(oid);
 
         match self.inspect_existing(&path, oid).await? {
-            ExistingObject::Valid(_) => {
-                self.record_verification_receipt(oid).await;
+            ExistingObject::Valid(meta) => {
+                Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                    .await;
                 return Ok(());
             }
             ExistingObject::Corrupt(etag) => {
@@ -322,13 +323,14 @@ impl LfsObjectStore {
     ) -> Result<()> {
         let path = self.object_path(oid);
 
-        if let ExistingObject::Valid(actual_size) = self.inspect_existing(&path, oid).await? {
-            if expected_size.is_some_and(|expected| expected != actual_size) {
+        if let ExistingObject::Valid(meta) = self.inspect_existing(&path, oid).await? {
+            if expected_size.is_some_and(|expected| expected != meta.size) {
                 return Err(LfsError::ObjectCorrupt {
                     oid: hex_encode(oid),
                 });
             }
-            self.record_verification_receipt(oid).await;
+            Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                .await;
             return Ok(());
         }
 
@@ -454,8 +456,9 @@ impl LfsObjectStore {
     /// Verifies an LFS object without retaining its body in memory.
     pub async fn verify_size(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
         match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size).await {
-            Ok(()) => {
-                Self::record_verification_receipt_at(&self.store, &self.prefix, oid).await;
+            Ok(meta) => {
+                Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                    .await;
                 Ok(())
             }
             Err(error) => {
@@ -470,9 +473,14 @@ impl LfsObjectStore {
                 match Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size)
                     .await
                 {
-                    Ok(()) => {
-                        Self::record_verification_receipt_at(fallback_store, fallback_prefix, oid)
-                            .await;
+                    Ok(meta) => {
+                        Self::record_verification_receipt_with_meta(
+                            fallback_store,
+                            fallback_prefix,
+                            oid,
+                            &meta,
+                        )
+                        .await;
                         Ok(())
                     }
                     Err(error) => Err(error),
@@ -571,12 +579,12 @@ impl LfsObjectStore {
         prefix: &str,
         oid: &[u8; 32],
         expected_size: u64,
-    ) -> Result<()> {
+    ) -> Result<ObjectMeta> {
         let path = Self::object_path_at(prefix, oid);
         match Self::inspect_existing_at(store, prefix, &path, oid).await? {
-            ExistingObject::Valid(size) => {
-                if size == expected_size {
-                    Ok(())
+            ExistingObject::Valid(meta) => {
+                if meta.size == expected_size {
+                    Ok(meta)
                 } else {
                     Err(LfsError::ObjectCorrupt {
                         oid: hex_encode(oid),
@@ -599,8 +607,8 @@ impl LfsObjectStore {
         expected_size: u64,
         range: Option<Range<u64>>,
     ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
-        Self::verify_size_at(store, prefix, oid, expected_size).await?;
-        Self::record_verification_receipt_at(store, prefix, oid).await;
+        let verified_meta = Self::verify_size_at(store, prefix, oid, expected_size).await?;
+        Self::record_verification_receipt_with_meta(store, prefix, oid, &verified_meta).await;
         let path = Self::object_path_at(prefix, oid);
         let (meta, result_range, stream) = store
             .get_stream(&path, range)
@@ -717,6 +725,16 @@ impl LfsObjectStore {
                 return;
             }
         };
+        Self::record_verification_receipt_with_meta(store, prefix, oid, &meta).await;
+    }
+
+    async fn record_verification_receipt_with_meta(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        meta: &ObjectMeta,
+    ) {
+        let object_path = Self::object_path_at(prefix, oid);
         if meta.e_tag.is_none() && meta.version.is_none() {
             // A receipt without a provider validator cannot prove that the
             // bytes observed later are the bytes verified here.
@@ -778,7 +796,7 @@ impl LfsObjectStore {
             Err(error) => return Err(error.into()),
         };
         if receipt_matches(store, prefix, path, oid, &meta).await {
-            return Ok(ExistingObject::Valid(meta.size));
+            return Ok(ExistingObject::Valid(meta));
         }
 
         let (meta, range, mut stream) = match store.get_stream(path, None).await {
@@ -814,7 +832,7 @@ impl LfsObjectStore {
             .into());
         }
         if hasher.finalize().as_slice() == oid {
-            Ok(ExistingObject::Valid(meta.size))
+            Ok(ExistingObject::Valid(meta))
         } else {
             Ok(ExistingObject::Corrupt(etag))
         }
