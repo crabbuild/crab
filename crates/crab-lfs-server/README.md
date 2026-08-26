@@ -33,6 +33,10 @@ spool directory remains available, and `/metrics` exposes process-wide
 Prometheus counters without repository or path labels; both are unauthenticated
 operational endpoints.
 
+Set `server.public_url` explicitly for internet-facing deployments. When it is
+omitted, native TLS listeners generate HTTPS links; reverse-proxy deployments
+must strip and recreate `x-forwarded-proto` before forwarding requests.
+
 Repository names are normalized by removing a final .git suffix, matching
 Git LFS server discovery. The origin URL prefix and normalized repository
 name form the object-store namespace; requests cannot select an arbitrary
