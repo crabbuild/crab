@@ -37,7 +37,7 @@ const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
-const LOCATOR_READ_RETRY_LIMIT: usize = 12;
+const LOCATOR_READ_RETRY_LIMIT: usize = 120;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
 const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(2);
 const READ_ADMISSION_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -704,7 +704,11 @@ async fn open_repository_with_visibility_requirement(
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
+    let deadline = Instant::now() + READ_ADMISSION_WAIT;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
+        if Instant::now() >= deadline {
+            break;
+        }
         let (manifest, _) =
             crate::metadata::manifest::read_manifest(&repair_store, &repair_layout).await?;
         let active_transactions = crate::metadata::manifest::list_active_ref_journal_transactions(
@@ -714,10 +718,22 @@ async fn open_repository_with_visibility_requirement(
         .await?;
         if !active_transactions.is_empty() {
             if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
-                return Err(remote_error(RemoteGitError::RepositoryIndexing {
-                    observed: Some(manifest.generation),
-                    required: manifest.generation.saturating_add(1),
-                }));
+                last_indexing = Some((
+                    Some(manifest.generation),
+                    manifest.generation.saturating_add(1),
+                ));
+                if !wait_for_locator_read_retry(
+                    attempt,
+                    deadline,
+                    Some(manifest.generation),
+                    manifest.generation.saturating_add(1),
+                    cancellation,
+                )
+                .await?
+                {
+                    break;
+                }
+                continue;
             }
             if super::push::compact_ref_journal_for_reader(
                 &repair_store,
@@ -738,13 +754,16 @@ async fn open_repository_with_visibility_requirement(
                 Some(manifest.generation),
                 manifest.generation.saturating_add(1),
             ));
-            if attempt == LOCATOR_READ_RETRY_LIMIT {
+            if !wait_for_locator_read_retry(
+                attempt,
+                deadline,
+                Some(manifest.generation),
+                manifest.generation.saturating_add(1),
+                cancellation,
+            )
+            .await?
+            {
                 break;
-            }
-            let delay = locator_read_retry_delay(attempt);
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
             }
             continue;
         }
@@ -782,10 +801,18 @@ async fn open_repository_with_visibility_requirement(
         // Once journal transactions are drained, generation checks distinguish
         // derived publication lag from a concurrent owner update.
         if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
-            return Err(remote_error(RemoteGitError::RepositoryIndexing {
-                observed: observed_generation,
-                required: required_generation,
-            }));
+            if !wait_for_locator_read_retry(
+                attempt,
+                deadline,
+                observed_generation,
+                required_generation,
+                cancellation,
+            )
+            .await?
+            {
+                break;
+            }
+            continue;
         }
         let repaired = super::push::repair_git_object_locator_if_current_for_reader(
             &repair_store,
@@ -827,21 +854,16 @@ async fn open_repository_with_visibility_requirement(
                 return Err(remote_error(error));
             }
         }
-        if attempt == LOCATOR_READ_RETRY_LIMIT {
-            break;
-        }
-
-        let delay = locator_read_retry_delay(attempt);
-        tracing::debug!(
-            attempt = attempt + 1,
-            ?delay,
+        if !wait_for_locator_read_retry(
+            attempt,
+            deadline,
             observed_generation,
             required_generation,
-            "waiting for current Git locator publication before upload-pack admission"
-        );
-        tokio::select! {
-            () = tokio::time::sleep(delay) => {}
-            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            cancellation,
+        )
+        .await?
+        {
+            break;
         }
     }
 
@@ -945,6 +967,34 @@ fn locator_read_retry_delay(attempt: usize) -> Duration {
     LOCATOR_READ_RETRY_BASE
         .saturating_mul(multiplier)
         .min(LOCATOR_READ_RETRY_CAP)
+}
+
+async fn wait_for_locator_read_retry(
+    attempt: usize,
+    deadline: Instant,
+    observed_generation: Option<u64>,
+    required_generation: u64,
+    cancellation: &CancellationToken,
+) -> Result<bool> {
+    if attempt >= LOCATOR_READ_RETRY_LIMIT {
+        return Ok(false);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(false);
+    }
+    let delay = locator_read_retry_delay(attempt).min(remaining);
+    tracing::debug!(
+        attempt = attempt + 1,
+        ?delay,
+        ?observed_generation,
+        required_generation,
+        "waiting for current Git locator publication before upload-pack admission"
+    );
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Ok(true),
+        () = cancellation.cancelled() => Err(CrabError::Cancelled),
+    }
 }
 
 pub(crate) fn visible_ref_names(
