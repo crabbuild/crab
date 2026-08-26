@@ -5,19 +5,18 @@ import type { ReactNode } from "react"
 import {
   FeatureArticleRail,
   type FeatureArticleTocItem,
-} from "@/components/library/feature-article-rail"
-import { KnowledgeCheck } from "@/components/library/knowledge-check"
-import { LargeFileScaleExplorer } from "@/components/library/large-file-scale-explorer"
+} from "@/components/blog/feature-article-rail"
+import { LargeFileScaleExplorer } from "@/components/blog/large-file-scale-explorer"
 import { MarketingLayout } from "@/components/marketing-layout"
 import { formatBlogDate } from "@/lib/blog-date"
-import type { LibraryGuideMeta } from "@/lib/library"
+import type { BlogPostMeta } from "@/lib/blog-posts"
 
-export function FeatureLibraryGuide({
+export function FeatureBlogArticle({
   post,
   toc,
   children,
 }: {
-  post: LibraryGuideMeta
+  post: BlogPostMeta
   toc: FeatureArticleTocItem[]
   children: ReactNode
 }) {
@@ -43,11 +42,11 @@ export function FeatureLibraryGuide({
 
           <div className="relative mx-auto max-w-7xl px-4 pt-24 pb-16 sm:px-6 sm:pt-28 lg:px-8 lg:pt-32 lg:pb-20">
             <Link
-              href="/library"
+              href="/blog"
               className="inline-flex min-h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.035] px-4 text-xs text-slate-300 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:outline-none"
             >
               <ArrowLeft size={13} aria-hidden="true" />
-              Crab library
+              Crab blog
             </Link>
 
             <div className="mt-14 max-w-5xl">
@@ -68,7 +67,7 @@ export function FeatureLibraryGuide({
               </p>
 
               <div className="mt-9 flex flex-wrap items-center gap-x-5 gap-y-3 text-sm text-slate-400">
-                <span>{post.author.name}</span>
+                <span>{post.author}</span>
                 <span
                   className="h-1 w-1 rounded-full bg-slate-600"
                   aria-hidden="true"
@@ -98,10 +97,9 @@ export function FeatureLibraryGuide({
           </aside>
 
           <div className="min-w-0">
-            <div className="feature-library-prose prose-lg prose-neutral dark:prose-invert prose max-w-none prose-headings:scroll-mt-24 prose-img:rounded-xl">
+            <div className="feature-blog-prose prose-lg prose-neutral dark:prose-invert prose max-w-none prose-headings:scroll-mt-24 prose-img:rounded-xl">
               {children}
             </div>
-            <KnowledgeCheck slug={post.slug} check={post.knowledgeCheck} />
           </div>
 
           <aside className="hidden lg:block">

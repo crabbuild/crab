@@ -10,7 +10,9 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import { notFound } from "next/navigation"
+import { isValidElement, type ReactElement, type ReactNode } from "react"
 
+import { FeatureBlogArticle } from "@/components/blog/feature-blog-article"
 import { MarketingLayout } from "@/components/marketing-layout"
 import { Badge } from "@/components/ui/badge"
 import { formatBlogDate } from "@/lib/blog-date"
@@ -40,6 +42,11 @@ export async function generateMetadata({
     description: post.description,
     path: `/blog/${slug}`,
     absoluteTitle: true,
+    image: {
+      openGraph: `/blog/${slug}/opengraph-image`,
+      twitter: `/blog/${slug}/twitter-image`,
+      alt: `${post.title} — Crab Blog`,
+    },
     article: {
       publishedTime: new Date(post.date).toISOString(),
       authors: [post.author],
@@ -59,6 +66,20 @@ export default async function BlogPostPage({
   if (!page || !post) notFound()
 
   const MDX = page.data.body
+
+  if (page.data.presentation === "feature") {
+    const toc = page.data.toc.map((item) => ({
+      title: tocTitleToString(item.title),
+      url: item.url,
+      depth: item.depth,
+    }))
+
+    return (
+      <FeatureBlogArticle post={post} toc={toc}>
+        <MDX components={getMDXComponents({})} />
+      </FeatureBlogArticle>
+    )
+  }
 
   return (
     <MarketingLayout>
@@ -128,6 +149,18 @@ export default async function BlogPostPage({
         </div>
       </section>
     </MarketingLayout>
+  )
+}
+
+function tocTitleToString(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node)
+  }
+  if (Array.isArray(node)) return node.map(tocTitleToString).join("")
+  if (!isValidElement(node)) return ""
+
+  return tocTitleToString(
+    (node as ReactElement<{ children?: ReactNode }>).props.children
   )
 }
 

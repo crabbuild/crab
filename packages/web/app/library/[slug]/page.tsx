@@ -1,7 +1,6 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import Link from "next/link"
-import { isValidElement, type ReactElement, type ReactNode } from "react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -18,7 +17,6 @@ import {
 } from "lucide-react"
 
 import { MarketingLayout } from "@/components/marketing-layout"
-import { FeatureLibraryGuide } from "@/components/library/feature-library-guide"
 import { KnowledgeCheck } from "@/components/library/knowledge-check"
 import { Reveal } from "@/components/marketing/reveal"
 import { Badge } from "@/components/ui/badge"
@@ -111,20 +109,6 @@ export default async function LibraryGuidePage({
   const relatedPosts = getRelatedGuides(currentPost, allPosts)
   const CategoryIcon = categoryIcons[currentPost.category] ?? Package
   const PathIcon = pathIcons[currentPost.path] ?? BookOpen
-
-  if (page.data.presentation === "feature") {
-    const toc = page.data.toc.map((item) => ({
-      title: tocTitleToString(item.title),
-      url: item.url,
-      depth: item.depth,
-    }))
-
-    return (
-      <FeatureLibraryGuide post={currentPost} toc={toc}>
-        <MDX components={getMDXComponents({})} />
-      </FeatureLibraryGuide>
-    )
-  }
 
   return (
     <MarketingLayout>
@@ -315,18 +299,6 @@ export default async function LibraryGuidePage({
         )}
       </section>
     </MarketingLayout>
-  )
-}
-
-function tocTitleToString(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node)
-  }
-  if (Array.isArray(node)) return node.map(tocTitleToString).join("")
-  if (!isValidElement(node)) return ""
-
-  return tocTitleToString(
-    (node as ReactElement<{ children?: ReactNode }>).props.children
   )
 }
 

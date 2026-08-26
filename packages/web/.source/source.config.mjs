@@ -86,7 +86,8 @@ var blog = defineDocs({
       tags: z.array(z.string()).min(1),
       excerpt: z.string(),
       level: z.enum(["beginner", "intermediate", "deep-dive"]),
-      audience: z.string()
+      audience: z.string(),
+      presentation: z.literal("feature").optional()
     })
   }
 });
@@ -94,7 +95,6 @@ var library = defineDocs({
   dir: "content/library",
   docs: {
     schema: guideSchema.extend({
-      presentation: z.enum(["guide", "feature"]).optional(),
       knowledgeCheck: z.object({
         question: z.string(),
         options: z.array(z.string()).min(2),
