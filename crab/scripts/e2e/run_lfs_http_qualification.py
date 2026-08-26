@@ -396,7 +396,11 @@ class Qualification:
         self.check("git-ref-equality", local_ref == remote_ref, {"local": local_ref, "remote": remote_ref})
         self.lfs(["fsck"], self.source, "source git lfs fsck")
 
-        self.git(["clone", str(self.remote), str(self.clone)], self.root, "clone with smudge disabled")
+        self.git(
+            ["clone", "--branch", "main", str(self.remote), str(self.clone)],
+            self.root,
+            "clone with smudge disabled",
+        )
         self.configure_clone()
         self.lfs(["pull"], self.clone, "git lfs pull")
         self.lfs(["fsck"], self.clone, "clone git lfs fsck")
