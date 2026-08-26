@@ -1,8 +1,7 @@
 //! `crab lfs update` — update git hooks and filter configuration for LFS.
 //!
-//! Re-applies the pre-push hook and transfer agent configuration to match
-//! the current crab binary version. Similar to `install` but designed
-//! for upgrades.
+//! Re-applies repository-scoped pre-push hook and transfer-agent
+//! configuration to match the current Crab binary version.
 
 use std::path::Path;
 use std::process::Command;
@@ -28,7 +27,8 @@ pub fn run_lfs_update_in(root: &Path, force: bool, manual: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Update git config entries.
+    // Update only this repository. A version update must not reintroduce the
+    // historical global standalone-agent interception.
     update_config(root, &bin)?;
 
     // Update the pre-push hook.
@@ -42,13 +42,13 @@ pub fn run_lfs_update_in(root: &Path, force: bool, manual: bool) -> Result<()> {
 fn print_manual_instructions(bin: &str) {
     println!("Run the following commands to update LFS configuration:");
     println!();
-    println!("  git config lfs.customtransfer.crab.path \"{bin}\"");
-    println!("  git config lfs.customtransfer.crab.args lfs-transfer-agent");
-    println!("  git config lfs.standalonetransferagent crab");
-    println!("  git config filter.lfs.clean \"{bin} lfs clean -- %f\"");
-    println!("  git config filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
-    println!("  git config filter.lfs.process \"{bin} lfs filter-process\"");
-    println!("  git config filter.lfs.required true");
+    println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
+    println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
+    println!("  git config --local lfs.standalonetransferagent crab");
+    println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
+    println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
+    println!("  git config --local filter.lfs.process \"{bin} lfs filter-process\"");
+    println!("  git config --local filter.lfs.required true");
     println!();
     println!("Replace pre-push in the directory printed by:");
     println!("  git rev-parse --git-path hooks");
@@ -75,7 +75,7 @@ fn update_config(root: &Path, bin: &str) -> Result<()> {
 
     for (key, value) in configs {
         let output = Command::new("git")
-            .args(["config", key, &value])
+            .args(["config", "--local", key, &value])
             .current_dir(root)
             .output()
             .map_err(|e| CrabError::Configuration {

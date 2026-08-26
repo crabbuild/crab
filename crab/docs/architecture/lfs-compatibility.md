@@ -2,12 +2,31 @@
 
 ## Overview
 
-Crab provides full Git LFS compatibility without a centralized LFS server.
+Crab provides two independently supported ways to manage Git LFS pointers.
 LFS objects are stored directly in cloud object storage alongside xorbs and
 shards. A repository can mix crab-native pointers (`filter=crab`, Blake3)
-and LFS pointers (`filter=lfs`, SHA-256) seamlessly.
+and LFS pointers (`filter=lfs`, SHA-256) when its attributes explicitly route
+each path.
+
+The custom transfer-agent path is not the Git LFS HTTP API. It bypasses HTTP
+discovery and requires repository-scoped Crab configuration and direct cloud
+authorization. The support contract below is the release boundary; tests and
+qualification evidence must name the profile they prove.
 
 Source: `crab/src/lfs/`
+
+## Support matrix
+
+| Profile | Transport | Client | Auth/storage | Status |
+|---------|-----------|--------|--------------|--------|
+| `crab-native` | Crab filters and porcelain | Crab CLI; `git` | Direct object storage selected by Crab | Supported and tested |
+| `git-lfs-standalone-direct` | Git LFS custom transfer agent | Git LFS 3.7.x | Direct object-storage credentials available to Crab | Supported for qualified storage providers |
+| `git-lfs-standalone-managed` | Custom transfer agent with managed grants | Unmodified Git LFS | Protected, repository-scoped grants | Not supported until managed-transfer qualification passes |
+| `git-lfs-http` | Standard Batch/basic/File Locking HTTP APIs | Unmodified Git LFS | HTTPS gateway authentication | Not shipped; no Crab HTTP LFS endpoint is currently exposed |
+
+“Git LFS-compatible” in this repository means the named standalone-direct
+profile unless a document explicitly names another profile. It does not mean
+interoperability with an arbitrary HTTP LFS server.
 
 ## Two Operating Modes
 
@@ -75,7 +94,7 @@ Two-level hex fan-out prevents flat-directory performance issues.
 - Download: SHA-256 verified before writing to local storage
 - Idempotent: duplicate uploads are detected and skipped
 
-Source: `crab/src/lfs/object_store.rs`
+Source: `crates/crab-lfs/src/object_store.rs`
 
 ## Transfer Agent Protocol
 
@@ -92,8 +111,10 @@ agent → client:  {"event":"complete","oid":"abc..."}
 client → agent:  {"event":"terminate"}
 ```
 
-Concurrency is bounded by a semaphore sized to `concurrenttransfers` from the
-init event (default 8).
+Concurrency is bounded by object and logical-byte semaphores. The object limit
+comes from `concurrenttransfers` (default 8); the default aggregate in-flight
+byte budget is 128 MiB. A configured transfer bandwidth cap is enforced by the
+same coordinator.
 
 Source: `crab/src/lfs/transfer_agent.rs`
 
@@ -124,7 +145,7 @@ locks are stored as JSON objects in S3 managed via CAS:
 
 ```
 Path:    {prefix}/lfs/locks/{blake3(filepath)}
-Content: {"path":"models/large.bin","owner":"user@example.com","id":"...","locked_at":...}
+Content: {"path":"models/large.bin","owner":"user@example.com","id":"...","locked_at":...,"released_at":null}
 ```
 
 ### Lock Operations
@@ -132,8 +153,8 @@ Content: {"path":"models/large.bin","owner":"user@example.com","id":"...","locke
 | Operation | Mechanism |
 |-----------|-----------|
 | Lock | `PutMode::Create` (atomic, fails if exists) |
-| Unlock | DELETE with owner verification |
-| Force-unlock | DELETE without owner check |
+| Unlock | CAS tombstone with owner and optional lock-ID verification |
+| Force-unlock | CAS tombstone without owner check |
 | List | List objects under `lfs/locks/` prefix |
 
 Source: `crab/src/lfs/lock.rs`
@@ -153,12 +174,13 @@ Source: `crab/src/lfs/migrate.rs`
 
 ## Configuration
 
-LFS configuration follows the same precedence as official `git-lfs`:
+LFS configuration follows Git's effective config precedence while preserving
+Git LFS's lower-priority tracked `.lfsconfig` behavior:
 
 ```
 1. Environment variables (GIT_LFS_*)
-2. .lfsconfig (repository root)
-3. .gitconfig (local → global → system)
+2. Git config (local → global → system, including Git-managed includes)
+3. .lfsconfig (repository root)
 4. Defaults
 ```
 

@@ -1,7 +1,7 @@
 # crab — Git LFS Compatibility Deep Dive
 
-**How crab implements full Git LFS feature parity without a server,
-storing LFS objects directly in cloud object storage alongside xorbs.**
+**How crab manages Git LFS pointers without a centralized server, storing
+objects directly in cloud object storage alongside xorbs.**
 
 -----
 
@@ -87,11 +87,25 @@ storing LFS objects directly in cloud object storage alongside xorbs.**
 
 ## 1. Overview
 
-Crab provides full Git LFS compatibility without requiring a centralized
-LFS server. The standard `git-lfs` client uses an HTTP Batch API to
-negotiate upload/download URLs with a server. Crab eliminates this
-server entirely — LFS objects are stored directly in cloud object storage
-(S3/GCS/Azure) alongside the existing xorb and shard data.
+Crab provides a Crab-managed LFS implementation without requiring a
+centralized LFS server. The standard `git-lfs` client uses an HTTP Batch API
+to negotiate upload/download URLs with a server. Crab's currently shipped
+interoperability path instead uses the Git LFS standalone custom transfer
+agent, so it requires repository-scoped configuration and direct cloud
+authorization. Crab does not currently expose the standard HTTP LFS API.
+
+The supported profiles are:
+
+| Profile | Contract | Release status |
+|---------|----------|----------------|
+| `crab-native` | Crab filters, porcelain, and direct object storage | Supported |
+| `git-lfs-standalone-direct` | Git LFS custom transfer agent with direct Crab storage access | Supported for qualified providers |
+| `git-lfs-standalone-managed` | Custom agent with short-lived repository grants | Planned; not shipped |
+| `git-lfs-http` | Standard Batch/basic/File Locking HTTPS API | Planned; not shipped |
+
+“Compatible” below refers to the named standalone-direct profile unless the
+profile is stated explicitly. No section should describe the current product
+as interchangeable with an arbitrary Git LFS HTTP server.
 
 Crab operates in two LFS modes simultaneously:
 
@@ -230,7 +244,7 @@ Local LFS objects mirror the remote layout under `.git/lfs/`:
 - **Idempotent put:** If an object with the same OID already exists,
   the upload is skipped and reported as success.
 
-**Source:** `crab/src/lfs/object_store.rs`
+**Source:** `crates/crab-lfs/src/object_store.rs`
 
 -----
 
@@ -337,8 +351,10 @@ JSON lines on stdin/stdout.
 ### Concurrency
 
 The transfer agent processes multiple upload/download events concurrently
-using tokio tasks, bounded by a semaphore sized to `concurrenttransfers`
-from the init event (default 8).
+using tokio tasks, bounded by object and logical-byte semaphores. The object
+limit comes from `concurrenttransfers` (default 8); the default aggregate
+in-flight byte budget is 128 MiB. A configured transfer bandwidth cap is
+enforced by the same coordinator.
 
 ### Resume for Large Objects
 
@@ -419,7 +435,8 @@ Path:    {prefix}/lfs/locks/{blake3-hash-of-filepath}
 Payload: { "path": "models/large.bin",
            "owner": "user@example.com",
            "locked_at": 1719849600,
-           "id": "a1b2c3d4-..." }
+           "id": "a1b2c3d4-...",
+           "released_at": null }
 ```
 
 The file path is hashed with Blake3 to produce a fixed-length key that
@@ -442,12 +459,12 @@ crab lfs lock models/large.bin
 ... editing ...
 
 crab lfs unlock models/large.bin
-  DELETE locks/{hash} (CAS: verify owner)
-  ◄── 200 OK ──────────────────►  lock removed
+  UPDATE locks/{hash} (CAS: verify owner and mark tombstone)
+  ◄── 200 OK ──────────────────►  lock released
 
                                                   crab lfs lock models/large.bin
                                   ◄── 200 OK ──────────────────────►
-                                                  lock acquired
+                                                  lock acquired; stale unlocks cannot remove it
 ```
 
 ### Pre-Push Lock Conflict Check
@@ -623,6 +640,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.fetchexclude` | (none) | Glob pattern for paths to exclude from fetch |
 | `lfs.transfer.maxretries` | 8 | Max retries per object on transient failure |
 | `lfs.transfer.maxretrydelay` | 10s | Max delay between retries |
+| `lfs.transfer.maxbandwidth` | 0 | Aggregate transfer limit in bytes/second; 0 is unlimited |
 | `lfs.skipdownloaderrors` | false | Continue on download errors instead of aborting |
 | `lfs.storage` | `.git/lfs` | Override local LFS storage; relative paths resolve inside the common Git directory |
 | `lfs.lfsdir` | `.git/lfs` | Legacy Crab alias for `lfs.storage` |
@@ -634,14 +652,14 @@ All LFS commands live under `crab lfs <subcommand>`:
 ```
 Highest priority:
   1. Environment variables (GIT_LFS_*)
-  2. .lfsconfig (repository root)
-  3. .gitconfig (local → global → system)
+  2. Git config (local → global → system, including Git-managed includes)
+  3. .lfsconfig (repository root)
   4. Defaults
 Lowest priority
 ```
 
-When a key is set in both `.lfsconfig` and `.gitconfig`, the `.lfsconfig`
-value wins, except tracked `.lfsconfig` files cannot set `lfs.storage` or
+When a key is set in both `.lfsconfig` and Git config, Git config wins,
+except tracked `.lfsconfig` files cannot set `lfs.storage` or
 `lfs.lfsdir`. Repository-controlled configuration must not redirect local
 writes or prune deletion outside the repository's Git directory.
 
@@ -684,6 +702,9 @@ s3://{bucket}/{prefix}/
 │   │   │       └── abcdef...      ← raw file content, keyed by SHA-256
 │   │   └── ...
 │   │
+│   ├── receipts/                   ← validator-bound verification receipts
+│   │   └── {oid[:2]}/{oid[2:4]}/{oid}.bin
+│   │
 │   └── locks/                      ← advisory file locks
 │       └── {blake3-hash-of-path}   ← JSON lock record
 │
@@ -704,7 +725,8 @@ s3://{bucket}/{prefix}/
 | Object | Mutability | Update Mechanism |
 |--------|------------|------------------|
 | `lfs/objects/*` | Immutable | PUT once, never updated |
-| `lfs/locks/*` | Mutable | CAS create/delete |
+| `lfs/receipts/*` | Rebuildable | Best-effort validator-bound metadata |
+| `lfs/locks/*` | Mutable | CAS create/tombstone |
 | `xorbs/*` | Immutable | PUT once, never updated |
 | `shards/*` | Immutable | PUT once, never updated |
 | `refs/*` | Mutable | CAS (etag-based) |

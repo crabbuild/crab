@@ -5,9 +5,10 @@
 //! [`crate::lfs::lock::LockManager`].
 
 use std::collections::HashSet;
-use std::io::{BufRead, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::thread;
 
 use crate::core::error::{CrabError, Result};
@@ -330,19 +331,29 @@ fn is_git_object_id(value: &str) -> bool {
 
 /// Collect LFS pointers from HEAD (or all refs for `--all`).
 fn collect_push_pointers(all: bool, refs: &[String]) -> Result<Vec<LfsPointer>> {
-    let tree_lines = if all {
+    let ref_names = if all {
         if refs.is_empty() {
-            ls_tree_all_refs()?
+            all_ref_names()?
         } else {
-            ls_tree_refs(refs)?
+            refs.to_vec()
         }
     } else if refs.is_empty() {
-        ls_tree_head()?
+        vec!["HEAD".to_owned()]
     } else {
-        ls_tree_refs(refs)?
+        refs.to_vec()
     };
 
-    batch_read_pointers(&tree_lines)
+    let mut pointers = Vec::new();
+    let mut seen = HashSet::new();
+    for ref_name in ref_names {
+        visit_lfs_pointers_in_tree(Path::new("."), &ref_name, |_, pointer| {
+            if seen.insert(pointer.oid) {
+                pointers.push(pointer);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(pointers)
 }
 
 /// Collect `(path, LfsPointer)` pairs from a commit range being pushed.
@@ -380,6 +391,7 @@ pub(crate) fn collect_pointers_from_range_in(
     let mut args = vec![
         "rev-list".to_owned(),
         "--objects".to_owned(),
+        "-z".to_owned(),
         format!("--filter=blob:limit={}", MAX_LFS_POINTER_SIZE + 1),
     ];
     for sha in local_shas {
@@ -388,217 +400,298 @@ pub(crate) fn collect_pointers_from_range_in(
     for sha in remote_shas {
         args.push(format!("^{sha}"));
     }
-
-    let output = git_command_in(repo_dir)
-        .args(&args)
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git rev-list: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CrabError::Internal(format!(
-            "git rev-list failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut blob_paths: Vec<(String, String)> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Reachable commits and trees have no path in rev-list output. They
-        // are valid records but cannot identify an LFS file, so skip them.
-        let Some((hash, path)) = line.split_once(' ') else {
-            if !is_git_object_id(line) {
-                return Err(CrabError::Internal(
-                    "git rev-list returned a malformed object record".to_owned(),
-                ));
-            }
-            continue;
-        };
-        if !is_git_object_id(hash) || path.is_empty() {
-            return Err(CrabError::Internal(
-                "git rev-list returned a malformed object record".to_owned(),
-            ));
-        }
-        blob_paths.push((hash.to_owned(), path.to_owned()));
-    }
-
-    if blob_paths.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Batch-read blobs to find LFS pointers.
-    let oids_input: String = blob_paths
-        .iter()
-        .map(|(hash, _)| hash.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let stdout = cat_file_batch_stdout(repo_dir, oids_input)?;
     let mut entries = Vec::new();
-    let mut pos = 0;
-    let mut line_idx = 0;
-
-    while pos < stdout.len() && line_idx < blob_paths.len() {
-        let header_end = match stdout[pos..].iter().position(|&b| b == b'\n') {
-            Some(p) => pos + p,
-            None => break,
-        };
-
-        let header = String::from_utf8_lossy(&stdout[pos..header_end]);
-        let parts: Vec<&str> = header.split_whitespace().collect();
-
-        if parts.len() < 2 || parts[1] == "missing" {
-            return Err(CrabError::Internal(format!(
-                "git cat-file could not read object {}",
-                blob_paths[line_idx].0
-            )));
-        }
-        if parts.len() != 3 {
-            return Err(CrabError::Internal(
-                "git cat-file returned a malformed object header".to_owned(),
-            ));
-        }
-
-        let Ok(obj_size) = parts[2].parse::<usize>() else {
-            return Err(CrabError::Internal(
-                "git cat-file returned an invalid object size".to_owned(),
-            ));
-        };
-
-        let content_start = header_end + 1;
-        let content_end = content_start + obj_size;
-
-        if content_end > stdout.len() {
-            return Err(CrabError::Internal(
-                "git cat-file returned truncated object content".to_owned(),
-            ));
-        }
-        if stdout.get(content_end) != Some(&b'\n') {
-            return Err(CrabError::Internal(
-                "git cat-file returned an unterminated object record".to_owned(),
-            ));
-        }
-
-        let content = &stdout[content_start..content_end];
-        let (_, path) = &blob_paths[line_idx];
-
-        if parts[1] == "blob"
-            && content.len() <= MAX_LFS_POINTER_SIZE
-            && let PointerKind::Lfs(pointer) = classify(content)
-            && pointer.size > 0
-        {
-            entries.push((path.clone(), pointer));
-        }
-
-        pos = content_end + 1;
-        line_idx += 1;
-    }
-
-    if line_idx != blob_paths.len() {
-        return Err(CrabError::Internal(
-            "git cat-file returned fewer object records than requested".to_owned(),
-        ));
-    }
-
+    visit_lfs_blobs_in_git_command(repo_dir, &args, parse_rev_list_record, |path, pointer| {
+        entries.push((path, pointer));
+        Ok(())
+    })?;
     Ok(entries)
 }
 
-/// Batch-read blobs and extract LFS pointers (without paths).
-fn batch_read_pointers(tree_lines: &[(String, String)]) -> Result<Vec<LfsPointer>> {
-    batch_read_pointers_in(Path::new("."), tree_lines)
+fn visit_lfs_pointers_in_tree(
+    repo_dir: &Path,
+    ref_name: &str,
+    mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
+) -> Result<()> {
+    let args = vec![
+        "ls-tree".to_owned(),
+        "-r".to_owned(),
+        "-z".to_owned(),
+        ref_name.to_owned(),
+    ];
+    let mut seen = HashSet::new();
+    visit_lfs_blobs_in_git_command(repo_dir, &args, parse_ls_tree_record, |path, pointer| {
+        if seen.insert(pointer.oid) {
+            visitor(path, pointer)?;
+        }
+        Ok(())
+    })
 }
 
-fn batch_read_pointers_in(
+fn visit_lfs_blobs_in_git_command(
     repo_dir: &Path,
-    tree_lines: &[(String, String)],
-) -> Result<Vec<LfsPointer>> {
-    if tree_lines.is_empty() {
-        return Ok(Vec::new());
+    args: &[String],
+    parse_record: fn(&[u8], &mut Option<String>) -> Result<Option<(String, String)>>,
+    mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
+) -> Result<()> {
+    let mut producer = git_command_in(repo_dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| CrabError::Internal(format!("failed to spawn git discovery: {error}")))?;
+    let mut cat = git_command_in(repo_dir)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| CrabError::Internal(format!("failed to spawn git cat-file: {error}")))?;
+
+    let producer_stdout = producer
+        .stdout
+        .take()
+        .ok_or_else(|| CrabError::Internal("git discovery stdout unavailable".to_owned()))?;
+    let mut producer_stdout = BufReader::new(producer_stdout);
+    let mut cat_stdin = BufWriter::new(
+        cat.stdin
+            .take()
+            .ok_or_else(|| CrabError::Internal("git cat-file stdin unavailable".to_owned()))?,
+    );
+    let cat_stdout = cat
+        .stdout
+        .take()
+        .ok_or_else(|| CrabError::Internal("git cat-file stdout unavailable".to_owned()))?;
+    let mut cat_stdout = BufReader::new(cat_stdout);
+
+    let scan_result = (|| -> Result<()> {
+        let mut record = Vec::new();
+        let mut parser_state = None;
+        loop {
+            record.clear();
+            let read = producer_stdout
+                .read_until(0, &mut record)
+                .map_err(|error| {
+                    CrabError::Internal(format!("failed to read git discovery: {error}"))
+                })?;
+            if read == 0 {
+                break;
+            }
+            let terminated = record.last() == Some(&0);
+            if terminated {
+                record.pop();
+            }
+            let Some((oid, path)) = parse_record(&record, &mut parser_state)? else {
+                continue;
+            };
+
+            cat_stdin
+                .write_all(oid.as_bytes())
+                .and_then(|_| cat_stdin.write_all(b"\n"))
+                .and_then(|_| cat_stdin.flush())
+                .map_err(|error| {
+                    CrabError::Internal(format!("failed to query git cat-file: {error}"))
+                })?;
+
+            let mut header = Vec::new();
+            cat_stdout.read_until(b'\n', &mut header).map_err(|error| {
+                CrabError::Internal(format!("failed to read git cat-file: {error}"))
+            })?;
+            if header.last() != Some(&b'\n') {
+                return Err(CrabError::Internal(
+                    "git cat-file returned a truncated object header".to_owned(),
+                ));
+            }
+            header.pop();
+            let parts: Vec<&str> = std::str::from_utf8(&header)
+                .map_err(|error| {
+                    CrabError::Internal(format!("git cat-file returned invalid UTF-8: {error}"))
+                })?
+                .split_whitespace()
+                .collect();
+            if parts.len() < 2 || parts[1] == "missing" {
+                return Err(CrabError::Internal(format!(
+                    "git cat-file could not read object {oid}"
+                )));
+            }
+            if parts.len() != 3 || parts[0] != oid {
+                return Err(CrabError::Internal(
+                    "git cat-file returned a malformed object header".to_owned(),
+                ));
+            }
+            let object_size = parts[2].parse::<u64>().map_err(|_| {
+                CrabError::Internal("git cat-file returned an invalid object size".to_owned())
+            })?;
+
+            let content = if object_size <= MAX_LFS_POINTER_SIZE as u64 {
+                let size = usize::try_from(object_size).map_err(|_| {
+                    CrabError::Internal(
+                        "git cat-file object size does not fit in memory".to_owned(),
+                    )
+                })?;
+                let mut content = vec![0; size];
+                cat_stdout.read_exact(&mut content).map_err(|error| {
+                    CrabError::Internal(format!(
+                        "git cat-file returned truncated object content: {error}"
+                    ))
+                })?;
+                Some(content)
+            } else {
+                let mut limited = (&mut cat_stdout).take(object_size);
+                io::copy(&mut limited, &mut io::sink()).map_err(|error| {
+                    CrabError::Internal(format!("failed to discard git object content: {error}"))
+                })?;
+                None
+            };
+            let mut separator = [0u8; 1];
+            cat_stdout.read_exact(&mut separator).map_err(|error| {
+                CrabError::Internal(format!(
+                    "git cat-file returned an unterminated object record: {error}"
+                ))
+            })?;
+            if separator[0] != b'\n' {
+                return Err(CrabError::Internal(
+                    "git cat-file returned an unterminated object record".to_owned(),
+                ));
+            }
+
+            if parts[1] == "blob"
+                && let Some(content) = content
+                && let PointerKind::Lfs(pointer) = classify(&content)
+                && pointer.size > 0
+            {
+                visitor(path, pointer)?;
+            }
+            if !terminated {
+                break;
+            }
+        }
+        Ok(())
+    })();
+
+    let scan_failed = scan_result.is_err();
+    drop(cat_stdin);
+    if scan_failed {
+        // A callback or framing error can leave either producer blocked on a
+        // full pipe. Kill both children before waiting so malformed input
+        // cannot turn a bounded scan into a process deadlock.
+        let _ = producer.kill();
+        let _ = cat.kill();
+    }
+    drop(producer_stdout);
+    drop(cat_stdout);
+    let cat_output = cat
+        .wait_with_output()
+        .map_err(|error| CrabError::Internal(format!("git cat-file failed: {error}")))?;
+    let producer_output = producer
+        .wait_with_output()
+        .map_err(|error| CrabError::Internal(format!("git discovery failed: {error}")))?;
+
+    if let Err(error) = scan_result {
+        return Err(error);
+    }
+    if !producer_output.status.success() {
+        let command = args.first().map(String::as_str).unwrap_or("git discovery");
+        return Err(CrabError::Internal(format!(
+            "git {command} failed: {}",
+            String::from_utf8_lossy(&producer_output.stderr).trim()
+        )));
+    }
+    if !cat_output.status.success() {
+        return Err(CrabError::Internal(format!(
+            "git cat-file exited with status {}: {}",
+            cat_output.status,
+            String::from_utf8_lossy(&cat_output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn parse_rev_list_record(
+    record: &[u8],
+    pending_oid: &mut Option<String>,
+) -> Result<Option<(String, String)>> {
+    if let Some(path) = record.strip_prefix(b"path=") {
+        let oid = pending_oid.take().ok_or_else(|| {
+            CrabError::Internal("git rev-list returned a path without an object ID".to_owned())
+        })?;
+        if path.is_empty() {
+            return Err(CrabError::Internal(
+                "git rev-list returned an empty object path".to_owned(),
+            ));
+        }
+        return Ok(Some((oid, String::from_utf8_lossy(path).into_owned())));
     }
 
-    let oids_input: String = tree_lines
-        .iter()
-        .map(|(hash, _)| hash.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let stdout = cat_file_batch_stdout(repo_dir, oids_input)?;
-    let mut pointers = Vec::new();
-    let mut seen = HashSet::new();
-    let mut pos = 0;
-    let mut line_idx = 0;
-
-    while pos < stdout.len() && line_idx < tree_lines.len() {
-        let header_end = match stdout[pos..].iter().position(|&b| b == b'\n') {
-            Some(p) => pos + p,
-            None => break,
-        };
-
-        let header = String::from_utf8_lossy(&stdout[pos..header_end]);
-        let parts: Vec<&str> = header.split_whitespace().collect();
-
-        if parts.len() < 2 || parts[1] == "missing" {
-            return Err(CrabError::Internal(format!(
-                "git cat-file could not read object {}",
-                tree_lines[line_idx].0
-            )));
-        }
-        if parts.len() != 3 {
-            return Err(CrabError::Internal(
-                "git cat-file returned a malformed object header".to_owned(),
-            ));
-        }
-
-        let Ok(obj_size) = parts[2].parse::<usize>() else {
-            return Err(CrabError::Internal(
-                "git cat-file returned an invalid object size".to_owned(),
-            ));
-        };
-
-        let content_start = header_end + 1;
-        let content_end = content_start + obj_size;
-
-        if content_end > stdout.len() {
-            return Err(CrabError::Internal(
-                "git cat-file returned truncated object content".to_owned(),
-            ));
-        }
-        if stdout.get(content_end) != Some(&b'\n') {
-            return Err(CrabError::Internal(
-                "git cat-file returned an unterminated object record".to_owned(),
-            ));
-        }
-
-        let content = &stdout[content_start..content_end];
-
-        if parts[1] == "blob"
-            && content.len() <= MAX_LFS_POINTER_SIZE
-            && let PointerKind::Lfs(pointer) = classify(content)
-            && pointer.size > 0
-            && seen.insert(pointer.oid)
-        {
-            pointers.push(pointer);
-        }
-
-        pos = content_end + 1;
-        line_idx += 1;
-    }
-
-    if line_idx != tree_lines.len() {
+    let oid = std::str::from_utf8(record).map_err(|_| {
+        CrabError::Internal("git rev-list returned a malformed object record".to_owned())
+    })?;
+    if !is_git_object_id(oid) {
         return Err(CrabError::Internal(
-            "git cat-file returned fewer object records than requested".to_owned(),
+            "git rev-list returned a malformed object record".to_owned(),
         ));
     }
-
-    Ok(pointers)
+    // `rev-list --objects -z` emits an object ID record followed by a
+    // `path=...` record only for objects that have a name. Commits and trees
+    // therefore leave a pending ID that is deliberately discarded by the
+    // next ID or at EOF.
+    *pending_oid = Some(oid.to_owned());
+    Ok(None)
 }
 
+fn parse_ls_tree_record(
+    record: &[u8],
+    _pending_oid: &mut Option<String>,
+) -> Result<Option<(String, String)>> {
+    let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+        return Err(CrabError::Internal(
+            "git ls-tree returned a malformed object record".to_owned(),
+        ));
+    };
+    let (meta, path) = record.split_at(separator);
+    let path = &path[1..];
+    let parts: Vec<&str> = std::str::from_utf8(meta)
+        .map_err(|_| CrabError::Internal("git ls-tree returned invalid UTF-8".to_owned()))?
+        .split_whitespace()
+        .collect();
+    if parts.len() != 3 {
+        return Err(CrabError::Internal(
+            "git ls-tree returned a malformed object record".to_owned(),
+        ));
+    }
+    if parts[1] != "blob" {
+        return Ok(None);
+    }
+    if !is_git_object_id(parts[2]) || path.is_empty() {
+        return Err(CrabError::Internal(
+            "git ls-tree returned a malformed object record".to_owned(),
+        ));
+    }
+    Ok(Some((
+        parts[2].to_owned(),
+        String::from_utf8_lossy(path).into_owned(),
+    )))
+}
+
+fn all_ref_names() -> Result<Vec<String>> {
+    let output = git_command_in(Path::new("."))
+        .args(["rev-parse", "--all"])
+        .output()
+        .map_err(|error| CrabError::Internal(format!("failed to run git rev-parse: {error}")))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then(|| line.to_owned())
+        })
+        .collect())
+}
+
+/// Retained for the focused pipe/backpressure regression test.
+#[cfg(test)]
 fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>> {
     let mut child = git_command_in(repo_dir)
         .args(["cat-file", "--batch"])
@@ -635,33 +728,6 @@ fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>>
     Ok(output.stdout)
 }
 
-fn ls_tree_head() -> Result<Vec<(String, String)>> {
-    ls_tree_ref_in(Path::new("."), "HEAD")
-}
-
-fn ls_tree_ref(ref_name: &str) -> Result<Vec<(String, String)>> {
-    ls_tree_ref_in(Path::new("."), ref_name)
-}
-
-fn ls_tree_ref_in(repo_dir: &Path, ref_name: &str) -> Result<Vec<(String, String)>> {
-    let output = git_command_in(repo_dir)
-        .args(["ls-tree", "-r", ref_name])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git ls-tree: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Not a valid object name") {
-            return Ok(Vec::new());
-        }
-        return Err(CrabError::Internal(format!(
-            "git ls-tree failed for {ref_name}: {stderr}"
-        )));
-    }
-
-    Ok(parse_ls_tree_output(&output.stdout))
-}
-
 fn git_command_in(repo_dir: &Path) -> Command {
     let mut command = Command::new("git");
     // Git sets these variables when invoking a remote helper. The scan owns
@@ -673,67 +739,6 @@ fn git_command_in(repo_dir: &Path) -> Command {
         .env_remove("GIT_COMMON_DIR")
         .current_dir(repo_dir);
     command
-}
-
-fn ls_tree_refs(refs: &[String]) -> Result<Vec<(String, String)>> {
-    let mut all_entries = Vec::new();
-    for ref_name in refs {
-        all_entries.extend(ls_tree_ref(ref_name)?);
-    }
-    Ok(all_entries)
-}
-
-fn ls_tree_all_refs() -> Result<Vec<(String, String)>> {
-    let refs_output = Command::new("git")
-        .args(["rev-parse", "--all"])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git rev-parse: {e}")))?;
-
-    if !refs_output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let refs_text = String::from_utf8_lossy(&refs_output.stdout);
-    let mut all_entries = Vec::new();
-
-    for ref_sha in refs_text.lines() {
-        let ref_sha = ref_sha.trim();
-        if ref_sha.is_empty() {
-            continue;
-        }
-        let output = Command::new("git")
-            .args(["ls-tree", "-r", ref_sha])
-            .output()
-            .map_err(|e| {
-                CrabError::Internal(format!("failed to run git ls-tree for {ref_sha}: {e}"))
-            })?;
-        if output.status.success() {
-            let entries = parse_ls_tree_output(&output.stdout);
-            all_entries.extend(entries);
-        }
-    }
-
-    Ok(all_entries)
-}
-
-fn parse_ls_tree_output(output: &[u8]) -> Vec<(String, String)> {
-    let text = String::from_utf8_lossy(output);
-    let mut results = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((meta, filename)) = line.split_once('\t') else {
-            continue;
-        };
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        if parts.len() < 3 || parts[1] != "blob" {
-            continue;
-        }
-        results.push((parts[2].to_owned(), filename.to_owned()));
-    }
-    results
 }
 
 /// Parse a hex OID string into 32 bytes.
@@ -774,6 +779,7 @@ fn hex_nibble(b: u8) -> std::result::Result<u8, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     fn oid(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
@@ -821,6 +827,70 @@ mod tests {
                 .unwrap_err();
 
         assert!(format!("{error}").contains("git rev-list failed"));
+    }
+
+    #[test]
+    fn range_scan_streams_zipped_rev_list_and_cat_file_records() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(dir.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        let content = b"streamed lfs object";
+        let pointer = LfsPointer {
+            oid: sha2::Sha256::digest(content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        std::fs::write(dir.path().join("asset.bin"), pointer.serialize()).unwrap();
+        std::fs::write(
+            dir.path().join("large.bin"),
+            vec![b'x'; MAX_LFS_POINTER_SIZE + 1024],
+        )
+        .unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["add", "."])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["commit", "--quiet", "-m", "fixture"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let head = String::from_utf8(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+
+        let entries = collect_pointers_from_range_in(dir.path(), &[head], &[]).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "asset.bin");
+        assert_eq!(entries[0].1, pointer);
     }
 
     #[test]

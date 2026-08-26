@@ -12,14 +12,16 @@ use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::core::error::{CrabError, Result};
-use crate::storage::retry::{RetryPolicy, retry};
+use crate::lfs::coordinator::{
+    DEFAULT_IN_FLIGHT_BYTES, TransferCoordinator, TransferOutcome, TransferPolicy, TransferRequest,
+};
 use crab_lfs::LfsObjectStore;
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,12 @@ pub struct TransferAgentConfig {
     pub max_retry_delay: u32,
     /// Directory where completed downloads are staged for Git LFS.
     pub temp_dir: PathBuf,
+    /// Maximum number of object transfers admitted at once.
+    pub concurrent_transfers: u32,
+    /// Maximum aggregate transfer bandwidth in bytes per second (zero is unlimited).
+    pub max_bandwidth: u64,
+    /// Byte budget shared by admitted object transfers.
+    pub in_flight_bytes: u64,
 }
 
 impl Default for TransferAgentConfig {
@@ -131,16 +139,22 @@ impl Default for TransferAgentConfig {
             max_retries: 8,
             max_retry_delay: 10,
             temp_dir: lfs_tmp_dir(),
+            concurrent_transfers: 8,
+            max_bandwidth: 0,
+            in_flight_bytes: DEFAULT_IN_FLIGHT_BYTES,
         }
     }
 }
 
 impl TransferAgentConfig {
-    fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy {
-            max_attempts: self.max_retries.saturating_add(1).max(1),
-            base: Duration::from_secs(1),
-            cap: Duration::from_secs(self.max_retry_delay as u64),
+    fn transfer_policy(&self) -> TransferPolicy {
+        TransferPolicy {
+            max_concurrency: self.concurrent_transfers.max(1) as usize,
+            max_retries: self.max_retries,
+            max_retry_delay: self.max_retry_delay,
+            skip_download_errors: false,
+            max_bandwidth: self.max_bandwidth,
+            in_flight_bytes: self.in_flight_bytes.max(1),
         }
     }
 }
@@ -211,7 +225,12 @@ where
 
             match serde_json::from_str::<InboundEvent>(&line) {
                 Ok(event) => {
-                    if tx.blocking_send(Ok(event)).is_err() {
+                    let terminate = matches!(&event, InboundEvent::Terminate);
+                    if tx.blocking_send(Ok(event)).is_err() || terminate {
+                        // Do not attempt another blocking read after the
+                        // protocol's terminal event. This is what lets a
+                        // real stdin pipe remain open without leaking a
+                        // blocked reader thread during shutdown.
                         break;
                     }
                 }
@@ -223,8 +242,7 @@ where
         }
     });
 
-    // Semaphore created after init tells us the concurrency limit.
-    let mut semaphore: Option<Arc<Semaphore>> = None;
+    let mut coordinator: Option<Arc<TransferCoordinator>> = None;
     let mut join_set = JoinSet::new();
     let mut loop_error = None;
 
@@ -282,10 +300,13 @@ where
                 } else {
                     1
                 };
+                let mut resolved_config = resolved_config;
+                resolved_config.concurrent_transfers = concurrency;
                 initialized = true;
                 store = Some(Arc::new(resolved_store));
+                let policy = resolved_config.transfer_policy();
                 config = Some(Arc::new(resolved_config));
-                semaphore = Some(Arc::new(Semaphore::new(concurrency as usize)));
+                coordinator = Some(Arc::new(TransferCoordinator::new(policy)));
 
                 tracing::debug!(
                     %operation,
@@ -305,7 +326,7 @@ where
                     break;
                 }
 
-                let Some(sem) = semaphore.clone() else {
+                let Some(coordinator) = coordinator.clone() else {
                     loop_error = Some(CrabError::LfsTransferProtocol(
                         "upload event before init".into(),
                     ));
@@ -317,29 +338,55 @@ where
                     ));
                     break;
                 };
-                let Some(config) = config.clone() else {
-                    loop_error = Some(CrabError::LfsTransferProtocol(
-                        "upload event before init".into(),
-                    ));
-                    break;
+                let request = match parse_oid_hex(&oid) {
+                    Ok(oid_bytes) => TransferRequest {
+                        oid: oid_bytes,
+                        size,
+                    },
+                    Err(error) => {
+                        let output = Arc::clone(&output);
+                        join_set.spawn(async move {
+                            if let Err(send_error) = write_json_line(
+                                &output,
+                                &CompleteEvent {
+                                    event: "complete",
+                                    oid,
+                                    path: None,
+                                    error: Some(TransferError {
+                                        code: error_code(&error),
+                                        message: error.to_string(),
+                                    }),
+                                },
+                            )
+                            .await
+                            {
+                                tracing::error!(error = %send_error, "upload failed to send response");
+                            }
+                        });
+                        continue;
+                    }
                 };
-                // Acquire before spawning so the JoinSet and the input
-                // reader both apply backpressure instead of retaining one
-                // task per queued transfer.
-                let permit = match sem.acquire_owned().await {
+                let permit = match coordinator.admit(request).await {
                     Ok(permit) => permit,
-                    Err(_) => {
-                        loop_error = Some(CrabError::LfsTransferProtocol(
-                            "transfer concurrency gate closed".into(),
-                        ));
+                    Err(error) => {
+                        loop_error = Some(error);
                         break;
                     }
                 };
                 let output = Arc::clone(&output);
 
                 join_set.spawn(async move {
-                    let _permit = permit;
-                    let result = handle_upload(&store, &oid, size, &path, &output, &config).await;
+                    let result = handle_upload(
+                        &coordinator,
+                        request,
+                        permit,
+                        &store,
+                        &oid,
+                        size,
+                        &path,
+                        &output,
+                    )
+                    .await;
                     if let Err(e) = result {
                         tracing::error!(oid = %oid, error = %e, "upload failed to send response");
                     }
@@ -354,7 +401,7 @@ where
                     break;
                 }
 
-                let Some(sem) = semaphore.clone() else {
+                let Some(coordinator) = coordinator.clone() else {
                     loop_error = Some(CrabError::LfsTransferProtocol(
                         "download event before init".into(),
                     ));
@@ -372,20 +419,55 @@ where
                     ));
                     break;
                 };
-                let permit = match sem.acquire_owned().await {
+                let request = match parse_oid_hex(&oid) {
+                    Ok(oid_bytes) => TransferRequest {
+                        oid: oid_bytes,
+                        size,
+                    },
+                    Err(error) => {
+                        let output = Arc::clone(&output);
+                        join_set.spawn(async move {
+                            if let Err(send_error) = write_json_line(
+                                &output,
+                                &CompleteEvent {
+                                    event: "complete",
+                                    oid,
+                                    path: None,
+                                    error: Some(TransferError {
+                                        code: error_code(&error),
+                                        message: error.to_string(),
+                                    }),
+                                },
+                            )
+                            .await
+                            {
+                                tracing::error!(error = %send_error, "download failed to send response");
+                            }
+                        });
+                        continue;
+                    }
+                };
+                let permit = match coordinator.admit(request).await {
                     Ok(permit) => permit,
-                    Err(_) => {
-                        loop_error = Some(CrabError::LfsTransferProtocol(
-                            "transfer concurrency gate closed".into(),
-                        ));
+                    Err(error) => {
+                        loop_error = Some(error);
                         break;
                     }
                 };
                 let output = Arc::clone(&output);
 
                 join_set.spawn(async move {
-                    let _permit = permit;
-                    let result = handle_download(&store, &oid, size, &output, &config).await;
+                    let result = handle_download(
+                        &coordinator,
+                        request,
+                        permit,
+                        &store,
+                        &oid,
+                        size,
+                        &output,
+                        &config.temp_dir,
+                    )
+                    .await;
                     if let Err(e) = result {
                         tracing::error!(oid = %oid, error = %e, "download failed to send response");
                     }
@@ -393,6 +475,12 @@ where
             }
 
             InboundEvent::Terminate => {
+                if !initialized {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "terminate event before init".into(),
+                    ));
+                    break;
+                }
                 tracing::debug!("received terminate, waiting for in-flight transfers");
                 break;
             }
@@ -420,47 +508,59 @@ where
 // Upload handler
 // ---------------------------------------------------------------------------
 
-/// Handle a single upload: read the local file, upload to the object store,
-/// emit progress and complete events.
+/// Handle one upload after admission by the canonical coordinator.
 async fn handle_upload<W: Write + Send>(
-    store: &LfsObjectStore,
+    coordinator: &TransferCoordinator,
+    request: TransferRequest,
+    permit: crate::lfs::coordinator::TransferPermit,
+    store: &Arc<LfsObjectStore>,
     oid: &str,
     size: u64,
     path: &str,
     output: &Arc<Mutex<W>>,
-    config: &TransferAgentConfig,
 ) -> Result<()> {
-    let result = do_upload(store, oid, size, path, output, config).await;
-    match result {
-        Ok(()) => {
-            write_json_line(
-                output,
-                &CompleteEvent {
-                    event: "complete",
-                    oid: oid.to_owned(),
-                    path: None,
-                    error: None,
-                },
-            )
-            .await
-        }
-        Err(e) => {
-            let code = error_code(&e);
-            write_json_line(
-                output,
-                &CompleteEvent {
-                    event: "complete",
-                    oid: oid.to_owned(),
-                    path: None,
-                    error: Some(TransferError {
-                        code,
-                        message: e.to_string(),
-                    }),
-                },
-            )
-            .await
-        }
-    }
+    let first_progress = Arc::new(AtomicBool::new(true));
+    let store = Arc::clone(store);
+    let oid = oid.to_owned();
+    let path = PathBuf::from(path);
+    let output_for_transfer = Arc::clone(output);
+    let first_progress_for_transfer = Arc::clone(&first_progress);
+    let response_oid = oid.clone();
+    let result = coordinator
+        .run_admitted(request, permit, move |cancel| {
+            let store = Arc::clone(&store);
+            let oid = oid.clone();
+            let path = path.clone();
+            let output = Arc::clone(&output_for_transfer);
+            let emit_initial_progress = first_progress_for_transfer.swap(false, Ordering::AcqRel);
+            async move {
+                if cancel.is_cancelled() {
+                    return Err(CrabError::Cancelled);
+                }
+                do_upload(&store, &oid, size, &path, &output, emit_initial_progress)
+                    .await
+                    .map(|()| TransferOutcome::Transferred)
+            }
+        })
+        .await;
+    let response = match result {
+        Ok(_) => CompleteEvent {
+            event: "complete",
+            oid: response_oid,
+            path: None,
+            error: None,
+        },
+        Err(error) => CompleteEvent {
+            event: "complete",
+            oid: response_oid,
+            path: None,
+            error: Some(TransferError {
+                code: error_code(&error),
+                message: error.to_string(),
+            }),
+        },
+    };
+    write_json_line(output, &response).await
 }
 
 /// Core upload logic separated from error-response plumbing.
@@ -468,21 +568,14 @@ async fn handle_upload<W: Write + Send>(
 /// Streams and verifies the local file for every object size. Peak memory is
 /// bounded by the object-store multipart pipeline instead of file size.
 ///
-/// Retries apply at the full-operation level. For the streaming
-/// path we rely on the object-store's internal per-part retry plus
-/// the outer [`retry`] wrapper for transient errors that escape part
-/// handling (connection resets between part PUTs, etc.). Because the
-/// multipart upload is aborted on error, a retry starts a fresh
-/// UploadId — no orphan parts accumulate on S3.
 async fn do_upload<W: Write + Send>(
     store: &LfsObjectStore,
     oid: &str,
     size: u64,
-    path: &str,
+    path: &std::path::Path,
     output: &Arc<Mutex<W>>,
-    config: &TransferAgentConfig,
+    emit_initial_progress: bool,
 ) -> Result<()> {
-    let oid_bytes = parse_oid_hex(oid)?;
     let actual_size = tokio::fs::metadata(path)
         .await
         .map_err(CrabError::Io)?
@@ -493,32 +586,24 @@ async fn do_upload<W: Write + Send>(
         });
     }
 
-    // Emit a progress event at the start (0 bytes). Done before any
-    // file I/O so the LFS client sees activity immediately even if
-    // the file is large and the first read stalls on a cold cache.
-    write_json_line(
-        output,
-        &ProgressEvent {
-            event: "progress",
-            oid: oid.to_owned(),
-            bytes_so_far: 0,
-            bytes_since_last: 0,
-        },
-    )
-    .await?;
+    if emit_initial_progress {
+        write_json_line(
+            output,
+            &ProgressEvent {
+                event: "progress",
+                oid: oid.to_owned(),
+                bytes_so_far: 0,
+                bytes_since_last: 0,
+            },
+        )
+        .await?;
+    }
 
-    let file_path = std::path::PathBuf::from(path);
-    let retry_policy = config.retry_policy();
-    retry(&retry_policy, || {
-        let fp = file_path.clone();
-        async move {
-            store
-                .put_stream(&oid_bytes, &fp)
-                .await
-                .map_err(CrabError::from)
-        }
-    })
-    .await?;
+    let oid_bytes = parse_oid_hex(oid)?;
+    store
+        .put_stream_with_size(&oid_bytes, Some(size), path)
+        .await
+        .map_err(CrabError::from)?;
 
     // Emit final progress event.
     write_json_line(
@@ -539,44 +624,88 @@ async fn do_upload<W: Write + Send>(
 // Download handler
 // ---------------------------------------------------------------------------
 
-/// Handle a single download: fetch from the object store, write to a temp
-/// file, emit progress and complete events.
+/// Handle one download after admission by the canonical coordinator.
 async fn handle_download<W: Write + Send>(
-    store: &LfsObjectStore,
+    coordinator: &TransferCoordinator,
+    request: TransferRequest,
+    permit: crate::lfs::coordinator::TransferPermit,
+    store: &Arc<LfsObjectStore>,
     oid: &str,
     size: u64,
     output: &Arc<Mutex<W>>,
-    config: &TransferAgentConfig,
+    temp_dir: &std::path::Path,
 ) -> Result<()> {
-    let result = do_download(store, oid, size, output, config).await;
-    match result {
-        Ok(temp_path) => {
-            write_json_line(
-                output,
-                &CompleteEvent {
-                    event: "complete",
-                    oid: oid.to_owned(),
-                    path: Some(temp_path),
-                    error: None,
-                },
-            )
-            .await
-        }
-        Err(e) => {
-            let code = error_code(&e);
-            write_json_line(
-                output,
-                &CompleteEvent {
-                    event: "complete",
-                    oid: oid.to_owned(),
-                    path: None,
-                    error: Some(TransferError {
-                        code,
-                        message: e.to_string(),
-                    }),
-                },
-            )
-            .await
+    let first_progress = Arc::new(AtomicBool::new(true));
+    let store = Arc::clone(store);
+    let oid = oid.to_owned();
+    let temp_dir = temp_dir.to_owned();
+    let output_for_transfer = Arc::clone(output);
+    let first_progress_for_transfer = Arc::clone(&first_progress);
+    let downloaded_path = Arc::new(Mutex::new(None));
+    let downloaded_path_for_transfer = Arc::clone(&downloaded_path);
+    let response_oid = oid.clone();
+    let result = coordinator
+        .run_admitted(request, permit, move |cancel| {
+            let store = Arc::clone(&store);
+            let oid = oid.clone();
+            let temp_dir = temp_dir.clone();
+            let output = Arc::clone(&output_for_transfer);
+            let downloaded_path = Arc::clone(&downloaded_path_for_transfer);
+            let emit_initial_progress = first_progress_for_transfer.swap(false, Ordering::AcqRel);
+            async move {
+                if cancel.is_cancelled() {
+                    return Err(CrabError::Cancelled);
+                }
+                let path = do_download(
+                    &store,
+                    &oid,
+                    size,
+                    &output,
+                    &temp_dir,
+                    emit_initial_progress,
+                )
+                .await?;
+                *downloaded_path.lock().await = Some(path);
+                Ok(TransferOutcome::Transferred)
+            }
+        })
+        .await;
+    let response = match result {
+        Ok(_) => match downloaded_path.lock().await.take() {
+            Some(temp_path) => CompleteEvent {
+                event: "complete",
+                oid: response_oid,
+                path: Some(temp_path),
+                error: None,
+            },
+            None => CompleteEvent {
+                event: "complete",
+                oid: response_oid,
+                path: None,
+                error: Some(TransferError {
+                    code: 1,
+                    message: "download completed without a staged path".to_owned(),
+                }),
+            },
+        },
+        Err(error) => CompleteEvent {
+            event: "complete",
+            oid: response_oid,
+            path: None,
+            error: Some(TransferError {
+                code: error_code(&error),
+                message: error.to_string(),
+            }),
+        },
+    };
+    let staged_path = response.path.clone();
+    match write_json_line(output, &response).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Some(path) = staged_path {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            Err(error)
         }
     }
 }
@@ -584,54 +713,51 @@ async fn handle_download<W: Write + Send>(
 /// Core download logic separated from error-response plumbing.
 ///
 /// The object store streams directly into a unique temporary file and hashes
-/// the bytes before returning the path to Git LFS. Transient errors retry the
-/// complete stream with the configured policy; a failed attempt never exposes
-/// its partial path to the client.
+/// the bytes before returning the path to Git LFS. A failed attempt is removed
+/// before the coordinator retries it, so no partial path reaches the client.
 async fn do_download<W: Write + Send>(
     store: &LfsObjectStore,
     oid: &str,
     size: u64,
     output: &Arc<Mutex<W>>,
-    config: &TransferAgentConfig,
+    temp_dir: &std::path::Path,
+    emit_initial_progress: bool,
 ) -> Result<String> {
     let oid_bytes = parse_oid_hex(oid)?;
 
-    let tmp_dir = config.temp_dir.clone();
-    tokio::fs::create_dir_all(&tmp_dir)
+    tokio::fs::create_dir_all(temp_dir)
         .await
         .map_err(CrabError::Io)?;
     let temp = tempfile::Builder::new()
         .prefix("crab-lfs-transfer-")
-        .tempfile_in(&tmp_dir)
+        .tempfile_in(temp_dir)
         .map_err(CrabError::Io)?;
     let temp_path = temp
         .into_temp_path()
         .keep()
         .map_err(|error| CrabError::Io(error.error))?;
 
-    // Emit a progress event at the start (0 bytes).
-    write_json_line(
-        output,
-        &ProgressEvent {
-            event: "progress",
-            oid: oid.to_owned(),
-            bytes_so_far: 0,
-            bytes_since_last: 0,
-        },
-    )
-    .await?;
-
-    let retry_policy = config.retry_policy();
-    if let Err(error) = retry(&retry_policy, || {
-        let destination = temp_path.clone();
-        async move {
-            store
-                .download_to_file(&oid_bytes, size, &destination)
-                .await
-                .map_err(CrabError::from)
+    if emit_initial_progress {
+        if let Err(error) = write_json_line(
+            output,
+            &ProgressEvent {
+                event: "progress",
+                oid: oid.to_owned(),
+                bytes_so_far: 0,
+                bytes_since_last: 0,
+            },
+        )
+        .await
+        {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error);
         }
-    })
-    .await
+    }
+
+    if let Err(error) = store
+        .download_to_file(&oid_bytes, size, &temp_path)
+        .await
+        .map_err(CrabError::from)
     {
         let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(error);
@@ -975,6 +1101,15 @@ mod tests {
             final_progress.get("bytesSoFar").and_then(|v| v.as_u64()),
             Some(data.len() as u64),
         );
+        let mut previous = 0;
+        for event in progress_events {
+            let current = event
+                .get("bytesSoFar")
+                .and_then(|value| value.as_u64())
+                .expect("progress must contain bytesSoFar");
+            assert!(current >= previous, "progress must be monotonic");
+            previous = current;
+        }
     }
 
     /// End-to-end proof that a multi-part upload routes through the bounded
@@ -1229,6 +1364,121 @@ mod tests {
         assert!(
             matches!(error, CrabError::LfsTransferProtocol(message) if message.contains("duplicate init"))
         );
+    }
+
+    #[tokio::test]
+    async fn terminate_before_init_is_fatal() {
+        let input = r#"{"event":"terminate"}
+"#;
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let error = run_transfer_agent(reader, SharedOutput::new(), test_store())
+            .await
+            .expect_err("terminate before init must terminate the protocol");
+        assert!(
+            matches!(error, CrabError::LfsTransferProtocol(message) if message.contains("before init"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_event_is_a_fatal_protocol_error() {
+        let input = concat!(
+            r#"{"event":"init","operation":"upload"}"#,
+            "\n",
+            r#"{"event":"not-a-transfer-event"}"#,
+            "\n",
+        );
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let error = run_transfer_agent(reader, SharedOutput::new(), test_store())
+            .await
+            .expect_err("unknown event must terminate the protocol");
+        assert!(matches!(
+            error,
+            CrabError::LfsTransferProtocol(message) if message.contains("malformed transfer event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn declared_size_mismatch_is_reported_for_upload() {
+        let store = test_store();
+        let data = b"seven bytes";
+        let oid = sha256_oid(data);
+        let oid_hex = hex_encode(&oid);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), data).unwrap();
+        let input = format!(
+            r#"{{"event":"init","operation":"upload"}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
+{{"event":"terminate"}}
+"#,
+            data.len() + 1,
+            file.path().display()
+        );
+        let reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let output = SharedOutput::new();
+        let output_copy = output.clone();
+        run_transfer_agent(reader, output, store).await.unwrap();
+        let completes: Vec<_> = parse_output_lines(&output_copy.into_bytes())
+            .into_iter()
+            .filter(|value| value.get("event").and_then(|event| event.as_str()) == Some("complete"))
+            .collect();
+        assert_eq!(completes.len(), 1);
+        assert!(completes[0].get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_upload_path_is_reported_without_panicking() {
+        let data = b"content";
+        let oid_hex = hex_encode(&sha256_oid(data));
+        let input = format!(
+            r#"{{"event":"init","operation":"upload"}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":"/path/that/does/not/exist"}}
+{{"event":"terminate"}}
+"#,
+            data.len()
+        );
+        let reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let output = SharedOutput::new();
+        let output_copy = output.clone();
+        run_transfer_agent(reader, output, test_store())
+            .await
+            .unwrap();
+        let completes: Vec<_> = parse_output_lines(&output_copy.into_bytes())
+            .into_iter()
+            .filter(|value| value.get("event").and_then(|event| event.as_str()) == Some("complete"))
+            .collect();
+        assert_eq!(completes.len(), 1);
+        assert!(completes[0].get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn duplicate_oid_requests_each_receive_one_completion() {
+        let data = b"duplicate request";
+        let oid_hex = hex_encode(&sha256_oid(data));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), data).unwrap();
+        let input = format!(
+            r#"{{"event":"init","operation":"upload","concurrenttransfers":1}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
+{{"event":"terminate"}}
+"#,
+            data.len(),
+            file.path().display(),
+            data.len(),
+            file.path().display()
+        );
+        let reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let output = SharedOutput::new();
+        let output_copy = output.clone();
+        run_transfer_agent(reader, output, test_store())
+            .await
+            .unwrap();
+        let completes: Vec<_> = parse_output_lines(&output_copy.into_bytes())
+            .into_iter()
+            .filter(|value| value.get("event").and_then(|event| event.as_str()) == Some("complete"))
+            .collect();
+        assert_eq!(completes.len(), 2);
+        assert!(completes.iter().all(|value| value.get("error").is_none()));
     }
 
     #[tokio::test]

@@ -2,7 +2,8 @@
 //! crab for LFS filters and transfers.
 //!
 //! `install` sets the `lfs.customtransfer.crab.path`,
-//! `lfs.customtransfer.crab.args`, and `lfs.standalonetransferagent`
+//! `lfs.customtransfer.crab.args`, and repository-scoped
+//! `lfs.standalonetransferagent`
 //! git config keys, registers Crab's standalone `filter.lfs`
 //! clean/smudge commands, and writes a pre-push hook that delegates
 //! to `crab lfs pre-push`.
@@ -131,25 +132,28 @@ fn config_scope_flag(options: LfsInstallOptions) -> &'static str {
     } else if options.system {
         "--system"
     } else {
-        "--global"
+        // Crab must not intercept unrelated repositories through a global
+        // standalone-agent setting. Users who intentionally want a system
+        // install must opt into --system explicitly.
+        "--local"
     }
 }
 
 fn print_manual_instructions(bin: &str, skip_smudge: bool) {
     println!("Run the following commands to install LFS configuration:");
     println!();
-    println!("  git config lfs.customtransfer.crab.path \"{bin}\"");
-    println!("  git config lfs.customtransfer.crab.args lfs-transfer-agent");
-    println!("  git config lfs.standalonetransferagent crab");
-    println!("  git config filter.lfs.clean \"{bin} lfs clean -- %f\"");
+    println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
+    println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
+    println!("  git config --local lfs.standalonetransferagent crab");
+    println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
     if skip_smudge {
-        println!("  git config filter.lfs.smudge \"{bin} lfs smudge --skip -- %f\"");
-        println!("  git config filter.lfs.process \"{bin} lfs filter-process --skip\"");
+        println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge --skip -- %f\"");
+        println!("  git config --local filter.lfs.process \"{bin} lfs filter-process --skip\"");
     } else {
-        println!("  git config filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
-        println!("  git config filter.lfs.process \"{bin} lfs filter-process\"");
+        println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
+        println!("  git config --local filter.lfs.process \"{bin} lfs filter-process\"");
     }
-    println!("  git config filter.lfs.required true");
+    println!("  git config --local filter.lfs.required true");
     println!();
     println!("Install the following as pre-push in the directory printed by:");
     println!("  git rev-parse --git-path hooks");
@@ -220,7 +224,7 @@ fn uninstall_config_scope_flag(options: LfsUninstallOptions) -> &'static str {
     } else if options.system {
         "--system"
     } else {
-        "--global"
+        "--local"
     }
 }
 
@@ -698,11 +702,9 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_default_leaves_local_config_scope() {
+    fn install_default_uses_local_config_scope() {
         let dir = temp_git_repo();
-        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
-
-        run_lfs_uninstall_in(dir.path(), LfsUninstallOptions::default()).unwrap();
+        run_lfs_install_in(dir.path(), LfsInstallOptions::default()).unwrap();
 
         let agent = get_config(dir.path(), "--local", "lfs.standalonetransferagent");
         assert_eq!(agent.as_deref(), Some("crab"));

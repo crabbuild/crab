@@ -3,6 +3,8 @@
 //! Wires the CLI lock subcommands to [`crate::lfs::lock::LockManager`]
 //! via the shared [`super::store_setup`] module.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -10,6 +12,7 @@ use std::time::Duration;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::lfs::lock::{LockManager, LockRecord};
+use fs4::fs_std::FileExt as LockFileExt;
 use serde::Serialize;
 
 use super::store_setup::{git_user_identity, resolve_lfs_remote_for_operation_with_remote_sync};
@@ -49,7 +52,7 @@ pub struct LfsLocksOptions {
 /// determined from `git config user.email` (falling back to
 /// `git config user.name`).
 pub async fn run_lfs_lock(options: LfsLockOptions) -> Result<()> {
-    validate_lock_worktree_path(&options.path)?;
+    let path = canonical_lock_path(&options.path, "lfs lock", true)?;
     let ctx = resolve_lfs_remote_for_operation_with_remote_sync("lock", options.remote.as_deref())?;
     let owner = git_user_identity()?;
 
@@ -61,9 +64,7 @@ pub async fn run_lfs_lock(options: LfsLockOptions) -> Result<()> {
 
     let lock_store = crate::storage::Store::from_storage(ctx.store.store().clone());
     let mgr = LockManager::lfs(lock_store, &ctx.prefix);
-    let record = mgr
-        .lock_with_expiry(&options.path, &owner, expires_dur)
-        .await?;
+    let record = mgr.lock_with_expiry(&path, &owner, expires_dur).await?;
     LockCache::open(&ctx.local_lfs_dir, options.remote.as_deref())?.add_local(&record)?;
     if options.json {
         emit_json("lfs.lock", "1.1", &record);
@@ -80,8 +81,8 @@ pub async fn run_lfs_lock(options: LfsLockOptions) -> Result<()> {
 
 /// Run `crab lfs unlock <path> [--force]`.
 ///
-/// Removes the advisory lock for the given path. When `force` is true
-/// the lock is removed regardless of the current owner.
+/// Releases the advisory lock for the given path. When `force` is true
+/// the lock is released regardless of the current owner.
 pub async fn run_lfs_unlock(options: LfsUnlockOptions) -> Result<()> {
     validate_unlock_options(&options)?;
     let ctx =
@@ -90,13 +91,14 @@ pub async fn run_lfs_unlock(options: LfsUnlockOptions) -> Result<()> {
     let lock_store = crate::storage::Store::from_storage(ctx.store.store().clone());
     let mgr = LockManager::lfs(lock_store, &ctx.prefix);
     let (path, id) = unlock_target(&mgr, &options).await?;
+    let path = normalize_lock_path(&path, "lfs unlock")?;
 
     if options.force {
         mgr.force_unlock(&path).await?;
     } else {
         validate_unlock_worktree_path(&path)?;
         let owner = git_user_identity()?;
-        mgr.unlock(&path, &owner).await?;
+        mgr.unlock_with_id(&path, &owner, id.as_deref()).await?;
     }
     let cache = LockCache::open(&ctx.local_lfs_dir, options.remote.as_deref())?;
     if let Some(id) = &id {
@@ -129,8 +131,64 @@ fn validate_unlock_options(options: &LfsUnlockOptions) -> Result<()> {
     Ok(())
 }
 
-fn validate_lock_worktree_path(path: &str) -> Result<()> {
-    validate_worktree_file(path, "lfs lock")
+fn canonical_lock_path(path: &str, key: &str, require_file: bool) -> Result<String> {
+    let normalized = normalize_lock_path(path, key)?;
+    if !require_file {
+        return Ok(normalized);
+    }
+
+    validate_worktree_file(path, key)?;
+    let root = std::env::current_dir()
+        .and_then(|root| root.canonicalize())
+        .map_err(|error| CrabError::Configuration {
+            key: key.to_owned(),
+            origin: format!("failed to resolve the working tree: {error}"),
+        })?;
+    let resolved =
+        root.join(&normalized)
+            .canonicalize()
+            .map_err(|error| CrabError::Configuration {
+                key: key.to_owned(),
+                origin: format!("failed to resolve path \"{path}\": {error}"),
+            })?;
+    if !resolved.starts_with(&root) {
+        return Err(CrabError::Configuration {
+            key: key.to_owned(),
+            origin: format!("path \"{path}\" resolves outside the working tree"),
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_lock_path(path: &str, key: &str) -> Result<String> {
+    let mut components = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| CrabError::Configuration {
+                    key: key.to_owned(),
+                    origin: format!("path \"{path}\" is not valid UTF-8"),
+                })?;
+                components.push(value.to_owned());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                return Err(CrabError::Configuration {
+                    key: key.to_owned(),
+                    origin: format!("path \"{path}\" must be repository-relative"),
+                });
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(CrabError::Configuration {
+            key: key.to_owned(),
+            origin: "lock path must name a file".to_owned(),
+        });
+    }
+    Ok(components.join("/"))
 }
 
 fn validate_unlock_worktree_path(path: &str) -> Result<()> {
@@ -470,6 +528,7 @@ impl LockCache {
     }
 
     fn add_local(&self, record: &LockRecord) -> Result<()> {
+        let _guard = lock_cache_file(&self.local_file)?;
         let mut locks = self.read_local()?;
         locks.retain(|lock| lock.path != record.path && lock.id != record.id);
         locks.push(record.clone());
@@ -477,12 +536,14 @@ impl LockCache {
     }
 
     fn remove_local_by_path(&self, path: &str) -> Result<()> {
+        let _guard = lock_cache_file(&self.local_file)?;
         let mut locks = self.read_local()?;
         locks.retain(|lock| lock.path != path);
         write_lock_cache_file(&self.local_file, &locks)
     }
 
     fn remove_local_by_id(&self, id: &str) -> Result<()> {
+        let _guard = lock_cache_file(&self.local_file)?;
         let mut locks = self.read_local()?;
         locks.retain(|lock| lock.id != id);
         write_lock_cache_file(&self.local_file, &locks)
@@ -497,6 +558,7 @@ impl LockCache {
     }
 
     fn replace_local_owned(&self, remote_locks: &[LockRecord], owner: &str) -> Result<()> {
+        let _guard = lock_cache_file(&self.local_file)?;
         let owned: Vec<LockRecord> = remote_locks
             .iter()
             .filter(|lock| !owner.is_empty() && lock.owner == owner)
@@ -535,7 +597,43 @@ fn write_lock_cache_file(path: &Path, locks: &[LockRecord]) -> Result<()> {
             path.display()
         ))
     })?;
-    std::fs::write(path, bytes).map_err(CrabError::Io)
+    let parent = path.parent().ok_or_else(|| {
+        CrabError::Internal(format!("lock cache path has no parent: {}", path.display()))
+    })?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".crab-lockcache-")
+        .tempfile_in(parent)
+        .map_err(CrabError::Io)?;
+    temp.write_all(&bytes).map_err(CrabError::Io)?;
+    temp.as_file().sync_all().map_err(CrabError::Io)?;
+    temp.persist(path)
+        .map(|_| ())
+        .map_err(|error| CrabError::Io(error.error))
+}
+
+fn lock_cache_file(path: &Path) -> Result<File> {
+    let parent = path.parent().ok_or_else(|| {
+        CrabError::Internal(format!("lock cache path has no parent: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            CrabError::Internal(format!(
+                "lock cache path is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?;
+    let lock_path = path.with_file_name(format!(".{file_name}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(CrabError::Io)?;
+    LockFileExt::lock_exclusive(&file).map_err(CrabError::Io)?;
+    Ok(file)
 }
 
 fn cache_scope(remote: Option<&str>) -> String {
@@ -627,6 +725,7 @@ mod tests {
             locked_at: 1,
             id: id.to_owned(),
             expires_at: None,
+            released_at: None,
         }
     }
 

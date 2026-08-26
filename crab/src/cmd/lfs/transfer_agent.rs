@@ -33,6 +33,9 @@ pub async fn run_lfs_transfer_agent() -> Result<()> {
                 max_retries: ctx.config.transfer_max_retries,
                 max_retry_delay: ctx.config.transfer_max_retry_delay,
                 temp_dir: ctx.local_lfs_dir.join("tmp"),
+                concurrent_transfers: ctx.config.concurrent_transfers,
+                max_bandwidth: ctx.config.transfer_max_bandwidth,
+                in_flight_bytes: crate::lfs::coordinator::DEFAULT_IN_FLIGHT_BYTES,
             };
 
             // The resolver shares the store with the command context. The

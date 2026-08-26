@@ -10,12 +10,16 @@ crab lfs <subcommand> [OPTIONS]
 
 ## Description
 
-`crab lfs` provides a full set of Git LFS-compatible subcommands that operate
-against cloud object storage without a centralized LFS server. This allows
-crab to serve as a drop-in replacement for `git-lfs` in existing workflows,
-while storing LFS objects alongside crab xorbs in the same bucket.
+`crab lfs` provides Crab-managed LFS operations against cloud object storage
+without a centralized LFS server. The supported Git LFS interoperability
+profile is the repository-scoped standalone transfer agent, which requires
+Git LFS to be configured to invoke Crab and requires Crab to have access to
+the selected object store. Crab does not currently provide the standard Git
+LFS HTTP Batch or File Locking service, so it cannot replace an arbitrary Git
+LFS HTTP server.
 
-The core transfer flow mirrors Git LFS: clean/smudge, custom transfer-agent,
+The core transfer flow mirrors the supported standalone Git LFS profile:
+clean/smudge, custom transfer-agent,
 push, fetch, pull, checkout, pointer inspection, status, local fsck, local
 pruning, direct LFS/Crab conversion, and safe local deduplication.
 
@@ -123,9 +127,9 @@ crab lfs uninstall [--local|--worktree|--system] [--skip-repo]
 | `--system` | Remove configuration from the system Git config |
 | `--skip-repo` | Skip removing Crab's repository pre-push hook |
 
-Without a scope flag, uninstall removes Crab's LFS filter configuration from
-the global Git config and removes the repository pre-push hook only when it is
-the hook written by `crab lfs install`.
+Without a scope flag, install and uninstall operate on the current
+repository's local Git config. Use `--system` only when intentionally managing
+an explicit system-wide installation; it can affect unrelated repositories.
 
 ---
 

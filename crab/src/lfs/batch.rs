@@ -4,15 +4,19 @@
 //! commit history and comparing against the object store. Drives concurrent
 //! upload and download of missing objects.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures_util::{Stream, StreamExt, stream};
 #[cfg(not(feature = "gix-pathmatch"))]
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use tokio::sync::Mutex;
 
 use crate::core::error::{CrabError, Result};
 use crate::lfs::config::LfsConfig;
+use crate::lfs::coordinator::{
+    TransferCoordinator, TransferDirection, TransferOutcome, TransferRequest,
+};
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use crab_lfs::LfsObjectStore;
 
@@ -59,35 +63,59 @@ impl BatchResolver {
             return Ok(Vec::new());
         }
 
-        let concurrency = self.config.concurrent_transfers.max(1) as usize;
-        let checks = stream::iter(pointers.iter().cloned())
-            .map(|pointer| {
-                let store = Arc::clone(&self.remote_store);
-                async move {
-                    let oid = pointer.oid;
-                    let exists = match store.verify_size(&oid, pointer.size).await {
-                        Ok(_) => true,
-                        Err(
-                            crab_lfs::LfsError::ObjectMissing { .. }
-                            | crab_lfs::LfsError::ObjectCorrupt { .. },
-                        ) => false,
-                        Err(error) => return Err(CrabError::from(error)),
-                    };
-                    Ok((pointer, exists))
-                }
-            })
-            .buffer_unordered(concurrency);
-
-        let mut missing = Vec::new();
-        futures_util::pin_mut!(checks);
-        while let Some(result) = checks.next().await {
-            let (pointer, exists) = result?;
-            if !exists {
-                missing.push(pointer);
+        let mut pointer_by_oid: HashMap<[u8; 32], LfsPointer> =
+            HashMap::with_capacity(pointers.len());
+        for pointer in pointers {
+            if let Some(existing) = pointer_by_oid.get(&pointer.oid)
+                && existing.size != pointer.size
+            {
+                return Err(CrabError::LfsObjectCorrupt {
+                    oid: hex_encode(&pointer.oid),
+                });
             }
+            pointer_by_oid
+                .entry(pointer.oid)
+                .or_insert_with(|| pointer.clone());
         }
 
-        Ok(missing)
+        let coordinator = TransferCoordinator::new((&self.config).into());
+        let missing = Arc::new(Mutex::new(Vec::new()));
+        let missing_for_operation = Arc::clone(&missing);
+        let store = Arc::clone(&self.remote_store);
+        let requests = pointer_by_oid.values().map(transfer_request);
+        coordinator
+            .execute(
+                TransferDirection::Upload,
+                requests,
+                move |request, cancel| {
+                    let store = Arc::clone(&store);
+                    let missing = Arc::clone(&missing_for_operation);
+                    async move {
+                        if cancel.is_cancelled() {
+                            return Err(CrabError::Cancelled);
+                        }
+                        match store.verify_size(&request.oid, request.size).await {
+                            Ok(()) => Ok(TransferOutcome::AlreadyValid),
+                            Err(
+                                crab_lfs::LfsError::ObjectMissing { .. }
+                                | crab_lfs::LfsError::ObjectCorrupt { .. },
+                            ) => {
+                                missing.lock().await.push(request);
+                                Ok(TransferOutcome::Skipped)
+                            }
+                            Err(error) => Err(CrabError::from(error)),
+                        }
+                    }
+                },
+            )
+            .await?;
+
+        let mut missing = missing.lock().await;
+        let requests = std::mem::take(&mut *missing);
+        Ok(requests
+            .into_iter()
+            .filter_map(|request| pointer_by_oid.get(&request.oid).cloned())
+            .collect())
     }
 
     /// Identifies LFS pointers whose objects are missing locally.
@@ -132,35 +160,37 @@ impl BatchResolver {
     ///
     /// # Errors
     ///
-    /// Returns the first upload error encountered. Remaining in-flight
-    /// transfers are allowed to complete but their errors are logged
-    /// rather than propagated.
+    /// Returns the first upload error encountered after admitted transfers
+    /// have drained; subsequent errors are not returned individually.
     pub async fn upload_missing(&self, pointers: &[LfsPointer]) -> Result<()> {
         if pointers.is_empty() {
             return Ok(());
         }
 
-        let effective_concurrency = self.effective_concurrency();
-        let transfers = stream::iter(pointers.iter().cloned())
-            .map(|pointer| {
-                let store = Arc::clone(&self.remote_store);
-                let local_path = self.local_object_path(&pointer.oid);
-                let oid = pointer.oid;
-
-                async move {
-                    // `put_stream` performs the remote integrity check and
-                    // idempotent skip itself, avoiding a second full remote
-                    // read for objects that are already valid.
-                    let result = store
-                        .put_stream(&oid, &local_path)
-                        .await
-                        .map_err(CrabError::from);
-                    (oid, result)
-                }
-            })
-            .buffer_unordered(effective_concurrency);
-
-        collect_results(transfers).await
+        let coordinator = TransferCoordinator::new((&self.config).into());
+        let store = Arc::clone(&self.remote_store);
+        let local_dir = self.local_lfs_dir.clone();
+        coordinator
+            .execute(
+                TransferDirection::Upload,
+                pointers.iter().map(transfer_request),
+                move |request, cancel| {
+                    let store = Arc::clone(&store);
+                    let local_path = local_object_path_for(&local_dir, &request.oid);
+                    async move {
+                        if cancel.is_cancelled() {
+                            return Err(CrabError::Cancelled);
+                        }
+                        store
+                            .put_stream_with_size(&request.oid, Some(request.size), &local_path)
+                            .await
+                            .map_err(CrabError::from)?;
+                        Ok(TransferOutcome::Transferred)
+                    }
+                },
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Downloads missing LFS objects from the remote store concurrently.
@@ -173,8 +203,8 @@ impl BatchResolver {
     /// # Errors
     ///
     /// Returns the first download error encountered unless
-    /// `config.skip_download_errors` is set, in which case errors are
-    /// logged and the operation continues.
+    /// `config.skip_download_errors` is set, in which case failed transfers
+    /// are counted as skipped and the operation continues.
     pub async fn download_missing(&self, pointers: &[LfsPointer]) -> Result<()> {
         self.download_objects(pointers, false).await
     }
@@ -188,77 +218,60 @@ impl BatchResolver {
             return Ok(());
         }
 
-        let effective_concurrency = self.effective_concurrency();
-        let skip_errors = self.config.skip_download_errors;
-
-        let transfers = stream::iter(pointers.iter().cloned())
-            .map(|pointer| {
-                let store = Arc::clone(&self.remote_store);
-                let local_dir = self.local_lfs_dir.clone();
-                let oid = pointer.oid;
-                let size = pointer.size;
-
-                async move {
-                    let result: Result<()> = async {
-                        if !force && crate::lfs::cache::is_valid(&local_dir, &oid, size)? {
+        let coordinator = TransferCoordinator::new((&self.config).into());
+        let store = Arc::clone(&self.remote_store);
+        let local_dir = self.local_lfs_dir.clone();
+        coordinator
+            .execute(
+                TransferDirection::Download,
+                pointers.iter().map(transfer_request),
+                move |request, cancel| {
+                    let store = Arc::clone(&store);
+                    let local_dir = local_dir.clone();
+                    async move {
+                        if cancel.is_cancelled() {
+                            return Err(CrabError::Cancelled);
+                        }
+                        if !force
+                            && crate::lfs::cache::is_valid(&local_dir, &request.oid, request.size)?
+                        {
                             tracing::debug!(
-                                oid = %hex_encode(&oid),
+                                oid = %hex_encode(&request.oid),
                                 "object already local, skipping download",
                             );
-                            return Ok(());
+                            return Ok(TransferOutcome::AlreadyValid);
                         }
 
                         let temp = crate::lfs::cache::new_temp_path(&local_dir)?;
                         let temp_path: PathBuf = temp.to_path_buf();
                         store
-                            .download_to_file(&oid, size, &temp_path)
+                            .download_to_file(&request.oid, request.size, &temp_path)
                             .await
                             .map_err(CrabError::from)?;
                         crate::lfs::cache::install_verified_temp_path(
-                            &local_dir, &oid, size, temp,
+                            &local_dir,
+                            &request.oid,
+                            request.size,
+                            temp,
                         )?;
-                        Ok(())
+                        Ok(TransferOutcome::Transferred)
                     }
-                    .await;
-                    (oid, result)
-                }
-            })
-            .buffer_unordered(effective_concurrency);
-
-        if skip_errors {
-            collect_results_lenient(transfers).await
-        } else {
-            collect_results(transfers).await
-        }
-    }
-
-    /// Compute effective concurrency, reduced when bandwidth is limited.
-    ///
-    /// When `transfer_max_bandwidth` is set, assumes an average object size
-    /// of 1 MB and limits concurrency so that `concurrency * avg_size` does
-    /// not exceed the bandwidth cap.
-    fn effective_concurrency(&self) -> usize {
-        let base = self.config.concurrent_transfers.max(1) as usize;
-        if self.config.transfer_max_bandwidth > 0 {
-            let avg_object_size = 1_048_576u64; // 1 MB heuristic
-            let max_concurrent =
-                (self.config.transfer_max_bandwidth / avg_object_size).max(1) as usize;
-            base.min(max_concurrent)
-        } else {
-            base
-        }
+                },
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Checks whether an LFS object exists in local storage.
     fn local_object_exists(&self, pointer: &LfsPointer) -> Result<bool> {
         crate::lfs::cache::is_valid(&self.local_lfs_dir, &pointer.oid, pointer.size)
     }
+}
 
-    /// Returns the local filesystem path for an LFS object.
-    ///
-    /// Layout mirrors the remote: `{local_lfs_dir}/objects/{aa}/{bb}/{oid}`
-    fn local_object_path(&self, oid: &[u8; 32]) -> PathBuf {
-        local_object_path_for(&self.local_lfs_dir, oid)
+fn transfer_request(pointer: &LfsPointer) -> TransferRequest {
+    TransferRequest {
+        oid: pointer.oid,
+        size: pointer.size,
     }
 }
 
@@ -332,55 +345,6 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(&hex[..2])
         .join(&hex[2..4])
         .join(&hex)
-}
-
-// ---------------------------------------------------------------------------
-// Result collection helpers
-// ---------------------------------------------------------------------------
-
-/// Drain a bounded transfer stream and return the first error, if any.
-async fn collect_results<S>(results: S) -> Result<()>
-where
-    S: Stream<Item = ([u8; 32], Result<()>)>,
-{
-    let mut first_error: Option<CrabError> = None;
-    futures_util::pin_mut!(results);
-
-    while let Some((oid, result)) = results.next().await {
-        if let Err(error) = result {
-            tracing::error!(
-                oid = %hex_encode(&oid),
-                error = %error,
-                "transfer failed",
-            );
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-    }
-
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
-}
-
-/// Drain a bounded transfer stream, logging errors but not failing the batch.
-async fn collect_results_lenient<S>(results: S) -> Result<()>
-where
-    S: Stream<Item = ([u8; 32], Result<()>)>,
-{
-    futures_util::pin_mut!(results);
-    while let Some((oid, result)) = results.next().await {
-        if let Err(error) = result {
-            tracing::warn!(
-                oid = %hex_encode(&oid),
-                error = %error,
-                "transfer failed (skip_download_errors enabled)",
-            );
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
