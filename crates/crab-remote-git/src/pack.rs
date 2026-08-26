@@ -24,9 +24,12 @@ const SIDEBAND_PAYLOAD: usize = 65_515;
 const GENERATED_PACK_CACHE_VERSION: u32 = 2;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
-const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(60);
-const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(20);
-const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(100);
+// Generated response packs can require a large catalog lookup plus pack
+// production. Match the repository lease safety window and renew well before
+// expiry so a short object-store stall cannot create duplicate producers.
+const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
+const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(60);
+const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(250);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 
@@ -766,7 +769,14 @@ async fn produce_cached_pack(
                     }
                     continue;
                 }
-                Err(source) => return Err(Error::GeneratedPackLease { source }),
+                Err(source) => {
+                    tracing::debug!(
+                        error = %source,
+                        error_debug = ?source,
+                        "generated response-pack lease attempt failed"
+                    );
+                    return Err(Error::GeneratedPackLease { source });
+                }
             }
         };
         return produce_cached_pack_under_lease(

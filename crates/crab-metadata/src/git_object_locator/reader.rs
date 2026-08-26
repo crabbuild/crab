@@ -32,6 +32,13 @@ const MAX_SCAN_AMPLIFICATION: usize = 2;
 // scan than with tens of thousands of independent OID point reads.
 const FULL_SCAN_MIN_LOOKUP_OBJECTS: usize = MIN_SCAN_LOOKUP_OBJECTS * 16;
 const FULL_SCAN_REQUEST_RATIO: u64 = 64;
+// Git SHA-1 object IDs are uniformly distributed in their key space. A
+// min/max range spanning most of that space turns a scan into a catalog-wide
+// read, even when the request contains only a small shallow closure.
+const MAX_SCAN_KEYSPAN_DIVISOR: u64 = 16;
+// A request this close to the complete catalog is cheaper to serve with one
+// sequential pass regardless of the requested IDs' key span.
+const FULL_SCAN_MIN_COVERAGE_DIVISOR: u64 = 8;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
 // Catalog reads materialize one immutable dense dictionary. A larger
@@ -52,6 +59,12 @@ enum LookupStrategy {
     Exact,
     Scan { row_limit: usize },
     FullScan { row_limit: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OidKeySpan {
+    Narrow,
+    Broad,
 }
 
 /// Result of validating one compact row against a pinned pack inventory.
@@ -249,10 +262,11 @@ impl GitObjectLocatorSession {
             .values()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let mut unique_objects = object_ids.len();
-        let mut strategy = lookup_strategy(unique_objects, inventory_objects);
+        let key_span = oid_key_span(object_ids);
+        let mut strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
         if !matches!(strategy, LookupStrategy::Exact) {
             unique_objects = object_ids.iter().collect::<HashSet<_>>().len();
-            strategy = lookup_strategy(unique_objects, inventory_objects);
+            strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
         }
         let scan = match strategy {
             LookupStrategy::Exact => None,
@@ -299,6 +313,16 @@ impl GitObjectLocatorSession {
             );
         }
 
+        if object_ids.len() >= FULL_SCAN_MIN_LOOKUP_OBJECTS {
+            tracing::debug!(
+                locator_lookup_mode = "exact",
+                requested_objects = object_ids.len(),
+                unique_objects,
+                inventory_objects,
+                oid_key_span = ?key_span,
+                "compact Git locator lookup selected"
+            );
+        }
         self.lookup_batch_exact(reader, object_ids, inventory).await
     }
 
@@ -765,23 +789,51 @@ impl GitObjectLocatorSession {
     }
 }
 
-fn lookup_strategy(requested_objects: usize, inventory_objects: u64) -> LookupStrategy {
+fn lookup_strategy(
+    requested_objects: usize,
+    inventory_objects: u64,
+    key_span: OidKeySpan,
+) -> LookupStrategy {
     let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
     if requested_objects < MIN_SCAN_LOOKUP_OBJECTS || inventory_objects == 0 {
         return LookupStrategy::Exact;
     }
+    let near_complete =
+        requested.saturating_mul(FULL_SCAN_MIN_COVERAGE_DIVISOR) >= inventory_objects;
     if requested_objects >= FULL_SCAN_MIN_LOOKUP_OBJECTS
         && requested.saturating_mul(FULL_SCAN_REQUEST_RATIO) >= inventory_objects
+        && (key_span == OidKeySpan::Narrow || near_complete)
     {
         return LookupStrategy::FullScan {
             row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
         };
     }
-    if requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects {
+    if key_span == OidKeySpan::Broad
+        || requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects
+    {
         return LookupStrategy::Exact;
     }
     LookupStrategy::Scan {
         row_limit: requested_objects.saturating_mul(MAX_SCAN_AMPLIFICATION),
+    }
+}
+
+fn oid_key_span(object_ids: &[[u8; 20]]) -> OidKeySpan {
+    let Some(first) = object_ids.first() else {
+        return OidKeySpan::Narrow;
+    };
+    let mut minimum = u64::from_be_bytes(first[..8].try_into().unwrap_or([0; 8]));
+    let mut maximum = minimum;
+    for oid in &object_ids[1..] {
+        let prefix = u64::from_be_bytes(oid[..8].try_into().unwrap_or([0; 8]));
+        minimum = minimum.min(prefix);
+        maximum = maximum.max(prefix);
+    }
+    let span = maximum.saturating_sub(minimum).saturating_add(1);
+    if span <= u64::MAX / MAX_SCAN_KEYSPAN_DIVISOR {
+        OidKeySpan::Narrow
+    } else {
+        OidKeySpan::Broad
     }
 }
 
@@ -1068,7 +1120,11 @@ mod tests {
     #[test]
     fn dense_lookup_requires_a_full_exact_wave_and_bounded_scan_amplification() {
         assert_eq!(
-            lookup_strategy(MIN_SCAN_LOOKUP_OBJECTS, MIN_SCAN_LOOKUP_OBJECTS as u64),
+            lookup_strategy(
+                MIN_SCAN_LOOKUP_OBJECTS,
+                MIN_SCAN_LOOKUP_OBJECTS as u64,
+                OidKeySpan::Narrow,
+            ),
             LookupStrategy::Scan {
                 row_limit: MIN_SCAN_LOOKUP_OBJECTS * 2,
             }
@@ -1076,14 +1132,16 @@ mod tests {
         assert_eq!(
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS - 1,
-                (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64
+                (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64,
+                OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
         );
         assert_eq!(
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS,
-                (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64
+                (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64,
+                OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
         );
@@ -1091,11 +1149,36 @@ mod tests {
             lookup_strategy(
                 FULL_SCAN_MIN_LOOKUP_OBJECTS,
                 (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                OidKeySpan::Narrow,
             ),
             LookupStrategy::FullScan {
                 row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * FULL_SCAN_REQUEST_RATIO as usize,
             }
         );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                OidKeySpan::Broad,
+            ),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * 4,
+                OidKeySpan::Broad,
+            ),
+            LookupStrategy::FullScan {
+                row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * 4,
+            }
+        );
+    }
+
+    #[test]
+    fn broad_sha1_ranges_use_exact_lookup_for_sparse_batches() {
+        assert_eq!(oid_key_span(&[[0; 20], [0xff; 20]]), OidKeySpan::Broad);
+        assert_eq!(oid_key_span(&[oid(1), oid(2)]), OidKeySpan::Narrow);
     }
 
     async fn publish(

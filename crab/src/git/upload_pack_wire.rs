@@ -124,13 +124,11 @@ impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLea
         >,
     > {
         Box::pin(async move {
-            match crab_coordination::PushLock::acquire_internal(
-                &self.store,
-                &self.prefix,
-                resource,
-                ttl,
-            )
-            .await
+            let mut context =
+                crab_coordination::PushLockAcquireContext::new(Arc::clone(&self.store));
+            match context
+                .try_acquire_internal(&self.prefix, resource, ttl)
+                .await
             {
                 Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
                     Box::new(ObjectStoreGeneratedPackLease { lock }),
