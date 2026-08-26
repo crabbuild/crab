@@ -1445,13 +1445,17 @@ class LargeRepositoryQualification:
         }
         for ordinal, commit in enumerate(commits, start=1):
             self.push_commit(commit, ordinal, f"replay push {ordinal:04d}")
-            if self.args.team_load and ordinal == 100:
-                self.prepare_fetch_fanout(ordinal)
             if ordinal in checkpoints:
                 self.acceleration_snapshot(str(ordinal))
                 self.incremental_fetch(ordinal, commit)
                 self.active_pack_snapshot(str(ordinal))
                 self.store_snapshot(str(ordinal))
+            if self.args.team_load and ordinal == 100:
+                # Seed fanout only after checkpoint maintenance has published
+                # the generation required by protocol-v2 readers. Starting it
+                # before the owner run makes the harness wait on clients that
+                # are, correctly, waiting on that same owner run.
+                self.prepare_fetch_fanout(ordinal)
 
     def final_clones(self) -> Path:
         cold = self.clone_root / "full-cold"
