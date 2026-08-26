@@ -1,19 +1,19 @@
 import {
   ArrowRight,
-  BookOpen,
-  ChevronDown,
+  Clock,
   Cloud,
   GitCommit,
+  Gauge,
   Newspaper,
+  Users,
 } from "lucide-react"
 import Link from "next/link"
 
 import { MarketingLayout } from "@/components/marketing-layout"
 import { Badge } from "@/components/ui/badge"
 import { formatBlogDate } from "@/lib/blog-date"
-import { blogSource } from "@/lib/blog-source"
+import { getBlogPosts, type BlogPostMeta } from "@/lib/blog-posts"
 import { createPageMetadata } from "@/lib/metadata"
-import { getMDXComponents } from "@/mdx-components"
 
 export const metadata = createPageMetadata({
   title: "Crab Blog",
@@ -23,12 +23,9 @@ export const metadata = createPageMetadata({
 })
 
 export default function BlogDashboardPage() {
-  const posts = [...blogSource.getPages()].sort((a, b) => {
-    return (
-      new Date(b.data.date ?? 0).getTime() -
-      new Date(a.data.date ?? 0).getTime()
-    )
-  })
+  const posts = getBlogPosts()
+  const featuredPost = posts[0]
+  const remainingPosts = posts.slice(1)
 
   return (
     <MarketingLayout>
@@ -70,108 +67,142 @@ export default function BlogDashboardPage() {
             </h2>
           </div>
           <p className="text-sm text-muted-foreground">
-            Newest first · read without leaving the dashboard
+            {posts.length} article{posts.length === 1 ? "" : "s"} · newest first
           </p>
         </div>
 
-        {posts.length === 0 ? (
+        {!featuredPost ? (
           <div className="border-b border-[#b9c7d8] py-12">
             <h3 className="text-lg font-bold">No notes published yet.</h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              New engineering notes will appear here when they are published.
+              Add an MDX file to the blog collection to publish the first note.
             </p>
           </div>
         ) : (
-          posts.map((post) => (
-            <EditorialEntry key={post.slugs.join("/")} post={post} />
-          ))
+          <>
+            <FeaturedPost post={featuredPost} />
+            {remainingPosts.length > 0 && (
+              <section className="mt-12" aria-labelledby="more-notes">
+                <h2 id="more-notes" className="text-lg font-bold">
+                  More engineering notes
+                </h2>
+                <div className="mt-5 grid gap-5 md:grid-cols-2">
+                  {remainingPosts.map((post) => (
+                    <PostCard key={post.slug} post={post} />
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
         )}
       </main>
     </MarketingLayout>
   )
 }
 
-type BlogPage = ReturnType<typeof blogSource.getPages>[number]
-
-function EditorialEntry({ post }: { post: BlogPage }) {
-  const MDX = post.data.body
-  const date = post.data.date ?? "2026-05-01"
-  const category = post.data.category
-    ? post.data.category.replace("-", " ")
-    : "product"
-
+function FeaturedPost({ post }: { post: BlogPostMeta }) {
   return (
-    <details className="group border-b border-[#b9c7d8]">
-      <summary className="grid cursor-pointer list-none gap-5 py-7 outline-none marker:content-none focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-4 focus-visible:outline-none sm:grid-cols-[8rem_minmax(0,1fr)_auto] sm:items-center">
-        <div className="font-mono text-xs font-black text-[#52637a]">
-          <span className="block text-2xl tracking-[-0.05em] text-[#142033]">
-            {new Date(date).getUTCDate().toString().padStart(2, "0")}
+    <Link
+      href={`/blog/${post.slug}`}
+      className="group grid border-b border-[#b9c7d8] py-8 outline-none focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-4 focus-visible:outline-none md:grid-cols-[9rem_minmax(0,1fr)_13rem] md:items-start"
+    >
+      <div className="font-mono text-xs font-black text-[#52637a]">
+        <span className="block text-3xl tracking-[-0.05em] text-[#142033]">
+          {new Date(post.date).getUTCDate().toString().padStart(2, "0")}
+        </span>
+        {formatBlogDate(post.date, "short")}
+      </div>
+
+      <div className="mt-5 md:mt-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary">{post.category}</Badge>
+          <span className="font-mono text-[10px] font-black tracking-[0.14em] text-[#3d9b72]">
+            FEATURED
           </span>
-          {formatBlogDate(date, "short")}
         </div>
+        <h3 className="mt-3 max-w-3xl text-2xl font-bold tracking-tight transition-colors group-hover:text-[#2f6fce] sm:text-3xl">
+          {post.title}
+        </h3>
+        <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground">
+          {post.excerpt}
+        </p>
+        <TagList tags={post.tags} />
+      </div>
 
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary" className="capitalize">
-              {category}
-            </Badge>
-            <span className="font-mono text-[10px] font-black tracking-[0.14em] text-[#3d9b72]">
-              PUBLISHED
-            </span>
-          </div>
-          <h3 className="mt-3 text-xl font-bold tracking-tight sm:text-2xl">
-            {post.data.title}
-          </h3>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-            {post.data.description}
-          </p>
-        </div>
-
-        <span className="inline-flex min-h-11 items-center gap-2 text-sm font-bold text-[#2f6fce]">
-          Read on this page
-          <ChevronDown
-            className="size-4 transition-transform group-open:rotate-180"
+      <div className="mt-6 grid gap-3 border-l-0 border-[#b9c7d8] text-xs md:mt-0 md:border-l md:pl-6">
+        <MetaLine icon={Clock} label={`${post.readingTimeMinutes} min read`} />
+        <MetaLine icon={Gauge} label={post.level} />
+        <MetaLine icon={Users} label={post.audience} />
+        <span className="mt-2 inline-flex min-h-11 items-center gap-2 font-bold text-[#2f6fce]">
+          Read article
+          <ArrowRight
+            className="size-4 transition-transform group-hover:translate-x-1"
             aria-hidden="true"
           />
         </span>
-      </summary>
+      </div>
+    </Link>
+  )
+}
 
-      <article className="border-t border-[#b9c7d8] bg-[#f8fafc] px-4 py-10 sm:px-8 lg:px-12 lg:py-14">
-        <header className="mx-auto max-w-[46rem] border-b border-[#b9c7d8] pb-7">
-          <p className="font-mono text-[10px] font-black tracking-[0.18em] text-[#2f6fce]">
-            INTERACTIVE FIELD NOTE
-          </p>
-          <h2 className="mt-2 text-3xl font-black tracking-[-0.04em]">
-            {post.data.title}
-          </h2>
-          <p className="mt-3 text-sm text-[#607188]">
-            {post.data.author ?? "Crab Team"} · {formatBlogDate(date)}
-          </p>
-        </header>
+function PostCard({ post }: { post: BlogPostMeta }) {
+  return (
+    <Link
+      href={`/blog/${post.slug}`}
+      className="group flex h-full flex-col rounded-xl border border-[#b9c7d8] bg-white p-5 transition-transform outline-none hover:-translate-y-0.5 hover:shadow-[6px_6px_0_#dbe5f2] focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-2 focus-visible:outline-none"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Badge variant="secondary">{post.category}</Badge>
+        <time className="text-xs text-muted-foreground" dateTime={post.date}>
+          {formatBlogDate(post.date, "short")}
+        </time>
+      </div>
+      <h3 className="mt-4 text-xl font-bold tracking-tight transition-colors group-hover:text-[#2f6fce]">
+        {post.title}
+      </h3>
+      <p className="mt-3 text-sm leading-6 text-muted-foreground">
+        {post.excerpt}
+      </p>
+      <TagList tags={post.tags} />
+      <div className="mt-auto grid gap-2 border-t border-[#dbe3ec] pt-4 text-xs">
+        <MetaLine icon={Clock} label={`${post.readingTimeMinutes} min read`} />
+        <MetaLine icon={Gauge} label={post.level} />
+        <MetaLine icon={Users} label={post.audience} />
+      </div>
+    </Link>
+  )
+}
 
-        <div className="prose-neutral dark:prose-invert mx-auto prose mt-8 max-w-[46rem] prose-headings:scroll-mt-24">
-          <MDX components={getMDXComponents({})} />
-        </div>
+function TagList({ tags }: { tags: string[] }) {
+  return (
+    <div className="my-5 flex flex-wrap gap-1.5">
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          className="rounded-full border border-[#b9c7d8] px-2 py-0.5 text-[10px] font-medium text-[#52637a]"
+        >
+          {tag}
+        </span>
+      ))}
+    </div>
+  )
+}
 
-        <div className="mx-auto mt-12 flex max-w-[46rem] flex-col gap-4 border-t-2 border-[#163052] pt-7 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="font-mono text-[10px] font-black tracking-[0.16em] text-[#2f6fce]">
-              CONTINUE LEARNING
-            </p>
-            <p className="mt-1 text-sm font-bold">
-              Turn the mental model into working knowledge.
-            </p>
-          </div>
-          <Link
-            href="/library"
-            className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg bg-[#163052] px-4 py-2 text-sm font-bold text-white hover:bg-[#23466f] focus-visible:ring-2 focus-visible:ring-[#2f6fce] focus-visible:ring-offset-2 focus-visible:outline-none"
-          >
-            <BookOpen className="size-4" aria-hidden="true" />
-            Open the Library
-          </Link>
-        </div>
-      </article>
-    </details>
+function MetaLine({
+  icon: Icon,
+  label,
+}: {
+  icon: typeof Clock
+  label: string
+}) {
+  return (
+    <span className="flex items-start gap-2 text-[#52637a]">
+      <Icon
+        className="mt-0.5 size-3.5 shrink-0 text-[#2f6fce]"
+        aria-hidden="true"
+      />
+      <span className="leading-5">{label}</span>
+    </span>
   )
 }
 

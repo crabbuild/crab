@@ -73,7 +73,21 @@ var guideSchema = pageSchema.extend({
 var blog = defineDocs({
   dir: "content/blog",
   docs: {
-    schema: guideSchema
+    schema: guideSchema.extend({
+      date: z.string(),
+      author: z.string(),
+      category: z.enum([
+        "product",
+        "tutorial",
+        "architecture",
+        "use-case",
+        "release"
+      ]),
+      tags: z.array(z.string()).min(1),
+      excerpt: z.string(),
+      level: z.enum(["beginner", "intermediate", "deep-dive"]),
+      audience: z.string()
+    })
   }
 });
 var library = defineDocs({

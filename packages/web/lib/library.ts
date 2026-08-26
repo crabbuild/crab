@@ -122,15 +122,6 @@ export function getAdjacentPathGuides(
 }
 
 /**
- * Calculates reading time in minutes from a word count.
- * Uses a rate of 200 words per minute, rounded up, with a minimum of 1.
- */
-export function calculateReadingTime(wordCount: number): number {
-  if (wordCount <= 0) return 1
-  return Math.max(1, Math.ceil(wordCount / 200))
-}
-
-/**
  * Filters posts by category. Returns all posts when category is "All".
  */
 export function filterByCategory(

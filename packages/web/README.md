@@ -27,7 +27,8 @@ The main routes are implemented under `app/`:
 | `/cli`              | Crab CLI product page with installation examples and the push pipeline walkthrough |
 | `/docs`             | Documentation landing page                                                         |
 | `/docs/cli/...`     | Fumadocs-rendered CLI documentation                                                |
-| `/blog`             | Crab's comprehensive interactive introduction and editorial surface              |
+| `/blog`             | Editorial dashboard generated from the blog MDX collection                        |
+| `/blog/[slug]`      | Individual metadata-rich blog articles                                             |
 | `/library`          | Ordered learning paths, filters, progress, and knowledge checks                   |
 | `/library/[slug]`   | Individual interactive learning guides                                             |
 | `/changelog`        | Published or repository-backed release entries                                     |
@@ -159,7 +160,7 @@ The app has three MDX collections and one static-data layer:
 2. `lib/source.ts` creates the `/docs/cli` loader, attaches sidebar icons, and removes internal `design` content from the public sidebar.
 3. `app/docs/cli/[[...slug]]/page.tsx` resolves a documentation slug and renders its MDX body through `mdx-components.tsx`.
 4. `app/api/search/route.ts` builds a Fumadocs search index from the same CLI page source.
-5. `content/blog/what-is-crab.mdx` is loaded as the `blog` collection and rendered directly at `/blog`.
+5. `content/blog/*.mdx` is loaded as the `blog` collection; `lib/blog-posts.ts` supplies dashboard metadata and `app/blog/[slug]/page.tsx` renders each article.
 6. `content/library/*.mdx` is loaded as the `library` collection and transformed by `lib/library-guides.ts` for learning paths, reading time, related guides, and required knowledge checks.
 7. `lib/integrations.ts`, `lib/pricing-data.ts`, and `lib/changelog.ts` provide typed, build-time data for their corresponding product pages.
 
@@ -194,9 +195,7 @@ The top-level order is defined in `content/docs/cli/meta.json`. When you add a n
 
 ## Author blog posts
 
-Editorial posts live in `content/blog/` as individual `.mdx` files. The schema is defined in `source.config.ts`, and `lib/blog-source.ts` exposes them to the blog routes.
-
-Learning guides live in `content/library/`. `lib/library-guides.ts` maps their frontmatter into the Library UI. Each guide must include a question that checks the reader's understanding of a system boundary or decision.
+Editorial posts live in `content/blog/` as individual `.mdx` files. Adding a file automatically creates its dashboard card, `/blog/<filename>` page, and sitemap entry. Reading time is calculated from the article body.
 
 Use frontmatter like this:
 
@@ -210,6 +209,28 @@ category: "tutorial"
 tags: ["getting-started", "workflow"]
 excerpt: "A short summary for cards and search results."
 level: "beginner"
+audience: "Developers evaluating Crab for a repository with large files."
+---
+
+Write the article body in MDX.
+```
+
+Required blog attributes appear on the dashboard and article page:
+
+- **Categories**: `product`, `tutorial`, `architecture`, `use-case`, `release`
+- **Levels**: `beginner`, `intermediate`, `deep-dive`
+- **Audience**: a short description of the intended reader
+- **Tags**: one or more topic labels
+- **Reading time**: calculated automatically; do not add it to frontmatter
+
+## Author Library guides
+
+Learning guides live in `content/library/`. `lib/library-guides.ts` maps their frontmatter into the Library UI. Each guide must include its learning-path metadata and a question that checks the reader's understanding of a system boundary or decision.
+
+In addition to the shared title, description, date, author, category, tags, excerpt, and level fields, use:
+
+```mdx
+---
 path: "first-workflow"
 order: 1
 concepts: ["installation", "push", "hydration"]
@@ -225,19 +246,11 @@ knowledgeCheck:
   answer: 1
   explanation: "A fresh clone exercises the published ref, metadata, and durable object data together."
 ---
-
-# A useful Crab article title
-
-Write the article body in MDX.
 ```
 
-The accepted values are:
-
-- **Categories**: `product`, `tutorial`, `architecture`, `use-case`, `release`
-- **Levels**: `beginner`, `intermediate`, `deep-dive`
 - **Learning paths**: `start-here`, `first-workflow`, `core-internals`, `advanced-operations`
 
-Both loaders discover `.mdx` files automatically. You do not need a separate registration file. Library guides need complete learning metadata and a valid `knowledgeCheck`; blog posts only need the editorial metadata their page uses.
+Both loaders discover `.mdx` files automatically. You do not need a separate registration file. Library guides need complete learning metadata and a valid `knowledgeCheck`.
 
 ## Update product data
 
