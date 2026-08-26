@@ -109,6 +109,24 @@ impl LfsLockManager {
         owner: &str,
         expires_in: Option<Duration>,
     ) -> LockResult<LockRecord> {
+        self.lock_with_expiry_mode(path, owner, expires_in, false)
+            .await
+    }
+
+    /// Acquires a lock and reports an existing lock as a conflict, including
+    /// when the current owner matches. This is the exclusive HTTP API
+    /// contract; the native CLI keeps the idempotent `lock` behavior.
+    pub async fn lock_exclusive(&self, path: &str, owner: &str) -> LockResult<LockRecord> {
+        self.lock_with_expiry_mode(path, owner, None, true).await
+    }
+
+    async fn lock_with_expiry_mode(
+        &self,
+        path: &str,
+        owner: &str,
+        expires_in: Option<Duration>,
+        same_owner_is_conflict: bool,
+    ) -> LockResult<LockRecord> {
         let key = self.lock_path(path);
         let object_path = Path::from(key.as_str());
         let now = unix_now();
@@ -137,7 +155,7 @@ impl LfsLockManager {
                         .await?;
                     return Ok(record);
                 }
-                if existing.owner == owner {
+                if existing.owner == owner && !same_owner_is_conflict {
                     return Ok(existing);
                 }
                 Err(LfsLockError::Conflict {
@@ -197,6 +215,21 @@ impl LfsLockManager {
     /// Releases a lock regardless of its owner. Missing and already released
     /// locks are treated as successful idempotent deletes.
     pub async fn force_unlock(&self, path: &str) -> LockResult<LockRecord> {
+        self.force_unlock_with_id_inner(path, None).await
+    }
+
+    /// Releases a lock regardless of its owner while requiring the current
+    /// record to have `lock_id`. The ID check is part of the same read/CAS
+    /// sequence, so a stale force-unlock cannot release a replacement lock.
+    pub async fn force_unlock_with_id(&self, path: &str, lock_id: &str) -> LockResult<LockRecord> {
+        self.force_unlock_with_id_inner(path, Some(lock_id)).await
+    }
+
+    async fn force_unlock_with_id_inner(
+        &self,
+        path: &str,
+        lock_id: Option<&str>,
+    ) -> LockResult<LockRecord> {
         let object_path = Path::from(self.lock_path(path));
         let (body, etag) = match self.store.get_with_etag(&object_path).await {
             Ok(result) => result,
@@ -208,6 +241,11 @@ impl LfsLockManager {
             Err(error) => return Err(error.into()),
         };
         let mut record = decode_record(&object_path, &body)?;
+        if lock_id.is_some_and(|expected| expected != record.id) {
+            return Err(LfsLockError::IdMismatch {
+                path: path.to_owned(),
+            });
+        }
         if is_released(&record) {
             return Ok(record);
         }
@@ -388,7 +426,7 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
@@ -404,6 +442,10 @@ mod tests {
         let first = manager.lock("model.bin", "alice").await.unwrap();
         assert_eq!(manager.lock("model.bin", "alice").await.unwrap(), first);
         assert!(matches!(
+            manager.lock_exclusive("model.bin", "alice").await,
+            Err(LfsLockError::Conflict { owner, .. }) if owner == "alice"
+        ));
+        assert!(matches!(
             manager.lock("model.bin", "bob").await,
             Err(LfsLockError::Conflict { owner, .. }) if owner == "alice"
         ));
@@ -412,6 +454,26 @@ mod tests {
             .await
             .unwrap();
         assert!(manager.lock("model.bin", "bob").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn force_unlock_id_mismatch_preserves_replacement_lock() {
+        let manager = manager();
+        let first = manager.lock("model.bin", "alice").await.unwrap();
+        manager
+            .unlock_with_id("model.bin", "alice", Some(&first.id))
+            .await
+            .unwrap();
+        let replacement = manager.lock("model.bin", "bob").await.unwrap();
+
+        assert!(matches!(
+            manager.force_unlock_with_id("model.bin", &first.id).await,
+            Err(LfsLockError::IdMismatch { .. })
+        ));
+        assert_eq!(
+            manager.find_by_path("model.bin").await.unwrap(),
+            replacement
+        );
     }
 
     #[tokio::test]

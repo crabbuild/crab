@@ -1477,7 +1477,10 @@ async fn create_lock(
         return error_response(StatusCode::BAD_REQUEST, message);
     }
     let manager = lock_manager(state, repository);
-    match manager.lock(&request.path, &identity.principal).await {
+    match manager
+        .lock_exclusive(&request.path, &identity.principal)
+        .await
+    {
         Ok(record) => match http_lock(record) {
             Ok(lock) => json_response(StatusCode::CREATED, LockResponse { lock }),
             Err(response) => response,
@@ -1564,7 +1567,7 @@ async fn unlock(
         Err(error) => return lock_error_response(error),
     };
     let result = if force {
-        manager.force_unlock(&record.path).await
+        manager.force_unlock_with_id(&record.path, id).await
     } else {
         manager
             .unlock_with_id(&record.path, &identity.principal, Some(id))
@@ -2056,6 +2059,21 @@ mod tests {
         let id = lock_json["lock"]["id"].as_str().expect("lock ID");
         assert_eq!(lock_json["lock"]["owner"]["name"], "anonymous");
         assert!(lock_json["lock"]["locked_at"].as_str().is_some());
+
+        let duplicate = request(
+            &app,
+            Method::POST,
+            "/lfs/repo/info/lfs/locks",
+            Body::from(serde_json::json!({"path": "model.bin"}).to_string()),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        let duplicate_body = to_bytes(duplicate.into_body(), MAX_SMALL_BODY_BYTES)
+            .await
+            .expect("duplicate lock body");
+        let duplicate_json: serde_json::Value =
+            serde_json::from_slice(&duplicate_body).expect("duplicate lock JSON");
+        assert_eq!(duplicate_json["lock"]["id"], id);
 
         let listed = request(
             &app,
