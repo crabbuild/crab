@@ -72,6 +72,7 @@ export const library = defineDocs({
   dir: "content/library",
   docs: {
     schema: guideSchema.extend({
+      presentation: z.enum(["guide", "feature"]).optional(),
       knowledgeCheck: z.object({
         question: z.string(),
         options: z.array(z.string()).min(2),
