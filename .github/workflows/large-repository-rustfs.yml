@@ -18,6 +18,11 @@ on:
       - "crab/docs/architecture/git-integration.md"
       - "crab/docs/architecture/git-protocol-v2.md"
       - "crab/docs/guides/metadb.md"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/upload_pack_wire.rs"
+      - "crates/crab-coordination/src/lib.rs"
+      - "crates/crab-coordination/src/push_lock.rs"
+      - "crates/crab-coordination/src/read_admission.rs"
       - "plans/001-large-repository-scale-roadmap.md"
   push:
     branches: [main]
@@ -37,6 +42,11 @@ on:
       - "crab/docs/architecture/git-integration.md"
       - "crab/docs/architecture/git-protocol-v2.md"
       - "crab/docs/guides/metadb.md"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/upload_pack_wire.rs"
+      - "crates/crab-coordination/src/lib.rs"
+      - "crates/crab-coordination/src/push_lock.rs"
+      - "crates/crab-coordination/src/read_admission.rs"
       - "plans/001-large-repository-scale-roadmap.md"
   schedule:
     - cron: "31 7 * * 0"
@@ -137,17 +147,21 @@ jobs:
             --object-store-version "$RUSTFS_IMAGE"
             --cold-clone-fanout 50
             --warm-clone-fanout 100
+            --team-load
             --cleanup-remote
           )
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json"
+            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
+            --require-team-load
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json"
+            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
+            --require-team-load
           python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
             "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
             "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
+            --require-team-load \
             --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
 
       - name: Capture RustFS logs

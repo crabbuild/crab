@@ -125,6 +125,15 @@ The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.
 
+Upload-pack admission is repository-scoped and distributed: each helper
+process must hold one of the fixed object-store read leases for the duration
+of its session. A rotated, jittered retry probes one slot at a time, leases
+renew while the session is active, and normal completion or cancellation
+releases the slot through the existing holder-checked lock path. A crashed
+helper leaves a bounded TTL lease for reclamation. This bounds aggregate
+provider pressure across helpers while retaining the per-process remote-Git
+object and range-read budgets.
+
 Git owns the local promisor lifecycle: the Git version in use records the
 remote's promisor/filter configuration and marks received promisor packs with
 `.promisor` sidecars. Crab's helper does not invent a second local repository

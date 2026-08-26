@@ -31,7 +31,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
 VERSION = "1.1"
@@ -121,6 +121,8 @@ class LargeRepositoryQualification:
         self.replay_repo = self.run_root / "replay"
         self.incremental_clone = self.run_root / "incremental-clone"
         self.clone_root = self.run_root / "clones"
+        self.fetch_root = self.run_root / "fetch-clients"
+        self.team_root = self.run_root / "team-clients"
         self.source = args.source.resolve()
         self.crab_bin = resolve_executable(args.crab_bin, "Crab binary")
         self.git_bin = resolve_executable(args.git_bin, "Git binary")
@@ -153,6 +155,7 @@ class LargeRepositoryQualification:
             "checks": [],
             "stages": {},
             "pushes": [],
+            "team_load": {},
             "store_snapshots": [],
             "correctness": {},
             "metrics": {},
@@ -529,6 +532,9 @@ class LargeRepositoryQualification:
         self.temp_root.mkdir()
         self.cache_root.mkdir()
         self.clone_root.mkdir()
+        if self.args.team_load:
+            self.fetch_root.mkdir()
+            self.team_root.mkdir()
         self.install_helper_alias()
         self.write_report()
 
@@ -1053,6 +1059,344 @@ class LargeRepositoryQualification:
                 )
         self.write_report()
 
+    def prepare_fetch_fanout(self, checkpoint: int) -> None:
+        count = self.args.fetch_fanout
+        barrier = threading.Barrier(count)
+
+        def worker(ordinal: int) -> dict[str, Any]:
+            target = self.fetch_root / f"client-{ordinal:03d}"
+            barrier.wait(timeout=60)
+            record = self.run_git(
+                self.run_root,
+                [
+                    "-c",
+                    "protocol.version=2",
+                    "clone",
+                    "--depth=1",
+                    "--no-checkout",
+                    "--single-branch",
+                    "--branch",
+                    "main",
+                    self.remote_url,
+                    str(target),
+                ],
+                f"fetch fanout seed clone {ordinal:03d}",
+                check=False,
+                timeout=self.args.clone_timeout,
+                extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
+            )
+            if record["exit_code"] != 0 and target.exists():
+                shutil.rmtree(target)
+            return {
+                "ordinal": ordinal,
+                "exit_code": record["exit_code"],
+                "duration_ms": record["duration_ms"],
+                "failure_category": "ok" if record["exit_code"] == 0 else "clone_failed",
+            }
+
+        started = time.monotonic()
+        runs: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=count) as executor:
+            futures = [executor.submit(worker, ordinal) for ordinal in range(1, count + 1)]
+            for future in as_completed(futures):
+                runs.append(future.result())
+        durations = [int(run["duration_ms"]) for run in runs]
+        successful = sum(run["failure_category"] == "ok" for run in runs)
+        self.report["team_load"]["fetch_seed"] = {
+            "checkpoint": checkpoint,
+            "clients": count,
+            "successful_clones": successful,
+            "duration_ms": int((time.monotonic() - started) * 1_000),
+            "median_client_ms": percentile(durations, 0.50),
+            "p95_client_ms": percentile(durations, 0.95),
+            "p99_client_ms": percentile(durations, 0.99),
+            "results": sorted(runs, key=lambda run: int(run["ordinal"])),
+        }
+        self.check(
+            "concurrent-fetch-seed-clones",
+            len(runs) == count and successful == count,
+            {"clients": count, "successful_clones": successful},
+        )
+        self.write_report()
+
+    def concurrent_incremental_fetches(self, expected: str) -> None:
+        count = self.args.fetch_fanout
+        barrier = threading.Barrier(count)
+
+        def worker(ordinal: int) -> dict[str, Any]:
+            target = self.fetch_root / f"client-{ordinal:03d}"
+            barrier.wait(timeout=60)
+            fetch = self.run_git(
+                target,
+                ["fetch", "origin", "refs/heads/main:refs/remotes/origin/main"],
+                f"concurrent incremental fetch {ordinal:03d}",
+                check=False,
+                timeout=self.args.clone_timeout,
+                extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
+            )
+            if fetch["exit_code"] != 0:
+                return {
+                    "ordinal": ordinal,
+                    "exit_code": fetch["exit_code"],
+                    "fetch_exit_code": fetch["exit_code"],
+                    "fsck_exit_code": None,
+                    "tip_matches": False,
+                    "duration_ms": fetch["duration_ms"],
+                    "failure_category": "fetch_failed",
+                }
+            fsck = self.run_git(
+                target,
+                ["fsck", "--full"],
+                f"concurrent incremental fetch {ordinal:03d} fsck",
+                check=False,
+                timeout=2 * 60 * 60,
+            )
+            tip = self.run_git(
+                target,
+                ["rev-parse", "refs/remotes/origin/main"],
+                f"concurrent incremental fetch {ordinal:03d} tip",
+                check=False,
+            )
+            return {
+                "ordinal": ordinal,
+                "exit_code": fetch["exit_code"],
+                "fetch_exit_code": fetch["exit_code"],
+                "fsck_exit_code": fsck["exit_code"],
+                "tip_matches": tip["exit_code"] == 0
+                and self.stdout(tip).strip() == expected,
+                "duration_ms": fetch["duration_ms"],
+                "failure_category": (
+                    "ok"
+                    if fsck["exit_code"] == 0
+                    and tip["exit_code"] == 0
+                    and self.stdout(tip).strip() == expected
+                    else "verification_failed"
+                ),
+            }
+
+        started = time.monotonic()
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=count) as executor:
+            futures = [executor.submit(worker, ordinal) for ordinal in range(1, count + 1)]
+            for future in as_completed(futures):
+                results.append(future.result())
+        results.sort(key=lambda result: int(result["ordinal"]))
+        durations = [int(result["duration_ms"]) for result in results]
+        successful = sum(result["failure_category"] == "ok" for result in results)
+        self.report["team_load"]["concurrent_incremental_fetches"] = {
+            "clients": count,
+            "successful": successful,
+            "failed": count - successful,
+            "duration_ms": int((time.monotonic() - started) * 1_000),
+            "median_client_ms": percentile(durations, 0.50),
+            "p95_client_ms": percentile(durations, 0.95),
+            "p99_client_ms": percentile(durations, 0.99),
+            "results": results,
+        }
+        self.check(
+            "concurrent-incremental-fetches",
+            len(results) == count and successful == count,
+            {"clients": count, "successful": successful},
+        )
+        self.write_report()
+
+    def create_team_push_client(
+        self, kind: str, ordinal: int, base: str
+    ) -> dict[str, Any]:
+        target = self.team_root / f"{kind}-{ordinal:03d}"
+        self.run_git(
+            self.run_root,
+            ["clone", "--shared", "--no-checkout", str(self.replay_repo), str(target)],
+            f"create {kind} push client {ordinal:03d}",
+            timeout=2 * 60 * 60,
+        )
+        self.run_git(
+            target,
+            ["remote", "remove", "origin"],
+            f"remove {kind} push client source remote",
+        )
+        self.run_crab(target, ["init", self.remote_url], f"initialize {kind} push client")
+        branch = f"team-{kind}-{ordinal:03d}"
+        self.run_git(target, ["checkout", "-b", branch, base], f"checkout {kind} push client")
+        filename = target / f"team-{kind}-{ordinal:03d}.txt"
+        filename.write_text(
+            f"Crab large-team qualification change {kind} {ordinal:03d}\n",
+            encoding="utf-8",
+        )
+        commit_date = f"2000-01-01T00:00:{ordinal:02d}Z"
+        commit_env = {
+            "GIT_AUTHOR_DATE": commit_date,
+            "GIT_COMMITTER_DATE": commit_date,
+        }
+        self.run_git(target, ["add", filename.name], f"stage {kind} push client")
+        self.run_git(
+            target,
+            ["commit", "-m", f"team {kind} change {ordinal:03d}"],
+            f"commit {kind} push client",
+            extra_env=commit_env,
+        )
+        commit = self.git_value(target, ["rev-parse", "HEAD"], f"resolve {kind} push client")
+        return {"ordinal": ordinal, "target": target, "commit": commit}
+
+    @staticmethod
+    def push_failure_category(record: dict[str, Any], output: str) -> str:
+        if record["exit_code"] == 0:
+            return "accepted"
+        lowered = output.lower()
+        if "crab-e0012" in lowered or "push lock" in lowered:
+            return "push_lock"
+        if "crab-e0017" in lowered or "non-fast-forward" in lowered:
+            return "non_fast_forward"
+        if "crab-e0010" in lowered or "cas conflict" in lowered:
+            return "cas_conflict"
+        return "unexpected"
+
+    def push_client_fanout(
+        self,
+        name: str,
+        clients: list[dict[str, Any]],
+        destination: str | Callable[[dict[str, Any]], str],
+        *,
+        exactly_one_success: bool,
+    ) -> list[dict[str, Any]]:
+        count = len(clients)
+        barrier = threading.Barrier(count)
+
+        def worker(client: dict[str, Any]) -> dict[str, Any]:
+            barrier.wait(timeout=60)
+            destination_for_client = (
+                destination(client) if callable(destination) else destination
+            )
+            record = self.run_crab(
+                client["target"],
+                [
+                    "push",
+                    "--jsonl",
+                    "origin",
+                    f"{client['commit']}:{destination_for_client}",
+                ],
+                f"{name} push {client['ordinal']:03d}",
+                check=False,
+                timeout=self.args.push_timeout,
+            )
+            output = self.stdout(record) + self.stderr(record)
+            return {
+                "ordinal": client["ordinal"],
+                "duration_ms": record["duration_ms"],
+                "exit_code": record["exit_code"],
+                "failure_category": self.push_failure_category(record, output),
+                "commit": client["commit"],
+            }
+
+        started = time.monotonic()
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=count) as executor:
+            futures = [executor.submit(worker, client) for client in clients]
+            for future in as_completed(futures):
+                results.append(future.result())
+        results.sort(key=lambda result: int(result["ordinal"]))
+        accepted = [result for result in results if result["failure_category"] == "accepted"]
+        allowed_rejections = {"push_lock", "non_fast_forward", "cas_conflict"}
+        rejected = [
+            result
+            for result in results
+            if result["failure_category"] in allowed_rejections
+        ]
+        durations = [int(result["duration_ms"]) for result in results]
+        stage = {
+            "clients": count,
+            "successful": len(accepted),
+            "rejected": len(rejected),
+            "unexpected_failures": count - len(accepted) - len(rejected),
+            "duration_ms": int((time.monotonic() - started) * 1_000),
+            "median_client_ms": percentile(durations, 0.50),
+            "p95_client_ms": percentile(durations, 0.95),
+            "p99_client_ms": percentile(durations, 0.99),
+            "results": results,
+        }
+        self.report["team_load"][name] = stage
+        if exactly_one_success:
+            ok = len(accepted) == 1 and len(rejected) == count - 1 and not stage[
+                "unexpected_failures"
+            ]
+        else:
+            ok = len(accepted) == count and not stage["unexpected_failures"]
+        self.check(
+            f"{name}-outcomes",
+            ok,
+            {
+                "clients": count,
+                "successful": len(accepted),
+                "rejected": len(rejected),
+                "unexpected_failures": stage["unexpected_failures"],
+            },
+        )
+        self.write_report()
+        return results
+
+    def run_team_load(self, source_head: str) -> None:
+        self.report["team_load"]["enabled"] = True
+        self.report["team_load"]["fetch_fanout"] = self.args.fetch_fanout
+        self.report["team_load"]["independent_pushes"] = self.args.independent_pushes
+        self.report["team_load"]["contended_pushes"] = self.args.contended_pushes
+        self.concurrent_incremental_fetches(source_head)
+
+        independent_clients = [
+            self.create_team_push_client("independent", ordinal, source_head)
+            for ordinal in range(1, self.args.independent_pushes + 1)
+        ]
+        independent_ref = "refs/heads/team/independent"
+        independent_results = self.push_client_fanout(
+            "independent_ref_pushes",
+            independent_clients,
+            lambda client: f"{independent_ref}/client/{client['ordinal']:03d}",
+            exactly_one_success=False,
+        )
+        refs = self.remote_refs()
+        missing_independent = [
+            result["ordinal"]
+            for result in independent_results
+            if refs.get(f"{independent_ref}/client/{result['ordinal']:03d}")
+            != result["commit"]
+        ]
+        self.check(
+            "independent-ref-pushes-preserved",
+            not missing_independent,
+            {"clients": len(independent_results), "missing": missing_independent},
+        )
+
+        contended_ref = "refs/heads/team/contended"
+        self.run_crab(
+            self.replay_repo,
+            ["push", "--jsonl", "origin", f"{source_head}:{contended_ref}"],
+            "seed same-ref contention",
+            timeout=self.args.push_timeout,
+        )
+        contended_clients = [
+            self.create_team_push_client("contended", ordinal, source_head)
+            for ordinal in range(1, self.args.contended_pushes + 1)
+        ]
+        contended_results = self.push_client_fanout(
+            "same_ref_pushes",
+            contended_clients,
+            contended_ref,
+            exactly_one_success=True,
+        )
+        accepted = [
+            result for result in contended_results if result["failure_category"] == "accepted"
+        ]
+        refs = self.remote_refs()
+        self.check(
+            "same-ref-winner-published",
+            len(accepted) == 1 and refs.get(contended_ref) == accepted[0]["commit"],
+            {
+                "accepted": len(accepted),
+                "remote_tip_matches_winner": len(accepted) == 1
+                and refs.get(contended_ref) == accepted[0]["commit"],
+            },
+        )
+        self.write_report()
+
     def incremental_fetch(self, checkpoint: int, expected: str) -> None:
         record = self.run_git(
             self.incremental_clone,
@@ -1101,6 +1445,8 @@ class LargeRepositoryQualification:
         }
         for ordinal, commit in enumerate(commits, start=1):
             self.push_commit(commit, ordinal, f"replay push {ordinal:04d}")
+            if self.args.team_load and ordinal == 100:
+                self.prepare_fetch_fanout(ordinal)
             if ordinal in checkpoints:
                 self.acceleration_snapshot(str(ordinal))
                 self.incremental_fetch(ordinal, commit)
@@ -1356,6 +1702,8 @@ class LargeRepositoryQualification:
             self.replay_repo,
             self.incremental_clone,
             self.clone_root,
+            self.fetch_root,
+            self.team_root,
             self.cache_root,
             self.temp_root,
         ):
@@ -1384,6 +1732,8 @@ class LargeRepositoryQualification:
             full_clone = self.final_clones()
             self.verify_correctness(source_head, full_clone)
             self.verify_source_unchanged()
+            if self.args.team_load:
+                self.run_team_load(source_head)
             self.store_snapshot("final")
             self.summarize_metrics()
             self.cleanup_remote()
@@ -1452,6 +1802,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
     parser.add_argument("--cold-clone-fanout", type=int, default=0)
     parser.add_argument("--warm-clone-fanout", type=int, default=0)
+    parser.add_argument("--team-load", action="store_true")
+    parser.add_argument("--fetch-fanout", type=int, default=100)
+    parser.add_argument("--independent-pushes", type=int, default=20)
+    parser.add_argument("--contended-pushes", type=int, default=20)
     parser.add_argument("--minimum-free-bytes", type=parse_size, default=20 * 1024**3)
     parser.add_argument("--timeout", type=int, default=30 * 60)
     parser.add_argument("--push-timeout", type=int, default=2 * 60 * 60)
@@ -1470,6 +1824,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--cold-clone-fanout must be between 0 and 50")
     if not 0 <= args.warm_clone_fanout <= 100:
         parser.error("--warm-clone-fanout must be between 0 and 100")
+    if not 1 <= args.fetch_fanout <= 100:
+        parser.error("--fetch-fanout must be between 1 and 100")
+    if not 1 <= args.independent_pushes <= 20:
+        parser.error("--independent-pushes must be between 1 and 20")
+    if not 1 <= args.contended_pushes <= 20:
+        parser.error("--contended-pushes must be between 1 and 20")
+    if args.team_load and args.replay_count < 100:
+        parser.error("--team-load requires --replay-count of at least 100")
     if args.sample_interval <= 0:
         parser.error("--sample-interval must be positive")
     return args

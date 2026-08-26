@@ -41,6 +41,10 @@ BASE_REQUIRED_STAGES = {
     "depth_1_clone",
     "depth_100_clone",
 }
+FULL_REQUIRED_STAGES = {
+    "depth_10_clone",
+    "depth_1000_clone",
+}
 
 
 class VerificationError(RuntimeError):
@@ -178,7 +182,152 @@ def verify_catalog_filter_telemetry(stages: dict[str, Any]) -> None:
     )
 
 
-def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
+def verify_team_load(team_load: Any, *, require_release_counts: bool = False) -> None:
+    require(isinstance(team_load, dict), "team_load must be an object")
+    require(team_load.get("enabled") is True, "team_load is not enabled")
+    for field in ("fetch_fanout", "independent_pushes", "contended_pushes"):
+        value = require_nonnegative_int(team_load.get(field), f"team_load.{field}")
+        require(value > 0, f"team_load.{field} must be positive")
+    if require_release_counts:
+        require(team_load["fetch_fanout"] == 100, "team load must run 100 concurrent fetches")
+        require(team_load["independent_pushes"] == 20, "team load must run 20 independent pushes")
+        require(team_load["contended_pushes"] == 20, "team load must run 20 same-ref pushes")
+
+    fetch_seed = team_load.get("fetch_seed")
+    require(isinstance(fetch_seed, dict), "team_load.fetch_seed is missing")
+    fetch_clients = require_nonnegative_int(
+        fetch_seed.get("clients"), "team_load.fetch_seed.clients"
+    )
+    require(fetch_clients == team_load["fetch_fanout"], "fetch seed fanout mismatch")
+    require(
+        fetch_seed.get("successful_clones") == fetch_clients,
+        "fetch seed clones did not all complete",
+    )
+    verify_team_summary(fetch_seed, "team_load.fetch_seed")
+    verify_team_results(
+        fetch_seed.get("results"),
+        fetch_clients,
+        "team_load.fetch_seed.results",
+        required_category="ok",
+    )
+
+    fetch = team_load.get("concurrent_incremental_fetches")
+    require(isinstance(fetch, dict), "team_load.concurrent_incremental_fetches is missing")
+    require(fetch.get("clients") == fetch_clients, "incremental fetch fanout mismatch")
+    require(fetch.get("successful") == fetch_clients, "incremental fetches did not all succeed")
+    require(fetch.get("failed") == 0, "incremental fetch failures were recorded")
+    verify_team_summary(fetch, "team_load.concurrent_incremental_fetches")
+    verify_team_results(
+        fetch.get("results"),
+        fetch_clients,
+        "team_load.concurrent_incremental_fetches.results",
+        required_category="ok",
+        require_fsck=True,
+    )
+
+    independent = team_load.get("independent_ref_pushes")
+    require(isinstance(independent, dict), "team_load.independent_ref_pushes is missing")
+    independent_clients = team_load["independent_pushes"]
+    require(
+        independent.get("clients") == independent_clients,
+        "independent push fanout mismatch",
+    )
+    require(
+        independent.get("successful") == independent_clients
+        and independent.get("rejected") == 0
+        and independent.get("unexpected_failures") == 0,
+        "independent-ref pushes did not all succeed",
+    )
+    verify_team_summary(independent, "team_load.independent_ref_pushes")
+    verify_team_results(
+        independent.get("results"),
+        independent_clients,
+        "team_load.independent_ref_pushes.results",
+        required_category="accepted",
+        require_commit=True,
+    )
+
+    same_ref = team_load.get("same_ref_pushes")
+    require(isinstance(same_ref, dict), "team_load.same_ref_pushes is missing")
+    contended_clients = team_load["contended_pushes"]
+    require(same_ref.get("clients") == contended_clients, "same-ref push fanout mismatch")
+    require(
+        same_ref.get("successful") == 1
+        and same_ref.get("rejected") == contended_clients - 1
+        and same_ref.get("unexpected_failures") == 0,
+        "same-ref push outcomes were not one winner plus retryable conflicts",
+    )
+    verify_team_summary(same_ref, "team_load.same_ref_pushes")
+    verify_team_results(
+        same_ref.get("results"),
+        contended_clients,
+        "team_load.same_ref_pushes.results",
+        required_category=None,
+        allowed_categories={"accepted", "push_lock", "non_fast_forward", "cas_conflict"},
+        require_commit=True,
+    )
+
+
+def verify_team_summary(value: dict[str, Any], field: str) -> None:
+    for name in ("duration_ms", "median_client_ms", "p95_client_ms", "p99_client_ms"):
+        require_nonnegative_int(value.get(name), f"{field}.{name}")
+    require(
+        value["median_client_ms"]
+        <= value["p95_client_ms"]
+        <= value["p99_client_ms"],
+        f"{field} percentiles are inconsistent",
+    )
+
+
+def verify_team_results(
+    results: Any,
+    expected_count: int,
+    field: str,
+    *,
+    required_category: str | None,
+    allowed_categories: set[str] | None = None,
+    require_fsck: bool = False,
+    require_commit: bool = False,
+) -> None:
+    require(isinstance(results, list), f"{field} must be an array")
+    require(len(results) == expected_count, f"{field} count mismatch")
+    ordinals: list[int] = []
+    for index, result in enumerate(results):
+        item = f"{field}[{index}]"
+        require(isinstance(result, dict), f"{item} must be an object")
+        ordinal = require_nonnegative_int(result.get("ordinal"), f"{item}.ordinal")
+        ordinals.append(ordinal)
+        require_nonnegative_int(result.get("duration_ms"), f"{item}.duration_ms")
+        category = result.get("failure_category")
+        require(isinstance(category, str) and category, f"{item}.failure_category is missing")
+        if required_category is not None:
+            require(category == required_category, f"{item} has category {category!r}")
+        if allowed_categories is not None:
+            require(category in allowed_categories, f"{item} has unexpected category {category!r}")
+        exit_code = require_nonnegative_int(result.get("exit_code"), f"{item}.exit_code")
+        if category in {"accepted", "ok"}:
+            require(exit_code == 0, f"{item} successful category has non-zero exit code")
+        else:
+            require(exit_code != 0, f"{item} rejected category has zero exit code")
+        if require_fsck:
+            require(result.get("fetch_exit_code") == 0, f"{item} fetch failed")
+            require(result.get("fsck_exit_code") == 0, f"{item} fsck failed")
+            require(result.get("tip_matches") is True, f"{item} tip mismatch")
+        if require_commit:
+            commit = result.get("commit")
+            require(
+                isinstance(commit, str) and OID_RE.fullmatch(commit),
+                f"{item} commit is invalid",
+            )
+    require(ordinals == list(range(1, expected_count + 1)), f"{field} ordinals are not contiguous")
+
+
+def verify_report(
+    path: Path,
+    *,
+    allow_smoke: bool = False,
+    require_team_load: bool = False,
+) -> Verification:
     report = load_report(path)
     require(report.get("schema") == SCHEMA, f"unsupported schema: {report.get('schema')!r}")
     require(report.get("version") == VERSION, f"unsupported version: {report.get('version')!r}")
@@ -314,6 +463,8 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
     stages = report.get("stages")
     require(isinstance(stages, dict), "stages must be an object")
     required_stages = set(BASE_REQUIRED_STAGES)
+    if profile == "full":
+        required_stages.update(FULL_REQUIRED_STAGES)
     required_stages.update(
         f"incremental_fetch_{checkpoint}"
         for checkpoint in {1, 10, 100, replay_count}
@@ -392,6 +543,23 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
                 clone_telemetry.get(field, 0) > 0,
                 f"full report is missing full-clone telemetry: {field}",
             )
+
+    team_load = report.get("team_load")
+    if require_team_load:
+        require(profile == "full", "team-load qualification requires a full report")
+        verify_team_load(team_load, require_release_counts=True)
+        required_team_checks = {
+            "concurrent-fetch-seed-clones",
+            "concurrent-incremental-fetches",
+            "independent_ref_pushes-outcomes",
+            "independent-ref-pushes-preserved",
+            "same_ref_pushes-outcomes",
+            "same-ref-winner-published",
+        }
+        missing_team_checks = sorted(required_team_checks - check_names)
+        require(not missing_team_checks, f"missing team-load checks: {missing_team_checks}")
+    elif team_load is not None and isinstance(team_load, dict) and team_load.get("enabled"):
+        verify_team_load(team_load)
 
     pushes = report.get("pushes")
     require(isinstance(pushes, list), "pushes must be an array")
@@ -483,10 +651,19 @@ def compare_reports(
     *,
     maximum_drift: float,
     allow_smoke: bool,
+    require_team_load: bool = False,
 ) -> dict[str, Any]:
     require(math.isfinite(maximum_drift) and maximum_drift >= 0, "maximum drift must be non-negative")
-    baseline = verify_report(baseline_path, allow_smoke=allow_smoke)
-    candidate = verify_report(candidate_path, allow_smoke=allow_smoke)
+    baseline = verify_report(
+        baseline_path,
+        allow_smoke=allow_smoke,
+        require_team_load=require_team_load,
+    )
+    candidate = verify_report(
+        candidate_path,
+        allow_smoke=allow_smoke,
+        require_team_load=require_team_load,
+    )
     require(baseline.profile == candidate.profile, "report profiles differ")
     require(baseline.source_revision == candidate.source_revision, "source revisions differ")
     require(baseline.replay_count == candidate.replay_count, "replay counts differ")
@@ -549,6 +726,7 @@ def parse_args() -> argparse.Namespace:
     verify = subparsers.add_parser("verify", help="verify one report")
     verify.add_argument("report", type=Path)
     verify.add_argument("--allow-smoke", action="store_true")
+    verify.add_argument("--require-team-load", action="store_true")
     verify.add_argument("--output", type=Path)
 
     compare = subparsers.add_parser("compare", help="verify and compare two reports")
@@ -556,6 +734,7 @@ def parse_args() -> argparse.Namespace:
     compare.add_argument("candidate", type=Path)
     compare.add_argument("--maximum-drift", type=float, default=0.20)
     compare.add_argument("--allow-smoke", action="store_true")
+    compare.add_argument("--require-team-load", action="store_true")
     compare.add_argument("--output", type=Path)
 
     args = parser.parse_args()
@@ -571,6 +750,7 @@ def main() -> int:
                 args.candidate,
                 maximum_drift=args.maximum_drift,
                 allow_smoke=args.allow_smoke,
+                require_team_load=args.require_team_load,
             )
             write_output(payload, args.output)
             if payload["status"] != "ok":
@@ -580,6 +760,7 @@ def main() -> int:
             verification = verify_report(
                 args.report,
                 allow_smoke=getattr(args, "allow_smoke", False),
+                require_team_load=getattr(args, "require_team_load", False),
             )
             payload = {
                 "schema": "crab.large-repository-rustfs-verification",

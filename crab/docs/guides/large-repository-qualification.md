@@ -9,6 +9,23 @@ commits individually, exercises full, filtered, shallow, and incremental
 reads, and verifies the resulting Git object database. Run it twice on the
 same idle host before using its latency results as a baseline.
 
+Add `--team-load` for the release-gate workload. At replay checkpoint 100 it
+creates 100 shallow client clones, then after replay runs 100 concurrent
+incremental fetches, 20 independent-ref pushes, and 20 same-ref pushes. The
+same-ref scenario expects one winner and records only typed retryable lock,
+CAS, or non-fast-forward outcomes for the other callers. The team-load run
+also keeps its generated clients under the run directory and removes them
+with the normal cleanup path.
+
+Each upload-pack session acquires one of 16 repository-scoped object-store
+read-admission leases before opening Git metadata. The lease is renewed for
+the session and released on normal success, error, or cancellation; a crashed
+helper leaves only a bounded TTL lease that can be reclaimed. Blocked helpers
+probe one rotated slot with jitter and eventually return the typed throttled
+error instead of overwhelming the provider. This cap applies across
+independent remote-helper processes, while the existing process-local
+object/read bounds remain in force inside each admitted session.
+
 ## Prerequisites
 
 - A read-only Kubernetes checkout at
@@ -43,6 +60,23 @@ python3 crab/scripts/e2e/run_large_repo_rustfs.py \
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-baseline-a/artifacts/report.json
+```
+
+For the full large-team gate, use the dedicated workflow's equivalent:
+
+```bash
+python3 crab/scripts/e2e/run_large_repo_rustfs.py \
+  --crab-bin /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab \
+  --run-id kubernetes-team-load-a \
+  --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
+  --cold-clone-fanout 50 \
+  --warm-clone-fanout 100 \
+  --team-load \
+  --cleanup-remote
+
+python3 crab/scripts/verify-large-repo-rustfs-report.py \
+  /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-team-load-a/artifacts/report.json \
+  --require-team-load
 ```
 
 Use a unique run ID. Generated clones, logs, temporary files, and reports stay
@@ -89,6 +123,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `commands` | Exit status, duration, process-tree CPU, peak child RSS, aggregate operation telemetry, and redacted logs |
 | `pushes` | Per-commit latency, resource use, and storage/cache counters |
 | `stages` | Clone/fetch measurements, active pack inventory, and generation-bound locator/visibility health |
+| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures; `--require-team-load` makes it mandatory for a full gate |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
 | `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
 | `metrics` | Count and min/median/p95/p99/max duration summaries by operation family |
@@ -115,5 +150,8 @@ must have room for the committed pack set plus one transient pack copy while
 Git builds its local index.
 
 The GitHub workflow runs only the report contract tests on ordinary pull
-requests. The Kubernetes download-free full job is restricted to a dedicated
-self-hosted runner on the weekly schedule or by manual dispatch.
+requests. The Kubernetes full and team-load job is restricted to a dedicated
+self-hosted runner on the weekly schedule or by manual dispatch. The standalone
+verifier accepts historical single-client reports by default, while the
+workflow invokes `--require-team-load` so a release-gate report cannot omit
+the concurrency scenarios.

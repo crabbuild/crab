@@ -11,6 +11,8 @@ pub mod gc_fence;
 pub mod push_admission;
 #[cfg(feature = "object-store-lock")]
 pub mod push_lock;
+#[cfg(feature = "object-store-lock")]
+pub mod read_admission;
 pub mod spanner_coordinator;
 pub mod write_coordinator;
 
@@ -26,4 +28,6 @@ pub use gc_fence::*;
 pub use push_admission::*;
 #[cfg(feature = "object-store-lock")]
 pub use push_lock::*;
+#[cfg(feature = "object-store-lock")]
+pub use read_admission::*;
 pub use write_coordinator::*;

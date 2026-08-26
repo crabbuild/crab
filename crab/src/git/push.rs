@@ -5439,6 +5439,34 @@ async fn acquire_ref_journal_compaction_lock(
     }
 }
 
+async fn try_acquire_ref_journal_compaction_lock(
+    store: &Store,
+    router: &StoreLayout,
+    transaction_id: &str,
+    ttl: Duration,
+) -> Result<Option<PushLock>> {
+    if !crate::metadata::manifest::ref_journal_transaction_is_active(store, router, transaction_id)
+        .await?
+    {
+        return Ok(None);
+    }
+
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+    match acquire_context
+        .try_acquire_internal(
+            router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            ttl,
+        )
+        .await
+        .map_err(CrabError::from)
+    {
+        Ok(lock) => Ok(Some(lock)),
+        Err(CrabError::PushLockHeld { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 async fn compact_ref_journal_until_idle(
     store: &Store,
     router: &StoreLayout,
@@ -5504,6 +5532,33 @@ async fn compact_ref_journal_until_idle(
     Ok(latest)
 }
 
+async fn compact_ref_journal_with_lock(
+    store: &Store,
+    router: &StoreLayout,
+    mut lock: PushLock,
+    pusher: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let operation = while_renewing_internal_lock_with_cancellation(
+        &mut lock,
+        cancel,
+        compact_ref_journal_until_idle(store, router, pusher),
+    )
+    .await;
+    let release = lock.release().await.map_err(CrabError::from);
+    match (operation, release) {
+        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            warn!(
+                error = %release_error,
+                "ref journal compaction lock release also failed after owner error"
+            );
+            Err(error)
+        }
+    }
+}
+
 /// Compact committed ref-journal transactions under the generation owner.
 ///
 /// A push only publishes the immutable transaction and its visibility
@@ -5522,26 +5577,64 @@ pub(crate) async fn compact_ref_journal_for_owner(
     let Some(transaction_id) = active.first() else {
         return Ok(false);
     };
-    let Some(mut lock) =
+    let Some(lock) =
         acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
             .await?
     else {
         return Ok(false);
     };
-    let operation = while_renewing_internal_lock_with_cancellation(
-        &mut lock,
-        cancel,
-        compact_ref_journal_until_idle(store, router, pusher),
-    )
+    compact_ref_journal_with_lock(store, router, lock, pusher, cancel).await
+}
+
+/// Make one bounded, non-blocking reader repair attempt for an active ref journal.
+///
+/// Upload-pack readers may arrive as a large fanout while a push is handing
+/// off its ref journal. Only one reader may compact; other readers retry their
+/// normal admission path without waiting on or probing the manifest lease.
+pub(crate) async fn compact_ref_journal_for_reader(
+    store: &Store,
+    router: &StoreLayout,
+    lock_ttl: Duration,
+    pusher: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let active =
+        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
+    let Some(transaction_id) = active.first() else {
+        return Ok(false);
+    };
+    let Some(lock) =
+        try_acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl).await?
+    else {
+        debug!(
+            %transaction_id,
+            "reader skipped ref journal compaction because another actor owns the manifest lease"
+        );
+        return Ok(false);
+    };
+    let deadline = Instant::now() + (lock_ttl / 2).max(Duration::from_secs(1));
+    let mut lock = lock;
+    let operation = while_renewing_internal_lock_with_cancellation(&mut lock, cancel, async {
+        let mut compacted = false;
+        while Instant::now() < deadline {
+            check_cancelled(cancel)?;
+            let pass = compact_ref_journal_until_idle(store, router, pusher.clone()).await?;
+            if pass.is_none() {
+                break;
+            }
+            compacted = true;
+        }
+        Ok::<_, CrabError>(compacted)
+    })
     .await;
     let release = lock.release().await.map_err(CrabError::from);
     match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
+        (Ok(compacted), Ok(())) => Ok(compacted),
         (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(release_error)) => {
             warn!(
                 error = %release_error,
-                "ref journal compaction lock release also failed after owner error"
+                "reader ref journal lock release also failed after compaction error"
             );
             Err(error)
         }
@@ -5932,6 +6025,36 @@ async fn acquire_current_git_locator_lock(
     }
 }
 
+async fn try_acquire_current_git_locator_lock(
+    store: &Store,
+    router: &StoreLayout,
+    anchor: CommittedManifestAnchor,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<PushLock>> {
+    check_cancelled(cancel)?;
+    let (current, _) = read_manifest(store, router).await?;
+    if current.generation != anchor.generation
+        || current.pack_index_hash != anchor.pack_index_hash.hex()
+    {
+        return Ok(None);
+    }
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+    match acquire_context
+        .try_acquire_internal(
+            router.repo_prefix(),
+            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+            lock_ttl,
+        )
+        .await
+        .map_err(CrabError::from)
+    {
+        Ok(lock) => Ok(Some(lock)),
+        Err(CrabError::PushLockHeld { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 async fn write_locator_pack_evidence(
     writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
     bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
@@ -6153,6 +6276,29 @@ pub(crate) async fn publish_committed_pack_locators(
     lock_ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
+    publish_committed_pack_locators_with_mode(
+        store,
+        router,
+        packs,
+        anchor,
+        pinned_inventory,
+        lock_ttl,
+        cancel,
+        true,
+    )
+    .await
+}
+
+async fn publish_committed_pack_locators_with_mode(
+    store: &Store,
+    router: &StoreLayout,
+    packs: &[CommittedPackIndex<'_>],
+    anchor: CommittedManifestAnchor,
+    pinned_inventory: Option<&[PackManifestEntry]>,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+    wait_for_lock: bool,
+) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
     if git_generation_owner_is_active(store, router).await? {
         debug!(
             generation = anchor.generation,
@@ -6195,9 +6341,12 @@ pub(crate) async fn publish_committed_pack_locators(
         }
     }
 
-    let Some(mut lock) =
+    let lock = if wait_for_lock {
         acquire_current_git_locator_lock(store, router, anchor, lock_ttl, cancel).await?
-    else {
+    } else {
+        try_acquire_current_git_locator_lock(store, router, anchor, lock_ttl, cancel).await?
+    };
+    let Some(mut lock) = lock else {
         return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
     };
     let publication_started = Instant::now();
@@ -6275,6 +6424,43 @@ pub(crate) async fn repair_git_object_locator_if_current(
     lock_ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<bool> {
+    repair_git_object_locator_if_current_with_mode(
+        store,
+        router,
+        required_generation,
+        lock_ttl,
+        cancel,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn repair_git_object_locator_if_current_for_reader(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    repair_git_object_locator_if_current_with_mode(
+        store,
+        router,
+        required_generation,
+        lock_ttl,
+        cancel,
+        false,
+    )
+    .await
+}
+
+async fn repair_git_object_locator_if_current_with_mode(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+    wait_for_lock: bool,
+) -> Result<bool> {
     let (manifest, _) = read_manifest(store, router).await?;
     // An active ref-journal transaction asks readers for the next generation.
     // Repair only an already-canonical generation or a read could bless stale state.
@@ -6298,8 +6484,17 @@ pub(crate) async fn repair_git_object_locator_if_current(
     if already_covered {
         return Ok(false);
     }
-    let stats =
-        publish_committed_pack_locators(store, router, &[], anchor, None, lock_ttl, cancel).await?;
+    let stats = publish_committed_pack_locators_with_mode(
+        store,
+        router,
+        &[],
+        anchor,
+        None,
+        lock_ttl,
+        cancel,
+        wait_for_lock,
+    )
+    .await?;
     Ok(stats.coverage_updated)
 }
 
@@ -6350,6 +6545,7 @@ pub(crate) async fn repair_git_visibility_if_current_with_limit(
         true,
         lock_ttl,
         cancel,
+        true,
     ))
     .await
 }
@@ -6370,6 +6566,28 @@ pub(crate) async fn repair_git_visibility_after_locator_if_current_with_limit(
         false,
         lock_ttl,
         cancel,
+        true,
+    ))
+    .await
+}
+
+pub(crate) async fn repair_git_visibility_after_locator_if_current_with_limit_for_reader(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    maximum_logical_objects: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<GitVisibilityPublication>> {
+    Box::pin(repair_git_visibility_if_current_with_options(
+        store,
+        router,
+        required_generation,
+        maximum_logical_objects,
+        false,
+        lock_ttl,
+        cancel,
+        false,
     ))
     .await
 }
@@ -6382,6 +6600,7 @@ async fn repair_git_visibility_if_current_with_options(
     repair_locator: bool,
     lock_ttl: Duration,
     cancel: &CancellationToken,
+    wait_for_lock: bool,
 ) -> Result<Option<GitVisibilityPublication>> {
     if maximum_logical_objects == 0
         || maximum_logical_objects > crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
@@ -6417,19 +6636,34 @@ async fn repair_git_visibility_if_current_with_options(
     // visibility lock. Keep that ordering even though cold visibility repair
     // now walks bulk-materialized packs instead of issuing per-object reads.
     if repair_locator {
-        let _ = repair_git_object_locator_if_current(
-            store,
-            router,
-            required_generation,
-            lock_ttl,
-            cancel,
-        )
-        .await?;
+        if wait_for_lock {
+            repair_git_object_locator_if_current(
+                store,
+                router,
+                required_generation,
+                lock_ttl,
+                cancel,
+            )
+            .await?;
+        } else {
+            repair_git_object_locator_if_current_for_reader(
+                store,
+                router,
+                required_generation,
+                lock_ttl,
+                cancel,
+            )
+            .await?;
+        }
     }
-    let Some(mut lock) =
+    let lock = if wait_for_lock {
         acquire_current_git_manifest_lock(store, router, required_generation, lock_ttl, cancel)
             .await?
-    else {
+    } else {
+        try_acquire_current_git_manifest_lock(store, router, required_generation, lock_ttl, cancel)
+            .await?
+    };
+    let Some(mut lock) = lock else {
         return Ok(None);
     };
     let repair = Box::pin(while_renewing_internal_lock(&mut lock, async {
@@ -6566,6 +6800,34 @@ async fn acquire_current_git_manifest_lock(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+async fn try_acquire_current_git_manifest_lock(
+    store: &Store,
+    router: &StoreLayout,
+    required_generation: u64,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<PushLock>> {
+    check_cancelled(cancel)?;
+    let (current, _) = read_manifest(store, router).await?;
+    if current.generation != required_generation {
+        return Ok(None);
+    }
+    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+    match acquire_context
+        .try_acquire_internal(
+            router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            lock_ttl,
+        )
+        .await
+        .map_err(CrabError::from)
+    {
+        Ok(lock) => Ok(Some(lock)),
+        Err(CrabError::PushLockHeld { .. }) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -23730,6 +23992,78 @@ mod tests {
             .release()
             .await
             .expect("release waiting locator writer");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reader_locator_and_visibility_repairs_do_not_wait_for_writers() {
+        let (store, router) = test_store_router("reader-repair-handoff");
+        let pack_index_hash = MerkleHash::from([17_u64, 18, 19, 20]);
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.pack_index_hash = pack_index_hash.hex();
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest)
+            .await
+            .expect("publish current manifest");
+        let anchor = CommittedManifestAnchor {
+            generation: manifest.generation,
+            shard_index_hash: MerkleHash::default(),
+            pack_index_hash,
+        };
+
+        let locator_blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("acquire locator writer");
+        let locator = tokio::time::timeout(
+            Duration::from_secs(1),
+            try_acquire_current_git_locator_lock(
+                &store,
+                &router,
+                anchor,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("reader locator repair should not wait")
+        .expect("reader locator probe should succeed");
+        assert!(locator.is_none());
+        locator_blocker
+            .release()
+            .await
+            .expect("release locator writer");
+
+        let manifest_blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("acquire visibility writer");
+        let visibility = tokio::time::timeout(
+            Duration::from_secs(1),
+            try_acquire_current_git_manifest_lock(
+                &store,
+                &router,
+                manifest.generation,
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("reader visibility repair should not wait")
+        .expect("reader visibility probe should succeed");
+        assert!(visibility.is_none());
+        manifest_blocker
+            .release()
+            .await
+            .expect("release visibility writer");
     }
 
     #[tokio::test]

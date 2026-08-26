@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
@@ -24,6 +24,7 @@ use crab_remote_git::{
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
+use rand::Rng as _;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
@@ -35,9 +36,12 @@ const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
-const LOCATOR_READ_RETRY_LIMIT: usize = 5;
+const LOCATOR_READ_RETRY_LIMIT: usize = 12;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
-const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
+const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(2);
+const READ_ADMISSION_WAIT: Duration = Duration::from_secs(5 * 60);
+const READ_ADMISSION_RETRY_BASE: Duration = Duration::from_millis(50);
+const READ_ADMISSION_RETRY_CAP: Duration = Duration::from_secs(2);
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
@@ -287,6 +291,150 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let mut read_admission = acquire_read_admission(store, prefix, cancellation).await?;
+    let result = serve_with_read_admission(
+        &mut read_admission,
+        reader,
+        writer,
+        store,
+        prefix,
+        hidden_ref_patterns,
+        fetch_policy,
+        progress,
+        cancellation,
+    )
+    .await;
+    let release = read_admission.release().await.map_err(CrabError::from);
+    match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after session failure"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn acquire_read_admission(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> Result<crab_coordination::ReadAdmissionTicket> {
+    let mut ticket = crab_coordination::ReadAdmissionTicket::new(
+        store.inner(),
+        prefix,
+        crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+        crab_coordination::DEFAULT_READ_ADMISSION_TTL,
+    )
+    .map_err(CrabError::from)?;
+    let deadline = Instant::now() + READ_ADMISSION_WAIT;
+    let started = Instant::now();
+    let mut attempt = 0;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
+        if ticket.try_admit().await.map_err(CrabError::from)? {
+            let waited_ms = started.elapsed().as_millis();
+            tracing::debug!(
+                waited_ms,
+                capacity = crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+                "upload-pack read admission acquired"
+            );
+            return Ok(ticket);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CrabError::Throttled {
+                retry_after: Some(READ_ADMISSION_RETRY_CAP),
+            });
+        }
+        let delay = read_admission_retry_delay(attempt).min(remaining);
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+        }
+    }
+}
+
+fn read_admission_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1_u32.checked_shl(attempt.min(6) as u32).unwrap_or(u32::MAX);
+    let bound = READ_ADMISSION_RETRY_BASE
+        .saturating_mul(multiplier)
+        .min(READ_ADMISSION_RETRY_CAP);
+    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+    Duration::from_nanos(rand::rng().random_range(0..=bound_nanos))
+}
+
+async fn serve_with_read_admission<R, W>(
+    read_admission: &mut crab_coordination::ReadAdmissionTicket,
+    reader: &mut R,
+    writer: &mut W,
+    store: &crab_storage::Store,
+    prefix: &str,
+    hidden_ref_patterns: &[String],
+    fetch_policy: &FetchAdmissionPolicy,
+    progress: bool,
+    cancellation: &CancellationToken,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let renewal_interval = (read_admission.ttl() / 3).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.tick().await;
+    let operation = serve_admitted(
+        reader,
+        writer,
+        store,
+        prefix,
+        hidden_ref_patterns,
+        fetch_policy,
+        progress,
+        cancellation,
+    );
+    tokio::pin!(operation);
+    let mut renewal_error = None;
+    loop {
+        tokio::select! {
+            result = &mut operation => {
+                return match result {
+                    Err(error) => Err(error),
+                    Ok(()) => match renewal_error {
+                        Some(error) => Err(CrabError::from(error)),
+                        None => Ok(()),
+                    },
+                };
+            }
+            _ = ticker.tick(), if renewal_error.is_none() => {
+                if let Err(error) = read_admission.renew().await {
+                    cancellation.cancel();
+                    renewal_error = Some(error);
+                }
+            }
+        }
+    }
+}
+
+async fn serve_admitted<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    store: &crab_storage::Store,
+    prefix: &str,
+    hidden_ref_patterns: &[String],
+    fetch_policy: &FetchAdmissionPolicy,
+    progress: bool,
+    cancellation: &CancellationToken,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let (repository, proof) = open_repository_with_visibility_requirement(
         store,
         prefix,
@@ -522,7 +670,7 @@ async fn open_repository_with_visibility_requirement(
                     required: manifest.generation.saturating_add(1),
                 }));
             }
-            if super::push::compact_ref_journal_for_owner(
+            if super::push::compact_ref_journal_for_reader(
                 &repair_store,
                 &repair_layout,
                 LOCATOR_READ_REPAIR_LOCK_TTL,
@@ -590,7 +738,7 @@ async fn open_repository_with_visibility_requirement(
                 required: required_generation,
             }));
         }
-        let repaired = super::push::repair_git_object_locator_if_current(
+        let repaired = super::push::repair_git_object_locator_if_current_for_reader(
             &repair_store,
             &repair_layout,
             required_generation,
@@ -607,7 +755,7 @@ async fn open_repository_with_visibility_requirement(
         }
         if repaired || visibility_error.is_some() {
             let publication =
-                super::push::repair_git_visibility_after_locator_if_current_with_limit(
+                super::push::repair_git_visibility_after_locator_if_current_with_limit_for_reader(
                     &repair_store,
                     &repair_layout,
                     required_generation,
@@ -1691,8 +1839,9 @@ mod tests {
     fn locator_read_retry_delay_is_bounded() {
         assert_eq!(locator_read_retry_delay(0), Duration::from_millis(100));
         assert_eq!(locator_read_retry_delay(3), Duration::from_millis(800));
-        assert_eq!(locator_read_retry_delay(4), Duration::from_secs(1));
-        assert_eq!(locator_read_retry_delay(usize::MAX), Duration::from_secs(1));
+        assert_eq!(locator_read_retry_delay(4), Duration::from_millis(1600));
+        assert_eq!(locator_read_retry_delay(5), Duration::from_secs(2));
+        assert_eq!(locator_read_retry_delay(usize::MAX), Duration::from_secs(2));
     }
 
     #[test]
