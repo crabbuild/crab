@@ -6255,10 +6255,10 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
         &mut local_evidence,
         anchor,
         current_packs,
-        // New or rebound packs need one body scan to make the ordinal metadata
-        // sidecar useful for filtered reads. Covered immutable packs are
-        // skipped above, so routine owner passes never rescan stable history.
-        true,
+        // Rebound packs retain the logical metadata already proven for each
+        // OID. New OIDs without local push evidence use the documented
+        // canonical filtered-read fallback instead of a repository-sized scan.
+        false,
     )
     .await?;
     if updated {

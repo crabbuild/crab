@@ -20,7 +20,8 @@ use super::format::{
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
-    GitObjectOrdinal, GitPackLocatorBinding, GitPackLocatorRecord, git_object_locator_path,
+    GitObjectMetadata, GitObjectOrdinal, GitPackLocatorBinding, GitPackLocatorRecord,
+    git_object_locator_path,
 };
 use crate::error::{MetadataError, Result};
 
@@ -45,6 +46,12 @@ const GC_GENERATION_INTERVAL: u64 = 32;
 const BULK_ORDINAL_LOOKUP_FACTOR: u64 = 64;
 const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
+
+#[derive(Debug, Clone, Copy)]
+struct ExistingObject {
+    ordinal: GitObjectOrdinal,
+    metadata: GitObjectMetadata,
+}
 
 /// Counts produced by one stale-locator sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,8 +89,8 @@ pub struct GitObjectLocatorWriter {
     metadata: LocatorMetadata,
     bindings: HashMap<u64, GitPackLocatorRecord>,
     empty_catalog_binding: Option<u64>,
-    replacement_ordinals: Option<HashMap<[u8; 20], GitObjectOrdinal>>,
-    existing_ordinals: Option<HashMap<[u8; 20], GitObjectOrdinal>>,
+    replacement_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
+    existing_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
     ordinal_lookup_candidates: u64,
     catalog_dirty: bool,
     checkpoint_required: bool,
@@ -417,16 +424,16 @@ impl GitObjectLocatorWriter {
                 ));
             }
             let key = object_key(&entry.oid);
-            let existing_ordinal = self
+            let existing_object = self
                 .replacement_ordinals
                 .as_ref()
                 .and_then(|ordinals| ordinals.get(&entry.oid).copied());
-            let existing_ordinal = existing_ordinal.or_else(|| {
+            let existing_object = existing_object.or_else(|| {
                 self.existing_ordinals
                     .as_ref()
                     .and_then(|ordinals| ordinals.get(&entry.oid).copied())
             });
-            let existing = if existing_ordinal.is_some()
+            let existing = if existing_object.is_some()
                 || self.existing_ordinals.is_some()
                 || self.empty_catalog_binding == Some(binding.pack_slot)
             {
@@ -434,36 +441,39 @@ impl GitObjectLocatorWriter {
             } else {
                 self.db.get(key).await.map_err(read_error)?
             };
-            let ordinal = match (existing_ordinal, existing) {
-                (Some(ordinal), _) => ordinal,
+            let (ordinal, previous_metadata) = match (existing_object, existing) {
+                (Some(existing), _) => (existing.ordinal, Some(existing.metadata)),
                 (None, Some(value)) => {
-                    decode_object_location(&value)
-                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?
-                        .ordinal
+                    let location = decode_object_location(&value)
+                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
+                    (location.ordinal, Some(location.metadata))
                 }
-                (None, None) => {
-                    let ordinal = self.allocate_ordinal()?;
-                    if let Some(ordinals) = &mut self.replacement_ordinals {
-                        ordinals.insert(entry.oid, ordinal);
-                    }
-                    if let Some(ordinals) = &mut self.existing_ordinals {
-                        ordinals.insert(entry.oid, ordinal);
-                    }
-                    ordinal
-                }
+                (None, None) => (self.allocate_ordinal()?, None),
             };
+            // A repack changes the physical location but not the OID's
+            // logical facts. Preserve facts already proven by the covered
+            // catalog so owner maintenance need not download the whole new
+            // pack merely to recover object kinds.
+            let metadata = Self::merge_object_metadata(previous_metadata, entry.metadata);
+            let object = ExistingObject { ordinal, metadata };
+            if let Some(ordinals) = &mut self.replacement_ordinals {
+                ordinals.insert(entry.oid, object);
+            }
+            if let Some(ordinals) = &mut self.existing_ordinals {
+                ordinals.insert(entry.oid, object);
+            }
             let value = encode_object_location(StoredObjectLocation {
                 ordinal,
                 pack_slot: binding.pack_slot,
                 pack_offset: entry.location.pack_offset,
                 entry_len: entry.location.entry_len,
                 crc32: entry.location.crc32,
-                metadata: entry.metadata,
+                metadata,
             });
             batch.put(key, value);
             batch.put(ordinal_key(ordinal), entry.oid);
             let metadata_key = ordinal_metadata_key(ordinal);
-            let metadata_value = encode_object_metadata(entry.metadata);
+            let metadata_value = encode_object_metadata(metadata);
             batch.put(metadata_key, metadata_value);
             batch_rows += 1;
             batch_bytes += key.len()
@@ -534,7 +544,13 @@ impl GitObjectLocatorWriter {
                     "compact locator object ordinal exceeds catalog metadata",
                 ));
             }
-            ordinals.insert(oid, location.ordinal);
+            ordinals.insert(
+                oid,
+                ExistingObject {
+                    ordinal: location.ordinal,
+                    metadata: location.metadata,
+                },
+            );
         }
         self.existing_ordinals = Some(ordinals);
         Ok(())
@@ -560,6 +576,18 @@ impl GitObjectLocatorWriter {
         self.catalog_dirty = true;
         self.checkpoint_required = true;
         Ok(ordinal)
+    }
+
+    fn merge_object_metadata(
+        existing: Option<GitObjectMetadata>,
+        incoming: GitObjectMetadata,
+    ) -> GitObjectMetadata {
+        let existing = existing.unwrap_or_default();
+        GitObjectMetadata {
+            kind: incoming.kind.or(existing.kind),
+            logical_size: incoming.logical_size.or(existing.logical_size),
+            delta_base_oid: incoming.delta_base_oid.or(existing.delta_base_oid),
+        }
     }
 
     /// Replace the current object/ordinal universe while retaining pack slots.
@@ -1165,7 +1193,9 @@ mod tests {
     use object_store::path::Path as ObjectPath;
 
     use super::*;
-    use crate::git_object_locator::{GitObjectLocation, GitObjectLookup, GitPackInventoryEntry};
+    use crate::git_object_locator::{
+        GitObjectKind, GitObjectLocation, GitObjectLookup, GitObjectMetadata, GitPackInventoryEntry,
+    };
     use crab_xet::hash::MerkleHash;
 
     fn hash(seed: u64) -> MerkleHash {
@@ -1576,6 +1606,84 @@ mod tests {
             1
         );
         writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn rebound_pack_preserves_proven_object_metadata() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let original = writer.bind_packs(&[pack(1)]).await.expect("bind original")[0];
+        let mut known = entry(1);
+        known.metadata = GitObjectMetadata {
+            kind: Some(GitObjectKind::Commit),
+            logical_size: Some(128),
+            delta_base_oid: Some([2; 20]),
+        };
+        writer
+            .write_locations(original, &[known])
+            .await
+            .expect("write original location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("cover original pack");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish original checkpoint");
+
+        let repacked = writer.bind_packs(&[pack(2)]).await.expect("bind repacked")[0];
+        let mut moved = entry(1);
+        moved.location.pack_offset = 24;
+        moved.location.entry_len = 80;
+        writer
+            .write_locations(repacked, &[moved])
+            .await
+            .expect("write rebound location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect("cover rebound pack");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish rebound checkpoint");
+        let identity = writer.catalog_identity().expect("rebound identity");
+        writer.close().await.expect("close writer");
+
+        let reader = super::super::GitObjectLocatorSession::open_for_catalog(
+            store,
+            "org/repo",
+            identity,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open rebound catalog");
+        let inventory = HashMap::from([(
+            repacked.record.pack_id,
+            GitPackInventoryEntry {
+                pack_id: repacked.record.pack_id,
+                object_count: repacked.record.object_count,
+                pack_size: repacked.record.pack_size,
+            },
+        )]);
+        let lookups = reader
+            .lookup_batch(&[known.oid], &inventory)
+            .await
+            .expect("lookup rebound object");
+        match lookups.as_slice() {
+            [GitObjectLookup::Hit(locator)] => assert_eq!(locator.metadata, known.metadata),
+            other => panic!("expected one rebound locator hit, got {other:?}"),
+        }
+        reader.close().await.expect("close rebound reader");
     }
 
     #[tokio::test]
