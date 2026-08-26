@@ -672,6 +672,8 @@ struct BatchObjectResponse {
     oid: String,
     size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    authenticated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     actions: Option<BatchActions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<BatchObjectError>,
@@ -901,6 +903,7 @@ async fn batch_upload_object(
                 return BatchObjectResponse {
                     oid: object.oid,
                     size: object.size,
+                    authenticated: None,
                     actions: None,
                     error: Some(BatchObjectError {
                         code: 422,
@@ -922,6 +925,7 @@ async fn batch_upload_object(
         Ok(()) => BatchObjectResponse {
             oid: object.oid,
             size: object.size,
+            authenticated: None,
             actions: None,
             error: None,
         },
@@ -962,6 +966,7 @@ async fn batch_download_object(
     BatchObjectResponse {
         oid,
         size: object.size,
+        authenticated: Some(true),
         actions: Some(BatchActions {
             download: Some(BatchAction {
                 href: download_href.to_owned(),
@@ -982,6 +987,7 @@ fn upload_action_response(
     BatchObjectResponse {
         oid,
         size: object.size,
+        authenticated: Some(true),
         actions: Some(BatchActions {
             download: None,
             upload: Some(BatchAction {
@@ -1003,6 +1009,7 @@ fn object_error_response(
     BatchObjectResponse {
         oid: object.oid,
         size: object.size,
+        authenticated: None,
         actions: None,
         error: Some(BatchObjectError {
             code,
@@ -1788,6 +1795,7 @@ mod tests {
             .expect("batch body");
         let batch_json: serde_json::Value =
             serde_json::from_slice(&batch_body).expect("batch JSON");
+        assert_eq!(batch_json["objects"][0]["authenticated"], true);
         let upload = batch_json["objects"][0]["actions"]["upload"]["href"]
             .as_str()
             .expect("upload action");
@@ -1829,6 +1837,7 @@ mod tests {
             .expect("batch body");
         let batch_json: serde_json::Value =
             serde_json::from_slice(&batch_body).expect("batch JSON");
+        assert_eq!(batch_json["objects"][0]["authenticated"], true);
         assert!(
             batch_json["objects"][0]["actions"]["download"]["href"]
                 .as_str()
@@ -1896,6 +1905,7 @@ mod tests {
             .expect("batch body");
         let batch_json: serde_json::Value =
             serde_json::from_slice(&batch_body).expect("batch JSON");
+        assert_eq!(batch_json["objects"][0]["authenticated"], true);
         let upload = batch_json["objects"][0]["actions"]["upload"]["href"]
             .as_str()
             .expect("upload action");
