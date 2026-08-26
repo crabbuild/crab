@@ -477,3 +477,73 @@ details.faq-item[open] .faq-chevron {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+
+.feature-library-prose {
+  --tw-prose-body: color-mix(in oklch, var(--foreground) 82%, transparent);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-links: var(--primary-hover);
+  font-size: clamp(1.05rem, 1.6vw, 1.16rem);
+  line-height: 1.88;
+}
+
+.feature-library-prose > p:first-child {
+  font-size: clamp(1.28rem, 2.2vw, 1.58rem);
+  line-height: 1.62;
+  letter-spacing: -0.018em;
+  color: var(--foreground);
+}
+
+.feature-library-prose > p:first-child::first-letter {
+  float: left;
+  margin: 0.1em 0.12em 0 0;
+  color: var(--primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 3.4em;
+  font-weight: 600;
+  line-height: 0.78;
+}
+
+.feature-library-prose h2 {
+  margin-top: 4.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  font-size: clamp(2rem, 4.5vw, 3.35rem);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
+}
+
+.feature-library-prose h3 {
+  margin-top: 3rem;
+  font-size: clamp(1.35rem, 2.7vw, 1.8rem);
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.feature-library-prose blockquote {
+  margin-block: 2.5rem;
+  border-left-width: 2px;
+  border-color: var(--primary);
+  background: color-mix(in oklch, var(--primary) 5%, transparent);
+  padding: 1.5rem 1.75rem;
+  font-size: 1.08em;
+  font-style: normal;
+}
+
+.feature-library-prose table {
+  font-size: 0.88em;
+}
+
+.feature-library-prose :is(th, td) {
+  padding: 0.8rem 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .feature-library-prose > p:first-child::first-letter {
+    font-size: 2.8em;
+  }
+
+  .feature-library-prose h2 {
+    margin-top: 3.75rem;
+  }
+}

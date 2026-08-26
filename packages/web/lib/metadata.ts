@@ -16,6 +16,11 @@ interface PageMetadataOptions {
     authors: string[]
     tags?: string[]
   }
+  image?: {
+    openGraph: string
+    twitter: string
+    alt: string
+  }
 }
 
 export function createPageMetadata({
@@ -24,6 +29,7 @@ export function createPageMetadata({
   path,
   absoluteTitle = false,
   article,
+  image,
 }: PageMetadataOptions): Metadata {
   const sharedOpenGraph = {
     title,
@@ -33,10 +39,12 @@ export function createPageMetadata({
     locale: "en_US",
     images: [
       {
-        url: "/opengraph-image",
+        url: image?.openGraph ?? "/opengraph-image",
         width: 1200,
         height: 630,
-        alt: "Crab — serverless Git for large files in cloud object storage",
+        alt:
+          image?.alt ??
+          "Crab — serverless Git for large files in cloud object storage",
       },
     ],
   }
@@ -60,8 +68,10 @@ export function createPageMetadata({
       description,
       images: [
         {
-          url: "/twitter-image",
-          alt: "Crab — serverless Git for large files in cloud object storage",
+          url: image?.twitter ?? "/twitter-image",
+          alt:
+            image?.alt ??
+            "Crab — serverless Git for large files in cloud object storage",
         },
       ],
     },

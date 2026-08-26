@@ -91,7 +91,7 @@ export default function LibraryIndexPage() {
           <div>
             <Badge variant="outline" className="gap-1">
               <Route size={12} />
-              Crab learning library · 15 knowledge checks
+              Crab learning library · {posts.length} knowledge checks
             </Badge>
             <h1 className="mt-4 max-w-3xl text-3xl font-bold tracking-tight sm:text-4xl">
               Learn Crab by following the data.

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useSyncExternalStore } from "react"
 import { cn } from "@/lib/utils"
 
 interface ScrollHeaderProps {
@@ -20,9 +20,8 @@ interface ScrollHeaderProps {
  * the page is at the top) and a solid, blurred background (after the
  * visitor has scrolled past `transitionThreshold` pixels).
  *
- * Uses `requestAnimationFrame` to coalesce scroll events. Respects
- * `prefers-reduced-motion`: when set, the wrapper renders in the solid
- * state immediately and skips the scroll listener entirely.
+ * Uses `requestAnimationFrame` to coalesce scroll and viewport changes.
+ * With `prefers-reduced-motion`, the snapshot stays in the solid state.
  *
  * The CSS transition runs for 200ms (within the 150–300ms range
  * specified by the design system) on `background-color`, `backdrop-filter`,
@@ -44,53 +43,37 @@ export function ScrollHeader({
   transitionThreshold,
   className,
 }: ScrollHeaderProps) {
-  // Compute the initial scrolled state synchronously so a refresh
-  // mid-page (or a user with reduced motion) doesn't flash the
-  // transparent state on mount.
-  const [isScrolled, setIsScrolled] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      return true
-    }
-    return window.scrollY > computeThreshold(transitionThreshold)
-  })
-  const rafRef = useRef<number | null>(null)
+  const subscribe = useCallback((notify: () => void) => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
+    let frame: number | null = null
 
-  useEffect(() => {
-    // When reduced motion is requested, the initializer already pinned
-    // us to the solid state and we don't subscribe to scroll updates.
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      return
+    const schedule = () => {
+      if (frame !== null) return
+      frame = window.requestAnimationFrame(() => {
+        frame = null
+        notify()
+      })
     }
 
-    let threshold = computeThreshold(transitionThreshold)
-
-    const update = () => {
-      rafRef.current = null
-      setIsScrolled(window.scrollY > threshold)
-    }
-
-    const onScroll = () => {
-      if (rafRef.current !== null) return
-      rafRef.current = window.requestAnimationFrame(update)
-    }
-
-    const onResize = () => {
-      threshold = computeThreshold(transitionThreshold)
-      onScroll()
-    }
-
-    window.addEventListener("scroll", onScroll, { passive: true })
-    window.addEventListener("resize", onResize)
+    window.addEventListener("scroll", schedule, { passive: true })
+    window.addEventListener("resize", schedule)
+    reducedMotion.addEventListener("change", schedule)
 
     return () => {
-      window.removeEventListener("scroll", onScroll)
-      window.removeEventListener("resize", onResize)
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current)
-      }
+      window.removeEventListener("scroll", schedule)
+      window.removeEventListener("resize", schedule)
+      reducedMotion.removeEventListener("change", schedule)
+      if (frame !== null) window.cancelAnimationFrame(frame)
     }
-  }, [transitionThreshold])
+  }, [])
+
+  const snapshot = useCallback(
+    () =>
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+      window.scrollY > computeThreshold(transitionThreshold),
+    [transitionThreshold]
+  )
+  const isScrolled = useSyncExternalStore(subscribe, snapshot, () => false)
 
   return (
     <div
@@ -105,9 +88,9 @@ export function ScrollHeader({
         // state floats over the page without a visible divider.
         "border-b",
         isScrolled
-          ? "bg-background/80 backdrop-blur border-border"
-          : "bg-background/90 border-transparent",
-        className,
+          ? "border-border bg-background/80 backdrop-blur"
+          : "border-transparent bg-background/90",
+        className
       )}
     >
       {children}

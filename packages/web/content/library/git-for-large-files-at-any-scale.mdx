@@ -1,0 +1,420 @@
+---
+title: "Git for large files at any scale"
+description: "Introducing Crab: one Git history for code, models, datasets, and media, with the heavy bytes stored directly in your own cloud object store."
+date: "2026-08-25"
+author: "Crab Team"
+category: "release"
+tags: ["launch", "git", "large-files", "object-storage", "xet", "deduplication", "serverless"]
+excerpt: "Crab keeps Git in charge of history while content-defined chunks, lazy hydration, and your own object store carry the large-file data plane."
+level: "beginner"
+path: "start-here"
+order: 1
+concepts: ["one history", "two data paths", "content-defined chunking", "object storage", "lazy hydration", "atomic publication"]
+prerequisites: []
+outcome: "Understand why Crab exists, how its Git and data paths fit together, and how to publish a first repository to S3, GCS, or Azure."
+diagramType: "Interactive architecture and scale simulators"
+presentation: "feature"
+knowledgeCheck:
+  question: "Which boundary lets Crab publish one Git history without putting large-file bytes in Git?"
+  options:
+    - "Git commits durable file identities while object storage holds reconstructable content"
+    - "Every client rewrites the branch after downloading the complete bucket"
+    - "A hosted Crab data server owns both commits and large-file retention"
+  answer: 0
+  explanation: "The commit selects the exact file identity. Crab publishes the ref only after the object-store data and reconstruction metadata are durable."
+meta:
+  contentType: "Conceptual"
+  goal: "Introduce Crab through the large-file problem, its architecture, and a complete first workflow."
+  audience: "Developers, ML teams, game studios, data engineers, and platform teams evaluating large-file version control."
+---
+
+Git is the best interface we have for deciding what changed, who changed it, and which state a team agrees to call `main`. But the files attached to modern software no longer look like the files Git was designed to carry. A model checkpoint can be larger than an old repository. A dataset may change every day. A game build can contain thousands of binary assets that compress, diff, and clone poorly as ordinary Git blobs.
+
+The usual answer is to move those files somewhere else. That solves a storage problem by creating a coordination problem: code lives in one history, data in another catalog, and the connection between them becomes a naming convention, a CI variable, or a line in a README that eventually goes stale.
+
+Today we are launching **Crab**, a serverless Git remote and large-file data plane designed around a different premise:
+
+> Keep one Git history. Put the heavy bytes directly in your object store. Move only the content a person or job actually needs.
+
+Crab uses Git's own extension points. Tracked large files become compact pointer blobs in Git. Their content is split at stable, content-defined boundaries, deduplicated by identity, packed into immutable objects, and stored in S3, Google Cloud Storage, Azure Blob Storage, or an S3-compatible store. A clone can begin with history and pointers; hydration can materialize selected files later.
+
+There is no Crab data server between your team and the bucket. There is no second branch model to reconcile. The system is deliberately split into two physical lanes that meet at one publication boundary.
+
+<TakeawayBox title="The launch in one sentence">
+  Crab is Git for repositories where the history should stay small, the files
+  can be enormous, and the durable source of truth should be cloud object
+  storage you control.
+</TakeawayBox>
+
+## The file became infrastructure
+
+For a long time, “large file” meant an occasional video, installer, or design export. Large-file policy could be an exception. In current systems, binary content is often the product itself:
+
+- Machine-learning teams version checkpoints, embeddings, tokenized corpora, and evaluation sets.
+- Game teams move textures, audio, meshes, maps, and engine caches alongside source.
+- Data teams need reproducible Parquet, Arrow, database, and scientific-array inputs.
+- Media and simulation teams produce large sequences whose neighboring versions are mostly related.
+- Agentic workflows create more branches, worktrees, experiments, and short-lived repository states than a human-only workflow did.
+
+These teams still want Git's strengths. A commit is a useful unit of review. A branch is a useful unit of collaboration. A checkout is a useful way to ask for a historical state. The failure is not the interface. The failure is treating every byte behind that interface as if it belongs in the same physical representation.
+
+An ordinary Git repository optimizes a graph of commits, trees, and blobs into packfiles. For source code, this is extraordinarily effective. The files are small, text deltas are useful, and developers often want a broad local copy.
+
+Large binary histories change the shape of the work:
+
+- A small logical edit can produce a new blob almost as large as the old one.
+- Cloning history can pull versions the current task will never open.
+- CI runners repeatedly transfer common bytes into disposable workspaces.
+- A few paths dominate the object database, maintenance time, and network cost.
+- Removing a path from the newest tree does not remove its older blobs from history.
+
+The repository is still a graph, but the economic unit is no longer “one blob.” It is the region of content that remained the same between versions, branches, names, and copies.
+
+## Why the obvious separations are expensive
+
+There are good tools for storing artifacts outside Git. Object stores are durable and elastic. Package registries are excellent distribution systems. Dataset catalogs capture useful domain metadata. The problem appears when the external store becomes a second source of version truth.
+
+Consider a training change that updates code, a configuration, and a checkpoint. If the checkpoint is named by an object-store path rather than the commit, several questions move into application policy:
+
+- Is the path mutable or immutable?
+- Which upload completed first?
+- Can a branch be reviewed without reading an external manifest convention?
+- Does reverting the commit also select the earlier checkpoint?
+- Can garbage collection tell which historical experiments still refer to the bytes?
+- Will a clone ten months later recreate the same worktree?
+
+You can answer every question with enough databases, conventions, and automation. But then your team is maintaining a version-control system next to Git.
+
+Crab keeps the join inside the commit. Git records a pointer containing the large file's identity and size. Crab records the ordered reconstruction recipe behind that identity. A historical commit therefore selects both the source state and the exact large-file state, even though their bytes travel through different systems.
+
+<BeforeAfter
+  before={[
+    "Code commit points to an external path by convention",
+    "Every checkout pulls the complete binary working set",
+    "File versions are stored as unrelated whole objects",
+    "A hosted LFS service sits in the data path",
+  ]}
+  after={[
+    "The Git tree contains the large file's durable identity",
+    "Hydration selects only the files the task needs",
+    "Content identities can be reused across versions and paths",
+    "Clients read and write the team's own object store",
+  ]}
+/>
+
+## One history, two data paths
+
+Crab does not replace Git. It interprets selected paths and implements a Git remote.
+
+The first integration point is Git's long-running filter process. A `.gitattributes` rule chooses which paths use `filter=crab`. When Git stages a matching file, Crab streams the file, computes its full identity, finds content-defined chunk boundaries, persists a local recipe, and returns a compact pointer blob to Git. Unmatched files remain ordinary Git blobs.
+
+The second integration point is the remote-helper protocol. Git invokes `git-remote-crab` for a `crab://` remote. The helper transfers the Git object graph, discovers the large-file pointers reachable from it, publishes their data dependencies, and finally updates the destination ref.
+
+<GitArchitecturePlayer story="overview" />
+
+This division creates a narrow contract for each layer:
+
+| Layer | Owns | Does not own |
+| --- | --- | --- |
+| Git commit and tree | Names, history, branches, path selection | Large-file placement |
+| Crab pointer | Full-file identity and logical size | Chunk storage location |
+| File recipe and shards | Ordered reconstruction terms | Branch visibility |
+| Xorbs | Immutable packed chunk bytes | File names or Git refs |
+| Ref journal | Which complete commit is visible | Working-tree hydration policy |
+
+The boundaries matter more than the component names. Git can inspect history without downloading model bytes. Object storage can hold immutable data without understanding a working tree. Repacking physical objects does not change the file identity recorded by a commit.
+
+The user still sees one repository. The implementation gets two data planes with different scaling behavior.
+
+## Content identity is the scaling primitive
+
+Whole-file storage can only reuse a file when the entire file is identical. Fixed-size chunking improves that, but a byte inserted near the beginning shifts every later boundary. Content-defined chunking chooses boundaries from the byte stream itself. After a local insertion or edit, the boundary detector can resynchronize, allowing distant unchanged regions to retain their earlier identities.
+
+<ChunkReuseDiagram />
+
+Crab hashes chunks with BLAKE3 and groups new chunk data into immutable packed objects called xorbs. Shards map each chunk identity to the byte range that contains it. A file recipe preserves the ordered list required to reconstruct one complete file version.
+
+This model allows reuse across dimensions that whole-file naming misses:
+
+- **Across versions:** an updated checkpoint can retain most regions from its parent.
+- **Across branches:** two experiments can share their common base content.
+- **Across paths:** copying or renaming identical content does not require another physical copy.
+- **Across contributors:** the durable chunk identity is independent of who uploaded it.
+- **Across time:** a later version can refer to content first introduced much earlier.
+
+Deduplication is not a promise that every format changes locally. Compressed or encrypted files can exhibit broad byte changes after a small semantic edit. That is why the scale lens above labels its values as an explanatory model rather than a benchmark. The invariant is simpler: identical chunks have identical identities, and Crab does not need to store proven content twice in the same repository data plane.
+
+## Add is a transaction, not a text substitution
+
+A pointer is useful only if its producing client can later publish a complete recipe. Returning a pointer before durable local staging exists would allow Git to commit an identity whose bytes Crab has already forgotten.
+
+For that reason, `crab add` does more than rewrite a file. It chooses the representation, streams the content through hashing and chunking, flushes the local staging state, writes the pointer, and then updates Git's index.
+
+<GitArchitecturePlayer story="add" />
+
+The working-tree file remains a normal full file. Tools do not have to understand the pointer format while the content is hydrated. The Git index receives either the ordinary blob or the backed pointer, depending on the path's attributes.
+
+This also means “tracked by Git,” “managed by Crab,” and “materialized on this machine” are separate decisions:
+
+1. Git and `.gitignore` decide whether the path enters history.
+2. `.gitattributes` decides whether the committed representation is a blob or a Crab pointer.
+3. Hydration policy decides whether the current worktree holds the pointer or the reconstructed bytes.
+
+Keeping those decisions independent lets a repository contain source code, managed model files, ignored training caches, and selectively hydrated assets without inventing separate histories for each class.
+
+## A push is immutable first, visible last
+
+Large-file systems become dangerous when metadata becomes visible before the data it names. A successful branch update that points to a missing chunk is worse than a failed push: it tells every reader that a broken state is canonical.
+
+Crab prepares immutable dependencies before it publishes the ref. A push discovers the Git closure and all reachable Crab pointers, serializes writers for the destination ref, builds Git packs and Crab data objects, uploads them, verifies connectivity and pointer closure, and only then commits the expected ref update.
+
+<GitArchitecturePlayer story="push" />
+
+The expected-old comparison is the final guard. It says, “move this ref only if it still points to the commit I planned against.” If another writer wins first, the stale push fails explicitly rather than overwriting newer history.
+
+The per-ref lock reduces wasted concurrent work and keeps the common path orderly. Correctness does not depend on pretending leases are perfect. The expected-old transaction remains the authority at publication.
+
+<TakeawayBox title="The publication invariant">
+  Every Git object, file recipe, shard term, and xorb range required by the new
+  tip must be durable before that tip becomes visible.
+</TakeawayBox>
+
+That invariant gives failure a legible shape. Before publication, partial immutable uploads are safe orphans. They may help a retry, or garbage collection can reclaim them after the grace window. After publication, the new state is complete, and derived indexes can be rebuilt without rolling the ref backward.
+
+## Serverless does not mean structureless
+
+“Serverless” can sound like an omission. Here it is an ownership choice.
+
+A traditional large-file service owns an endpoint, authentication layer, database, storage configuration, availability model, and upgrade path. The repository's pointers depend on that service remaining reachable and compatible.
+
+Crab's durable data path uses object-storage operations and repository-scoped layouts. The team chooses the bucket and provider. Cloud credentials come from the provider's normal discovery mechanisms or an optional managed authentication boundary. There is no Crab data server required for the basic repository path.
+
+The absence of a data server does not remove coordination. Crab still needs explicit contracts for ref serialization, metadata publication, recovery, caching, and garbage collection. Those contracts live in the repository namespace instead of behind a mandatory hosted database.
+
+This matters operationally:
+
+- Bucket durability and replication remain visible cloud choices.
+- Data access can use the organization's existing provider identity policy.
+- A repository can live under its own prefix rather than in a vendor-wide object namespace.
+- Immutable objects can be inspected, inventoried, verified, tiered, and recovered with repository-aware tooling.
+- Read caches accelerate access but do not become the source of truth.
+
+Crab supports AWS S3, Google Cloud Storage, Azure Blob Storage, and S3-compatible endpoints. Provider behavior still differs—credentials, conditional operations, lifecycle classes, and consistency contracts are not interchangeable—but the Git-facing workflow stays the same.
+
+## Clone the history; hydrate the working set
+
+A large repository often contains more historical or domain content than one task needs. A source-only CI job may need no checkpoints. An evaluation job may need one model and one test set. An artist may need the current map but not every cinematic. Making clone synonymous with “download every large file” turns repository scale into mandatory local scale.
+
+Crab clone is lazy by default. Git history and pointer blobs arrive first. Hydration resolves selected pointers into complete worktree files.
+
+<GitArchitecturePlayer story="hydrate" />
+
+Hydration follows a proof-oriented read path:
+
+1. Read the pointer's full-file identity and size.
+2. Resolve every ordered reconstruction term from file and shard metadata.
+3. Plan and coalesce the required xorb ranges.
+4. Read those ranges from the origin or a verified cache.
+5. Reconstruct chunks in recipe order.
+6. Verify the complete output against the pointer identity.
+7. Materialize the file only after verification succeeds.
+
+The result is byte-identical or hydration returns an error. A partial output does not quietly become the worktree file.
+
+Hydration policy can match the job:
+
+```bash
+# Begin with history and pointers.
+crab clone crab://team-bucket/vision-search
+
+# Materialize one working set.
+crab hydrate 'models/encoder.safetensors'
+
+# Return clean managed files to pointer form later.
+crab dehydrate 'models/*.safetensors'
+```
+
+Dehydration changes the local representation, not history or remote retention. The commit still names the same file identity. A future hydration can reconstruct it again.
+
+## Scale has more than one axis
+
+“At scale” is often reduced to the size of one repository. Large-file version control has at least five independent axes:
+
+| Axis | Pressure | Crab's boundary |
+| --- | --- | --- |
+| One file becomes huge | Memory and transfer size | Bounded streaming and range reads |
+| History becomes deep | Repeated versions | Chunk identity and lazy hydration |
+| File count becomes large | Metadata and request fan-out | Packed xorbs, shards, and batched paths |
+| Team concurrency rises | Conflicting publication | Per-ref serialization plus expected-old refs |
+| Repository count rises | Service and database overhead | Repository prefixes in shared object storage |
+
+These axes interact. Packing chunks reduces object-count overhead but makes reconstruction metadata necessary. Lazy reads reduce checkout transfer but make range planning and caching important. Immutable publication makes retries safe but requires repository-aware garbage collection.
+
+Crab's design does not make those costs disappear. It gives each cost an owner and keeps it away from the Git history path when it does not belong there.
+
+### One giant file
+
+Hashing, chunking, staging, upload, and reconstruction are streaming operations. The pipeline does not require the complete file to fit in memory. Reads can request the ranges that cover the selected file rather than retrieving a repository-sized pack.
+
+### Many related versions
+
+Content-defined boundaries allow stable regions to keep their identities. The full-file hash still changes, preserving exact version identity, while physical storage can reuse the unchanged chunk terms.
+
+### Many files
+
+Xorbs group chunk payloads so the object store does not receive one tiny object per chunk. Shards and file recipes preserve lookup and order without making path names the physical layout.
+
+### Many writers
+
+Writers to different refs can prepare in parallel. Writers to the same ref must reconcile at the expected-old update. An upload is preparation; it never grants permission to replace history.
+
+### Many readers
+
+Local and shared caches can serve verified content, but the canonical bucket remains authoritative. A cache miss changes latency, not correctness. A source-only job can remain on the Git lane and avoid the large-file data plane entirely.
+
+## Failure should be boring
+
+The hardest part of storage is rarely the success path. Machines stop after writing half a plan. Credentials expire. A second writer moves the branch. A cache contains stale hints. An index update succeeds while the response is lost.
+
+Crab assigns each failure to a boundary with an observable result.
+
+<GitArchitecturePlayer story="failure" />
+
+| Failure point | Visible repository state | Safe response |
+| --- | --- | --- |
+| Local staging fails | No backed pointer is added | Fix local access and add again |
+| Immutable upload stops | Old ref remains visible | Restore access and retry |
+| Closure verification fails | Old ref remains visible | Repair or republish missing dependencies |
+| Expected-old check loses | Winner's ref remains visible | Fetch, reconcile, and push a new plan |
+| Response is lost after commit | New ref may be visible | Read canonical ref before retrying |
+| Derived index update fails | Committed state remains valid | Rebuild from durable source records |
+
+This is why “immutable first, visible last” is more than a storage pattern. It is a user-experience rule. A failure can say what is visible and what action is safe.
+
+## Garbage collection follows reachability, not filenames
+
+Deduplicated content breaks the assumption that deleting a path deletes its bytes. The same chunk may belong to another version, branch, file, workflow artifact, or recovery point. Bucket keys also do not reveal which Git histories still reach them.
+
+Crab garbage collection begins with retained roots, traverses their complete Git and file-data closure, compares that mark set with a repository inventory, and applies a grace window before deletion.
+
+An object becomes a deletion candidate only when both conditions are true:
+
+1. No retained root reaches it.
+2. It is older than the configured protection window.
+
+The grace period protects concurrent and interrupted writers whose immutable objects may not yet be reachable. Repository scope protects other teams sharing the bucket. This is also why manually deleting keys by source path is unsafe: physical objects are content-addressed and may be shared far beyond that path.
+
+## Where Crab fits
+
+Crab is not the only way to manage large content, and it should not be chosen by slogan.
+
+| Approach | Strong fit | Trade-off |
+| --- | --- | --- |
+| Ordinary Git blobs | Small files, source, portable history | Large binary versions inflate packs and clones |
+| Git LFS | Familiar pointer workflow with a hosted LFS endpoint | Whole-file storage and a separate service path |
+| Artifact registry | Published, immutable build outputs | Usually not a working-tree or branch-history model |
+| Dataset or experiment system | Domain metadata, lineage, metrics | Code and data state may live in separate histories |
+| Crab | Mixed repositories, large related versions, object-store ownership | Adds a CLI, pointer contract, and repository-aware operations |
+
+Use ordinary Git when it already works. Crab deliberately leaves unmatched paths alone.
+
+Use a package or artifact registry when the content is a released product with a package lifecycle rather than a file edited alongside source.
+
+Use a domain-specific data system when its catalog, query, lineage, or governance model is the primary interface. Crab can still version the code and selected file identities around that system, but it does not try to become every data platform.
+
+Use Crab when the team wants Git commits and branches to remain the coordination interface, large-file versions share meaningful content, working sets should be selective, and the durable bytes should live directly in cloud object storage.
+
+## From empty directory to first push
+
+Crab ships as a single CLI. The same installation provides the user-facing command, Git's remote helper, and the filter process integration.
+
+Install it on macOS or Linux:
+
+```bash
+brew install crabbuild/tap/crab
+```
+
+Or use the checksum-verifying installer:
+
+```bash
+curl -fsSL https://crab.build/install.sh | bash
+```
+
+Then create a repository backed by your bucket:
+
+```bash
+mkdir vision-search && cd vision-search
+crab configure s3://team-bucket/vision-search
+crab track '*.safetensors'
+crab add .
+git commit -m "Add the first model"
+crab push origin main
+```
+
+`crab configure` can infer S3, GCS, or Azure from a provider-prefixed URL, check credential discovery, initialize Git when needed, write Crab configuration, and install the filter and diff drivers. It can also scan for common large-file patterns. Use `--dry-run` when you want to inspect the plan before it changes the repository.
+
+After publication, verify both the branch and its data closure:
+
+```bash
+git ls-remote origin refs/heads/main
+crab fsck --json
+crab doctor
+```
+
+The remote ref proves which commit is published. `crab fsck` checks the referenced Crab objects. `crab doctor` checks local configuration, credentials, and repository health. These are different claims, so Crab exposes them as different checks.
+
+<FlowSteps
+  title="A production-minded first evaluation"
+  steps={[
+    "Configure a dedicated repository prefix and review the generated .gitattributes rules.",
+    "Add one representative large file and inspect the pointer staged in Git.",
+    "Push, then verify the ref and remote closure from the producing machine.",
+    "Clone lazily on a second machine or clean environment.",
+    "Hydrate a selected file and compare its full identity with the source.",
+    "Interrupt a test push before publication and confirm the old ref remains visible.",
+  ]}
+/>
+
+## What we chose not to hide
+
+Large-file version control has real policy decisions. Crab tries to make them explicit instead of burying them under “automatic” behavior.
+
+You choose which paths use the large-file representation. You choose the bucket, provider, credentials, lifecycle classes, and retention posture. You choose whether a job hydrates nothing, a manifest, a pattern, or everything. You can distinguish canonical origin state from cache state. You can inspect the Git ref separately from the large-file closure it names.
+
+The defaults are meant to make a first repository direct, but the boundaries remain visible because they are where recovery happens.
+
+<ConceptChecklist
+  title="The Crab mental model"
+  items={[
+    "Git owns names, commits, trees, branches, and review",
+    "Pointers bind Git paths to exact large-file identities",
+    "Recipes and shards bind file identities to ordered chunk ranges",
+    "Xorbs carry immutable packed content in object storage",
+    "Hydration turns selected pointers back into verified files",
+    "The ref moves only after every reachable dependency is durable",
+  ]}
+/>
+
+## The repository should feel smaller than its history
+
+The name of this post is intentionally ambitious. “Any scale” does not mean physics stops applying. A five-terabyte version still contains five terabytes of logical content. A cold object still has restore latency. A compressed file that changes everywhere still produces new bytes. An object store still charges for storage, requests, and transfer.
+
+It means the repository model should not force every scale dimension onto every operation.
+
+A large history should not require a large checkout. A large file should not require whole-file memory. Many versions should not require many complete physical copies when their content is shared. Many readers should not make a mutable cache authoritative. A failed upload should not expose a broken ref. A serverless data path should not erase operational evidence.
+
+Crab is our attempt to keep those statements true while preserving the interface developers already understand: add, commit, branch, push, clone, checkout.
+
+The result is not Git with an attachment bucket. It is one history interpreted across two purpose-built data paths.
+
+## Start here
+
+Crab is available now for macOS, Linux, and Windows. Begin with the [installation guide](/docs/cli/getting-started/installation), create a [first repository](/docs/cli/getting-started/first-repository), or inspect the [complete CLI documentation](/docs/cli).
+
+If you are evaluating an existing Git LFS repository, read the [migration guide](/docs/cli/guides/migrating-from-lfs). If your working set is larger than local disk, continue with [lazy clone and hydration](/docs/cli/virtual-filesystem) and the [local mount workflow](/docs/cli/virtual-filesystem/local-mount).
+
+The first question is not “How large is the repository?”
+
+It is: **Which bytes does this operation actually need?**
+
+Crab lets Git answer which state you mean—and lets the data plane answer the rest.

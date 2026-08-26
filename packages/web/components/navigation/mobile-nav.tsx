@@ -92,7 +92,7 @@ export function MobileNav() {
       {/* Full-screen overlay panel */}
       <div
         className={cn(
-          "fixed inset-0 z-100 md:hidden",
+          "fixed inset-0 z-100 overflow-hidden md:hidden",
           open ? "visible" : "pointer-events-none invisible"
         )}
         aria-modal={open}
