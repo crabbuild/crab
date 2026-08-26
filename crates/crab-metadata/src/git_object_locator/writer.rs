@@ -645,10 +645,10 @@ impl GitObjectLocatorWriter {
             let location = decode_object_location(&row.value)
                 .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
             if !retained_slots.contains(&location.pack_slot) {
-                if let Some(ordinals) = &mut self.existing_ordinals {
-                    if let Some(oid) = decode_object_key(&row.key) {
-                        ordinals.remove(&oid);
-                    }
+                if let Some(ordinals) = &mut self.existing_ordinals
+                    && let Some(oid) = decode_object_key(&row.key)
+                {
+                    ordinals.remove(&oid);
                 }
                 deletes.delete(row.key);
                 deletes.delete(ordinal_key(location.ordinal));
