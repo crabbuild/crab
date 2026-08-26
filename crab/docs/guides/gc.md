@@ -73,10 +73,16 @@ only the small completed-run state remains.
 Repository runs use the same durable plan, but walk current, historical,
 journal, workflow, and pack roots directly into key-partitioned marks.
 Pack-list segments and delete outcomes are consumed in bounded batches;
-store-only deletion does not build a process-wide deleted-key list. Bucket
-previews use a non-executable journal and remove its temporary batches and
-marks after reporting. Repair commands intentionally retain their
-collection-oriented behavior.
+store-only deletion does not build a process-wide deleted-key list. Generated
+response-pack descriptors and their content-addressed artifacts are treated as
+soft cache roots while they are inside the configured grace period; older
+cache pairs become repo-GC candidates, and `--force` may remove them
+immediately. A descriptor is read with a fixed body limit before its artifact
+is retained, so a corrupt cache descriptor fails closed instead of allowing a
+possibly referenced artifact to be collected. Bucket previews use a
+non-executable journal and remove its temporary batches and marks after
+reporting. Repair commands intentionally retain their collection-oriented
+behavior.
 
 ## How It Works
 
@@ -114,6 +120,8 @@ GC tracks deletions across several categories:
 - Xorbs — chunk data blobs
 - Shards — metadata shards
 - Packs — Git objects in repo-scope GC
+- Generated response packs — immutable clone accelerators retained only as
+  grace-period soft roots
 
 Repo-scoped dry runs also report pack storage in four disjoint byte classes:
 

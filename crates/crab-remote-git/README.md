@@ -80,6 +80,9 @@ semantics, output policy, and ordered object selection. Complete pack bodies
 and descriptors are verified on every read. Runtime single-flight and the
 existing renewable internal-lock contract coalesce concurrent producers;
 cancelling one waiter does not cancel work still needed by another process.
+Repository GC treats these objects as a soft acceleration cache: recent
+descriptors retain their referenced artifacts through the configured grace
+period, after which stale descriptor/artifact pairs become collectible.
 
 Directory listing reads only the selected tree. Child sizes are absent unless
 the caller requests bounded page-only metadata. Comparison prunes equal tree

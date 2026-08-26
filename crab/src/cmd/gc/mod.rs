@@ -44,6 +44,7 @@ use crate::tier::classes::StorageClass;
 
 const REPO_GC_PREFIXES: &[&str] = &[
     "packs/",
+    "generated-packs/",
     "metadata/",
     "manifests/",
     "workflow/artifacts/",
@@ -57,6 +58,7 @@ const REPO_GC_PREFIXES: &[&str] = &[
 ];
 const DEFAULT_DELETE_CONCURRENCY: usize = 64;
 const DEFAULT_LIST_CONCURRENCY: usize = 32;
+const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 
 // ---------------------------------------------------------------------------
 // GC arguments
@@ -833,6 +835,9 @@ async fn finish_repo_gc_from_marks(
             args.list_concurrency,
             coordinator_protected_keys,
             cancel,
+            t0,
+            grace_period,
+            !args.force,
             None,
         )
         .await;
@@ -984,6 +989,9 @@ async fn run_repo_gc_durable_streaming_roots(
             args.list_concurrency,
             coordinator_protected_keys,
             cancel,
+            t0,
+            grace_period,
+            !args.force,
             None,
         )
         .await?;
@@ -1017,6 +1025,9 @@ async fn run_repo_gc_durable_streaming_roots(
         args.list_concurrency,
         coordinator_protected_keys,
         cancel,
+        t0,
+        grace_period,
+        !args.force,
         Some(&mut reachable_marks),
     )
     .await?;
@@ -1875,6 +1886,9 @@ async fn stream_repo_reachability(
     concurrency: usize,
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
+    retention_at: SystemTime,
+    grace_period: Duration,
+    retain_generated_pack_cache: bool,
     mut writer: Option<&mut marks::DurableMarkWriter>,
 ) -> Result<StreamedRepoRootSnapshot> {
     check_cancelled(cancel)?;
@@ -1894,6 +1908,17 @@ async fn stream_repo_reachability(
     stream_reachable_bulk_objects(store, router, &manifest, &mut sink).await?;
     if let Some(path) = current_git_visibility_pending_root(router, &manifest) {
         sink.add(path).await?;
+    }
+    if retain_generated_pack_cache {
+        stream_generated_pack_cache_reachable(
+            store,
+            router,
+            retention_at,
+            grace_period,
+            &mut sink,
+            cancel,
+        )
+        .await?;
     }
     stream_reachable_workflow_objects(store, router, &mut sink).await?;
     sink.add(router.manifest_path().as_ref().to_owned()).await?;
@@ -1958,6 +1983,111 @@ async fn stream_repo_reachability(
     Ok(StreamedRepoRootSnapshot {
         root_identity: digest.finish(),
     })
+}
+
+fn generated_pack_cache_artifact_key(
+    router: &StoreLayout,
+    descriptor_key: &str,
+    bytes: &[u8],
+) -> Result<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
+        CrabError::CorruptObject {
+            path: descriptor_key.to_owned(),
+            reason: format!("generated pack descriptor is not valid JSON: {error}"),
+        }
+    })?;
+    let content_hash = value
+        .get("content_hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CrabError::CorruptObject {
+            path: descriptor_key.to_owned(),
+            reason: "generated pack descriptor has no content hash".to_owned(),
+        })?;
+    if content_hash.len() != 64
+        || !content_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        return Err(CrabError::CorruptObject {
+            path: descriptor_key.to_owned(),
+            reason: "generated pack descriptor has an invalid content hash".to_owned(),
+        });
+    }
+    Ok(router
+        .generated_pack_artifact_path(content_hash)
+        .as_ref()
+        .to_owned())
+}
+
+async fn extend_generated_pack_cache_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    retention_at: SystemTime,
+    grace_period: Duration,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    let cutoff = retention_at - grace_period.max(MIN_GRACE_PERIOD);
+    let prefix = router.repo_path("generated-packs/v1/requests/");
+    let mut descriptors = store.inner().list(Some(&prefix));
+    while let Some(meta) = descriptors.try_next().await.map_err(CrabError::Storage)? {
+        let last_modified: SystemTime = meta.last_modified.into();
+        if last_modified < cutoff {
+            continue;
+        }
+        let descriptor_key = meta.location.as_ref().to_owned();
+        let (bytes, _) = match store
+            .get_with_etag_bounded(&meta.location, GENERATED_PACK_DESCRIPTOR_MAX_BYTES)
+            .await
+        {
+            Ok(value) => value,
+            Err(CrabError::NotFound { .. }) => continue,
+            Err(error) => return Err(error),
+        };
+        let artifact_key = generated_pack_cache_artifact_key(router, &descriptor_key, &bytes)?;
+        reachable.insert(descriptor_key);
+        reachable.insert(artifact_key);
+    }
+    Ok(())
+}
+
+async fn stream_generated_pack_cache_reachable(
+    store: &Store,
+    router: &StoreLayout,
+    retention_at: SystemTime,
+    grace_period: Duration,
+    sink: &mut RepoReachabilitySink<'_>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let cutoff = retention_at - grace_period.max(MIN_GRACE_PERIOD);
+    let prefix = router.repo_path("generated-packs/v1/requests/");
+    let mut descriptors = store.inner().list(Some(&prefix));
+    while let Some(meta) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        next = descriptors.try_next() => next.map_err(CrabError::Storage)?,
+    } {
+        let last_modified: SystemTime = meta.last_modified.into();
+        if last_modified < cutoff {
+            continue;
+        }
+        let descriptor_key = meta.location.as_ref().to_owned();
+        let (bytes, _) = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = store.get_with_etag_bounded(
+                &meta.location,
+                GENERATED_PACK_DESCRIPTOR_MAX_BYTES,
+            ) => match result {
+                Ok(value) => value,
+                Err(CrabError::NotFound { .. }) => continue,
+                Err(error) => return Err(error),
+            },
+        };
+        let artifact_key = generated_pack_cache_artifact_key(router, &descriptor_key, &bytes)?;
+        sink.add(descriptor_key).await?;
+        sink.add(artifact_key).await?;
+    }
+    Ok(())
 }
 
 async fn stream_reachable_bulk_objects(
@@ -2338,12 +2468,39 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     router: &StoreLayout,
     concurrency: usize,
 ) -> Result<RepoGcReachability> {
+    reachable_repo_objects_from_manifest_with_options(
+        store,
+        router,
+        concurrency,
+        true,
+        Duration::from_secs(24 * 3600),
+    )
+    .await
+}
+
+async fn reachable_repo_objects_from_manifest_with_options(
+    store: &Store,
+    router: &StoreLayout,
+    concurrency: usize,
+    retain_generated_pack_cache: bool,
+    grace_period: Duration,
+) -> Result<RepoGcReachability> {
     let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
     let manifest = snapshot.manifest;
     let mut reachable = HashSet::new();
     extend_reachable_bulk_objects(store, router, &manifest, &mut reachable).await?;
     if let Some(path) = current_git_visibility_pending_root(router, &manifest) {
         reachable.insert(path);
+    }
+    if retain_generated_pack_cache {
+        extend_generated_pack_cache_reachable(
+            store,
+            router,
+            SystemTime::now(),
+            grace_period,
+            &mut reachable,
+        )
+        .await?;
     }
     extend_reachable_workflow_objects(store, router, &mut reachable).await?;
     reachable.insert(router.manifest_path().as_ref().to_string());
@@ -2674,9 +2831,14 @@ async fn run_repo_remote_gc_under_maintenance(
     }
 
     let reachability_started = Instant::now();
-    let reachability =
-        reachable_repo_objects_from_manifest_with_concurrency(store, router, args.list_concurrency)
-            .await?;
+    let reachability = reachable_repo_objects_from_manifest_with_options(
+        store,
+        router,
+        args.list_concurrency,
+        !args.force,
+        grace_period,
+    )
+    .await?;
     let mut reachable_keys = reachability.reachable_keys;
     let workflow_store = crab_workflow::WorkflowStore::from_storage(store.clone().into());
     reachable_keys.extend(
@@ -3526,6 +3688,8 @@ mod tests {
         let router = StoreLayout::new(store.clone(), "org/repo".to_string());
         for key in [
             "org/repo/packs/pack-old.pack",
+            "org/repo/generated-packs/v1/artifacts/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack",
+            "org/repo/generated-packs/v1/requests/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
             "org/repo/metadata/pack/indexes/old.json",
             "org/repo/manifests/pack-list-old",
             "org/repo/manifest",
@@ -3545,12 +3709,109 @@ mod tests {
         assert_eq!(outcome.requests, REPO_GC_PREFIXES.len() as u64);
         assert_eq!(outcome.parallelism, REPO_GC_PREFIXES.len());
         assert!(keys.contains("org/repo/packs/pack-old.pack"));
+        assert!(keys.contains(
+            "org/repo/generated-packs/v1/artifacts/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack"
+        ));
+        assert!(keys.contains(
+            "org/repo/generated-packs/v1/requests/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
+        ));
         assert!(keys.contains("org/repo/metadata/pack/indexes/old.json"));
         assert!(keys.contains("org/repo/manifests/pack-list-old"));
         assert!(!keys.contains("org/repo/manifest"));
         assert!(!keys.contains("org/repo/locks/refs/heads/main/lock"));
         assert!(!keys.contains("org/repo/locks/internal/repack/lock"));
         assert!(!keys.contains(".crab/xorbs/abc"));
+    }
+
+    #[tokio::test]
+    async fn reachable_repo_objects_retain_recent_generated_pack_pairs() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+
+        let content_hash = "a".repeat(64);
+        let request_hash = "b".repeat(64);
+        let descriptor = serde_json::json!({
+            "version": 2,
+            "request_hash": request_hash,
+            "content_hash": content_hash,
+            "checksum": "c".repeat(40),
+            "size": 64,
+            "object_count": 1,
+            "selection_object_count": 1,
+        });
+        store
+            .put(
+                &router.generated_pack_descriptor_path(&request_hash),
+                Bytes::from(serde_json::to_vec(&descriptor).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                &router.generated_pack_artifact_path(&content_hash),
+                Bytes::from_static(b"generated pack"),
+            )
+            .await
+            .unwrap();
+
+        let (_manifest, reachable) = reachable_repo_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+
+        assert!(
+            reachable.contains(
+                router
+                    .generated_pack_descriptor_path(&request_hash)
+                    .as_ref()
+            )
+        );
+        assert!(reachable.contains(router.generated_pack_artifact_path(&content_hash).as_ref()));
+
+        let args = GcArgs {
+            force: true,
+            yes: true,
+            ..GcArgs::default()
+        };
+        run_repo_remote_gc(
+            &args,
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(store.head(&router.manifest_path()).await.is_ok());
+        assert!(matches!(
+            store
+                .head(&router.generated_pack_descriptor_path(&request_hash))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store
+                .head(&router.generated_pack_artifact_path(&content_hash))
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
