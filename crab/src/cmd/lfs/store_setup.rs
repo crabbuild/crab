@@ -285,6 +285,46 @@ fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {
     Ok(url)
 }
 
+pub(super) fn validate_git_push_url(name: &str, expected_url: &str) -> Result<()> {
+    if expected_url.is_empty() {
+        return Err(CrabError::Configuration {
+            key: format!("git remote \"{name}\" has an empty push URL"),
+            origin: "pre-push hook arguments".into(),
+        });
+    }
+
+    let cwd = std::env::current_dir().map_err(CrabError::Io)?;
+    let repo_root =
+        crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?.current_worktree_root;
+    let output = git_command(&repo_root)
+        .args(["remote", "get-url", "--push", name])
+        .output()
+        .map_err(|e| CrabError::Configuration {
+            key: format!("failed to read git remote \"{name}\" push URL: {e}"),
+            origin: "git remote get-url --push".into(),
+        })?;
+
+    if !output.status.success() {
+        return Err(CrabError::Configuration {
+            key: format!("git remote \"{name}\" is not configured"),
+            origin: "git remote get-url --push".into(),
+        });
+    }
+
+    let matches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .any(|url| url == expected_url);
+    if matches {
+        return Ok(());
+    }
+
+    Err(CrabError::Configuration {
+        key: format!("git remote \"{name}\" changed during pre-push"),
+        origin: "the hook URL does not match the configured push URL".into(),
+    })
+}
+
 fn git_command(repo_root: &Path) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command

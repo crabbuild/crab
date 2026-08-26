@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tempfile::{Builder, NamedTempFile};
+use tempfile::{Builder, NamedTempFile, TempPath};
 
 use crate::core::error::{CrabError, Result};
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
@@ -45,6 +45,17 @@ impl ObjectWriter {
             size: self.size,
         })
     }
+}
+
+/// Creates a closed temporary path beneath the local LFS cache.
+pub(crate) fn new_temp_path(lfs_dir: &Path) -> Result<TempPath> {
+    let temp_dir = lfs_dir.join("tmp");
+    std::fs::create_dir_all(&temp_dir).map_err(CrabError::Io)?;
+    Builder::new()
+        .prefix("crab-lfs-download-")
+        .tempfile_in(temp_dir)
+        .map(NamedTempFile::into_temp_path)
+        .map_err(CrabError::Io)
 }
 
 impl Write for ObjectWriter {
@@ -143,6 +154,19 @@ pub(crate) fn read(lfs_dir: &Path, oid: &[u8; 32], size: u64) -> Result<Option<V
     Ok(Some(content))
 }
 
+/// Checks a cached object without retaining its bytes in memory.
+pub(crate) fn is_valid(lfs_dir: &Path, oid: &[u8; 32], size: u64) -> Result<bool> {
+    let path = object_path(lfs_dir, oid);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    match verify_file(&path, oid, size) {
+        Ok(()) => Ok(true),
+        Err(CrabError::LfsObjectCorrupt { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Atomically installs already-materialized bytes after integrity validation.
 pub(crate) fn install_bytes(
     lfs_dir: &Path,
@@ -154,6 +178,39 @@ pub(crate) fn install_bytes(
     let mut writer = ObjectWriter::new(lfs_dir)?;
     writer.write_all(content).map_err(CrabError::Io)?;
     writer.finish()?.install(lfs_dir)
+}
+
+/// Atomically installs a file that was verified while it was streamed.
+pub(crate) fn install_verified_temp_path(
+    lfs_dir: &Path,
+    oid: &[u8; 32],
+    size: u64,
+    temp: TempPath,
+) -> Result<PathBuf> {
+    let metadata = std::fs::metadata(&temp).map_err(CrabError::Io)?;
+    if metadata.len() != size {
+        return Err(CrabError::LfsObjectCorrupt {
+            oid: hex_encode(oid),
+        });
+    }
+
+    let target = object_path(lfs_dir, oid);
+    if target.is_file() && verify_file(&target, oid, size).is_ok() {
+        return Ok(target);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
+    }
+
+    match temp.persist(&target) {
+        Ok(()) => Ok(target),
+        Err(error) => {
+            if target.is_file() && verify_file(&target, oid, size).is_ok() {
+                return Ok(target);
+            }
+            Err(CrabError::Io(error.error))
+        }
+    }
 }
 
 /// Verifies materialized bytes against an LFS pointer's SHA-256 and size.

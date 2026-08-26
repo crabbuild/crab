@@ -881,6 +881,8 @@ pub struct CleanSession {
     lfs_store: Option<Arc<LfsObjectStore>>,
     /// Git LFS fetch include/exclude filters used by smudge paths.
     lfs_fetch_filter: Option<crate::lfs::fetch_filter::FetchPathFilter>,
+    /// Preserve Git LFS's explicit skip-download-errors behavior for smudge.
+    lfs_skip_download_errors: bool,
     /// Repository root directory, used to locate `.gitattributes`.
     /// `None` when the repo root could not be determined.
     repo_root: Option<PathBuf>,
@@ -961,6 +963,7 @@ impl CleanSession {
             hydrate_filter,
             lfs_store: None,
             lfs_fetch_filter: None,
+            lfs_skip_download_errors: false,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1004,6 +1007,7 @@ impl CleanSession {
             hydrate_filter,
             lfs_store: None,
             lfs_fetch_filter: None,
+            lfs_skip_download_errors: false,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1208,7 +1212,11 @@ impl CleanSession {
     /// previous two-call approach incurred.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         let (entries, root_mtime) = crate::git::filter_attr_cache::collect_all_entries(&root);
-        self.lfs_fetch_filter = match crate::lfs::config::LfsConfig::resolve(&root)
+        let lfs_config = crate::lfs::config::LfsConfig::resolve(&root);
+        self.lfs_skip_download_errors = lfs_config
+            .as_ref()
+            .is_ok_and(|config| config.skip_download_errors);
+        self.lfs_fetch_filter = match lfs_config
             .and_then(|config| crate::lfs::fetch_filter::FetchPathFilter::from_config(&config))
         {
             Ok(filter) => filter,
@@ -1281,6 +1289,12 @@ impl CleanSession {
         self.lfs_fetch_filter
             .as_ref()
             .is_none_or(|filter| filter.allows(pathname))
+    }
+
+    /// Check whether an explicit Git LFS setting permits pointer fallback.
+    #[must_use]
+    pub fn should_skip_lfs_download_errors(&self) -> bool {
+        self.lfs_skip_download_errors
     }
 
     /// Flush pending hydrated-cache invalidations to disk. Called at

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use object_store::path::Path;
 use object_store::{MultipartUpload, ObjectStoreExt, PutPayload};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crab_git::lfs_pointer::hex_encode;
 use crab_storage::{ETag, StorageError, Store};
@@ -67,7 +67,7 @@ const FILE_READ_BUF: usize = STREAM_PART_SIZE;
 
 enum ExistingObject {
     Missing,
-    Valid,
+    Valid(u64),
     Corrupt(ETag),
 }
 
@@ -174,7 +174,7 @@ impl LfsObjectStore {
         let path = self.object_path(oid);
 
         match self.inspect_existing(&path, oid).await? {
-            ExistingObject::Valid => return Ok(()),
+            ExistingObject::Valid(_) => return Ok(()),
             ExistingObject::Corrupt(etag) => {
                 return self.replace_corrupt(&path, oid, bytes, etag).await;
             }
@@ -222,7 +222,7 @@ impl LfsObjectStore {
         let path = self.object_path(oid);
 
         match self.inspect_existing(&path, oid).await? {
-            ExistingObject::Valid => return Ok(()),
+            ExistingObject::Valid(_) => return Ok(()),
             ExistingObject::Corrupt(etag) => {
                 let bytes = tokio::fs::read(file_path)
                     .await
@@ -349,6 +349,69 @@ impl LfsObjectStore {
         Ok(bytes)
     }
 
+    /// Verifies an LFS object without retaining its body in memory.
+    pub async fn verify_size(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
+        match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS verification from selected remote failed; retrying primary"
+                );
+                Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size).await
+            }
+        }
+    }
+
+    /// Streams an LFS object to a local file while verifying its size and
+    /// SHA-256 digest.
+    ///
+    /// The destination is truncated before each selected-source attempt. A
+    /// replica read that is missing, corrupt, or unavailable is retried from
+    /// the configured primary fallback; local I/O errors are returned without
+    /// hiding them behind a remote retry.
+    pub async fn download_to_file(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        destination: &StdPath,
+    ) -> Result<()> {
+        match Self::download_from_to_file(
+            &self.store,
+            &self.prefix,
+            oid,
+            expected_size,
+            destination,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ LfsError::Io { .. }) => Err(error),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS streaming read from selected remote failed; retrying primary"
+                );
+                Self::download_from_to_file(
+                    fallback_store,
+                    fallback_prefix,
+                    oid,
+                    expected_size,
+                    destination,
+                )
+                .await
+            }
+        }
+    }
+
     /// Deletes an LFS object from the store.
     ///
     /// Behavior on missing objects depends on the backend: some backends
@@ -389,6 +452,84 @@ impl LfsObjectStore {
         }
     }
 
+    async fn verify_size_at(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+    ) -> Result<()> {
+        let path = Self::object_path_at(prefix, oid);
+        match Self::inspect_existing_at(store, &path, oid).await? {
+            ExistingObject::Valid(size) => {
+                if size == expected_size {
+                    Ok(())
+                } else {
+                    Err(LfsError::ObjectCorrupt {
+                        oid: hex_encode(oid),
+                    })
+                }
+            }
+            ExistingObject::Missing => Err(LfsError::ObjectMissing {
+                oid: hex_encode(oid),
+            }),
+            ExistingObject::Corrupt(_) => Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            }),
+        }
+    }
+
+    async fn download_from_to_file(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+        destination: &StdPath,
+    ) -> Result<()> {
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let path = Self::object_path_at(prefix, oid);
+        let (meta, range, mut stream) = match store.get_stream(&path, None).await {
+            Ok(result) => result,
+            Err(StorageError::NotFound { .. }) => {
+                return Err(LfsError::ObjectMissing {
+                    oid: hex_encode(oid),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if range.start != 0 || range.end != meta.size || meta.size != expected_size {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+
+        let mut file = tokio::fs::File::create(destination).await?;
+        let mut hasher = Sha256::new();
+        let mut actual_size = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            actual_size = actual_size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "LFS object size overflow while downloading".to_owned(),
+                }
+            })?;
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+
+        if actual_size != expected_size || hasher.finalize().as_slice() != oid {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+        Ok(())
+    }
+
     /// Replaces a corrupt same-key object only if the inspected version is
     /// still current, then re-verifies the winning bytes.
     async fn replace_corrupt(
@@ -418,7 +559,7 @@ impl LfsObjectStore {
 
     async fn verify_at_path(&self, path: &Path, oid: &[u8; 32]) -> Result<()> {
         match self.inspect_existing(path, oid).await? {
-            ExistingObject::Valid => Ok(()),
+            ExistingObject::Valid(_) => Ok(()),
             ExistingObject::Missing => Err(LfsError::ObjectMissing {
                 oid: hex_encode(oid),
             }),
@@ -429,7 +570,15 @@ impl LfsObjectStore {
     }
 
     async fn inspect_existing(&self, path: &Path, oid: &[u8; 32]) -> Result<ExistingObject> {
-        let (meta, range, mut stream) = match self.store.get_stream(path, None).await {
+        Self::inspect_existing_at(&self.store, path, oid).await
+    }
+
+    async fn inspect_existing_at(
+        store: &Store,
+        path: &Path,
+        oid: &[u8; 32],
+    ) -> Result<ExistingObject> {
+        let (meta, range, mut stream) = match store.get_stream(path, None).await {
             Ok(result) => result,
             Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
             Err(error) => return Err(error.into()),
@@ -462,7 +611,7 @@ impl LfsObjectStore {
             .into());
         }
         if hasher.finalize().as_slice() == oid {
-            Ok(ExistingObject::Valid)
+            Ok(ExistingObject::Valid(meta.size))
         } else {
             Ok(ExistingObject::Corrupt(etag))
         }
@@ -816,6 +965,67 @@ mod tests {
         store.put(&oid, bytes.clone()).await.unwrap();
         let got = store.verify(&oid).await.unwrap();
         assert_eq!(got, bytes);
+    }
+
+    #[tokio::test]
+    async fn download_to_file_streams_and_verifies_object() {
+        let store = test_store();
+        let data = b"stream this object to disk";
+        let oid = sha256_oid(data);
+        store.put(&oid, Bytes::from_static(data)).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("nested").join("object");
+
+        store
+            .download_to_file(&oid, data.len() as u64, &destination)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn download_to_file_rejects_wrong_declared_size() {
+        let store = test_store();
+        let data = b"size matters";
+        let oid = sha256_oid(data);
+        store.put(&oid, Bytes::from_static(data)).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let error = store
+            .download_to_file(&oid, data.len() as u64 + 1, &dir.path().join("object"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LfsError::ObjectCorrupt { .. }));
+    }
+
+    #[tokio::test]
+    async fn download_to_file_falls_back_after_replica_corruption() {
+        let selected = test_base_store();
+        let primary = test_base_store();
+        let primary_lfs = LfsObjectStore::new(primary.clone(), "repo");
+        let data = Bytes::from_static(b"primary streaming fallback");
+        let oid = sha256_oid(&data);
+        primary_lfs.put(&oid, data.clone()).await.unwrap();
+
+        let selected_lfs = LfsObjectStore::new(selected.clone(), "repo");
+        let selected_path = selected_lfs.object_path_for(&oid);
+        selected
+            .inner()
+            .put(&selected_path, Bytes::from_static(b"corrupt").into())
+            .await
+            .unwrap();
+        let store = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("object");
+
+        store
+            .download_to_file(&oid, data.len() as u64, &destination)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), data);
     }
 
     #[tokio::test]

@@ -2,27 +2,21 @@
 //!
 //! Implements the Git LFS custom/standalone transfer agent protocol using
 //! JSON lines over stdin/stdout. Handles `init`, `upload`, `download`, and
-//! `terminate` events with concurrent transfer support and progress reporting.
+//! `terminate` events with bounded concurrent transfers and progress reporting.
 //!
-//! Retry and resume behaviour:
-//! - Transient errors (network, 5xx) are retried up to 3 times with
-//!   exponential backoff (1 s base, 4 s cap).
-//! - Permanent errors (not found, access denied) surface immediately.
-//! - Objects larger than 64 MB upload via a streaming multipart path
-//!   (see [`crab_lfs::LfsObjectStore::put_stream`])
-//!   that bounds peak memory to a few parts-in-flight regardless of
-//!   file size, so a 50 GiB object uploads without OOMing. Downloads
-//!   use range-request resume with partial state persisted in
-//!   `.git/lfs/tmp/`.
+//! Transfers stream through bounded object-store paths, retry transient
+//! failures using the resolved Git LFS policy, and use unique temporary
+//! download paths so concurrent worktrees and agent processes do not collide.
 
+use std::future::Future;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::core::error::{CrabError, Result};
 use crate::storage::retry::{RetryPolicy, retry};
@@ -40,10 +34,8 @@ enum InboundEvent {
     Init {
         operation: String,
         #[serde(default)]
-        #[allow(dead_code)]
         remote: String,
         #[serde(default)]
-        #[allow(dead_code)]
         concurrent: bool,
         #[serde(default = "default_concurrency")]
         concurrenttransfers: u32,
@@ -122,17 +114,36 @@ fn error_code(err: &CrabError) -> u32 {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Objects larger than this threshold use multipart upload and
-/// range-request download resume.
-const MULTIPART_THRESHOLD: u64 = 64 * 1024 * 1024; // 64 MB
+/// Transfer retry and backoff settings resolved from Git LFS configuration.
+#[derive(Debug, Clone)]
+pub struct TransferAgentConfig {
+    /// Number of retries after the initial attempt.
+    pub max_retries: u32,
+    /// Maximum delay between retry attempts, in seconds.
+    pub max_retry_delay: u32,
+    /// Directory where completed downloads are staged for Git LFS.
+    pub temp_dir: PathBuf,
+}
 
-/// Retry policy for individual LFS transfers: 3 attempts with
-/// exponential backoff (1 s base, 4 s cap).
-const TRANSFER_RETRY_POLICY: RetryPolicy = RetryPolicy {
-    max_attempts: 3,
-    base: Duration::from_secs(1),
-    cap: Duration::from_secs(4),
-};
+impl Default for TransferAgentConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 8,
+            max_retry_delay: 10,
+            temp_dir: lfs_tmp_dir(),
+        }
+    }
+}
+
+impl TransferAgentConfig {
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: self.max_retries.saturating_add(1).max(1),
+            base: Duration::from_secs(1),
+            cap: Duration::from_secs(self.max_retry_delay as u64),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Transfer agent entry point
@@ -140,37 +151,56 @@ const TRANSFER_RETRY_POLICY: RetryPolicy = RetryPolicy {
 
 /// Run the standalone LFS transfer agent protocol loop.
 ///
-/// Reads JSON-line events from `input` (stdin), dispatches uploads and
-/// downloads concurrently via tokio tasks bounded by a semaphore, and
-/// writes JSON-line responses to `output` (stdout). Returns when a
-/// `terminate` event is received or the input stream ends.
+/// Reads JSON-line events from `input` (stdin), resolves the store and policy
+/// from the init event, dispatches bounded uploads and downloads, and writes
+/// JSON-line responses to `output` (stdout).
 ///
 /// # Errors
 ///
-/// Returns [`CrabError::LfsTransferProtocol`] on malformed input.
-/// Individual transfer failures are reported as `complete` events with
-/// an `error` object — they do not terminate the agent.
+/// Returns [`CrabError::LfsTransferProtocol`] on malformed input or invalid
+/// protocol ordering. Individual transfer failures are reported as `complete`
+/// events with an `error` object — they do not terminate the agent.
 pub async fn run_transfer_agent<R, W>(input: R, output: W, store: LfsObjectStore) -> Result<()>
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
+    run_transfer_agent_with_resolver(input, output, move |_, _| async move {
+        Ok((store, TransferAgentConfig::default()))
+    })
+    .await
+}
+
+/// Run the transfer agent with a store resolver selected by the Git LFS init event.
+pub async fn run_transfer_agent_with_resolver<R, W, F, Fut>(
+    input: R,
+    output: W,
+    resolver: F,
+) -> Result<()>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnOnce(String, Option<String>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(LfsObjectStore, TransferAgentConfig)>> + Send,
+{
     let output = Arc::new(Mutex::new(output));
-    let store = Arc::new(store);
 
     // Default concurrency; overridden by the init event.
     let mut initialized = false;
+    let mut store: Option<Arc<LfsObjectStore>> = None;
+    let mut config: Option<Arc<TransferAgentConfig>> = None;
+    let mut resolver = Some(resolver);
 
     // Read lines from stdin synchronously in a blocking task so we don't
     // block the tokio runtime.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<InboundEvent>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<std::result::Result<InboundEvent, String>>(64);
 
     let reader_handle = tokio::task::spawn_blocking(move || {
         for line_result in input.lines() {
             let line = match line_result {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::warn!(error = %e, "stdin read error, stopping reader");
+                    let _ = tx.blocking_send(Err(format!("stdin read error: {e}")));
                     break;
                 }
             };
@@ -181,12 +211,13 @@ where
 
             match serde_json::from_str::<InboundEvent>(&line) {
                 Ok(event) => {
-                    if tx.blocking_send(event).is_err() {
+                    if tx.blocking_send(Ok(event)).is_err() {
                         break;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(line = %line, error = %e, "ignoring malformed JSON line");
+                    let _ = tx.blocking_send(Err(format!("malformed transfer event: {e}")));
+                    break;
                 }
             }
         }
@@ -194,17 +225,66 @@ where
 
     // Semaphore created after init tells us the concurrency limit.
     let mut semaphore: Option<Arc<Semaphore>> = None;
-    let mut join_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut join_set = JoinSet::new();
+    let mut loop_error = None;
 
     while let Some(event) = rx.recv().await {
+        while let Some(join_result) = join_set.try_join_next() {
+            if let Err(error) = join_result {
+                tracing::error!(error = %error, "transfer task failed");
+            }
+        }
+
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                loop_error = Some(CrabError::LfsTransferProtocol(error));
+                break;
+            }
+        };
         match event {
             InboundEvent::Init {
                 operation,
+                remote,
+                concurrent,
                 concurrenttransfers,
                 ..
             } => {
-                let concurrency = concurrenttransfers.clamp(1, 100);
+                if initialized {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "duplicate init event".into(),
+                    ));
+                    break;
+                }
+                if !matches!(operation.as_str(), "upload" | "download") {
+                    loop_error = Some(CrabError::LfsTransferProtocol(format!(
+                        "unsupported transfer operation: {operation}"
+                    )));
+                    break;
+                }
+                let Some(resolver) = resolver.take() else {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "transfer store resolver already consumed".into(),
+                    ));
+                    break;
+                };
+                let remote = (!remote.trim().is_empty()).then_some(remote);
+                let (resolved_store, resolved_config) =
+                    match resolver(operation.clone(), remote).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            loop_error = Some(error);
+                            break;
+                        }
+                    };
+                let concurrency = if concurrent {
+                    concurrenttransfers.clamp(1, 100)
+                } else {
+                    1
+                };
                 initialized = true;
+                store = Some(Arc::new(resolved_store));
+                config = Some(Arc::new(resolved_config));
                 semaphore = Some(Arc::new(Semaphore::new(concurrency as usize)));
 
                 tracing::debug!(
@@ -219,52 +299,97 @@ where
 
             InboundEvent::Upload { oid, size, path } => {
                 if !initialized {
-                    return Err(CrabError::LfsTransferProtocol(
+                    loop_error = Some(CrabError::LfsTransferProtocol(
                         "upload event before init".into(),
                     ));
+                    break;
                 }
 
                 let Some(sem) = semaphore.clone() else {
-                    return Err(CrabError::LfsTransferProtocol(
+                    loop_error = Some(CrabError::LfsTransferProtocol(
                         "upload event before init".into(),
                     ));
+                    break;
                 };
-                let store = Arc::clone(&store);
+                let Some(store) = store.clone() else {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "upload event before init".into(),
+                    ));
+                    break;
+                };
+                let Some(config) = config.clone() else {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "upload event before init".into(),
+                    ));
+                    break;
+                };
+                // Acquire before spawning so the JoinSet and the input
+                // reader both apply backpressure instead of retaining one
+                // task per queued transfer.
+                let permit = match sem.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        loop_error = Some(CrabError::LfsTransferProtocol(
+                            "transfer concurrency gate closed".into(),
+                        ));
+                        break;
+                    }
+                };
                 let output = Arc::clone(&output);
 
-                let handle = tokio::spawn(async move {
-                    let _permit = sem.acquire().await;
-                    let result = handle_upload(&store, &oid, size, &path, &output).await;
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    let result = handle_upload(&store, &oid, size, &path, &output, &config).await;
                     if let Err(e) = result {
                         tracing::error!(oid = %oid, error = %e, "upload failed to send response");
                     }
                 });
-                join_handles.push(handle);
             }
 
             InboundEvent::Download { oid, size } => {
                 if !initialized {
-                    return Err(CrabError::LfsTransferProtocol(
+                    loop_error = Some(CrabError::LfsTransferProtocol(
                         "download event before init".into(),
                     ));
+                    break;
                 }
 
                 let Some(sem) = semaphore.clone() else {
-                    return Err(CrabError::LfsTransferProtocol(
+                    loop_error = Some(CrabError::LfsTransferProtocol(
                         "download event before init".into(),
                     ));
+                    break;
                 };
-                let store = Arc::clone(&store);
+                let Some(store) = store.clone() else {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "download event before init".into(),
+                    ));
+                    break;
+                };
+                let Some(config) = config.clone() else {
+                    loop_error = Some(CrabError::LfsTransferProtocol(
+                        "download event before init".into(),
+                    ));
+                    break;
+                };
+                let permit = match sem.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        loop_error = Some(CrabError::LfsTransferProtocol(
+                            "transfer concurrency gate closed".into(),
+                        ));
+                        break;
+                    }
+                };
                 let output = Arc::clone(&output);
 
-                let handle = tokio::spawn(async move {
-                    let _permit = sem.acquire().await;
-                    let result = handle_download(&store, &oid, size, &output).await;
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    let result = handle_download(&store, &oid, size, &output, &config).await;
                     if let Err(e) = result {
                         tracing::error!(oid = %oid, error = %e, "download failed to send response");
                     }
                 });
-                join_handles.push(handle);
             }
 
             InboundEvent::Terminate => {
@@ -275,15 +400,20 @@ where
     }
 
     // Wait for all in-flight transfers to complete.
-    for handle in join_handles {
-        let _ = handle.await;
+    while let Some(result) = join_set.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(error = %error, "transfer task failed");
+        }
     }
 
     // Drop the reader task.
     reader_handle.abort();
     let _ = reader_handle.await;
 
-    Ok(())
+    match loop_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +428,9 @@ async fn handle_upload<W: Write + Send>(
     size: u64,
     path: &str,
     output: &Arc<Mutex<W>>,
+    config: &TransferAgentConfig,
 ) -> Result<()> {
-    let result = do_upload(store, oid, size, path, output).await;
+    let result = do_upload(store, oid, size, path, output, config).await;
     match result {
         Ok(()) => {
             write_json_line(
@@ -334,22 +465,8 @@ async fn handle_upload<W: Write + Send>(
 
 /// Core upload logic separated from error-response plumbing.
 ///
-/// Chooses between two paths based on the declared object size:
-///
-/// - **Small objects** (≤ [`MULTIPART_THRESHOLD`]): load the full file
-///   into memory and hand it to [`LfsObjectStore::put`]. This keeps
-///   the simple fast path for the 99% case and shares the
-///   Store-level CAS idempotency (PutMode::Create + blake3 content
-///   compare). Peak memory ≈ file size, which is bounded by the
-///   threshold (currently 64 MiB) so this is always safe.
-///
-/// - **Large objects** (> [`MULTIPART_THRESHOLD`]): stream the file
-///   through [`LfsObjectStore::put_stream`], which reads in bounded
-///   chunks, hashes incrementally, and drives the object-store
-///   multipart API directly. Peak memory is bounded to
-///   `STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS` (~32 MiB at defaults)
-///   regardless of file size, so a 50 GiB LFS object uploads
-///   without OOMing.
+/// Streams and verifies the local file for every object size. Peak memory is
+/// bounded by the object-store multipart pipeline instead of file size.
 ///
 /// Retries apply at the full-operation level. For the streaming
 /// path we rely on the object-store's internal per-part retry plus
@@ -363,6 +480,7 @@ async fn do_upload<W: Write + Send>(
     size: u64,
     path: &str,
     output: &Arc<Mutex<W>>,
+    config: &TransferAgentConfig,
 ) -> Result<()> {
     let oid_bytes = parse_oid_hex(oid)?;
     let actual_size = tokio::fs::metadata(path)
@@ -389,43 +507,18 @@ async fn do_upload<W: Write + Send>(
     )
     .await?;
 
-    if size > MULTIPART_THRESHOLD {
-        // Large object: streaming path. `put_stream` takes a file path
-        // and handles reading/hashing/multipart itself, bounding peak
-        // memory to one part × MAX_IN_FLIGHT_PARTS regardless of the
-        // file's size.
-        let file_path = std::path::PathBuf::from(path);
-        retry(&TRANSFER_RETRY_POLICY, || {
-            let fp = file_path.clone();
-            async move {
-                store
-                    .put_stream(&oid_bytes, &fp)
-                    .await
-                    .map_err(CrabError::from)
-            }
-        })
-        .await?;
-    } else {
-        // Small object: buffer-and-put path, same as before. Reading
-        // and the put happen under the outer retry so transient
-        // failures re-read the file (in case the prior attempt
-        // consumed the buffer or we got a partial file).
-        let file_path = path.to_owned();
-        let content = tokio::task::spawn_blocking(move || std::fs::read(&file_path))
-            .await
-            .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
-            .map_err(CrabError::Io)?;
-        let bytes = Bytes::from(content);
-
-        // Upload with retry. The underlying LfsObjectStore.put already
-        // verifies SHA-256 integrity and is idempotent, so retries are
-        // safe.
-        retry(&TRANSFER_RETRY_POLICY, || {
-            let b = bytes.clone();
-            async { store.put(&oid_bytes, b).await.map_err(CrabError::from) }
-        })
-        .await?;
-    }
+    let file_path = std::path::PathBuf::from(path);
+    let retry_policy = config.retry_policy();
+    retry(&retry_policy, || {
+        let fp = file_path.clone();
+        async move {
+            store
+                .put_stream(&oid_bytes, &fp)
+                .await
+                .map_err(CrabError::from)
+        }
+    })
+    .await?;
 
     // Emit final progress event.
     write_json_line(
@@ -453,8 +546,9 @@ async fn handle_download<W: Write + Send>(
     oid: &str,
     size: u64,
     output: &Arc<Mutex<W>>,
+    config: &TransferAgentConfig,
 ) -> Result<()> {
-    let result = do_download(store, oid, size, output).await;
+    let result = do_download(store, oid, size, output, config).await;
     match result {
         Ok(temp_path) => {
             write_json_line(
@@ -489,29 +583,31 @@ async fn handle_download<W: Write + Send>(
 
 /// Core download logic separated from error-response plumbing.
 ///
-/// For objects larger than [`MULTIPART_THRESHOLD`], the download uses
-/// range requests to resume from the last received byte if a partial
-/// file exists in `.git/lfs/tmp/`. Transient errors are retried up to
-/// 3 times with exponential backoff.
+/// The object store streams directly into a unique temporary file and hashes
+/// the bytes before returning the path to Git LFS. Transient errors retry the
+/// complete stream with the configured policy; a failed attempt never exposes
+/// its partial path to the client.
 async fn do_download<W: Write + Send>(
     store: &LfsObjectStore,
     oid: &str,
     size: u64,
     output: &Arc<Mutex<W>>,
+    config: &TransferAgentConfig,
 ) -> Result<String> {
     let oid_bytes = parse_oid_hex(oid)?;
 
-    let tmp_dir = lfs_tmp_dir();
-
-    // Create the temp directory if it doesn't exist.
-    let tmp_dir_clone = tmp_dir.clone();
-    tokio::task::spawn_blocking(move || std::fs::create_dir_all(&tmp_dir_clone))
+    let tmp_dir = config.temp_dir.clone();
+    tokio::fs::create_dir_all(&tmp_dir)
         .await
-        .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
         .map_err(CrabError::Io)?;
-
-    let partial_path = tmp_dir.join(format!("{oid}.partial"));
-    let final_path = tmp_dir.join(oid);
+    let temp = tempfile::Builder::new()
+        .prefix("crab-lfs-transfer-")
+        .tempfile_in(&tmp_dir)
+        .map_err(CrabError::Io)?;
+    let temp_path = temp
+        .into_temp_path()
+        .keep()
+        .map_err(|error| CrabError::Io(error.error))?;
 
     // Emit a progress event at the start (0 bytes).
     write_json_line(
@@ -525,171 +621,42 @@ async fn do_download<W: Write + Send>(
     )
     .await?;
 
-    // For large objects, attempt range-request resume from partial file.
-    let use_resume = size > MULTIPART_THRESHOLD;
-    let content = if use_resume {
-        download_with_resume(store, &oid_bytes, size, &partial_path, oid, output).await?
-    } else {
-        // Small object: simple get with retry.
-        retry(&TRANSFER_RETRY_POLICY, || async {
-            store.get(&oid_bytes).await.map_err(CrabError::from)
-        })
-        .await?
-    };
-
-    let actual_size = content.len() as u64;
-    if let Err(error) = crate::lfs::cache::verify_bytes(&oid_bytes, size, &content) {
-        if use_resume {
-            let corrupt_partial = partial_path.clone();
-            let _ =
-                tokio::task::spawn_blocking(move || std::fs::remove_file(corrupt_partial)).await;
+    let retry_policy = config.retry_policy();
+    if let Err(error) = retry(&retry_policy, || {
+        let destination = temp_path.clone();
+        async move {
+            store
+                .download_to_file(&oid_bytes, size, &destination)
+                .await
+                .map_err(CrabError::from)
         }
+    })
+    .await
+    {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(error);
     }
 
-    // Write content to the final temp file.
-    let content_for_write = content;
-    let final_path_clone = final_path.clone();
-    let temp_path = tokio::task::spawn_blocking(move || -> Result<String> {
-        std::fs::write(&final_path_clone, &content_for_write).map_err(CrabError::Io)?;
-        Ok(final_path_clone.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))??;
-
-    // Clean up partial file on success.
-    if use_resume {
-        let pp = partial_path.clone();
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&pp)).await;
-    }
-
     // Emit final progress event.
-    let report_size = if size > 0 { size } else { actual_size };
-    write_json_line(
+    if let Err(error) = write_json_line(
         output,
         &ProgressEvent {
             event: "progress",
             oid: oid.to_owned(),
-            bytes_so_far: report_size,
-            bytes_since_last: report_size,
+            bytes_so_far: size,
+            bytes_since_last: size,
         },
     )
-    .await?;
-
-    Ok(temp_path)
-}
-
-/// Download a large object using range requests for resume.
-///
-/// If a partial file exists at `partial_path`, reads its length and
-/// issues a range request for the remaining bytes. The partial file is
-/// updated incrementally so that a subsequent retry can resume from
-/// where the previous attempt left off.
-async fn download_with_resume<W: Write + Send>(
-    store: &LfsObjectStore,
-    oid: &[u8; 32],
-    size: u64,
-    partial_path: &Path,
-    oid_hex: &str,
-    output: &Arc<Mutex<W>>,
-) -> Result<Bytes> {
-    let obj_path = store.object_path_for(oid);
-
-    // Check for existing partial download.
-    let pp = partial_path.to_path_buf();
-    let existing_len: u64 = tokio::task::spawn_blocking(move || -> u64 {
-        std::fs::metadata(&pp).map(|m| m.len()).unwrap_or(0)
-    })
     .await
-    .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?;
-
-    if existing_len > 0 && existing_len < size {
-        tracing::debug!(
-            oid = %oid_hex,
-            existing_bytes = existing_len,
-            total_size = size,
-            "resuming download from partial file",
-        );
-
-        // Report progress for already-downloaded bytes.
-        write_json_line(
-            output,
-            &ProgressEvent {
-                event: "progress",
-                oid: oid_hex.to_owned(),
-                bytes_so_far: existing_len,
-                bytes_since_last: existing_len,
-            },
-        )
-        .await?;
-
-        // Fetch the remaining range with retry.
-        let remaining = retry(&TRANSFER_RETRY_POLICY, || {
-            let path = obj_path.clone();
-            async move {
-                store
-                    .store()
-                    .range_get(&path, existing_len..size)
-                    .await
-                    .map_err(CrabError::from)
-            }
-        })
-        .await?;
-
-        // Append to partial file and read the complete content.
-        let pp = partial_path.to_path_buf();
-        let content = tokio::task::spawn_blocking(move || -> Result<Bytes> {
-            use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&pp)
-                .map_err(CrabError::Io)?;
-            f.write_all(&remaining).map_err(CrabError::Io)?;
-            f.flush().map_err(CrabError::Io)?;
-            drop(f);
-            let data = std::fs::read(&pp).map_err(CrabError::Io)?;
-            Ok(Bytes::from(data))
-        })
-        .await
-        .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))??;
-
-        return Ok(content);
+    {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error);
     }
 
-    // No usable partial file — full download with retry, saving partial
-    // state so a future attempt can resume.
-    let result = retry(&TRANSFER_RETRY_POLICY, || {
-        let path = obj_path.clone();
-        async move {
-            let (bytes, _etag) = store
-                .store()
-                .get_with_etag(&path)
-                .await
-                .map_err(CrabError::from)?;
-            Ok(bytes)
-        }
-    })
-    .await;
-
-    match result {
-        Ok(content) => {
-            // Write partial file so cross-process resume works if the
-            // caller crashes after download but before final rename.
-            let pp = partial_path.to_path_buf();
-            let c = content.clone();
-            let _ = tokio::task::spawn_blocking(move || std::fs::write(&pp, &c)).await;
-            Ok(content)
-        }
-        Err(e) => Err(match e {
-            CrabError::NotFound { .. } => CrabError::LfsObjectMissing {
-                oid: crab_git::lfs_pointer::hex_encode(oid),
-            },
-            other => other,
-        }),
-    }
+    Ok(temp_path.to_string_lossy().into_owned())
 }
 
-/// Returns the `.git/lfs/tmp/` directory path for partial transfer state.
+/// Returns the `.git/lfs/tmp/` directory path for completed transfer files.
 ///
 fn lfs_tmp_dir() -> PathBuf {
     let git_dir = crate::git::discover::discover_common_git_dir().unwrap_or_else(|_| {
@@ -935,7 +902,7 @@ mod tests {
             + r#"{"event":"terminate"}"#
             + "\n";
 
-        let reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
         let shared_output = SharedOutput::new();
         let shared_clone = shared_output.clone();
 
@@ -979,7 +946,7 @@ mod tests {
             + r#"{"event":"terminate"}"#
             + "\n";
 
-        let reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
         let shared_output = SharedOutput::new();
         let shared_clone = shared_output.clone();
 
@@ -1010,19 +977,12 @@ mod tests {
         );
     }
 
-    /// End-to-end proof: an upload declared above the multipart
-    /// threshold routes through `put_stream`, completes successfully,
-    /// and the downloaded bytes match. This is the regression test
-    /// for the "large LFS object loaded entirely into memory" gap —
-    /// with the streaming path in place the agent should handle any
-    /// file size bounded only by disk, not RAM.
+    /// End-to-end proof that a multi-part upload routes through the bounded
+    /// streaming path and the downloaded bytes match.
     #[tokio::test]
     async fn large_upload_takes_streaming_path_and_succeeds() {
-        // Build a file just over `MULTIPART_THRESHOLD` so the agent
-        // chooses the streaming branch. The memory backend in the
-        // test store happily holds the bytes — we're asserting
-        // correctness of the streaming path, not production-sized
-        // throughput.
+        // The memory backend happily holds the bytes; this asserts
+        // correctness of the streaming path, not production throughput.
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let policy = RetryPolicy {
@@ -1030,7 +990,7 @@ mod tests {
             base: std::time::Duration::from_millis(1),
             cap: std::time::Duration::from_millis(5),
         };
-        let size = (MULTIPART_THRESHOLD as usize) + 1024;
+        let size = (8 * 1024 * 1024) + 1024;
         let data = vec![0xA5u8; size];
         let oid = sha256_oid(&data);
         let oid_hex = hex_encode(&oid);
@@ -1206,51 +1166,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_json_line_is_skipped() {
+    async fn malformed_json_line_is_fatal() {
         let store = test_store();
-        let data = b"valid content";
-        let oid = sha256_oid(data);
-        let oid_hex = hex_encode(&oid);
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), data).unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        // Malformed line between init and a valid upload — should be skipped.
-        let input = format!(
-            r#"{{"event":"init","operation":"upload","remote":"origin","concurrenttransfers":2}}"#,
-        ) + "\n"
-            + "{broken json!!!\n"
-            + &format!(
-                r#"{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{path}"}}"#,
-                data.len()
-            )
-            + "\n"
-            + r#"{"event":"terminate"}"#
-            + "\n";
-
-        let reader = BufReader::new(Cursor::new(input.into_bytes()));
-        let shared_output = SharedOutput::new();
-        let shared_clone = shared_output.clone();
-
-        run_transfer_agent(reader, shared_output, store)
-            .await
-            .unwrap();
-
-        let bytes = shared_clone.into_bytes();
-        let lines = parse_output_lines(&bytes);
-
-        let complete_events: Vec<_> = lines
-            .iter()
-            .filter(|v| v.get("event").and_then(|e| e.as_str()) == Some("complete"))
-            .collect();
-        assert!(
-            !complete_events.is_empty(),
-            "expected at least one complete event despite malformed line"
+        let input = concat!(
+            r#"{"event":"init","operation":"upload","remote":"origin","concurrenttransfers":2}"#,
+            "\n",
+            "{broken json!!!\n",
         );
+
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let shared_output = SharedOutput::new();
+
+        let error = run_transfer_agent(reader, shared_output, store)
+            .await
+            .expect_err("malformed input must terminate the protocol");
         assert!(
-            complete_events[0].get("error").is_none(),
-            "upload should succeed despite malformed line"
+            matches!(error, CrabError::LfsTransferProtocol(message) if message.contains("malformed transfer event"))
+        );
+    }
+
+    #[tokio::test]
+    async fn init_resolver_receives_operation_and_remote() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let resolver_seen = Arc::clone(&seen);
+        let input = concat!(
+            r#"{"event":"init","operation":"download","remote":"archive","concurrent":false}"#,
+            "\n",
+            r#"{"event":"terminate"}"#,
+            "\n",
+        );
+
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let output = SharedOutput::new();
+        run_transfer_agent_with_resolver(reader, output, move |operation, remote| {
+            let resolver_seen = Arc::clone(&resolver_seen);
+            async move {
+                *resolver_seen.lock().unwrap() = Some((operation, remote));
+                Ok((test_store(), TransferAgentConfig::default()))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().as_ref(),
+            Some(&("download".to_owned(), Some("archive".to_owned())))
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_init_is_fatal() {
+        let input = concat!(
+            r#"{"event":"init","operation":"download"}"#,
+            "\n",
+            r#"{"event":"init","operation":"download"}"#,
+            "\n",
+        );
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let error = run_transfer_agent(reader, SharedOutput::new(), test_store())
+            .await
+            .expect_err("duplicate init must terminate the protocol");
+        assert!(
+            matches!(error, CrabError::LfsTransferProtocol(message) if message.contains("duplicate init"))
         );
     }
 

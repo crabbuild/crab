@@ -5,7 +5,7 @@
 //! [`crate::lfs::lock::LockManager`].
 
 use std::collections::HashSet;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -16,7 +16,9 @@ use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
 use crab_git::pointer_detect::{PointerKind, classify};
 
-use super::store_setup::{git_user_identity, resolve_lfs_remote_for_operation_with_remote_sync};
+use super::store_setup::{
+    git_user_identity, resolve_lfs_remote_for_operation_with_remote_sync, validate_git_push_url,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsPushOptions {
@@ -216,38 +218,27 @@ fn is_oid_hex(value: &str) -> bool {
 /// Invoked by the pre-push hook. Reads ref updates from stdin, collects
 /// LFS pointers from pushed commits, checks lock conflicts, uploads
 /// missing objects, and exits non-zero on failure.
-pub fn run_lfs_pre_push() -> Result<()> {
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("push", None)?;
+pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
+    if remote.is_none() && url.is_some() {
+        return Err(CrabError::Configuration {
+            key: "lfs pre-push".to_owned(),
+            origin: "Git supplied a remote URL without a remote name".to_owned(),
+        });
+    }
+    if let (Some(remote), Some(url)) = (remote, url) {
+        validate_git_push_url(remote, url)?;
+    }
+    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("push", remote)?;
 
     // Read ref updates from stdin (git pre-push hook format):
     // <local-ref> <local-sha> <remote-ref> <remote-sha>
     let stdin = std::io::stdin();
-    let mut local_shas = Vec::new();
-    let mut remote_shas = Vec::new();
-
-    for line in stdin.lock().lines() {
-        let line = line.map_err(CrabError::Io)?;
-        let line = line.trim().to_owned();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let local_sha = parts[1];
-        let remote_sha = parts[3];
-
-        // Skip delete ref updates (local SHA all zeros).
-        if local_sha.chars().all(|c| c == '0') {
-            continue;
-        }
-
-        local_shas.push(local_sha.to_owned());
-        if !remote_sha.chars().all(|c| c == '0') {
-            remote_shas.push(remote_sha.to_owned());
-        }
-    }
+    let mut input = String::new();
+    stdin
+        .lock()
+        .read_to_string(&mut input)
+        .map_err(CrabError::Io)?;
+    let (local_shas, remote_shas) = parse_pre_push_input(&input)?;
 
     if local_shas.is_empty() {
         return Ok(());
@@ -292,6 +283,49 @@ pub fn run_lfs_pre_push() -> Result<()> {
 
         Ok(())
     })
+}
+
+fn parse_pre_push_input(input: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let mut local_shas = Vec::new();
+    let mut remote_shas = Vec::new();
+
+    for (line_number, line) in input.lines().enumerate() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if parts.len() != 4 {
+            return Err(CrabError::Configuration {
+                key: "lfs pre-push".to_owned(),
+                origin: format!("invalid ref update on input line {}", line_number + 1),
+            });
+        }
+
+        let local_sha = parts[1];
+        let remote_sha = parts[3];
+        if !is_git_object_id(local_sha) || !is_git_object_id(remote_sha) {
+            return Err(CrabError::Configuration {
+                key: "lfs pre-push".to_owned(),
+                origin: format!("invalid object ID on input line {}", line_number + 1),
+            });
+        }
+
+        // Skip delete ref updates (local SHA all zeros).
+        if local_sha.bytes().all(|c| c == b'0') {
+            continue;
+        }
+
+        local_shas.push(local_sha.to_owned());
+        if !remote_sha.bytes().all(|c| c == b'0') {
+            remote_shas.push(remote_sha.to_owned());
+        }
+    }
+
+    Ok((local_shas, remote_shas))
+}
+
+fn is_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Collect LFS pointers from HEAD (or all refs for `--all`).
@@ -361,9 +395,11 @@ pub(crate) fn collect_pointers_from_range_in(
         .map_err(|e| CrabError::Internal(format!("failed to run git rev-list: {e}")))?;
 
     if !output.status.success() {
-        // Fall back to HEAD scan if rev-list fails.
-        let ptrs = batch_read_pointers_in(repo_dir, &ls_tree_head_in(repo_dir)?)?;
-        return Ok(ptrs.into_iter().map(|p| (String::new(), p)).collect());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CrabError::Internal(format!(
+            "git rev-list failed: {}",
+            stderr.trim()
+        )));
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -374,10 +410,22 @@ pub(crate) fn collect_pointers_from_range_in(
         if line.is_empty() {
             continue;
         }
-        // Lines with paths: "<hash> <path>"
-        if let Some((hash, path)) = line.split_once(' ') {
-            blob_paths.push((hash.to_owned(), path.to_owned()));
+        // Reachable commits and trees have no path in rev-list output. They
+        // are valid records but cannot identify an LFS file, so skip them.
+        let Some((hash, path)) = line.split_once(' ') else {
+            if !is_git_object_id(line) {
+                return Err(CrabError::Internal(
+                    "git rev-list returned a malformed object record".to_owned(),
+                ));
+            }
+            continue;
+        };
+        if !is_git_object_id(hash) || path.is_empty() {
+            return Err(CrabError::Internal(
+                "git rev-list returned a malformed object record".to_owned(),
+            ));
         }
+        blob_paths.push((hash.to_owned(), path.to_owned()));
     }
 
     if blob_paths.is_empty() {
@@ -405,23 +453,36 @@ pub(crate) fn collect_pointers_from_range_in(
         let header = String::from_utf8_lossy(&stdout[pos..header_end]);
         let parts: Vec<&str> = header.split_whitespace().collect();
 
-        if parts.len() < 3 || parts[1] == "missing" {
-            pos = header_end + 1;
-            line_idx += 1;
-            continue;
+        if parts.len() < 2 || parts[1] == "missing" {
+            return Err(CrabError::Internal(format!(
+                "git cat-file could not read object {}",
+                blob_paths[line_idx].0
+            )));
+        }
+        if parts.len() != 3 {
+            return Err(CrabError::Internal(
+                "git cat-file returned a malformed object header".to_owned(),
+            ));
         }
 
         let Ok(obj_size) = parts[2].parse::<usize>() else {
-            pos = header_end + 1;
-            line_idx += 1;
-            continue;
+            return Err(CrabError::Internal(
+                "git cat-file returned an invalid object size".to_owned(),
+            ));
         };
 
         let content_start = header_end + 1;
         let content_end = content_start + obj_size;
 
         if content_end > stdout.len() {
-            break;
+            return Err(CrabError::Internal(
+                "git cat-file returned truncated object content".to_owned(),
+            ));
+        }
+        if stdout.get(content_end) != Some(&b'\n') {
+            return Err(CrabError::Internal(
+                "git cat-file returned an unterminated object record".to_owned(),
+            ));
         }
 
         let content = &stdout[content_start..content_end];
@@ -437,6 +498,12 @@ pub(crate) fn collect_pointers_from_range_in(
 
         pos = content_end + 1;
         line_idx += 1;
+    }
+
+    if line_idx != blob_paths.len() {
+        return Err(CrabError::Internal(
+            "git cat-file returned fewer object records than requested".to_owned(),
+        ));
     }
 
     Ok(entries)
@@ -476,23 +543,36 @@ fn batch_read_pointers_in(
         let header = String::from_utf8_lossy(&stdout[pos..header_end]);
         let parts: Vec<&str> = header.split_whitespace().collect();
 
-        if parts.len() < 3 || parts[1] == "missing" {
-            pos = header_end + 1;
-            line_idx += 1;
-            continue;
+        if parts.len() < 2 || parts[1] == "missing" {
+            return Err(CrabError::Internal(format!(
+                "git cat-file could not read object {}",
+                tree_lines[line_idx].0
+            )));
+        }
+        if parts.len() != 3 {
+            return Err(CrabError::Internal(
+                "git cat-file returned a malformed object header".to_owned(),
+            ));
         }
 
         let Ok(obj_size) = parts[2].parse::<usize>() else {
-            pos = header_end + 1;
-            line_idx += 1;
-            continue;
+            return Err(CrabError::Internal(
+                "git cat-file returned an invalid object size".to_owned(),
+            ));
         };
 
         let content_start = header_end + 1;
         let content_end = content_start + obj_size;
 
         if content_end > stdout.len() {
-            break;
+            return Err(CrabError::Internal(
+                "git cat-file returned truncated object content".to_owned(),
+            ));
+        }
+        if stdout.get(content_end) != Some(&b'\n') {
+            return Err(CrabError::Internal(
+                "git cat-file returned an unterminated object record".to_owned(),
+            ));
         }
 
         let content = &stdout[content_start..content_end];
@@ -508,6 +588,12 @@ fn batch_read_pointers_in(
 
         pos = content_end + 1;
         line_idx += 1;
+    }
+
+    if line_idx != tree_lines.len() {
+        return Err(CrabError::Internal(
+            "git cat-file returned fewer object records than requested".to_owned(),
+        ));
     }
 
     Ok(pointers)
@@ -551,10 +637,6 @@ fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>>
 
 fn ls_tree_head() -> Result<Vec<(String, String)>> {
     ls_tree_ref_in(Path::new("."), "HEAD")
-}
-
-fn ls_tree_head_in(repo_dir: &Path) -> Result<Vec<(String, String)>> {
-    ls_tree_ref_in(repo_dir, "HEAD")
 }
 
 fn ls_tree_ref(ref_name: &str) -> Result<Vec<(String, String)>> {
@@ -695,6 +777,50 @@ mod tests {
 
     fn oid(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    fn git_oid(byte: u8) -> String {
+        format!("{byte:02x}").repeat(20)
+    }
+
+    #[test]
+    fn pre_push_parser_preserves_updates_and_skips_deletes() {
+        let input = format!(
+            "refs/heads/main {} refs/heads/main {}\nrefs/heads/old {} refs/heads/old {}\n",
+            git_oid(1),
+            git_oid(2),
+            "0".repeat(40),
+            git_oid(3),
+        );
+
+        let (local, remote) = parse_pre_push_input(&input).unwrap();
+
+        assert_eq!(local, vec![git_oid(1)]);
+        assert_eq!(remote, vec![git_oid(2)]);
+    }
+
+    #[test]
+    fn pre_push_parser_rejects_malformed_updates() {
+        let error = parse_pre_push_input("refs/heads/main only-three-fields\n").unwrap_err();
+
+        assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[test]
+    fn range_scan_does_not_fall_back_when_rev_list_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let error =
+            collect_pointers_from_range_in(dir.path(), &["not-a-git-object".to_owned()], &[])
+                .unwrap_err();
+
+        assert!(format!("{error}").contains("git rev-list failed"));
     }
 
     #[test]

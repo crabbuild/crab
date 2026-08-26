@@ -7,11 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use futures_util::{Stream, StreamExt, stream};
 #[cfg(not(feature = "gix-pathmatch"))]
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use sha2::Digest;
-use tokio::sync::Semaphore;
 
 use crate::core::error::{CrabError, Result};
 use crate::lfs::config::LfsConfig;
@@ -61,33 +59,31 @@ impl BatchResolver {
             return Ok(Vec::new());
         }
 
-        let concurrency = self.config.concurrent_transfers as usize;
-        let mut missing = Vec::new();
-
-        // Check existence in batches to avoid overwhelming the store.
-        for chunk in pointers.chunks(concurrency) {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for pointer in chunk {
+        let concurrency = self.config.concurrent_transfers.max(1) as usize;
+        let checks = stream::iter(pointers.iter().cloned())
+            .map(|pointer| {
                 let store = Arc::clone(&self.remote_store);
-                let oid = pointer.oid;
-                handles.push(tokio::spawn(async move {
-                    match store.verify(&oid).await {
-                        Ok(_) => Ok((oid, true)),
+                async move {
+                    let oid = pointer.oid;
+                    let exists = match store.verify_size(&oid, pointer.size).await {
+                        Ok(_) => true,
                         Err(
                             crab_lfs::LfsError::ObjectMissing { .. }
                             | crab_lfs::LfsError::ObjectCorrupt { .. },
-                        ) => Ok((oid, false)),
-                        Err(error) => Err(error),
-                    }
-                }));
-            }
-            for (i, handle) in handles.into_iter().enumerate() {
-                let (_, exists) = handle
-                    .await
-                    .map_err(|e| CrabError::Internal(format!("task join error: {e}")))??;
-                if !exists {
-                    missing.push(chunk[i].clone());
+                        ) => false,
+                        Err(error) => return Err(CrabError::from(error)),
+                    };
+                    Ok((pointer, exists))
                 }
+            })
+            .buffer_unordered(concurrency);
+
+        let mut missing = Vec::new();
+        futures_util::pin_mut!(checks);
+        while let Some(result) = checks.next().await {
+            let (pointer, exists) = result?;
+            if !exists {
+                missing.push(pointer);
             }
         }
 
@@ -145,41 +141,26 @@ impl BatchResolver {
         }
 
         let effective_concurrency = self.effective_concurrency();
-        let semaphore = Arc::new(Semaphore::new(effective_concurrency));
+        let transfers = stream::iter(pointers.iter().cloned())
+            .map(|pointer| {
+                let store = Arc::clone(&self.remote_store);
+                let local_path = self.local_object_path(&pointer.oid);
+                let oid = pointer.oid;
 
-        let mut handles = Vec::with_capacity(pointers.len());
-
-        for pointer in pointers {
-            let sem = Arc::clone(&semaphore);
-            let store = Arc::clone(&self.remote_store);
-            let local_path = self.local_object_path(&pointer.oid);
-            let oid = pointer.oid;
-            let size = pointer.size;
-
-            let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.map_err(|_| CrabError::Cancelled)?;
-
-                // Presence is insufficient: a same-key corrupt object must
-                // never satisfy publication or suppress repair.
-                if store.verify(&oid).await.is_ok() {
-                    tracing::debug!(
-                        oid = %hex_encode(&oid),
-                        "object already on remote, skipping upload",
-                    );
-                    return Ok(());
+                async move {
+                    // `put_stream` performs the remote integrity check and
+                    // idempotent skip itself, avoiding a second full remote
+                    // read for objects that are already valid.
+                    let result = store
+                        .put_stream(&oid, &local_path)
+                        .await
+                        .map_err(CrabError::from);
+                    (oid, result)
                 }
+            })
+            .buffer_unordered(effective_concurrency);
 
-                read_local_object(&local_path, &oid, size).await?;
-                store
-                    .put_stream(&oid, &local_path)
-                    .await
-                    .map_err(CrabError::from)
-            });
-
-            handles.push((pointer.oid, handle));
-        }
-
-        collect_results(handles).await
+        collect_results(transfers).await
     }
 
     /// Downloads missing LFS objects from the remote store concurrently.
@@ -208,43 +189,46 @@ impl BatchResolver {
         }
 
         let effective_concurrency = self.effective_concurrency();
-        let semaphore = Arc::new(Semaphore::new(effective_concurrency));
         let skip_errors = self.config.skip_download_errors;
 
-        let mut handles = Vec::with_capacity(pointers.len());
+        let transfers = stream::iter(pointers.iter().cloned())
+            .map(|pointer| {
+                let store = Arc::clone(&self.remote_store);
+                let local_dir = self.local_lfs_dir.clone();
+                let oid = pointer.oid;
+                let size = pointer.size;
 
-        for pointer in pointers {
-            let sem = Arc::clone(&semaphore);
-            let store = Arc::clone(&self.remote_store);
-            let local_dir = self.local_lfs_dir.clone();
-            let oid = pointer.oid;
-            let size = pointer.size;
+                async move {
+                    let result: Result<()> = async {
+                        if !force && crate::lfs::cache::is_valid(&local_dir, &oid, size)? {
+                            tracing::debug!(
+                                oid = %hex_encode(&oid),
+                                "object already local, skipping download",
+                            );
+                            return Ok(());
+                        }
 
-            let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.map_err(|_| CrabError::Cancelled)?;
-
-                if !force
-                    && crate::lfs::cache::read(&local_dir, &oid, size).is_ok_and(|v| v.is_some())
-                {
-                    tracing::debug!(
-                        oid = %hex_encode(&oid),
-                        "object already local, skipping download",
-                    );
-                    return Ok(());
+                        let temp = crate::lfs::cache::new_temp_path(&local_dir)?;
+                        let temp_path: PathBuf = temp.to_path_buf();
+                        store
+                            .download_to_file(&oid, size, &temp_path)
+                            .await
+                            .map_err(CrabError::from)?;
+                        crate::lfs::cache::install_verified_temp_path(
+                            &local_dir, &oid, size, temp,
+                        )?;
+                        Ok(())
+                    }
+                    .await;
+                    (oid, result)
                 }
-
-                let content = store.verify(&oid).await.map_err(CrabError::from)?;
-                crate::lfs::cache::install_bytes(&local_dir, &oid, size, &content)?;
-                Ok(())
-            });
-
-            handles.push((pointer.oid, handle));
-        }
+            })
+            .buffer_unordered(effective_concurrency);
 
         if skip_errors {
-            collect_results_lenient(handles).await
+            collect_results_lenient(transfers).await
         } else {
-            collect_results(handles).await
+            collect_results(transfers).await
         }
     }
 
@@ -254,7 +238,7 @@ impl BatchResolver {
     /// of 1 MB and limits concurrency so that `concurrency * avg_size` does
     /// not exceed the bandwidth cap.
     fn effective_concurrency(&self) -> usize {
-        let base = self.config.concurrent_transfers as usize;
+        let base = self.config.concurrent_transfers.max(1) as usize;
         if self.config.transfer_max_bandwidth > 0 {
             let avg_object_size = 1_048_576u64; // 1 MB heuristic
             let max_concurrent =
@@ -267,11 +251,7 @@ impl BatchResolver {
 
     /// Checks whether an LFS object exists in local storage.
     fn local_object_exists(&self, pointer: &LfsPointer) -> Result<bool> {
-        match crate::lfs::cache::read_pointer(&self.local_lfs_dir, pointer) {
-            Ok(Some(_)) => Ok(true),
-            Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
+        crate::lfs::cache::is_valid(&self.local_lfs_dir, &pointer.oid, pointer.size)
     }
 
     /// Returns the local filesystem path for an LFS object.
@@ -342,10 +322,6 @@ impl PatternFilter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Local object I/O helpers
-// ---------------------------------------------------------------------------
-
 /// Compute the local filesystem path for an LFS object.
 ///
 /// Layout: `{lfs_dir}/objects/{oid[0:2]}/{oid[2:4]}/{oid}`
@@ -358,71 +334,27 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(&hex)
 }
 
-/// Read an LFS object from local storage and verify its SHA-256 hash
-/// matches the expected OID. A local cache corruption (bit rot, disk
-/// failure, concurrent write) would surface here with a clear error
-/// message identifying the local file, rather than only at the remote
-/// PUT's idempotency check where the error says "remote hash mismatch"
-/// and the source of corruption is ambiguous. See finding CR9-F9.
-async fn read_local_object(path: &Path, oid: &[u8; 32], size: u64) -> Result<Bytes> {
-    let path = path.to_owned();
-    let oid = *oid;
-    tokio::task::spawn_blocking(move || {
-        let content = std::fs::read(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => CrabError::LfsObjectMissing {
-                oid: hex_encode(&oid),
-            },
-            _ => CrabError::Io(e),
-        })?;
-        let computed = sha2::Sha256::digest(&content);
-        if computed.as_slice() != oid || (size > 0 && content.len() as u64 != size) {
-            return Err(CrabError::CorruptObject {
-                path: path.display().to_string(),
-                reason: format!(
-                    "local LFS object hash does not match expected {}; \
-                     cache may be corrupt",
-                    hex_encode(&oid),
-                ),
-            });
-        }
-        Ok(Bytes::from(content))
-    })
-    .await
-    .map_err(|e| CrabError::Internal(format!("spawn_blocking join error: {e}")))?
-}
-
 // ---------------------------------------------------------------------------
 // Result collection helpers
 // ---------------------------------------------------------------------------
 
-/// Await all task handles and return the first error, if any.
-async fn collect_results(
-    handles: Vec<([u8; 32], tokio::task::JoinHandle<Result<()>>)>,
-) -> Result<()> {
+/// Drain a bounded transfer stream and return the first error, if any.
+async fn collect_results<S>(results: S) -> Result<()>
+where
+    S: Stream<Item = ([u8; 32], Result<()>)>,
+{
     let mut first_error: Option<CrabError> = None;
+    futures_util::pin_mut!(results);
 
-    for (oid, handle) in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::error!(
-                    oid = %hex_encode(&oid),
-                    error = %e,
-                    "transfer failed",
-                );
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    oid = %hex_encode(&oid),
-                    error = %e,
-                    "transfer task panicked",
-                );
-                if first_error.is_none() {
-                    first_error = Some(CrabError::Internal(format!("task join error: {e}")));
-                }
+    while let Some((oid, result)) = results.next().await {
+        if let Err(error) = result {
+            tracing::error!(
+                oid = %hex_encode(&oid),
+                error = %error,
+                "transfer failed",
+            );
+            if first_error.is_none() {
+                first_error = Some(error);
             }
         }
     }
@@ -433,27 +365,19 @@ async fn collect_results(
     }
 }
 
-/// Await all task handles, logging errors but not failing the batch.
-async fn collect_results_lenient(
-    handles: Vec<([u8; 32], tokio::task::JoinHandle<Result<()>>)>,
-) -> Result<()> {
-    for (oid, handle) in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    oid = %hex_encode(&oid),
-                    error = %e,
-                    "transfer failed (skip_download_errors enabled)",
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    oid = %hex_encode(&oid),
-                    error = %e,
-                    "transfer task panicked (skip_download_errors enabled)",
-                );
-            }
+/// Drain a bounded transfer stream, logging errors but not failing the batch.
+async fn collect_results_lenient<S>(results: S) -> Result<()>
+where
+    S: Stream<Item = ([u8; 32], Result<()>)>,
+{
+    futures_util::pin_mut!(results);
+    while let Some((oid, result)) = results.next().await {
+        if let Err(error) = result {
+            tracing::warn!(
+                oid = %hex_encode(&oid),
+                error = %error,
+                "transfer failed (skip_download_errors enabled)",
+            );
         }
     }
     Ok(())

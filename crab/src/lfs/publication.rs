@@ -56,26 +56,29 @@ pub(crate) async fn publish_reachable(
     let remote = LfsObjectStore::new(store, &prefix);
     let local_lfs_dir = git_dir.join("lfs");
     for pointer in pointers.into_values() {
-        match remote.verify(&pointer.oid).await {
-            Ok(bytes) => {
-                crate::lfs::cache::verify_pointer(&pointer, &bytes)?;
-                continue;
-            }
+        match remote.verify_size(&pointer.oid, pointer.size).await {
+            Ok(()) => continue,
             Err(LfsError::ObjectMissing { .. } | LfsError::ObjectCorrupt { .. }) => {}
             Err(error) => return Err(error.into()),
         }
 
-        let local =
-            crate::lfs::cache::read_pointer(&local_lfs_dir, &pointer)?.ok_or_else(|| {
-                CrabError::LfsObjectMissing {
-                    oid: hex_encode(&pointer.oid),
-                }
-            })?;
-        crate::lfs::cache::verify_pointer(&pointer, &local)?;
         let local_path = crate::lfs::cache::object_path(&local_lfs_dir, &pointer.oid);
+        let local_size = match std::fs::metadata(&local_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CrabError::LfsObjectMissing {
+                    oid: hex_encode(&pointer.oid),
+                });
+            }
+            Err(error) => return Err(CrabError::Io(error)),
+        };
+        if local_size != pointer.size {
+            return Err(CrabError::LfsObjectCorrupt {
+                oid: hex_encode(&pointer.oid),
+            });
+        }
         remote.put_stream(&pointer.oid, &local_path).await?;
-        let published = remote.verify(&pointer.oid).await?;
-        crate::lfs::cache::verify_pointer(&pointer, &published)?;
+        remote.verify_size(&pointer.oid, pointer.size).await?;
     }
 
     Ok(())

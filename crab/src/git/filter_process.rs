@@ -1234,14 +1234,35 @@ fn smudge_content(
                 if let Some(store) = lfs_store {
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
                     let rt = tokio::runtime::Handle::current();
-                    let bytes = rt.block_on(store.verify(&ptr.oid))?;
+                    let bytes = match rt.block_on(store.verify(&ptr.oid)) {
+                        Ok(bytes) => bytes,
+                        Err(error) if session.should_skip_lfs_download_errors() => {
+                            tracing::warn!(
+                                oid = %oid_hex,
+                                error = %error,
+                                "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+                            );
+                            return Ok(Bytes::copy_from_slice(content));
+                        }
+                        Err(error) => return Err(CrabError::from(error)),
+                    };
                     cache_lfs_locally(&ptr, &bytes, session.repo_root())?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
                     return Ok(Bytes::from(content));
                 }
+                if session.should_skip_lfs_download_errors() {
+                    tracing::warn!(
+                        oid = %oid_hex,
+                        "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
+                    );
+                    return Ok(Bytes::copy_from_slice(content));
+                }
                 tracing::warn!(oid = %oid_hex, "smudge: LFS object not available for LFS-filtered path");
-                return Ok(Bytes::copy_from_slice(content));
+                return Err(CrabError::Configuration {
+                    key: "lfs remote".to_owned(),
+                    origin: "non-lazy LFS smudge could not resolve a remote store".to_owned(),
+                });
             }
             // Content isn't an LFS pointer — pass through.
             tracing::debug!(path = %pathname, "smudge: LFS-filtered path, content is not an LFS pointer, passing through");
@@ -1325,7 +1346,18 @@ fn smudge_by_blob_classification(
                     "smudge: downloading LFS object from remote"
                 );
                 let rt = tokio::runtime::Handle::current();
-                let bytes = rt.block_on(store.verify(&pointer.oid))?;
+                let bytes = match rt.block_on(store.verify(&pointer.oid)) {
+                    Ok(bytes) => bytes,
+                    Err(error) if session.should_skip_lfs_download_errors() => {
+                        tracing::warn!(
+                            oid = %oid_hex,
+                            error = %error,
+                            "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+                        );
+                        return Ok(Bytes::copy_from_slice(content));
+                    }
+                    Err(error) => return Err(CrabError::from(error)),
+                };
                 // Cache locally for future checkouts.
                 cache_lfs_locally(&pointer, &bytes, session.repo_root())?;
                 let content =
@@ -1333,12 +1365,24 @@ fn smudge_by_blob_classification(
                 return Ok(Bytes::from(content));
             }
 
-            // No local cache and no remote — pass pointer through with a warning.
+            if session.should_skip_lfs_download_errors() {
+                tracing::warn!(
+                    oid = %oid_hex,
+                    "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
+                );
+                return Ok(Bytes::copy_from_slice(content));
+            }
+
+            // Non-lazy smudge must not silently materialize a pointer when
+            // the required remote is unavailable.
             tracing::warn!(
                 oid = %oid_hex,
                 "smudge: LFS object not in local cache and no remote store available"
             );
-            Ok(Bytes::copy_from_slice(content))
+            Err(CrabError::Configuration {
+                key: "lfs remote".to_owned(),
+                origin: "non-lazy LFS smudge could not resolve a remote store".to_owned(),
+            })
         }
         PointerKind::Crab(pointer) => {
             // Lazy mode: pass the pointer through for on-demand hydration,
@@ -2479,6 +2523,66 @@ size 1048576\n";
                 .any(|w| w == pointer_bytes.as_slice()),
             "LFS pointer bytes should pass through unchanged in lazy mode"
         );
+    }
+
+    #[test]
+    fn non_lazy_lfs_smudge_fails_without_remote_store() {
+        use crab_git::lfs_pointer::LfsPointer;
+
+        let repo = tempfile::tempdir().unwrap();
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let pointer = LfsPointer {
+            oid: [0xabu8; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+
+        let error = smudge_content(
+            &pointer.serialize(),
+            "model.bin",
+            false,
+            None,
+            &session,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[test]
+    fn skip_download_errors_preserves_pointer_without_remote_store() {
+        use crab_git::lfs_pointer::LfsPointer;
+
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join(".lfsconfig"),
+            "[lfs]\n    skipdownloaderrors = true\n",
+        )
+        .unwrap();
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let pointer = LfsPointer {
+            oid: [0xabu8; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+        let pointer_bytes = pointer.serialize();
+
+        let result = smudge_content(
+            &pointer_bytes,
+            "model.bin",
+            false,
+            None,
+            &session,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.as_ref(), pointer_bytes.as_slice());
     }
 
     #[tokio::test]
