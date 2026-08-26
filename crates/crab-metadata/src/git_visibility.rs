@@ -456,6 +456,7 @@ impl GitCatalogVisibilityIndex {
         Ok(())
     }
 
+    #[cfg(feature = "remote-index")]
     /// Return the exact catalog checkpoint identity bound to this proof.
     pub fn catalog_identity(&self) -> Result<crate::git_object_locator::GitObjectCatalogIdentity> {
         Ok(crate::git_object_locator::GitObjectCatalogIdentity {
