@@ -14,7 +14,7 @@ from typing import Any
 
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.0"
+VERSION = "1.1"
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
@@ -117,6 +117,12 @@ def verify_telemetry(value: Any, field: str) -> None:
         "upload_pack_duration_ms",
         "visibility_plan_ms",
         "pack_generation_ms",
+        "locator_scan",
+        "locator_full_scan",
+        "locator_exact_fallback",
+        "locator_ordinal_scan",
+        "locator_ordinal_metadata",
+        "locator_ordinal_metadata_scan",
     ):
         require_nonnegative_int(value.get(name), f"{field}.{name}")
 
@@ -159,6 +165,16 @@ def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
     require(
         "visibility_repair" not in owner_actions,
         "full report records a visibility repair without visibility-build telemetry",
+    )
+
+
+def verify_catalog_filter_telemetry(stages: dict[str, Any]) -> None:
+    filtered = stages["blob_none_clone"]
+    telemetry = filtered.get("telemetry", {})
+    require(
+        telemetry.get("locator_ordinal_metadata", 0) > 0
+        or telemetry.get("locator_ordinal_metadata_scan", 0) > 0,
+        "full report did not exercise ordinal metadata for the blobless catalog filter",
     )
 
 
@@ -362,6 +378,7 @@ def verify_report(path: Path, *, allow_smoke: bool = False) -> Verification:
             require(isinstance(stage.get("notes"), list), f"stages.{name}.notes must be an array")
     if profile == "full":
         verify_full_visibility_telemetry(stages)
+        verify_catalog_filter_telemetry(stages)
         clone_telemetry = stages["full_clone_cold"].get("telemetry", {})
         for field in (
             "upload_pack_duration_ms",

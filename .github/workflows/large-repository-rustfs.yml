@@ -9,9 +9,16 @@ on:
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-metadata/src/git_object_locator/**"
+      - "crates/crab-metadata/src/split_commit_graph.rs"
+      - "crab/src/cmd/metadb.rs"
       - "crates/crab-remote-git/src/budget.rs"
       - "crates/crab-remote-git/src/operation.rs"
       - "crates/crab-remote-git/src/pack.rs"
+      - "crab/docs/architecture/git-integration.md"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/guides/metadb.md"
+      - "plans/001-large-repository-scale-roadmap.md"
   push:
     branches: [main]
     paths:
@@ -21,9 +28,16 @@ on:
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-metadata/src/git_object_locator/**"
+      - "crates/crab-metadata/src/split_commit_graph.rs"
+      - "crab/src/cmd/metadb.rs"
       - "crates/crab-remote-git/src/budget.rs"
       - "crates/crab-remote-git/src/operation.rs"
       - "crates/crab-remote-git/src/pack.rs"
+      - "crab/docs/architecture/git-integration.md"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/guides/metadb.md"
+      - "plans/001-large-repository-scale-roadmap.md"
   schedule:
     - cron: "31 7 * * 0"
   workflow_dispatch:

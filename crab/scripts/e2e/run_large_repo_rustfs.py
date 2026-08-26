@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.0"
+VERSION = "1.1"
 DEFAULT_SOURCE = Path("/Volumes/Workspace/Github/kubernetes/kubernetes")
 DEFAULT_ROOT = Path("/Volumes/Workspace/CrabBuild/crabbuild-qualification")
 DEFAULT_BUCKET = "crab"
@@ -49,6 +49,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CRAB_DIR = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
 START_RUSTFS = CRAB_DIR / "scripts" / "start-rustfs.sh"
+QUALIFICATION_DEBUG_LOG = (
+    "crab=info,crab_remote_git=info,"
+    "crab_read::upload_pack=debug,"
+    "crab_metadata::git_object_locator::reader=debug"
+)
 
 
 class QualificationError(RuntimeError):
@@ -324,6 +329,12 @@ class LargeRepositoryQualification:
             "upload_pack_duration_ms": 0,
             "visibility_plan_ms": 0,
             "pack_generation_ms": 0,
+            "locator_scan": 0,
+            "locator_full_scan": 0,
+            "locator_exact_fallback": 0,
+            "locator_ordinal_scan": 0,
+            "locator_ordinal_metadata": 0,
+            "locator_ordinal_metadata_scan": 0,
         }
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
@@ -333,6 +344,16 @@ class LargeRepositoryQualification:
             fields = event.get("fields")
             if not isinstance(fields, dict):
                 continue
+            lookup_mode = {
+                "scan": "locator_scan",
+                "full_scan": "locator_full_scan",
+                "exact_fallback": "locator_exact_fallback",
+                "ordinal_scan": "locator_ordinal_scan",
+                "ordinal_metadata": "locator_ordinal_metadata",
+                "ordinal_metadata_scan": "locator_ordinal_metadata_scan",
+            }.get(str(fields.get("locator_lookup_mode", "")))
+            if lookup_mode is not None:
+                telemetry[lookup_mode] += 1
             request = fields.get("storage_request")
             if request:
                 request = str(request)
@@ -767,7 +788,7 @@ class LargeRepositoryQualification:
                 ["metadb", "owner", "--once", "--jsonl"],
                 f"generation owner {stage} pass {attempt}",
                 timeout=self.args.clone_timeout,
-                extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+                extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
             )
             owner_runs.append(owner)
             lines = [line for line in self.stdout(owner).splitlines() if line.strip()]
@@ -926,7 +947,7 @@ class LargeRepositoryQualification:
             ["-c", "protocol.version=2", "clone", *options, self.remote_url, str(target)],
             name,
             timeout=self.args.clone_timeout,
-            extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+            extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
         )
         if fsck:
             self.run_git(target, ["fsck", "--full"], f"{name} fsck", timeout=2 * 60 * 60)
@@ -970,7 +991,7 @@ class LargeRepositoryQualification:
                 ],
                 f"{name} clone {ordinal:03d}",
                 timeout=self.args.clone_timeout,
-                extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+                extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
             )
             self.run_git(
                 target,
@@ -1038,7 +1059,7 @@ class LargeRepositoryQualification:
             ["fetch", "origin", "refs/heads/main:refs/remotes/origin/main"],
             f"incremental fetch after {checkpoint} pushes",
             timeout=self.args.clone_timeout,
-            extra_env={"CRAB_LOG": "crab=info,crab_remote_git=info"},
+            extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
         )
         actual = self.git_value(
             self.incremental_clone,
@@ -1102,12 +1123,22 @@ class LargeRepositoryQualification:
             fsck=True,
             remove_after=True,
         )
-        self.clone(
+        blob_none = self.clone(
             "blob_none_clone",
             filtered,
             ["--filter=blob:none", "--no-checkout", "--single-branch", "--branch", "main"],
             fsck=False,
             remove_after=True,
+        )
+        blob_none_telemetry = blob_none["telemetry"]
+        metadata_lookup_events = sum(
+            int(blob_none_telemetry.get(field, 0))
+            for field in ("locator_ordinal_metadata", "locator_ordinal_metadata_scan")
+        )
+        self.check(
+            "blob-none-ordinal-metadata-lookup",
+            metadata_lookup_events > 0,
+            {"metadata_lookup_events": metadata_lookup_events},
         )
         self.clone(
             "depth_1_clone",
@@ -1360,16 +1391,16 @@ class LargeRepositoryQualification:
             self.cleanup_local_worktrees()
             self.report["status"] = "ok"
             return 0
-        except Exception as error:
-            self.report["status"] = "failed"
-            self.report["error"] = str(error)
-            print(f"error: {error}", file=sys.stderr)
-            return 1
         except KeyboardInterrupt:
             self.report["status"] = "failed"
             self.report["error"] = "qualification interrupted"
             print("error: qualification interrupted", file=sys.stderr)
             return 130
+        except Exception as error:
+            self.report["status"] = "failed"
+            self.report["error"] = str(error)
+            print(f"error: {error}", file=sys.stderr)
+            return 1
         finally:
             if (
                 self.args.cleanup_remote

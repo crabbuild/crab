@@ -80,7 +80,7 @@ non-zero; it is never accepted as performance evidence.
 ## Report contract
 
 The versioned JSON report uses schema `crab.large-repository-rustfs`, version
-`1.0`. Its main sections are:
+`1.1`. Its main sections are:
 
 | Field | Evidence |
 |---|---|
@@ -102,8 +102,11 @@ fields. It records repository-wide generation-receipt and maintenance health
 without treating unrelated file-index repair as a Git acceleration failure.
 
 Remote-operation telemetry is emitted once per bounded operation. It records
-only numeric counts and durations; per-object debug logging is disabled because
-its volume would distort both timing and storage evidence on large histories.
+only numeric counts and durations, plus bounded counts for locator lookup modes;
+per-object debug logging is disabled because its volume would distort both
+timing and storage evidence on large histories. The blobless catalog-filter
+stage must record ordinal-metadata lookup activity, proving that the optimized
+ordinal path was exercised.
 Cold visibility repair downloads each unique committed pack once into the
 run-scoped temporary directory, verifies its manifest identity, and performs
 the reachability walk against that local ODB. The owner telemetry therefore

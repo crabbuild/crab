@@ -53,6 +53,12 @@ def telemetry() -> dict[str, int]:
         "upload_pack_duration_ms": 1,
         "visibility_plan_ms": 1,
         "pack_generation_ms": 1,
+        "locator_scan": 0,
+        "locator_full_scan": 0,
+        "locator_exact_fallback": 0,
+        "locator_ordinal_scan": 0,
+        "locator_ordinal_metadata": 1,
+        "locator_ordinal_metadata_scan": 0,
     }
 
 
@@ -134,7 +140,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.0",
+        "version": "1.1",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -296,6 +302,12 @@ class ReportVerificationTests(unittest.TestCase):
                     }
                 }
             )
+
+    def test_blobless_catalog_filter_requires_ordinal_metadata_telemetry(self) -> None:
+        report = valid_report()
+        report["stages"]["blob_none_clone"]["telemetry"]["locator_ordinal_metadata"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "ordinal metadata"):
+            VERIFY.verify_catalog_filter_telemetry(report["stages"])
 
     def test_abbreviated_binary_revision_is_accepted(self) -> None:
         report = valid_report()
