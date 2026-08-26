@@ -298,6 +298,14 @@ impl<S> StoreLayout<S> {
         ))
     }
 
+    /// Path to a pending catalog-bound visibility compaction.
+    #[must_use]
+    pub fn git_visibility_pending_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility-pending/v1/{git_validation_digest}.json"
+        ))
+    }
+
     /// Path to a v1 visibility proof shipped by Crab 1.0.15.
     #[must_use]
     pub fn git_visibility_v1_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {

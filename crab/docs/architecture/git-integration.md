@@ -307,6 +307,17 @@ Pack removal or explicit migration rebuilds a dense universe before publishing
 new visibility closures, so mixed-generation catalog/bitmap tuples fail
 closed.
 
+When a ref-journal compaction has a catalog-bound base proof, it records the
+small ordinal visibility delta before advancing the manifest. The generation
+owner resolves only the changed tips and evidence objects after publishing the
+new catalog checkpoint, then writes the target proof. The pending delta is
+immutable and rooted by the current manifest until that handoff completes; if
+the base checkpoint or evidence is unavailable, the owner uses the complete
+proof rebuild path instead. Catalog kind metadata is optional: owner catalog
+publication does not download stable pack bodies solely to populate it, and a
+filtered request with missing kinds uses the existing bounded canonical
+traversal path.
+
 `crab metadb rebuild` is the repository-scoped migration and repair boundary.
 It ignores the retired `git_locator_db/` namespace, reconstructs the catalog
 from manifest-pinned immutable packs, and publishes coverage only after every

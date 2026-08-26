@@ -6124,7 +6124,10 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
         &mut local_evidence,
         anchor,
         current_packs,
-        true,
+        // Owner publication only needs verified pack indexes and locator
+        // rows. Missing kind metadata makes filtered reads use their existing
+        // bounded traversal path, avoiding a full pack download and scan here.
+        false,
     )
     .await?;
     if updated {

@@ -129,6 +129,12 @@ SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
 a shorter interval only when lower repair or maintenance lag justifies the
 additional metadata requests.
 
+For large existing packs, owner catalog publication verifies the pack indexes
+and locator ranges without downloading pack bodies just to fill optional object
+kind metadata. A filtered request whose selected rows lack kind metadata falls
+back to the bounded canonical planner; direct pushes continue to publish kinds
+for newly introduced objects when the local Git source is available.
+
 `--once` executes one decision, not the entire backlog. Repeat it until
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per
 sample with the selected action, active pack count/bytes, geometric roll-up

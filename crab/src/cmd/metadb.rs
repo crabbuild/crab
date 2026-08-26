@@ -3557,9 +3557,10 @@ async fn diagnose_acceleration_health(
     } else if !git_locator_coverage_current {
         notes.push("Git locator coverage is stale; run `crab metadb rebuild`".to_owned());
     }
+    // Bucket-wide discovery is reported independently because it is not
+    // required for repository-local acceleration or safe repo-scoped repair.
     let repair_required = !generation_receipt_valid
         || !ref_registry_repo_complete
-        || !ref_registry_bucket_complete
         || !git_locator_index_available
         || !git_locator_coverage_current
         || !git_visibility_index_available

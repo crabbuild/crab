@@ -37,6 +37,10 @@ const FIXED_PUBLICATION_SSTS: usize = 4;
 // Amortize one directory scan over a normal fan-out while bounding the number
 // of superseded locator generations. This cadence is cost policy, not safety.
 const GC_GENERATION_INTERVAL: u64 = 32;
+// A catalog scan is cheaper than one remote point lookup per object once a
+// batch covers a meaningful fraction of the current ordinal universe. Keep
+// small incremental pushes on the point-read path.
+const BULK_ORDINAL_LOOKUP_FACTOR: u64 = 64;
 const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
 
@@ -77,6 +81,8 @@ pub struct GitObjectLocatorWriter {
     bindings: HashMap<u64, GitPackLocatorRecord>,
     empty_catalog_binding: Option<u64>,
     replacement_ordinals: Option<HashMap<[u8; 20], GitObjectOrdinal>>,
+    existing_ordinals: Option<HashMap<[u8; 20], GitObjectOrdinal>>,
+    ordinal_lookup_candidates: u64,
     catalog_dirty: bool,
     checkpoint_required: bool,
     stats: LocatorWriteStats,
@@ -211,6 +217,8 @@ impl GitObjectLocatorWriter {
             bindings,
             empty_catalog_binding: None,
             replacement_ordinals: None,
+            existing_ordinals: None,
+            ordinal_lookup_candidates: 0,
             catalog_dirty,
             checkpoint_required,
             stats: LocatorWriteStats::default(),
@@ -384,6 +392,8 @@ impl GitObjectLocatorWriter {
             ));
         }
 
+        self.prepare_ordinal_lookup(entries.len()).await?;
+
         let mut batch = slatedb::WriteBatch::new();
         let mut batch_rows = 0_usize;
         let mut batch_bytes = 0_usize;
@@ -409,7 +419,13 @@ impl GitObjectLocatorWriter {
                 .replacement_ordinals
                 .as_ref()
                 .and_then(|ordinals| ordinals.get(&entry.oid).copied());
+            let existing_ordinal = existing_ordinal.or_else(|| {
+                self.existing_ordinals
+                    .as_ref()
+                    .and_then(|ordinals| ordinals.get(&entry.oid).copied())
+            });
             let existing = if existing_ordinal.is_some()
+                || self.existing_ordinals.is_some()
                 || self.empty_catalog_binding == Some(binding.pack_slot)
             {
                 None
@@ -426,6 +442,9 @@ impl GitObjectLocatorWriter {
                 (None, None) => {
                     let ordinal = self.allocate_ordinal()?;
                     if let Some(ordinals) = &mut self.replacement_ordinals {
+                        ordinals.insert(entry.oid, ordinal);
+                    }
+                    if let Some(ordinals) = &mut self.existing_ordinals {
                         ordinals.insert(entry.oid, ordinal);
                     }
                     ordinal
@@ -461,6 +480,53 @@ impl GitObjectLocatorWriter {
             self.catalog_dirty = true;
             self.checkpoint_required = true;
         }
+        Ok(())
+    }
+
+    async fn prepare_ordinal_lookup(&mut self, entry_count: usize) -> Result<()> {
+        if self.replacement_ordinals.is_some() || self.existing_ordinals.is_some() {
+            return Ok(());
+        }
+        self.ordinal_lookup_candidates = self
+            .ordinal_lookup_candidates
+            .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
+        let current_objects = self.metadata.next_object_ordinal;
+        if current_objects == 0 {
+            self.existing_ordinals = Some(HashMap::new());
+        } else if self
+            .ordinal_lookup_candidates
+            .saturating_mul(BULK_ORDINAL_LOOKUP_FACTOR)
+            >= current_objects
+        {
+            self.load_existing_ordinals().await?;
+        }
+        Ok(())
+    }
+
+    async fn load_existing_ordinals(&mut self) -> Result<()> {
+        if self.existing_ordinals.is_some() {
+            return Ok(());
+        }
+        let mut rows = self
+            .db
+            .scan_prefix([OBJECT_FAMILY], ..)
+            .await
+            .map_err(read_error)?;
+        let mut ordinals = HashMap::new();
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            let oid = decode_object_key(&row.key)
+                .ok_or_else(|| corrupt("object", "invalid compact locator object key"))?;
+            let location = decode_object_location(&row.value)
+                .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
+            if u64::from(location.ordinal) >= self.metadata.next_object_ordinal {
+                return Err(corrupt(
+                    "object",
+                    "compact locator object ordinal exceeds catalog metadata",
+                ));
+            }
+            ordinals.insert(oid, location.ordinal);
+        }
+        self.existing_ordinals = Some(ordinals);
         Ok(())
     }
 
@@ -527,6 +593,8 @@ impl GitObjectLocatorWriter {
         self.flush_objects().await?;
         self.empty_catalog_binding = None;
         self.replacement_ordinals = Some(HashMap::new());
+        self.existing_ordinals = None;
+        self.ordinal_lookup_candidates = 0;
         Ok(())
     }
 
@@ -577,6 +645,11 @@ impl GitObjectLocatorWriter {
             let location = decode_object_location(&row.value)
                 .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
             if !retained_slots.contains(&location.pack_slot) {
+                if let Some(ordinals) = &mut self.existing_ordinals {
+                    if let Some(oid) = decode_object_key(&row.key) {
+                        ordinals.remove(&oid);
+                    }
+                }
                 deletes.delete(row.key);
                 deletes.delete(ordinal_key(location.ordinal));
                 delete_count += 1;

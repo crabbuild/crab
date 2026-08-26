@@ -621,6 +621,177 @@ impl GitCatalogVisibilityIndex {
         }
         union
     }
+
+    fn resize_bitmaps(&mut self) -> Result<()> {
+        let object_count = usize::try_from(self.object_count)
+            .map_err(|_| corrupt("Git object catalog count cannot be represented"))?;
+        let bitmap_len = object_count.div_ceil(8);
+        for closure in self.refs.values_mut() {
+            if let GitVisibilityClosure::Bitmap(bitmap) = closure {
+                bitmap.resize(bitmap_len, 0);
+            }
+        }
+        for transitions in self.transitions.values_mut() {
+            for transition in transitions {
+                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+                    bitmap.resize(bitmap_len, 0);
+                }
+            }
+        }
+        for transitions in self.incremental_history.values_mut() {
+            for transition in transitions {
+                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+                    bitmap.resize(bitmap_len, 0);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rebind_identity(
+        &mut self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+        catalog_digest: &str,
+        object_count: u64,
+    ) -> Result<()> {
+        if object_count < self.object_count {
+            return Err(corrupt(
+                "catalog-bound visibility update removed catalog ordinals",
+            ));
+        }
+        self.generation = generation;
+        self.pack_index_hash = pack_index_hash.to_owned();
+        self.git_validation_digest = git_validation_digest.to_owned();
+        self.catalog_digest = catalog_digest.to_owned();
+        self.object_count = object_count;
+        self.resize_bitmaps()?;
+        self.validate()
+    }
+
+    fn remove_ref(&mut self, name: &str) {
+        self.refs.remove(name);
+        self.transitions.remove(name);
+        self.incremental_history.remove(name);
+    }
+
+    fn apply_ordinal_edit(
+        &mut self,
+        name: String,
+        edit: &GitVisibilityEdit,
+        from_ordinal: Option<u32>,
+        to_ordinal: u32,
+        mut added: Vec<u32>,
+        mut removed: Vec<u32>,
+    ) -> Result<()> {
+        edit.validate()?;
+        let object_count = usize::try_from(self.object_count)
+            .map_err(|_| corrupt("Git object catalog count cannot be represented"))?;
+        if u64::from(to_ordinal) >= self.object_count {
+            return Err(corrupt(
+                "visibility edit target is outside its Git object catalog",
+            ));
+        }
+        added.sort_unstable();
+        added.dedup();
+        removed.sort_unstable();
+        removed.dedup();
+        if added
+            .iter()
+            .chain(&removed)
+            .any(|ordinal| usize::try_from(*ordinal).ok() >= Some(object_count))
+        {
+            return Err(corrupt(
+                "visibility edit object is outside its Git object catalog",
+            ));
+        }
+
+        let prior = self
+            .refs
+            .get(&name)
+            .map(GitVisibilityClosure::positions)
+            .unwrap_or_default();
+        if edit.old_oid.is_none() && self.refs.contains_key(&name) {
+            return Err(corrupt(
+                "visibility add targets a ref already present in its prior catalog",
+            ));
+        }
+        if let Some(from_ordinal) = from_ordinal
+            && prior.binary_search(&from_ordinal).is_err()
+        {
+            return Err(corrupt(
+                "visibility delta prior closure does not contain its old ref tip",
+            ));
+        }
+        if edit.old_oid.is_some() && from_ordinal.is_none() {
+            return Err(corrupt(
+                "visibility delta old ref tip is absent from its prior catalog",
+            ));
+        }
+        let positions = if edit.replaces {
+            added.clone()
+        } else {
+            let mut positions = prior;
+            for ordinal in &removed {
+                let position = positions.binary_search(ordinal).map_err(|_| {
+                    corrupt("visibility edit removes an object outside the prior closure")
+                })?;
+                positions.remove(position);
+            }
+            positions.extend(added.iter().copied());
+            positions.sort_unstable();
+            positions.dedup();
+            positions
+        };
+        if positions.binary_search(&to_ordinal).is_err() {
+            return Err(corrupt(
+                "visibility edit result does not contain its new ref tip",
+            ));
+        }
+        self.refs.insert(
+            name.clone(),
+            GitVisibilityClosure::from_positions(positions, object_count)?,
+        );
+        if edit.replaces || !removed.is_empty() {
+            self.transitions.remove(&name);
+            self.incremental_history.remove(&name);
+            return Ok(());
+        }
+        let Some(from_ordinal) = from_ordinal else {
+            self.transitions.remove(&name);
+            self.incremental_history.remove(&name);
+            return Ok(());
+        };
+        let transitions = self.transitions.entry(name.clone()).or_default();
+        for transition in transitions.iter_mut() {
+            let mut positions = transition.objects.positions();
+            positions.extend(added.iter().copied());
+            positions.sort_unstable();
+            positions.dedup();
+            transition.to_ordinal = to_ordinal;
+            transition.objects = GitVisibilityClosure::from_positions(positions, object_count)?;
+        }
+        transitions.retain(|transition| transition.from_ordinal != from_ordinal);
+        transitions.push(GitCatalogVisibilityTransition {
+            from_ordinal,
+            to_ordinal,
+            objects: GitVisibilityClosure::from_positions(added.clone(), object_count)?,
+        });
+        if transitions.len() > MAX_VISIBILITY_TRANSITIONS_PER_REF {
+            transitions.remove(0);
+        }
+        let history = self.incremental_history.entry(name).or_default();
+        history.push(GitCatalogVisibilityTransition {
+            from_ordinal,
+            to_ordinal,
+            objects: GitVisibilityClosure::from_positions(added, object_count)?,
+        });
+        if history.len() > MAX_VISIBILITY_HISTORY_TRANSITIONS_PER_REF {
+            history.remove(0);
+        }
+        Ok(())
+    }
 }
 
 fn validate_catalog_transitions(
@@ -1347,6 +1518,8 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 mod storage {
     use std::collections::BTreeMap;
     #[cfg(feature = "remote-index")]
+    use std::collections::HashMap;
+    #[cfg(feature = "remote-index")]
     use std::sync::Arc;
     #[cfg(feature = "remote-index")]
     use std::time::Duration;
@@ -1471,6 +1644,43 @@ mod storage {
         from_ordinal: u32,
         to_ordinal: u32,
         objects: GitVisibilityClosureV3,
+    }
+
+    #[cfg(feature = "remote-index")]
+    const GIT_VISIBILITY_PENDING_VERSION: u32 = 1;
+
+    #[cfg(feature = "remote-index")]
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityPending {
+        version: u32,
+        target_generation: u64,
+        target_pack_index_hash: String,
+        target_git_validation_digest: String,
+        base_generation: u64,
+        base_pack_index_hash: String,
+        base_git_validation_digest: String,
+        base_catalog_digest: String,
+        base_object_count: u64,
+        edits: Vec<GitVisibilityPendingEdit>,
+    }
+
+    #[cfg(feature = "remote-index")]
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GitVisibilityPendingEdit {
+        ref_name: String,
+        old_oid: Option<String>,
+        new_oid: Option<String>,
+        visibility_evidence_hash: Option<String>,
+    }
+
+    #[cfg(feature = "remote-index")]
+    struct ResolvedGitVisibilityPendingEdit {
+        ref_name: String,
+        old_oid: Option<[u8; 20]>,
+        new_oid: Option<[u8; 20]>,
+        evidence: Option<GitVisibilityEdit>,
     }
 
     #[derive(Deserialize)]
@@ -2086,6 +2296,50 @@ mod storage {
                 transitions,
                 incremental_history,
             )
+        }
+
+        fn from_catalog_index(index: &super::GitCatalogVisibilityIndex) -> Result<Self> {
+            index.validate()?;
+            let object_count = usize::try_from(index.object_count)
+                .map_err(|_| super::corrupt("Git object catalog count cannot be represented"))?;
+            let encode_closure = |closure: &super::GitVisibilityClosure| {
+                GitVisibilityClosureV3::from_positions(closure.positions(), object_count)
+            };
+            let encode_transitions =
+                |source: &BTreeMap<String, Vec<super::GitCatalogVisibilityTransition>>| {
+                    source
+                        .iter()
+                        .map(|(name, transitions)| {
+                            let transitions = transitions
+                                .iter()
+                                .map(|transition| {
+                                    Ok(GitVisibilityTransitionV5 {
+                                        from_ordinal: transition.from_ordinal,
+                                        to_ordinal: transition.to_ordinal,
+                                        objects: encode_closure(&transition.objects)?,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            Ok((name.clone(), transitions))
+                        })
+                        .collect::<Result<BTreeMap<_, _>>>()
+                };
+            let refs = index
+                .refs
+                .iter()
+                .map(|(name, closure)| Ok((name.clone(), encode_closure(closure)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            Ok(Self {
+                version: GIT_VISIBILITY_INDEX_VERSION,
+                generation: index.generation,
+                pack_index_hash: index.pack_index_hash.clone(),
+                git_validation_digest: index.git_validation_digest.clone(),
+                catalog_digest: index.catalog_digest.clone(),
+                object_count: index.object_count,
+                refs,
+                transitions: encode_transitions(&index.transitions)?,
+                incremental_history: encode_transitions(&index.incremental_history)?,
+            })
         }
 
         fn into_index(self, catalog: Vec<[u8; 20]>) -> Result<GitVisibilityIndex> {
@@ -2834,6 +3088,10 @@ mod storage {
             if catalog_bound_exists(store, router, manifest).await? {
                 return Ok(true);
             }
+            if let Some(index) = apply_catalog_journal_edits(store, router, manifest).await? {
+                upload_catalog_index(store, router, &index).await?;
+                return Ok(true);
+            }
             let Some(read) = read_for_manifest(store, router, manifest).await? else {
                 return Ok(false);
             };
@@ -2954,6 +3212,483 @@ mod storage {
         Ok(edit)
     }
 
+    /// Stage a lazy ordinal proof for a ref-journal compaction.
+    ///
+    /// A V5 base proof can be carried forward without materializing its OID
+    /// dictionary. The pending object is immutable and keyed by the target
+    /// validation digest; the owner completes it after publishing the target
+    /// catalog, or the normal full rebuild remains available.
+    pub async fn prepare_catalog_journal_edits(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        base: &Manifest,
+        edits: &[RefJournalEdit],
+        final_refs: &BTreeMap<String, String>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<bool> {
+        #[cfg(feature = "remote-index")]
+        {
+            if base.refs.is_empty() {
+                return Ok(false);
+            }
+            let path = router.git_visibility_catalog_path(&base.git_validation_digest);
+            let body = match read_bounded(store, &path).await {
+                Ok(body) => body,
+                Err(crate::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                }) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let stored: GitVisibilityIndexV5 = serde_json::from_slice(&body).map_err(|error| {
+                crate::error::MetadataError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: format!("invalid catalog visibility index JSON: {error}"),
+                }
+            })?;
+            let base_identity = stored.validate_binding(
+                base.generation,
+                &base.pack_index_hash,
+                &base.git_validation_digest,
+            )?;
+            validate_hash(pack_index_hash, "pack index hash")?;
+            validate_hash(git_validation_digest, "Git validation digest")?;
+            let mut ref_tips = base.refs.clone();
+            let edits = edits
+                .iter()
+                .map(|edit| {
+                    super::validate_ref_name(&edit.ref_name)?;
+                    if edit.old_oid.is_none() && edit.new_oid.is_none() {
+                        return Err(super::corrupt(
+                            "catalog visibility pending edit cannot omit both ref tips",
+                        ));
+                    }
+                    if ref_tips.get(&edit.ref_name) != edit.old_oid.as_ref() {
+                        return Err(super::corrupt(
+                            "catalog visibility pending edit does not match its prior ref tip",
+                        ));
+                    }
+                    if let Some(old_oid) = &edit.old_oid {
+                        super::validate_oid(old_oid)?;
+                    }
+                    if let Some(new_oid) = &edit.new_oid {
+                        super::validate_oid(new_oid)?;
+                        let Some(evidence_hash) = edit.visibility_evidence_hash.as_deref() else {
+                            return Ok(None);
+                        };
+                        validate_hash(evidence_hash, "visibility edit hash")?;
+                    } else if edit.visibility_evidence_hash.is_some() {
+                        return Err(super::corrupt(
+                            "deleted ref visibility edit cannot carry evidence",
+                        ));
+                    }
+                    match &edit.new_oid {
+                        Some(new_oid) => {
+                            ref_tips.insert(edit.ref_name.clone(), new_oid.clone());
+                        }
+                        None => {
+                            ref_tips.remove(&edit.ref_name);
+                        }
+                    }
+                    Ok(Some(GitVisibilityPendingEdit {
+                        ref_name: edit.ref_name.clone(),
+                        old_oid: edit.old_oid.clone(),
+                        new_oid: edit.new_oid.clone(),
+                        visibility_evidence_hash: edit.visibility_evidence_hash.clone(),
+                    }))
+                })
+                .collect::<Result<Option<Vec<_>>>>()?;
+            let Some(edits) = edits else {
+                return Ok(false);
+            };
+            if ref_tips != *final_refs {
+                return Err(super::corrupt(
+                    "catalog visibility pending edits do not match their target refs",
+                ));
+            }
+            let pending = GitVisibilityPending {
+                version: GIT_VISIBILITY_PENDING_VERSION,
+                target_generation: generation,
+                target_pack_index_hash: pack_index_hash.to_owned(),
+                target_git_validation_digest: git_validation_digest.to_owned(),
+                base_generation: base_identity.generation,
+                base_pack_index_hash: base_identity.pack_index_hash.to_string(),
+                base_git_validation_digest: base.git_validation_digest.clone(),
+                base_catalog_digest: base_identity.catalog_digest.to_string(),
+                base_object_count: base_identity.object_count,
+                edits,
+            };
+            let body = serde_json::to_vec(&pending).map_err(|error| {
+                crate::error::MetadataError::Internal(format!(
+                    "catalog visibility pending serialize: {error}"
+                ))
+            })?;
+            if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
+                return Err(crate::error::MetadataError::CorruptObject {
+                    path: router
+                        .git_visibility_pending_path(git_validation_digest)
+                        .as_ref()
+                        .to_owned(),
+                    reason: format!(
+                        "catalog visibility pending object exceeds {} bytes",
+                        MAX_GIT_VISIBILITY_INDEX_BYTES
+                    ),
+                });
+            }
+            store
+                .put_exact(
+                    &router.git_visibility_pending_path(git_validation_digest),
+                    Bytes::from(body),
+                )
+                .await?;
+            Ok(true)
+        }
+        #[cfg(not(feature = "remote-index"))]
+        {
+            let _ = (
+                store,
+                router,
+                base,
+                edits,
+                final_refs,
+                generation,
+                pack_index_hash,
+                git_validation_digest,
+            );
+            Ok(false)
+        }
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn apply_catalog_journal_edits(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<Option<GitCatalogVisibilityIndex>> {
+        let pending_path = router.git_visibility_pending_path(&manifest.git_validation_digest);
+        let body = match read_bounded(store, &pending_path).await {
+            Ok(body) => body,
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let pending: GitVisibilityPending = serde_json::from_slice(&body).map_err(|error| {
+            crate::error::MetadataError::CorruptObject {
+                path: pending_path.as_ref().to_owned(),
+                reason: format!("invalid catalog visibility pending JSON: {error}"),
+            }
+        })?;
+        if pending.version != GIT_VISIBILITY_PENDING_VERSION
+            || pending.target_generation != manifest.generation
+            || pending.target_pack_index_hash != manifest.pack_index_hash
+            || pending.target_git_validation_digest != manifest.git_validation_digest
+        {
+            return Err(super::corrupt(
+                "catalog visibility pending object does not match its target manifest",
+            ));
+        }
+        validate_hash(&pending.base_pack_index_hash, "base pack index hash")?;
+        validate_hash(
+            &pending.base_git_validation_digest,
+            "base Git validation digest",
+        )?;
+        validate_hash(&pending.base_catalog_digest, "base catalog digest")?;
+        let base_path = router.git_visibility_catalog_path(&pending.base_git_validation_digest);
+        let base_body = match read_bounded(store, &base_path).await {
+            Ok(body) => body,
+            Err(crate::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let base_stored: GitVisibilityIndexV5 =
+            serde_json::from_slice(&base_body).map_err(|error| {
+                crate::error::MetadataError::CorruptObject {
+                    path: base_path.as_ref().to_owned(),
+                    reason: format!("invalid base catalog visibility index JSON: {error}"),
+                }
+            })?;
+        let base_identity = base_stored.validate_binding(
+            pending.base_generation,
+            &pending.base_pack_index_hash,
+            &pending.base_git_validation_digest,
+        )?;
+        if base_identity.catalog_digest.to_string() != pending.base_catalog_digest
+            || base_identity.object_count != pending.base_object_count
+        {
+            return Ok(None);
+        }
+        let base_session =
+            match crate::git_object_locator::GitObjectLocatorSession::open_for_catalog(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+                base_identity,
+                Duration::from_secs(60 * 60),
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(crate::error::MetadataError::CorruptObject { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+        base_session.close().await?;
+        let mut index = base_stored.into_catalog_index()?;
+        let packs =
+            crate::manifest_store::read_bulk_pack_list(store, router, &manifest.pack_index_hash)
+                .await?;
+        let inventory = packs
+            .into_iter()
+            .map(|pack| {
+                let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+                    super::corrupt(format!(
+                        "invalid manifest pack ID in catalog handoff: {error}"
+                    ))
+                })?;
+                Ok((
+                    pack_id,
+                    crate::git_object_locator::GitPackInventoryEntry {
+                        pack_id,
+                        object_count: pack.object_count,
+                        pack_size: pack.size,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        let session = crate::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await?;
+        let result: Result<Option<GitCatalogVisibilityIndex>> = async {
+            let Some(identity) = session.catalog_identity() else {
+                return Ok(None);
+            };
+            if identity.generation != manifest.generation
+                || identity.pack_index_hash.to_string() != manifest.pack_index_hash
+                || identity.object_count < pending.base_object_count
+                || !catalog_checkpoint_marker_matches(store, router, identity).await?
+            {
+                return Ok(None);
+            }
+
+            let mut required = HashMap::<[u8; 20], ()>::new();
+            for oid in manifest.refs.values().chain(manifest.peeled_refs.values()) {
+                required.insert(super::decode_oid(oid)?, ());
+            }
+            let mut resolved = Vec::with_capacity(pending.edits.len());
+            for pending_edit in pending.edits {
+                super::validate_ref_name(&pending_edit.ref_name)?;
+                let old_oid = pending_edit
+                    .old_oid
+                    .as_deref()
+                    .map(super::decode_oid)
+                    .transpose()?;
+                let new_oid = pending_edit
+                    .new_oid
+                    .as_deref()
+                    .map(super::decode_oid)
+                    .transpose()?;
+                if let Some(oid) = old_oid {
+                    required.insert(oid, ());
+                }
+                if let Some(new_oid) = new_oid {
+                    required.insert(new_oid, ());
+                    let Some(evidence_hash) = pending_edit.visibility_evidence_hash.as_deref()
+                    else {
+                        return Err(super::corrupt(
+                            "catalog visibility pending update is missing evidence",
+                        ));
+                    };
+                    let evidence = read_edit(store, router, evidence_hash).await?;
+                    if evidence.old_oid != pending_edit.old_oid
+                        || evidence.new_oid
+                            != pending_edit.new_oid.as_deref().ok_or_else(|| {
+                                super::corrupt(
+                                    "catalog visibility pending update is missing its new ref tip",
+                                )
+                            })?
+                    {
+                        return Err(super::corrupt(
+                            "catalog visibility evidence does not match its pending ref edit",
+                        ));
+                    }
+                    for oid in evidence.added.iter().chain(evidence.removed.iter()) {
+                        required.insert(super::decode_oid(oid)?, ());
+                    }
+                    resolved.push(ResolvedGitVisibilityPendingEdit {
+                        ref_name: pending_edit.ref_name,
+                        old_oid,
+                        new_oid: Some(new_oid),
+                        evidence: Some(evidence),
+                    });
+                } else {
+                    if pending_edit.visibility_evidence_hash.is_some() {
+                        return Err(super::corrupt(
+                            "deleted ref pending edit cannot carry visibility evidence",
+                        ));
+                    }
+                    resolved.push(ResolvedGitVisibilityPendingEdit {
+                        ref_name: pending_edit.ref_name,
+                        old_oid,
+                        new_oid: None,
+                        evidence: None,
+                    });
+                }
+            }
+            let mut object_ids = required.keys().copied().collect::<Vec<_>>();
+            object_ids.sort_unstable();
+            let lookups = session.lookup_batch(&object_ids, &inventory).await?;
+            let mut ordinals = HashMap::with_capacity(object_ids.len());
+            for (oid, lookup) in object_ids.into_iter().zip(lookups) {
+                match lookup {
+                    crate::git_object_locator::GitObjectLookup::Hit(locator) => {
+                        ordinals.insert(oid, locator.ordinal);
+                    }
+                    crate::git_object_locator::GitObjectLookup::Miss => return Ok(None),
+                    crate::git_object_locator::GitObjectLookup::Corrupt => {
+                        return Err(super::corrupt(
+                            "catalog visibility handoff encountered a corrupt locator row",
+                        ));
+                    }
+                }
+            }
+            index.rebind_identity(
+                manifest.generation,
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+                &identity.catalog_digest.to_string(),
+                identity.object_count,
+            )?;
+            for edit in resolved {
+                let Some(evidence) = edit.evidence else {
+                    let old_oid = edit.old_oid.ok_or_else(|| {
+                        super::corrupt("catalog visibility deletion has no old ref tip")
+                    })?;
+                    let old_ordinal = ordinals.get(&old_oid).copied().ok_or_else(|| {
+                        super::corrupt("catalog visibility deletion old ref tip is absent")
+                    })?;
+                    if !index.contains_ordinal_in_ref(&edit.ref_name, old_ordinal) {
+                        return Err(super::corrupt(
+                            "catalog visibility deletion old ref tip is outside its prior closure",
+                        ));
+                    }
+                    index.remove_ref(&edit.ref_name);
+                    continue;
+                };
+                let old_ordinal = edit
+                    .old_oid
+                    .map(|oid| {
+                        ordinals.get(&oid).copied().ok_or_else(|| {
+                            super::corrupt("catalog visibility old ref tip is absent")
+                        })
+                    })
+                    .transpose()?;
+                let new_ordinal = ordinals
+                    .get(&edit.new_oid.ok_or_else(|| {
+                        super::corrupt("catalog visibility new ref tip is absent")
+                    })?)
+                    .copied()
+                    .ok_or_else(|| super::corrupt("catalog visibility new ref tip is absent"))?;
+                let added = evidence
+                    .added
+                    .iter()
+                    .map(|oid| {
+                        let oid = super::decode_oid(oid)?;
+                        ordinals.get(&oid).copied().ok_or_else(|| {
+                            super::corrupt("catalog visibility added object is absent")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let removed = evidence
+                    .removed
+                    .iter()
+                    .map(|oid| {
+                        let oid = super::decode_oid(oid)?;
+                        ordinals.get(&oid).copied().ok_or_else(|| {
+                            super::corrupt("catalog visibility removed object is absent")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                index.apply_ordinal_edit(
+                    edit.ref_name,
+                    &evidence,
+                    old_ordinal,
+                    new_ordinal,
+                    added,
+                    removed,
+                )?;
+            }
+            if index.ref_count() != manifest.refs.len()
+                || manifest.refs.keys().any(|name| !index.contains_ref(name))
+            {
+                return Err(super::corrupt(
+                    "catalog visibility handoff refs do not match its manifest",
+                ));
+            }
+            for (name, oid) in manifest.refs.iter().chain(manifest.peeled_refs.iter()) {
+                let oid = super::decode_oid(oid)?;
+                let ordinal = ordinals
+                    .get(&oid)
+                    .copied()
+                    .ok_or_else(|| super::corrupt("catalog visibility manifest tip is absent"))?;
+                if !index.contains_ordinal_in_ref(name, ordinal) {
+                    return Err(super::corrupt(
+                        "catalog visibility handoff does not contain a manifest tip",
+                    ));
+                }
+            }
+            index.validate()?;
+            Ok(Some(index))
+        }
+        .await;
+        let close = session.close().await;
+        match (result, close) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(close_error)) => {
+                tracing::error!(
+                    error = %close_error,
+                    "Git catalog handoff reader close also failed after operation error"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn upload_catalog_index(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        index: &GitCatalogVisibilityIndex,
+    ) -> Result<()> {
+        let stored = GitVisibilityIndexV5::from_catalog_index(index)?;
+        let body = serde_json::to_vec(&stored).map_err(|error| {
+            crate::error::MetadataError::Internal(format!(
+                "catalog visibility index serialize: {error}"
+            ))
+        })?;
+        if body.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES {
+            return Err(crate::error::MetadataError::CorruptObject {
+                path: router
+                    .git_visibility_catalog_path(&index.git_validation_digest)
+                    .as_ref()
+                    .to_owned(),
+                reason: format!(
+                    "visibility index exceeds {} bytes",
+                    MAX_GIT_VISIBILITY_INDEX_BYTES
+                ),
+            });
+        }
+        upload_visibility_body(
+            store,
+            &router.git_visibility_catalog_path(&index.git_validation_digest),
+            Bytes::from(body),
+        )
+        .await
+    }
+
     /// Build a generation proof by applying journal-owned immutable evidence.
     ///
     /// Returns `None` when the base proof or any transaction evidence is absent,
@@ -3035,8 +3770,9 @@ mod storage {
 
 #[cfg(feature = "storage")]
 pub use storage::{
-    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound, read,
-    read_edit, read_for_manifest, read_with_format, upload_edit, upload_if_absent,
+    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound,
+    prepare_catalog_journal_edits, read, read_edit, read_for_manifest, read_with_format,
+    upload_edit, upload_if_absent,
 };
 
 #[cfg(all(feature = "remote-index", feature = "storage"))]
@@ -3427,6 +4163,78 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[cfg(feature = "remote-index")]
+    #[test]
+    fn catalog_fast_forward_rejects_missing_old_tip() {
+        let mut index = GitCatalogVisibilityIndex::from_parts(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            2,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                GitVisibilityClosure::from_positions(vec![0], 2).expect("valid catalog closure"),
+            )]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("valid catalog visibility index");
+        let edit = GitVisibilityEdit::delta(
+            Some("1".repeat(40)),
+            "2".repeat(40),
+            &BTreeSet::from(["1".repeat(40)]),
+            &BTreeSet::from(["2".repeat(40)]),
+        );
+
+        assert!(
+            index
+                .apply_ordinal_edit(
+                    "refs/heads/main".to_owned(),
+                    &edit,
+                    None,
+                    1,
+                    vec![1],
+                    vec![0]
+                )
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "remote-index")]
+    #[test]
+    fn catalog_add_rejects_an_existing_ref_closure() {
+        let mut index = GitCatalogVisibilityIndex::from_parts(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            2,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                GitVisibilityClosure::from_positions(vec![0], 2).expect("valid catalog closure"),
+            )]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("valid catalog visibility index");
+        let edit =
+            GitVisibilityEdit::from_replacement_objects(None, "2".repeat(40), vec!["2".repeat(40)]);
+
+        assert!(
+            index
+                .apply_ordinal_edit(
+                    "refs/heads/main".to_owned(),
+                    &edit,
+                    None,
+                    1,
+                    vec![1],
+                    Vec::new(),
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn unrelated_ref_transition_bitmaps_follow_dictionary_growth() {
         let oid = |value: usize| format!("{value:040x}");
@@ -3811,6 +4619,314 @@ mod tests {
                 .index
                 .incremental_ordinals("refs/heads/main", 0, &[1]),
             Some(Vec::new())
+        );
+    }
+
+    #[cfg(all(feature = "storage", feature = "remote-index"))]
+    #[tokio::test]
+    async fn catalog_journal_handoff_applies_ordinal_delta_after_catalog_append() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use crab_xet::hash::MerkleHash;
+        use object_store::memory::InMemory;
+
+        use crate::git_object_locator::{
+            GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitObjectLocatorWriter,
+            GitPackLocatorRecord,
+        };
+        use crate::manifests::{BulkData, PackManifestEntry, compact_pack_index};
+        use crate::ref_journal::RefJournalEdit;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let base_pack_id = MerkleHash::from([3; 32]).to_string();
+        let new_pack_id = MerkleHash::from([4; 32]).to_string();
+        let base_packs = vec![PackManifestEntry {
+            pack_id: base_pack_id.clone(),
+            size: 256,
+            content_hash: base_pack_id.clone(),
+            ref_tips: vec!["1".repeat(40)],
+            object_count: 2,
+        }];
+        let target_packs = [
+            base_packs[0].clone(),
+            PackManifestEntry {
+                pack_id: new_pack_id.clone(),
+                size: 512,
+                content_hash: new_pack_id.clone(),
+                ref_tips: vec!["5".repeat(40)],
+                object_count: 4,
+            },
+        ];
+        let (base_pack_index_hash, _, base_pack_index) =
+            compact_pack_index(4, &base_packs).expect("base pack index");
+        let (target_pack_index_hash, _, target_pack_index) =
+            compact_pack_index(5, &target_packs).expect("target pack index");
+        crate::manifest_store::upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crate::segmented::SegmentWrite::default(),
+                pack_index: base_pack_index,
+            },
+        )
+        .await
+        .expect("upload base pack index");
+        crate::manifest_store::upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crate::segmented::SegmentWrite::default(),
+                pack_index: target_pack_index,
+            },
+        )
+        .await
+        .expect("upload target pack index");
+
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.generation = 4;
+        base.pack_index_hash = base_pack_index_hash.clone();
+        base.refs
+            .insert("refs/heads/main".to_owned(), "1".repeat(40));
+        base.seal_git_validation();
+        let base_index = GitVisibilityIndex::new(
+            base.generation,
+            &base.pack_index_hash,
+            &base.git_validation_digest,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec!["1".repeat(40), "2".repeat(40)],
+            )]),
+        )
+        .expect("base visibility index");
+        let base_pack_index_hash =
+            MerkleHash::from_hex(&base_pack_index_hash).expect("base pack index hash");
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .expect("open base catalog writer");
+        let base_binding = writer
+            .bind_packs(&[GitPackLocatorRecord {
+                pack_id: MerkleHash::from_hex(&base_pack_id).expect("base pack ID"),
+                committed_generation: 4,
+                pack_index_hash: base_pack_index_hash,
+                object_count: 2,
+                pack_size: 256,
+            }])
+            .await
+            .expect("bind base pack")[0];
+        writer
+            .write_locations(
+                base_binding,
+                &[
+                    GitObjectLocatorEntry {
+                        oid: [0x11; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 12,
+                            entry_len: 64,
+                            crc32: 1,
+                        },
+                        metadata: Default::default(),
+                    },
+                    GitObjectLocatorEntry {
+                        oid: [0x22; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 76,
+                            entry_len: 64,
+                            crc32: 2,
+                        },
+                        metadata: Default::default(),
+                    },
+                ],
+            )
+            .await
+            .expect("write base catalog rows");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 4,
+                pack_index_hash: base_pack_index_hash,
+            })
+            .await
+            .expect("publish base catalog");
+        writer.close().await.expect("close base catalog writer");
+        upload_if_absent(&store, &router, &base_index)
+            .await
+            .expect("upload base catalog-bound proof");
+
+        let mut target = base.clone();
+        target.generation = 5;
+        target.pack_index_hash = target_pack_index_hash.clone();
+        target
+            .refs
+            .insert("refs/heads/main".to_owned(), "5".repeat(40));
+        target.seal_git_validation();
+        let target_pack_index_hash =
+            MerkleHash::from_hex(&target_pack_index_hash).expect("target pack index hash");
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .expect("open target catalog writer");
+        let bindings = writer
+            .bind_packs(&[
+                GitPackLocatorRecord {
+                    pack_id: MerkleHash::from_hex(&base_pack_id).expect("base pack ID"),
+                    committed_generation: 4,
+                    pack_index_hash: base_pack_index_hash,
+                    object_count: 2,
+                    pack_size: 256,
+                },
+                GitPackLocatorRecord {
+                    pack_id: MerkleHash::from_hex(&new_pack_id).expect("new pack ID"),
+                    committed_generation: 5,
+                    pack_index_hash: target_pack_index_hash,
+                    object_count: 4,
+                    pack_size: 512,
+                },
+            ])
+            .await
+            .expect("bind target packs");
+        writer
+            .write_locations(
+                bindings[1],
+                &[
+                    GitObjectLocatorEntry {
+                        oid: [0x33; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 12,
+                            entry_len: 64,
+                            crc32: 3,
+                        },
+                        metadata: Default::default(),
+                    },
+                    GitObjectLocatorEntry {
+                        oid: [0x44; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 76,
+                            entry_len: 64,
+                            crc32: 4,
+                        },
+                        metadata: Default::default(),
+                    },
+                    GitObjectLocatorEntry {
+                        oid: [0x55; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 140,
+                            entry_len: 64,
+                            crc32: 5,
+                        },
+                        metadata: Default::default(),
+                    },
+                    GitObjectLocatorEntry {
+                        oid: [0x66; 20],
+                        location: GitObjectLocation {
+                            pack_offset: 204,
+                            entry_len: 64,
+                            crc32: 6,
+                        },
+                        metadata: Default::default(),
+                    },
+                ],
+            )
+            .await
+            .expect("write target catalog rows");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 5,
+                pack_index_hash: target_pack_index_hash,
+            })
+            .await
+            .expect("publish target catalog");
+        writer.close().await.expect("close target catalog writer");
+
+        let first_evidence = GitVisibilityEdit::delta(
+            Some("1".repeat(40)),
+            "3".repeat(40),
+            &BTreeSet::from(["1".repeat(40), "2".repeat(40)]),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+            ]),
+        );
+        let first_evidence_hash = upload_edit(&store, &router, &first_evidence)
+            .await
+            .expect("upload visibility evidence");
+        let second_evidence = GitVisibilityEdit::delta(
+            Some("3".repeat(40)),
+            "5".repeat(40),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+            ]),
+            &BTreeSet::from([
+                "1".repeat(40),
+                "2".repeat(40),
+                "3".repeat(40),
+                "4".repeat(40),
+                "5".repeat(40),
+                "6".repeat(40),
+            ]),
+        );
+        let second_evidence_hash = upload_edit(&store, &router, &second_evidence)
+            .await
+            .expect("upload second visibility evidence");
+        let edits = vec![
+            RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some("1".repeat(40)),
+                new_oid: Some("3".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(first_evidence_hash),
+            },
+            RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some("3".repeat(40)),
+                new_oid: Some("5".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(second_evidence_hash),
+            },
+        ];
+        assert!(
+            prepare_catalog_journal_edits(
+                &store,
+                &router,
+                &base,
+                &edits,
+                &target.refs,
+                target.generation,
+                &target.pack_index_hash,
+                &target.git_validation_digest,
+            )
+            .await
+            .expect("prepare catalog visibility handoff")
+        );
+        assert!(
+            ensure_catalog_bound(&store, &router, &target)
+                .await
+                .expect("apply catalog visibility handoff")
+        );
+        let lazy = read_catalog_with_format(
+            &store,
+            &router,
+            target.generation,
+            &target.pack_index_hash,
+            &target.git_validation_digest,
+        )
+        .await
+        .expect("read target catalog proof");
+        assert_eq!(
+            lazy.index.ordinals_for_refs(["refs/heads/main"]),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            lazy.index.incremental_ordinals("refs/heads/main", 4, &[0]),
+            Some(vec![2, 3, 4, 5])
         );
     }
 

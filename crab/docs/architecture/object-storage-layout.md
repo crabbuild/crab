@@ -143,6 +143,7 @@ Paths are relative to `repo_prefix`.
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
 | `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
 | `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
+| `metadata/git-visibility-pending/v1/{validation-digest}.json` | `crab-metadata`: catalog-ordinal visibility delta awaiting owner catalog publication | Immutable, current-manifest recovery root |
 | `manifests/commit-graph-{blake3}` | complete split commit-graph descriptor pinned by `manifest` | Immutable |
 | `metadata/commit-graph/layers/{blake3}.bin` | positional commit records and parent ordinals | Immutable |
 | `locks/` | coordination namespaces described below | Mutable |

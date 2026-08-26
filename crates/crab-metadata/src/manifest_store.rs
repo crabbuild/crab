@@ -394,21 +394,36 @@ pub async fn compact_ref_journal(
         }
     }
 
-    // Complete evidence publishes authorization before the compacted manifest;
-    // otherwise no proof is written and upload-pack withholds protocol v2.
+    // A catalog-bound base proof can be carried forward as ordinal edits. The
+    // owner finishes that small handoff after publishing the target catalog,
+    // avoiding a repository-sized OID materialization during compaction.
     let compacted_transactions = snapshot.journal.transactions.clone();
-    let git_visibility_published = if let Some(visibility) =
-        crate::git_visibility::compact_journal_edits(
-            store,
-            router,
-            &snapshot.manifest,
-            &snapshot.journal.ordered_edits,
-            generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-            &manifest.refs,
-        )
-        .await?
+    let visibility_deferred = crate::git_visibility::prepare_catalog_journal_edits(
+        store,
+        router,
+        &snapshot.manifest,
+        &snapshot.journal.ordered_edits,
+        &manifest.refs,
+        generation,
+        &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
+    )
+    .await?;
+    let git_visibility_published = if visibility_deferred {
+        write_ref_journal_frontier(store, router, &manifest, &snapshot.journal.visible_heads)
+            .await?;
+        false
+    } else if let Some(visibility) = crate::git_visibility::compact_journal_edits(
+        store,
+        router,
+        &snapshot.manifest,
+        &snapshot.journal.ordered_edits,
+        generation,
+        &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
+        &manifest.refs,
+    )
+    .await?
     {
         futures_util::future::try_join(
             crate::git_visibility::upload_if_absent(store, router, &visibility),

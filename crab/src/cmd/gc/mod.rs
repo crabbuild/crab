@@ -1650,6 +1650,9 @@ pub async fn reachable_bulk_objects_from_manifest(
     let mut reachable = HashSet::new();
 
     extend_reachable_bulk_objects(store, router, &manifest, &mut reachable).await?;
+    if let Some(path) = current_git_visibility_pending_root(router, &manifest) {
+        reachable.insert(path);
+    }
 
     debug!(
         reachable_bulk_objects = reachable.len(),
@@ -1723,6 +1726,18 @@ async fn extend_reachable_bulk_objects(
     }
 
     Ok(())
+}
+
+fn current_git_visibility_pending_root(
+    router: &StoreLayout,
+    manifest: &crate::metadata::manifest::Manifest,
+) -> Option<String> {
+    (!manifest.refs.is_empty() && !manifest.pack_index_hash.is_empty()).then(|| {
+        router
+            .git_visibility_pending_path(&manifest.git_validation_digest)
+            .as_ref()
+            .to_owned()
+    })
 }
 
 async fn extend_shallow_closure_reachable(
@@ -1877,6 +1892,9 @@ async fn stream_repo_reachability(
     };
 
     stream_reachable_bulk_objects(store, router, &manifest, &mut sink).await?;
+    if let Some(path) = current_git_visibility_pending_root(router, &manifest) {
+        sink.add(path).await?;
+    }
     stream_reachable_workflow_objects(store, router, &mut sink).await?;
     sink.add(router.manifest_path().as_ref().to_owned()).await?;
 
@@ -2324,6 +2342,9 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     let manifest = snapshot.manifest;
     let mut reachable = HashSet::new();
     extend_reachable_bulk_objects(store, router, &manifest, &mut reachable).await?;
+    if let Some(path) = current_git_visibility_pending_root(router, &manifest) {
+        reachable.insert(path);
+    }
     extend_reachable_workflow_objects(store, router, &mut reachable).await?;
     reachable.insert(router.manifest_path().as_ref().to_string());
 
@@ -3467,7 +3488,7 @@ mod tests {
 
         // The reachable set should contain both segmented index objects and
         // the immutable segments they reference.
-        assert_eq!(reachable.len(), 6);
+        assert_eq!(reachable.len(), 7);
         assert!(reachable.contains(&format!(
             "org/repo/metadata/shard/indexes/{shard_hash}.json"
         )));
@@ -3481,6 +3502,10 @@ mod tests {
         assert!(reachable.contains(&format!(
             "org/repo/metadata/git-visibility/{:020}-{pack_hash}.json",
             manifest.generation,
+        )));
+        assert!(reachable.contains(&format!(
+            "org/repo/metadata/git-visibility-pending/v1/{}.json",
+            manifest.git_validation_digest
         )));
 
         // An object NOT in the reachable set is unreachable.
