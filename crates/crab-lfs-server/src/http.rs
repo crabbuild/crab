@@ -1021,6 +1021,7 @@ fn is_missing(error: &LfsError) -> bool {
         )
 }
 
+#[allow(clippy::result_large_err)]
 async fn read_json<T>(body: Body, limit: usize) -> Result<T, Response>
 where
     T: for<'de> Deserialize<'de>,
@@ -1032,6 +1033,7 @@ where
         .map_err(|source| error_response(StatusCode::UNPROCESSABLE_ENTITY, source.to_string()))
 }
 
+#[allow(clippy::result_large_err)]
 async fn read_json_or_default<T>(body: Body, limit: usize) -> Result<T, Response>
 where
     T: for<'de> Deserialize<'de> + Default,
