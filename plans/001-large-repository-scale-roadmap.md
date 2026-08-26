@@ -105,6 +105,13 @@ The 2026-08-26 follow-up is committed as `c57ee1f4`:
   diagnostics and destructive bucket GC remains disabled until its separate
   completeness gate is proven.
 
+The next owner hardening keeps the documented one-action-per-cycle contract
+literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
+from running in the same poll. Owner JSONL samples also expose a stable
+`maintenance_reason` and `next_eligibility_secs`, with immediate rechecks
+represented as zero after supersession. This makes maintenance backlog and
+lease occupancy observable without adding public configuration knobs.
+
 Focused source proof for this follow-up passes formatting, `cargo check -p
 crab`, 30 catalog-visibility tests, 39 locator tests with one intentional
 stress test ignored, five repack tests, and 23 upload-pack tests. The fresh
@@ -211,6 +218,9 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`):
   retained transitions together whenever the shared object dictionary grows,
   so validation cannot observe a shorter transition bitmap after an unrelated
   ref update.
+- generation-owner cycles execute at most one derived-state action, and owner
+  samples identify the action reason and next eligibility for operational
+  scheduling.
 
 Still required before the roadmap is DONE:
 

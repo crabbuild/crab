@@ -371,6 +371,8 @@ fn build_metadb(
 struct GenerationOwnerSample {
     generation: u64,
     action: &'static str,
+    maintenance_reason: &'static str,
+    next_eligibility_secs: u64,
     locator_advanced: bool,
     visibility: &'static str,
     active_packs: u64,
@@ -500,12 +502,20 @@ async fn generation_owner_loop(
             return Ok(());
         }
         match Box::pin(generation_owner_sample(
-            store, router, lock_ttl, config, cancel,
+            store,
+            router,
+            lock_ttl,
+            interval_secs,
+            config,
+            cancel,
         ))
         .await
         {
-            Ok(sample) => {
+            Ok(mut sample) => {
                 consecutive_errors = 0;
+                if once {
+                    sample.next_eligibility_secs = 0;
+                }
                 render_generation_owner_sample(&sample, jsonl)?;
                 if once {
                     return Ok(());
@@ -535,6 +545,7 @@ async fn generation_owner_sample(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
     lock_ttl: std::time::Duration,
+    interval_secs: u64,
     config: &Config,
     cancel: &CancellationToken,
 ) -> Result<GenerationOwnerSample> {
@@ -553,6 +564,8 @@ async fn generation_owner_sample(
         return Ok(GenerationOwnerSample {
             generation,
             action: "ref_journal_compaction",
+            maintenance_reason: generation_owner_reason("ref_journal_compaction"),
+            next_eligibility_secs: 0,
             locator_advanced: false,
             visibility: "deferred",
             active_packs: 0,
@@ -599,6 +612,8 @@ async fn generation_owner_sample(
         return Ok(GenerationOwnerSample {
             generation,
             action: "catalog_advance",
+            maintenance_reason: generation_owner_reason("catalog_advance"),
+            next_eligibility_secs: interval_secs,
             locator_advanced,
             visibility: "deferred",
             active_packs,
@@ -647,6 +662,12 @@ async fn generation_owner_sample(
             } else {
                 "visibility_repair"
             },
+            maintenance_reason: generation_owner_reason(if superseded {
+                "superseded"
+            } else {
+                "visibility_repair"
+            }),
+            next_eligibility_secs: if superseded { 0 } else { interval_secs },
             locator_advanced,
             visibility,
             active_packs,
@@ -663,7 +684,10 @@ async fn generation_owner_sample(
         });
     }
     let mut graph = maintain_split_commit_graph(store, router, &manifest, cancel).await?;
-    if graph.action != "superseded" {
+    // The owner performs one derived-state action per cycle. A graph rebuild
+    // or compaction must not be followed by shallow-closure work in the same
+    // pass, otherwise a large repository can monopolize the owner lease.
+    if graph.action == "none" {
         match crate::git::push::rebuild_shallow_closure_index_from_remote_packs_if_current(
             store,
             router,
@@ -677,7 +701,7 @@ async fn generation_owner_sample(
                 graph.action = "superseded";
                 superseded = true;
             }
-            Some(true) if graph.action == "none" => {
+            Some(true) => {
                 graph.action = "shallow_closure_rebuild";
             }
             Some(_) => {}
@@ -706,6 +730,8 @@ async fn generation_owner_sample(
     Ok(GenerationOwnerSample {
         generation,
         action: graph.action,
+        maintenance_reason: generation_owner_reason(graph.action),
+        next_eligibility_secs: if superseded { 0 } else { interval_secs },
         locator_advanced,
         visibility,
         active_packs,
@@ -720,6 +746,21 @@ async fn generation_owner_sample(
         superseded,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+fn generation_owner_reason(action: &str) -> &'static str {
+    match action {
+        "ref_journal_compaction" => "active_ref_journal",
+        "catalog_advance" => "catalog_coverage_stale",
+        "visibility_repair" => "visibility_missing_or_stale",
+        "commit_graph_incremental" => "commit_graph_missing_incremental",
+        "commit_graph_rebuild" => "commit_graph_missing",
+        "commit_graph_compaction" => "commit_graph_layers_due",
+        "shallow_closure_rebuild" => "shallow_closure_missing",
+        "geometric_repack" => "geometric_pack_threshold",
+        "superseded" => "manifest_superseded",
+        _ => "no_maintenance_due",
+    }
 }
 
 async fn maintain_object_catalog(
@@ -997,6 +1038,8 @@ fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -
             commit_graph_bytes = sample.commit_graph_bytes,
             maintenance_bytes_read = sample.maintenance_bytes_read,
             maintenance_bytes_written = sample.maintenance_bytes_written,
+            maintenance_reason = sample.maintenance_reason,
+            next_eligibility_secs = sample.next_eligibility_secs,
             superseded = sample.superseded,
             elapsed_ms = sample.elapsed_ms,
             "Git generation owner sample completed"
@@ -3821,6 +3864,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_owner_reason_is_stable_for_each_action() {
+        let reasons = [
+            ("ref_journal_compaction", "active_ref_journal"),
+            ("catalog_advance", "catalog_coverage_stale"),
+            ("visibility_repair", "visibility_missing_or_stale"),
+            (
+                "commit_graph_incremental",
+                "commit_graph_missing_incremental",
+            ),
+            ("commit_graph_rebuild", "commit_graph_missing"),
+            ("commit_graph_compaction", "commit_graph_layers_due"),
+            ("shallow_closure_rebuild", "shallow_closure_missing"),
+            ("geometric_repack", "geometric_pack_threshold"),
+            ("superseded", "manifest_superseded"),
+            ("none", "no_maintenance_due"),
+        ];
+
+        for (action, reason) in reasons {
+            assert_eq!(generation_owner_reason(action), reason);
+        }
+    }
+
     #[tokio::test]
     async fn generation_owner_accepts_an_empty_current_generation() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3837,6 +3903,7 @@ mod tests {
             &store,
             &router,
             std::time::Duration::from_secs(60),
+            60,
             &Config::default(),
             &CancellationToken::new(),
         )
@@ -3845,6 +3912,8 @@ mod tests {
 
         assert_eq!(sample.generation, 0);
         assert_eq!(sample.action, "none");
+        assert_eq!(sample.maintenance_reason, "no_maintenance_due");
+        assert_eq!(sample.next_eligibility_secs, 60);
         assert!(!sample.locator_advanced);
         assert_eq!(sample.visibility, "published");
         assert!(!sample.superseded);
@@ -3897,6 +3966,7 @@ mod tests {
             &store,
             &router,
             std::time::Duration::from_secs(60),
+            60,
             &Config::default(),
             &CancellationToken::new(),
         )
@@ -3904,6 +3974,8 @@ mod tests {
         .expect("owner should compact active journal");
 
         assert_eq!(sample.action, "ref_journal_compaction");
+        assert_eq!(sample.maintenance_reason, "active_ref_journal");
+        assert_eq!(sample.next_eligibility_secs, 0);
         assert!(sample.superseded);
         let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await

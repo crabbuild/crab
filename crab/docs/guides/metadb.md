@@ -101,12 +101,14 @@ command.
 
 Run one durable derived-state owner for a repository. Each cycle pins one
 manifest snapshot and performs at most one bounded action: advance the object
-catalog, repair visibility, rebuild or compact the split commit graph, or roll
-up the smallest non-geometric pack suffix. The locator writer and its lease are
-opened only for catalog work and are closed before repository-sized graph or
-pack work begins. Push and upload-pack clients detect the repository owner and
-leave repair to it; complete-pack fetch remains the safe fallback while a new
-generation is being indexed.
+catalog, repair visibility, rebuild or compact the split commit graph, rebuild
+the shallow-closure index, or roll up the smallest non-geometric pack suffix.
+Graph maintenance never shares a cycle with shallow-closure rebuilding, so a
+large repository cannot let one poll monopolize the owner lease. The locator
+writer and its lease are opened only for catalog work and are closed before
+repository-sized graph or pack work begins. Push and upload-pack clients detect
+the repository owner and leave repair to it; complete-pack fetch remains the
+safe fallback while a new generation is being indexed.
 
 ```bash
 crab metadb owner
@@ -149,9 +151,14 @@ rebuild once; later generations can return to the incremental path.
 
 `--once` executes one decision, not the entire backlog. Repeat it until
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per
-sample with the selected action, active pack count/bytes, geometric roll-up
-size, catalog and commit-graph layer count/bytes, maintenance bytes read and
-written, visibility state, supersession, and elapsed time.
+sample with the selected action, stable `maintenance_reason`,
+`next_eligibility_secs` (`0` when the owner immediately rechecks a superseded
+generation), active pack count/bytes, geometric roll-up size, catalog and
+commit-graph layer count/bytes, maintenance bytes read and written, visibility
+state, supersession, and elapsed time. The reason values are operational
+labels, not user-controlled repository names: for example,
+`catalog_coverage_stale`, `commit_graph_layers_due`,
+`shallow_closure_missing`, and `geometric_pack_threshold`.
 
 ### `crab metadb compact`
 
