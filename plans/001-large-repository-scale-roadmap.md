@@ -90,10 +90,18 @@ errors fail closed. This closes the capability-to-admission crash recovery gap
 found by the released-shape RustFS lifecycle while preserving the push
 acknowledgement boundary.
 
+The active-marker recovery path is now complete for the discovered crash
+boundary: compaction promotes any prepared ref heads after the manifest CAS,
+retains the marker when that CAS repair fails, and releases the exact recorded
+ref-lock holder after successful compaction. The metadata regression and Crab
+upload-pack admission regression both exercise the prepared-head state left by
+process death; the released-shape RustFS lifecycle remains the final end-to-end
+proof.
+
 Implemented on the current branch (qualification evidence at `04655f3b`; latest
 admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`;
 capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
-`be27f458`):
+`be27f458`; active-marker recovery fix at `73ef4035`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -148,6 +156,9 @@ capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
 - protocol-v2 qualification now settles the expected post-push admission repair
   before taking the filter-matrix baseline, keeping the steady-state
   read-only remote assertion strict.
+- active-marker compaction repairs prepared ref heads before marker cleanup and
+  releases the committed holder with a holder-checked ref-lock CAS, so a
+  process death after the durable ref boundary does not strand the next push.
 
 Still required before the roadmap is DONE:
 
