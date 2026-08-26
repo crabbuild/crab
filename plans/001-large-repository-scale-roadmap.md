@@ -95,13 +95,20 @@ boundary: compaction promotes any prepared ref heads after the manifest CAS,
 retains the marker when that CAS repair fails, and releases the exact recorded
 ref-lock holder after successful compaction. The metadata regression and Crab
 upload-pack admission regression both exercise the prepared-head state left by
-process death; the released-shape RustFS lifecycle remains the final end-to-end
-proof.
+process death. The first released-shape run after that work exposed one more
+shared-dictionary invariant: an incremental edit resized current-ref and
+history bitmaps but left transition bitmaps for unrelated refs at their old
+length. `01d588ea` resizes every retained transition bitmap when the dictionary
+grows and adds a regression that binds the repaired index. The fresh
+[released-shape RustFS workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230)
+passed the real-Git lifecycle, response-loss/crash-recovery lifecycle, and all
+Git 2.30/2.40/2.45/current compatibility jobs on that fix.
 
 Implemented on the current branch (qualification evidence at `04655f3b`; latest
 admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`;
 capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
-`be27f458`; active-marker recovery fix at `73ef4035`):
+`be27f458`; active-marker recovery fix at `73ef4035`; transition-bitmap fix at
+`01d588ea`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -159,6 +166,10 @@ capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
 - active-marker compaction repairs prepared ref heads before marker cleanup and
   releases the committed holder with a holder-checked ref-lock CAS, so a
   process death after the durable ref boundary does not strand the next push.
+- visibility edits resize bitmap closures in refs, incremental history, and
+  retained transitions together whenever the shared object dictionary grows,
+  so validation cannot observe a shorter transition bitmap after an unrelated
+  ref update.
 
 Still required before the roadmap is DONE:
 
