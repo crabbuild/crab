@@ -273,12 +273,57 @@ impl LfsLockManager {
         self.list_records(&prefix).await
     }
 
+    /// Lists a bounded, ID-sorted page of active locks.
+    ///
+    /// `limit` bounds the number of records retained while the object-store
+    /// listing is scanned. The returned vector may contain fewer records when
+    /// the filters do not match; callers can request one extra record to
+    /// determine whether a next page exists.
+    pub async fn list_page(
+        &self,
+        path: Option<&str>,
+        id: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> LockResult<Vec<LockRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = Path::from(self.namespace_path());
+        let mut records = Vec::with_capacity(limit);
+        let mut stream = self.store.inner().list(Some(&prefix));
+        while let Some(result) = stream.next().await {
+            let object = result.map_err(|error| {
+                LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
+            })?;
+            let (body, _) = match self.store.get_with_etag(&object.location).await {
+                Ok(result) => result,
+                Err(StorageError::NotFound { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let record = decode_record(&object.location, &body)?;
+            if is_released(&record)
+                || is_expired(&record)
+                || path.is_some_and(|expected| expected != record.path)
+                || id.is_some_and(|expected| expected != record.id)
+                || cursor.is_some_and(|value| record.id.as_str() <= value)
+            {
+                continue;
+            }
+            if id.is_some() {
+                return Ok(vec![record]);
+            }
+            insert_page_record(&mut records, record, limit);
+        }
+        Ok(records)
+    }
+
     /// Finds an active lock by its public ID.
     pub async fn find_by_id(&self, id: &str) -> LockResult<LockRecord> {
-        self.list()
+        self.list_page(None, Some(id), None, 1)
             .await?
             .into_iter()
-            .find(|record| record.id == id)
+            .next()
             .ok_or_else(|| LfsLockError::NotFound {
                 path: format!("lock id {id}"),
             })
@@ -286,29 +331,35 @@ impl LfsLockManager {
 
     /// Finds an active lock for a repository-relative path.
     pub async fn find_by_path(&self, path: &str) -> LockResult<LockRecord> {
-        self.list()
-            .await?
-            .into_iter()
-            .find(|record| record.path == path)
-            .ok_or_else(|| LfsLockError::NotFound {
+        let object_path = Path::from(self.lock_path(path));
+        let (body, _) =
+            self.store
+                .get_with_etag(&object_path)
+                .await
+                .map_err(|error| match error {
+                    StorageError::NotFound { .. } => LfsLockError::NotFound {
+                        path: path.to_owned(),
+                    },
+                    other => other.into(),
+                })?;
+        let record = decode_record(&object_path, &body)?;
+        if record.path != path || is_released(&record) || is_expired(&record) {
+            return Err(LfsLockError::NotFound {
                 path: path.to_owned(),
-            })
+            });
+        }
+        Ok(record)
     }
 
     /// Verifies all stored records and returns malformed object keys.
     pub async fn verify_locks(&self) -> LockResult<Vec<String>> {
         let prefix = Path::from(self.namespace_path());
-        let stream = self.store.inner().list(Some(&prefix));
-        let objects = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| {
+        let mut invalid = Vec::new();
+        let mut stream = self.store.inner().list(Some(&prefix));
+        while let Some(result) = stream.next().await {
+            let object = result.map_err(|error| {
                 LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
             })?;
-        let mut invalid = Vec::new();
-        for object in objects {
             match self.store.get_with_etag(&object.location).await {
                 Ok((body, _)) if serde_json::from_slice::<LockRecord>(&body).is_ok() => {}
                 Ok(_) => invalid.push(object.location.to_string()),
@@ -343,17 +394,12 @@ impl LfsLockManager {
     }
 
     async fn list_records(&self, prefix: &Path) -> LockResult<Vec<LockRecord>> {
-        let stream = self.store.inner().list(Some(prefix));
-        let objects = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| {
+        let mut records = Vec::new();
+        let mut stream = self.store.inner().list(Some(prefix));
+        while let Some(result) = stream.next().await {
+            let object = result.map_err(|error| {
                 LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
             })?;
-        let mut records = Vec::new();
-        for object in objects {
             match self.store.get_with_etag(&object.location).await {
                 Ok((body, _)) => {
                     let record = decode_record(&object.location, &body)?;
@@ -379,6 +425,16 @@ impl LfsLockManager {
     fn lock_path(&self, path: &str) -> String {
         let hash = blake3::hash(path.as_bytes()).to_hex();
         format!("{}/{hash}", self.namespace_path())
+    }
+}
+
+fn insert_page_record(records: &mut Vec<LockRecord>, record: LockRecord, limit: usize) {
+    let index = records
+        .binary_search_by(|current| current.id.cmp(&record.id))
+        .unwrap_or_else(|index| index);
+    records.insert(index, record);
+    if records.len() > limit {
+        records.pop();
     }
 }
 

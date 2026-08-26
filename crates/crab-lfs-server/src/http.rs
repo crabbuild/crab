@@ -1446,14 +1446,23 @@ async fn list_locks(state: &AppState, repository: &str, uri: &Uri) -> Response {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
     let manager = lock_manager(state, repository);
-    let mut records = match manager.list().await {
+    let limit = query.limit.unwrap_or(100);
+    let records = match manager
+        .list_page(
+            query.path.as_deref(),
+            query.id.as_deref(),
+            query.cursor.as_deref(),
+            limit.saturating_add(1),
+        )
+        .await
+    {
         Ok(records) => records,
         Err(error) => return lock_error_response(error),
     };
-    filter_and_page_locks(&mut records, &query);
-    let next_cursor = next_cursor(&records, query.limit.unwrap_or(100));
+    let next_cursor = next_cursor(&records, limit);
     let locks = match records
         .into_iter()
+        .take(limit)
         .map(http_lock)
         .collect::<std::result::Result<Vec<_>, _>>()
     {
@@ -1513,14 +1522,18 @@ async fn verify_locks(
         Err(response) => return response,
     };
     let manager = lock_manager(state, repository);
-    let mut records = match manager.list().await {
+    let mut records = match manager
+        .list_page(
+            None,
+            None,
+            request.cursor.as_deref(),
+            limit.saturating_add(1),
+        )
+        .await
+    {
         Ok(records) => records,
         Err(error) => return lock_error_response(error),
     };
-    if let Some(cursor) = request.cursor.as_deref() {
-        records.retain(|record| record.id.as_str() > cursor);
-    }
-    records.sort_by(|left, right| left.id.cmp(&right.id));
     let has_more = records.len() > limit;
     if has_more {
         records.truncate(limit);
@@ -1621,23 +1634,6 @@ fn parse_limit(limit: Option<usize>) -> Result<usize, Response> {
         ));
     }
     Ok(limit.min(MAX_LOCK_RESULTS))
-}
-
-fn filter_and_page_locks(records: &mut Vec<LockRecord>, query: &LockQuery) {
-    if let Some(path) = query.path.as_deref() {
-        records.retain(|record| record.path == path);
-    }
-    if let Some(id) = query.id.as_deref() {
-        records.retain(|record| record.id == id);
-    }
-    records.sort_by(|left, right| left.id.cmp(&right.id));
-    if let Some(cursor) = query.cursor.as_deref() {
-        records.retain(|record| record.id.as_str() > cursor);
-    }
-    let limit = query.limit.unwrap_or(100);
-    if records.len() > limit {
-        records.truncate(limit + 1);
-    }
 }
 
 fn next_cursor(records: &[LockRecord], limit: usize) -> Option<String> {
@@ -2105,5 +2101,53 @@ mod tests {
         let listed_json: serde_json::Value =
             serde_json::from_slice(&listed_body).expect("empty lock list JSON");
         assert!(listed_json["locks"].as_array().expect("locks").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lock_listing_honors_limit_without_returning_lookahead() {
+        let (app, _spool) = app();
+        for path in ["a.bin", "b.bin", "c.bin"] {
+            let response = request(
+                &app,
+                Method::POST,
+                "/repo.git/info/lfs/locks",
+                Body::from(serde_json::json!({"path": path}).to_string()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let first = request(
+            &app,
+            Method::GET,
+            "/repo.git/info/lfs/locks?limit=1",
+            Body::empty(),
+        )
+        .await;
+        let first_body = to_bytes(first.into_body(), MAX_SMALL_BODY_BYTES)
+            .await
+            .expect("first lock page body");
+        let first_json: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("first lock page JSON");
+        assert_eq!(first_json["locks"].as_array().expect("locks").len(), 1);
+        let cursor = first_json["next_cursor"].as_str().expect("next cursor");
+        let first_id = first_json["locks"][0]["id"]
+            .as_str()
+            .expect("first lock ID");
+
+        let second = request(
+            &app,
+            Method::GET,
+            &format!("/repo.git/info/lfs/locks?limit=1&cursor={cursor}"),
+            Body::empty(),
+        )
+        .await;
+        let second_body = to_bytes(second.into_body(), MAX_SMALL_BODY_BYTES)
+            .await
+            .expect("second lock page body");
+        let second_json: serde_json::Value =
+            serde_json::from_slice(&second_body).expect("second lock page JSON");
+        assert_eq!(second_json["locks"].as_array().expect("locks").len(), 1);
+        assert_ne!(second_json["locks"][0]["id"], first_id);
     }
 }

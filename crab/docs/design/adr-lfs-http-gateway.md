@@ -54,11 +54,13 @@ transfers.
 
 The gateway applies a bounded Batch body, per-object size limit, request
 timeout, concurrent request limit, upload concurrency limit, streamed-download
-concurrency bound, and temporary disk spooling. The origin URL is built only
-through crab-storage. Native mTLS or an explicitly configured trusted proxy is
-required for mTLS identity; an untrusted `x-client-cn` header is never
-accepted. Metrics, rate-limit integration, and managed protected-push binding
-remain follow-up controls before broad internet exposure.
+concurrency bound, temporary disk spooling, and bounded lock-list page
+retention. Lock creation is exclusive, and unlock CAS operations are bound to
+the requested lock ID. The origin URL is built only through crab-storage.
+Native mTLS or an explicitly configured trusted proxy is required for mTLS
+identity; an untrusted `x-client-cn` header is never accepted. Metrics,
+rate-limit integration, and managed protected-push binding remain follow-up
+controls before broad internet exposure.
 
 ## Compatibility contract
 

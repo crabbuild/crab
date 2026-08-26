@@ -37,6 +37,11 @@ read/write/admin actions per repository, and `server.action_secret` (or
 `CRAB_LFS_ACTION_SECRET`) so Batch actions are short-lived and bound to their
 repository, operation, OID, and size.
 
+Lock creation is exclusive, including repeated requests from the same owner,
+and lock listing is ID-ordered with bounded page retention. Unlock operations
+bind the compare-and-swap release to the requested lock ID so a stale force
+unlock cannot release a replacement lock for the same path.
+
 When no action secret is configured, the gateway permits unauthenticated
 object actions only with `auth.mechanism = "none"`, or with an end-to-end mTLS
 deployment whose client identity is present on every action request. Basic and
