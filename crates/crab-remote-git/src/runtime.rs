@@ -1309,8 +1309,11 @@ mod tests {
                 .insert_pack_index(
                     key.clone(),
                     Arc::new(PackIndex {
-                        by_offset: HashMap::new(),
                         object_ids: Vec::new(),
+                        pack_offsets: Vec::new(),
+                        crc32: Vec::new(),
+                        offset_order: Vec::new(),
+                        pack_data_end: 0,
                         pack_checksum: [0; 20],
                         source_bytes: 32,
                     }),
@@ -1323,8 +1326,11 @@ mod tests {
             .insert_pack_index(
                 keys[2].clone(),
                 Arc::new(PackIndex {
-                    by_offset: HashMap::new(),
                     object_ids: Vec::new(),
+                    pack_offsets: Vec::new(),
+                    crc32: Vec::new(),
+                    offset_order: Vec::new(),
+                    pack_data_end: 0,
                     pack_checksum: [0; 20],
                     source_bytes: 32,
                 }),
