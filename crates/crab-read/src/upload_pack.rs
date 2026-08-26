@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use bstr::ByteSlice;
+use crab_metadata::git_object_locator::{GitObjectMetadata, GitObjectOrdinal};
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
     CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, OperationContext,
@@ -1227,6 +1228,23 @@ fn gix_kind(kind: crab_metadata::git_object_locator::GitObjectKind) -> gix_objec
     }
 }
 
+fn catalog_filter_ordinals(
+    filter: &UploadPackFilter,
+    roots: &HashSet<GitObjectOrdinal>,
+    ordinals: impl IntoIterator<Item = (GitObjectOrdinal, GitObjectMetadata)>,
+) -> Vec<GitObjectOrdinal> {
+    ordinals
+        .into_iter()
+        .filter_map(|(ordinal, metadata)| {
+            (roots.contains(&ordinal)
+                || metadata
+                    .kind
+                    .is_some_and(|kind| catalog_filter_accepts(filter, gix_kind(kind))))
+            .then_some(ordinal)
+        })
+        .collect()
+}
+
 async fn plan_from_visibility_catalog(
     operation: &OperationContext,
     references: &[RepositoryRef],
@@ -1408,17 +1426,11 @@ async fn plan_from_visibility_catalog_ordinals(
         .ok_or(RemoteGitError::Corrupt {
             stage: CorruptionStage::Locator,
         })?;
-    let selected_ordinals = ordinals
-        .into_iter()
-        .zip(metadata)
-        .filter_map(|(ordinal, metadata)| {
-            (root_ordinals.contains(&ordinal)
-                || metadata
-                    .kind
-                    .is_some_and(|kind| catalog_filter_accepts(&request.filter, gix_kind(kind))))
-            .then_some(ordinal)
-        })
-        .collect::<Vec<_>>();
+    let selected_ordinals = catalog_filter_ordinals(
+        &request.filter,
+        &root_ordinals,
+        ordinals.into_iter().zip(metadata),
+    );
     let object_ids = operation
         .catalog_object_ids_by_ordinal(&selected_ordinals)
         .await?;
@@ -2080,6 +2092,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
+    use crab_metadata::git_object_locator::GitObjectKind;
     use crab_metadata::git_visibility::{compact_journal_edits, upload_edit, upload_if_absent};
     use crab_metadata::manifests::Manifest;
     use crab_metadata::ref_journal::RefJournalEdit;
@@ -2338,6 +2351,40 @@ mod tests {
             &UploadPackFilter::ObjectType(UploadPackObjectType::Blob),
             gix_object::Kind::Tree
         ));
+    }
+
+    #[test]
+    fn ordinal_metadata_filter_keeps_roots_and_selected_kinds() {
+        let filter = UploadPackFilter::BlobNone;
+        let selected = catalog_filter_ordinals(
+            &filter,
+            &HashSet::from([0]),
+            [
+                (
+                    0,
+                    GitObjectMetadata {
+                        kind: Some(GitObjectKind::Blob),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    1,
+                    GitObjectMetadata {
+                        kind: Some(GitObjectKind::Tree),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    2,
+                    GitObjectMetadata {
+                        kind: Some(GitObjectKind::Blob),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+
+        assert_eq!(selected, [0, 1]);
     }
 
     #[test]
