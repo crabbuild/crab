@@ -65,8 +65,8 @@ validated but does not yet partition locks by branch.
 The gateway applies a bounded Batch body, per-object size limit, request
 timeout, concurrent request limit, upload concurrency limit, bounded password
 verification concurrency, aggregate process-local spool-byte budget,
-streamed-download concurrency bound, temporary disk spooling, and bounded
-lock-list page retention. The gateway exports process-wide request/status/byte counters
+streamed-download concurrency bound, temporary disk spooling, bounded ordered
+lock-record reads, and bounded lock-list page retention. The gateway exports process-wide request/status/byte counters
 without repository or path labels, and readiness detects a missing spool
 directory. Startup recovery charges recent gateway-owned spool files against the
 same aggregate budget and refuses to start when retained bytes exceed it. Lock

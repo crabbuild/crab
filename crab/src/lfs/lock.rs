@@ -19,6 +19,8 @@ use tracing::debug;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
+const MAX_LOCK_READ_CONCURRENCY: usize = 32;
+
 /// JSON payload stored in the lock file in object storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockRecord {
@@ -299,21 +301,26 @@ impl LockManager {
             })?;
 
         let mut records = Vec::new();
-        for meta in objects {
-            match self.store.get_with_etag(&meta.location).await {
-                Ok((body, _)) => {
-                    if let Ok(record) = serde_json::from_slice::<LockRecord>(&body)
-                        && !Self::is_released(&record)
-                    {
-                        records.push(record);
-                    } else {
-                        debug!(key = %meta.location, "lock record JSON deserialization failed");
-                    }
-                }
-                Err(CrabError::NotFound { .. }) => {
-                    // Disappeared between list and get — skip.
-                }
-                Err(e) => return Err(e),
+        let mut reads = futures_util::stream::iter(objects.into_iter().map(|meta| async move {
+            let key = meta.location.to_string();
+            let result: Result<Option<LockRecord>> =
+                match self.store.get_with_etag(&meta.location).await {
+                    Ok((body, _)) => match serde_json::from_slice::<LockRecord>(&body) {
+                        Ok(record) if !Self::is_released(&record) => Ok(Some(record)),
+                        Ok(_) | Err(_) => {
+                            debug!(key = %key, "lock record JSON deserialization failed");
+                            Ok(None)
+                        }
+                    },
+                    Err(CrabError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(record) = result? {
+                records.push(record);
             }
         }
 
@@ -344,17 +351,22 @@ impl LockManager {
             })?;
 
         let mut invalid = Vec::new();
-        for meta in objects {
-            match self.store.get_with_etag(&meta.location).await {
-                Ok((body, _)) => {
-                    if serde_json::from_slice::<LockRecord>(&body).is_err() {
-                        invalid.push(meta.location.to_string());
-                    }
-                }
-                Err(CrabError::NotFound { .. }) => {
-                    // Disappeared — skip.
-                }
-                Err(e) => return Err(e),
+        let mut reads = futures_util::stream::iter(objects.into_iter().map(|meta| async move {
+            let key = meta.location.to_string();
+            let result: Result<Option<String>> =
+                match self.store.get_with_etag(&meta.location).await {
+                    Ok((body, _)) => Ok(serde_json::from_slice::<LockRecord>(&body)
+                        .is_err()
+                        .then_some(key)),
+                    Err(CrabError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(key) = result? {
+                invalid.push(key);
             }
         }
 
@@ -384,30 +396,33 @@ impl LockManager {
     /// Propagates storage errors.
     pub async fn check_conflicts(&self, paths: &[String], owner: &str) -> Result<Vec<LockRecord>> {
         let mut conflicts = Vec::new();
-
-        for path in paths {
-            let key = self.lock_path(path);
+        let mut reads = futures_util::stream::iter(paths.iter().cloned().map(|path| async move {
+            let key = self.lock_path(&path);
             let obj_path = Path::from(key.as_str());
 
-            match self.store.get_with_etag(&obj_path).await {
+            let result: Result<Option<LockRecord>> = match self.store.get_with_etag(&obj_path).await
+            {
                 Ok((body, _)) => {
                     let record = serde_json::from_slice::<LockRecord>(&body).map_err(|error| {
                         CrabError::CorruptObject {
-                            path: key,
+                            path: key.clone(),
                             reason: format!("invalid LFS lock record: {error}"),
                         }
                     })?;
-                    if !Self::is_expired(&record)
+                    Ok((!Self::is_expired(&record)
                         && !Self::is_released(&record)
-                        && record.owner != owner
-                    {
-                        conflicts.push(record);
-                    }
+                        && record.owner != owner)
+                        .then_some(record))
                 }
-                Err(CrabError::NotFound { .. }) => {
-                    // No lock on this path — no conflict.
-                }
-                Err(e) => return Err(e),
+                Err(CrabError::NotFound { .. }) => Ok(None),
+                Err(error) => Err(error),
+            };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(record) = result? {
+                conflicts.push(record);
             }
         }
 

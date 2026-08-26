@@ -14,6 +14,8 @@ use tracing::debug;
 
 use crab_storage::{StorageError, Store};
 
+const MAX_LOCK_READ_CONCURRENCY: usize = 32;
+
 /// Result alias for LFS lock operations.
 pub type LockResult<T> = std::result::Result<T, LfsLockError>;
 
@@ -291,17 +293,30 @@ impl LfsLockManager {
         }
         let prefix = Path::from(self.namespace_path());
         let mut records = Vec::with_capacity(limit);
-        let mut stream = self.store.inner().list(Some(&prefix));
+        let mut stream =
+            self.store
+                .inner()
+                .list(Some(&prefix))
+                .map(|result| async {
+                    let object = result.map_err(|error| {
+                        LfsLockError::Storage(crab_storage::map_object_store_error(
+                            error,
+                            prefix.as_ref(),
+                        ))
+                    })?;
+                    match self.store.get_with_etag(&object.location).await {
+                        Ok((body, _)) => Ok::<Option<LockRecord>, LfsLockError>(Some(
+                            decode_record(&object.location, &body)?,
+                        )),
+                        Err(StorageError::NotFound { .. }) => Ok(None),
+                        Err(error) => Err(LfsLockError::Storage(error)),
+                    }
+                })
+                .buffered(MAX_LOCK_READ_CONCURRENCY);
         while let Some(result) = stream.next().await {
-            let object = result.map_err(|error| {
-                LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
-            })?;
-            let (body, _) = match self.store.get_with_etag(&object.location).await {
-                Ok(result) => result,
-                Err(StorageError::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
+            let Some(record) = result? else {
+                continue;
             };
-            let record = decode_record(&object.location, &body)?;
             if is_released(&record)
                 || is_expired(&record)
                 || path.is_some_and(|expected| expected != record.path)
@@ -355,16 +370,31 @@ impl LfsLockManager {
     pub async fn verify_locks(&self) -> LockResult<Vec<String>> {
         let prefix = Path::from(self.namespace_path());
         let mut invalid = Vec::new();
-        let mut stream = self.store.inner().list(Some(&prefix));
+        let mut stream = self
+            .store
+            .inner()
+            .list(Some(&prefix))
+            .map(|result| async {
+                let object = result.map_err(|error| {
+                    LfsLockError::Storage(crab_storage::map_object_store_error(
+                        error,
+                        prefix.as_ref(),
+                    ))
+                })?;
+                match self.store.get_with_etag(&object.location).await {
+                    Ok((body, _)) => Ok::<Option<String>, LfsLockError>(
+                        serde_json::from_slice::<LockRecord>(&body)
+                            .is_err()
+                            .then(|| object.location.to_string()),
+                    ),
+                    Err(StorageError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(LfsLockError::Storage(error)),
+                }
+            })
+            .buffered(MAX_LOCK_READ_CONCURRENCY);
         while let Some(result) = stream.next().await {
-            let object = result.map_err(|error| {
-                LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
-            })?;
-            match self.store.get_with_etag(&object.location).await {
-                Ok((body, _)) if serde_json::from_slice::<LockRecord>(&body).is_ok() => {}
-                Ok(_) => invalid.push(object.location.to_string()),
-                Err(StorageError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
+            if let Some(location) = result? {
+                invalid.push(location);
             }
         }
         Ok(invalid)
@@ -377,17 +407,24 @@ impl LfsLockManager {
         owner: &str,
     ) -> LockResult<Vec<LockRecord>> {
         let mut conflicts = Vec::new();
-        for path in paths {
+        let mut stream = futures_util::stream::iter(paths.iter().map(|path| async move {
             let object_path = Path::from(self.lock_path(path));
             match self.store.get_with_etag(&object_path).await {
                 Ok((body, _)) => {
                     let record = decode_record(&object_path, &body)?;
-                    if !is_expired(&record) && !is_released(&record) && record.owner != owner {
-                        conflicts.push(record);
-                    }
+                    Ok::<Option<LockRecord>, LfsLockError>(
+                        (!is_expired(&record) && !is_released(&record) && record.owner != owner)
+                            .then_some(record),
+                    )
                 }
-                Err(StorageError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
+                Err(StorageError::NotFound { .. }) => Ok(None),
+                Err(error) => Err(LfsLockError::Storage(error)),
+            }
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = stream.next().await {
+            if let Some(record) = result? {
+                conflicts.push(record);
             }
         }
         Ok(conflicts)
@@ -395,20 +432,31 @@ impl LfsLockManager {
 
     async fn list_records(&self, prefix: &Path) -> LockResult<Vec<LockRecord>> {
         let mut records = Vec::new();
-        let mut stream = self.store.inner().list(Some(prefix));
-        while let Some(result) = stream.next().await {
-            let object = result.map_err(|error| {
-                LfsLockError::Storage(crab_storage::map_object_store_error(error, prefix.as_ref()))
-            })?;
-            match self.store.get_with_etag(&object.location).await {
-                Ok((body, _)) => {
-                    let record = decode_record(&object.location, &body)?;
-                    if !is_released(&record) {
-                        records.push(record);
+        let mut stream =
+            self.store
+                .inner()
+                .list(Some(prefix))
+                .map(|result| async {
+                    let object = result.map_err(|error| {
+                        LfsLockError::Storage(crab_storage::map_object_store_error(
+                            error,
+                            prefix.as_ref(),
+                        ))
+                    })?;
+                    match self.store.get_with_etag(&object.location).await {
+                        Ok((body, _)) => Ok::<Option<LockRecord>, LfsLockError>(Some(
+                            decode_record(&object.location, &body)?,
+                        )),
+                        Err(StorageError::NotFound { .. }) => Ok(None),
+                        Err(error) => Err(LfsLockError::Storage(error)),
                     }
-                }
-                Err(StorageError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
+                })
+                .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = stream.next().await {
+            if let Some(record) = result?
+                && !is_released(&record)
+            {
+                records.push(record);
             }
         }
         Ok(records)

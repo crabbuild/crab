@@ -65,12 +65,14 @@ Signed Batch actions also include Git LFS `expires_in` metadata, matching the
 capability lifetime advertised by the URL.
 
 Lock creation is exclusive, including repeated requests from the same owner,
-and lock listing is ID-ordered with bounded page retention. Unlock operations
-bind the compare-and-swap release to the requested lock ID so a stale force
-unlock cannot release a replacement lock for the same path. Batch and locking
-requests accept the standard optional Git ref/refspec context; the current
-lock namespace is repository-wide, so that context is validated but does not
-yet partition locks by branch.
+and lock listing is ID-ordered with bounded page retention. Lock record reads
+for listing, verification, and pre-push conflict checks use bounded ordered
+concurrency; pagination still scans the repository lock prefix. Unlock
+operations bind the compare-and-swap release to the requested lock ID so a
+stale force unlock cannot release a replacement lock for the same path. Batch
+and locking requests accept the standard optional Git ref/refspec context; the
+current lock namespace is repository-wide, so that context is validated but
+does not yet partition locks by branch.
 
 When no action secret is configured, the gateway permits unauthenticated
 object actions only with `auth.mechanism = "none"`, or with an end-to-end mTLS
