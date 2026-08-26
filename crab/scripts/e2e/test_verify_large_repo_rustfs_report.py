@@ -278,7 +278,12 @@ class ReportVerificationTests(unittest.TestCase):
         VERIFY.verify_full_visibility_telemetry(
             {
                 "visibility_owner_seed": {
-                    "actions": ["catalog_advance", "commit_graph_rebuild", "none"],
+                    "actions": [
+                        "catalog_advance",
+                        "commit_graph_incremental",
+                        "commit_graph_rebuild",
+                        "none",
+                    ],
                     "telemetry": {
                         "visibility_duration_ms": 0,
                         "storage_requests": 0,

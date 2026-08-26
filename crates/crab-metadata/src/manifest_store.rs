@@ -197,6 +197,36 @@ pub async fn list_manifest_history_with_concurrency(
     Ok(entries)
 }
 
+/// List and validate immutable historical roots for one generation only.
+pub async fn list_manifest_history_for_generation(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    generation: u64,
+) -> Result<Vec<ManifestHistoryEntry>> {
+    let history_prefix = router.manifest_history_prefix();
+    let generation_prefix = router.manifest_history_generation_prefix(generation);
+    let objects = store
+        .list_prefix(&history_prefix)
+        .await?
+        .into_iter()
+        .filter(|object| {
+            object
+                .location
+                .as_ref()
+                .starts_with(generation_prefix.as_ref())
+        })
+        .collect::<Vec<_>>();
+    let mut entries =
+        futures_util::stream::iter(objects.into_iter().map(|object| async move {
+            read_history_entry(store, router, &object.location).await
+        }))
+        .buffer_unordered(DEFAULT_HISTORY_READ_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    entries.sort_unstable_by(|left, right| left.digest.cmp(&right.digest));
+    Ok(entries)
+}
+
 /// Streams validated historical manifests without retaining the complete
 /// history listing or body set in memory. Consumers that need deterministic
 /// ordering must impose it on their durable mark/output stream; GC only needs
@@ -240,12 +270,10 @@ pub async fn select_manifest_history(
             "historical manifest digest must be 64 lowercase hexadecimal characters".to_owned(),
         ));
     }
-    let mut matches = list_manifest_history(store, router)
+    let mut matches = list_manifest_history_for_generation(store, router, generation)
         .await?
         .into_iter()
-        .filter(|entry| {
-            entry.generation == generation && digest.is_none_or(|value| entry.digest == value)
-        });
+        .filter(|entry| digest.is_none_or(|value| entry.digest == value));
     let selected = matches.next().ok_or_else(|| MetadataError::CorruptObject {
         path: router.manifest_history_prefix().as_ref().to_owned(),
         reason: format!("historical manifest generation {generation} was not found"),
@@ -1206,6 +1234,27 @@ mod tests {
         );
         assert!(delayed.max_active_gets() > 1);
         assert!(delayed.max_active_gets() <= 4);
+    }
+
+    #[tokio::test]
+    async fn manifest_history_generation_listing_excludes_other_generations() {
+        let store = memory_store();
+        let router = test_layout(store.clone());
+        for generation in [3, 4, 5] {
+            let mut manifest = Manifest::default_for_repo("refs/heads/main");
+            manifest.generation = generation;
+            manifest.session_id = format!("session-{generation}");
+            manifest.seal_git_validation();
+            archive_manifest(&store, &router, &manifest).await.unwrap();
+        }
+
+        let entries = list_manifest_history_for_generation(&store, &router, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].generation, 4);
+        assert_eq!(entries[0].manifest.session_id, "session-4");
     }
 
     #[tokio::test]

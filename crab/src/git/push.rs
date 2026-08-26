@@ -21,6 +21,13 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crab_auth::{CrabAuthProvider, PushFinalizeResponse, PushRefUpdate};
 use crab_coordination::active_active::ActiveActiveReplicationConfig;
+use crab_remote_git::{
+    Error as RemoteGitError, ObjectLimits as RemoteGitObjectLimits,
+    OperationContext as RemoteGitOperationContext, OperationKind as RemoteGitOperationKind,
+    OperationLimits as RemoteGitOperationLimits, RemoteGitObject, RemoteGitRepository,
+    RemoteGitRuntime, RepositoryIdentity as RemoteGitRepositoryIdentity,
+    RepositoryOptions as RemoteGitRepositoryOptions,
+};
 use crab_storage::error::StorageError;
 use object_store::{ObjectMeta, ObjectStoreExt, path::Path as ObjectPath};
 use rand::Rng;
@@ -56,8 +63,9 @@ use crab_metadata::chunk_index::ChunkIndex;
 use crab_metadata::commit_graph::CommitEntry;
 use crab_metadata::pack_metadata::PackMetadata;
 use crab_metadata::split_commit_graph::{
-    CommitGraphInput, DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES, append_split_commit_graph,
-    load_split_commit_graph, upload_split_commit_graph,
+    CommitGraphInput, CommitGraphWrite, DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES, SplitCommitGraph,
+    append_split_commit_graph, decode_commit_graph_descriptor, encode_commit_graph_descriptor,
+    load_split_commit_graph, load_split_commit_graph_descriptor, upload_split_commit_graph,
 };
 use crab_staging::StagingAreaReadOnly;
 use crab_staging::push_plan::{self, FilePushPlan, PlannedXorb};
@@ -16412,6 +16420,320 @@ fn create_shallow_enumeration_repository(
     Ok(temporary)
 }
 
+const GENERATION_OWNER_REMOTE_GRAPH_BATCH_SIZE: usize = 512;
+const GENERATION_OWNER_REMOTE_GRAPH_MAX_DURATION: Duration = Duration::from_hours(2);
+
+#[derive(Debug)]
+pub(crate) struct SplitCommitGraphRebuild {
+    pub(crate) hash: String,
+    pub(crate) incremental: bool,
+    pub(crate) layers: u64,
+    pub(crate) bytes: u64,
+    pub(crate) bytes_read: u64,
+    pub(crate) bytes_written: u64,
+}
+
+#[derive(Debug)]
+struct RemoteCommitGraphInputs {
+    inputs: Vec<CommitGraphInput>,
+    bytes_read: u64,
+}
+
+fn commit_graph_write_stats(write: &CommitGraphWrite) -> Result<(u64, u64, u64)> {
+    let descriptor = decode_commit_graph_descriptor(&write.descriptor_bytes, "commit graph")
+        .map_err(CrabError::from)?;
+    let graph_bytes = descriptor.layers.iter().map(|layer| layer.bytes).sum();
+    let written_bytes = write
+        .layers
+        .iter()
+        .map(|layer| layer.bytes.len() as u64)
+        .sum::<u64>()
+        .saturating_add(write.descriptor_bytes.len() as u64);
+    Ok((
+        u64::try_from(descriptor.layers.len()).unwrap_or(u64::MAX),
+        graph_bytes,
+        written_bytes,
+    ))
+}
+
+fn commit_graph_descriptor_stats(
+    descriptor: &crab_metadata::split_commit_graph::CommitGraphDescriptor,
+) -> Result<(u64, u64, u64)> {
+    let descriptor_bytes = encode_commit_graph_descriptor(descriptor).map_err(CrabError::from)?;
+    let graph_bytes = descriptor.layers.iter().map(|layer| layer.bytes).sum();
+    Ok((
+        u64::try_from(descriptor.layers.len()).unwrap_or(u64::MAX),
+        graph_bytes,
+        graph_bytes.saturating_add(descriptor_bytes.len() as u64),
+    ))
+}
+
+async fn load_previous_split_commit_graph(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+    maximum_bytes: u64,
+) -> Result<Option<SplitCommitGraph>> {
+    let Some(previous_generation) = manifest.generation.checked_sub(1) else {
+        return Ok(None);
+    };
+    let history = crate::metadata::manifest::list_manifest_history_for_generation(
+        store,
+        router,
+        previous_generation,
+    )
+    .await?;
+    let Some(base_manifest) = history
+        .iter()
+        .find(|entry| entry.manifest.commit_graph_hash.is_some())
+        .map(|entry| &entry.manifest)
+    else {
+        return Ok(None);
+    };
+    let Some(hash) = base_manifest.commit_graph_hash.as_deref() else {
+        return Ok(None);
+    };
+    let storage = store.as_storage();
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        storage.clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let graph = load_split_commit_graph(storage, &storage_router, hash, maximum_bytes).await?;
+    let roots = base_manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| base_manifest.peeled_refs.get(name).unwrap_or(oid))
+        .map(|oid| parse_sha1_array(oid, "base commit graph root"))
+        .collect::<Result<Vec<_>>>()?;
+    if graph.descriptor.generation != base_manifest.generation
+        || graph.descriptor.pack_index_hash != base_manifest.pack_index_hash
+        || graph.descriptor.git_validation_digest != base_manifest.git_validation_digest
+        || roots.iter().any(|root| !graph.contains(root))
+    {
+        return Err(CrabError::CorruptObject {
+            path: storage_router
+                .bulk_manifest_path("commit-graph", hash)
+                .to_string(),
+            reason: "historical commit graph does not match its committed Git state".to_owned(),
+        });
+    }
+    Ok(Some(graph))
+}
+
+fn generation_owner_remote_graph_options(maximum_bytes: u64) -> Result<RemoteGitRepositoryOptions> {
+    let maximum_bytes = maximum_bytes.max(1);
+    let maximum_objects = maximum_bytes
+        .checked_div(60)
+        .and_then(|value| value.checked_add(1))
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let object = RemoteGitObjectLimits {
+        max_packed_entry_bytes: 128 * 1024 * 1024,
+        max_inflated_entry_bytes: 128 * 1024 * 1024,
+        max_object_bytes: 128 * 1024 * 1024,
+        ..RemoteGitObjectLimits::default()
+    };
+    let operation = RemoteGitOperationLimits {
+        max_duration: GENERATION_OWNER_REMOTE_GRAPH_MAX_DURATION,
+        max_logical_objects: maximum_objects,
+        max_storage_requests: maximum_objects.saturating_mul(4).max(1),
+        max_fetched_bytes: maximum_bytes,
+        max_inflated_bytes: maximum_bytes,
+        max_history_commits: maximum_objects,
+        max_response_bytes: maximum_bytes,
+        ..RemoteGitOperationLimits::default()
+    };
+    RemoteGitRepositoryOptions::new(object, operation).map_err(remote_git_graph_error)
+}
+
+fn remote_git_graph_error(error: impl fmt::Display) -> CrabError {
+    CrabError::Protocol(format!(
+        "remote Git commit-graph maintenance failed: {error}"
+    ))
+}
+
+async fn append_split_commit_graph_from_remote(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+    base: SplitCommitGraph,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<(CommitGraphWrite, u64)>> {
+    let roots = manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+        .map(|oid| parse_sha1_array(oid, "remote commit graph root"))
+        .collect::<Result<Vec<_>>>()?;
+    let bucket = store.bucket_identity();
+    let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
+    let identity = RemoteGitRepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
+        .map_err(remote_git_graph_error)?;
+    let remote_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let repository = RemoteGitRepository::open(
+        store.as_storage().clone(),
+        remote_router,
+        identity,
+        Arc::new(RemoteGitRuntime::default()),
+        generation_owner_remote_graph_options(maximum_bytes)?,
+        cancel,
+    )
+    .await
+    .map_err(remote_git_graph_error)?;
+    if repository.generation() != manifest.generation {
+        return Ok(None);
+    }
+    let operation = repository
+        .operation(RemoteGitOperationKind::History, cancel)
+        .await
+        .map_err(remote_git_graph_error)?;
+    let additions = collect_remote_commit_graph_inputs(&operation, &base, &roots).await;
+    let additions = operation
+        .finish(additions)
+        .await
+        .map_err(remote_git_graph_error)?;
+    if !repository
+        .is_current(cancel)
+        .await
+        .map_err(remote_git_graph_error)?
+    {
+        return Ok(None);
+    }
+    let write = append_split_commit_graph(
+        Some(base),
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        &roots,
+        additions.inputs,
+    )
+    .map_err(CrabError::from)?;
+    Ok(write.map(|write| (write, additions.bytes_read)))
+}
+
+async fn collect_remote_commit_graph_inputs(
+    operation: &RemoteGitOperationContext,
+    base: &SplitCommitGraph,
+    roots: &[[u8; 20]],
+) -> std::result::Result<RemoteCommitGraphInputs, RemoteGitError> {
+    let mut pending = VecDeque::new();
+    let mut queued = HashSet::new();
+    for root in roots {
+        if !base.contains(root) && queued.insert(*root) {
+            pending.push_back(*root);
+        }
+    }
+    let mut additions = Vec::new();
+    let mut bytes_read = 0_u64;
+    while !pending.is_empty() {
+        let mut requested = Vec::with_capacity(GENERATION_OWNER_REMOTE_GRAPH_BATCH_SIZE);
+        while requested.len() < GENERATION_OWNER_REMOTE_GRAPH_BATCH_SIZE {
+            let Some(oid) = pending.pop_front() else {
+                break;
+            };
+            if !base.contains(&oid) {
+                requested.push(gix_hash::ObjectId::from(oid));
+            }
+        }
+        if requested.is_empty() {
+            continue;
+        }
+        let objects = operation.read_objects(&requested).await?;
+        if objects.len() != requested.len() {
+            return Err(RemoteGitError::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Commit,
+            });
+        }
+        for (expected, object) in requested.into_iter().zip(objects) {
+            if object.oid != expected {
+                return Err(RemoteGitError::Corrupt {
+                    stage: crab_remote_git::CorruptionStage::Commit,
+                });
+            }
+            bytes_read = bytes_read.saturating_add(object.data.len() as u64);
+            let input = remote_commit_graph_input(&object)?;
+            for parent in &input.parents {
+                if !base.contains(parent) && queued.insert(*parent) {
+                    pending.push_back(*parent);
+                }
+            }
+            additions.push(input);
+        }
+    }
+    Ok(RemoteCommitGraphInputs {
+        inputs: additions,
+        bytes_read,
+    })
+}
+
+fn remote_commit_graph_input(
+    object: &RemoteGitObject,
+) -> std::result::Result<CommitGraphInput, RemoteGitError> {
+    if object.kind != gix_object::Kind::Commit {
+        return Err(RemoteGitError::ObjectKind {
+            oid: object.oid,
+            expected: gix_object::Kind::Commit,
+            actual: object.kind,
+        });
+    }
+    let parsed = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+        .map_err(|source| RemoteGitError::CommitParse {
+            oid: object.oid,
+            source,
+        })?
+        .into_owned()
+        .map_err(|source| RemoteGitError::CommitParse {
+            oid: object.oid,
+            source,
+        })?;
+    let parents = parsed.parents.into_vec();
+    Ok(CommitGraphInput {
+        oid: commit_graph_oid_bytes(&object.oid),
+        tree_oid: commit_graph_oid_bytes(&parsed.tree),
+        commit_time: parsed.committer.time.seconds,
+        parents: parents
+            .iter()
+            .map(|parent| commit_graph_oid_bytes(parent))
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn attach_split_commit_graph_if_current(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+    hash: &str,
+) -> Result<Option<String>> {
+    for _ in 0..3 {
+        let (mut current, etag) = read_manifest(store, router).await?;
+        if current.generation != manifest.generation
+            || current.pack_index_hash != manifest.pack_index_hash
+            || current.git_validation_digest != manifest.git_validation_digest
+        {
+            return Ok(None);
+        }
+        if let Some(existing) = current.commit_graph_hash.as_ref() {
+            return Ok(Some(existing.clone()));
+        }
+        current.commit_graph_hash = Some(hash.to_owned());
+        match write_manifest_cas(store, router, &current, &etag).await {
+            Ok(_) => return Ok(Some(hash.to_owned())),
+            Err(CrabError::CasConflict { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(CrabError::CasConflict {
+        path: router.manifest_path().to_string(),
+        expected_etag: None,
+    })
+}
+
 /// Rebuild and attach a missing split graph from one pinned remote pack set.
 pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
     store: &Store,
@@ -16419,13 +16741,66 @@ pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
     required_generation: u64,
     maximum_bytes: u64,
     cancel: &CancellationToken,
-) -> Result<Option<String>> {
+) -> Result<Option<SplitCommitGraphRebuild>> {
     let (manifest, _) = read_manifest(store, router).await?;
     if manifest.generation != required_generation || manifest.refs.is_empty() {
         return Ok(None);
     }
     if let Some(hash) = manifest.commit_graph_hash.as_ref() {
-        return Ok(Some(hash.clone()));
+        return Ok(Some(SplitCommitGraphRebuild {
+            hash: hash.clone(),
+            incremental: false,
+            layers: 0,
+            bytes: 0,
+            bytes_read: 0,
+            bytes_written: 0,
+        }));
+    }
+    if let Some(base) =
+        load_previous_split_commit_graph(store, router, &manifest, maximum_bytes).await?
+    {
+        if let Some((write, bytes_read)) = append_split_commit_graph_from_remote(
+            store,
+            router,
+            &manifest,
+            base,
+            maximum_bytes,
+            cancel,
+        )
+        .await?
+        {
+            let (layers, bytes, bytes_written) = commit_graph_write_stats(&write)?;
+            let descriptor_hash = write.descriptor_hash.clone();
+            let storage = store.as_storage();
+            let storage_router = crab_storage::StoreLayout::with_global_prefix(
+                storage.clone(),
+                router.repo_prefix().to_owned(),
+                router.global_prefix().to_owned(),
+            );
+            upload_split_commit_graph(storage, &storage_router, &write).await?;
+            let Some(hash) =
+                attach_split_commit_graph_if_current(store, router, &manifest, &descriptor_hash)
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let incremental = hash == descriptor_hash;
+            return Ok(Some(SplitCommitGraphRebuild {
+                incremental,
+                hash,
+                layers,
+                bytes,
+                bytes_read: if incremental { bytes_read } else { 0 },
+                bytes_written: if incremental { bytes_written } else { 0 },
+            }));
+        }
+        let (current, _) = read_manifest(store, router).await?;
+        if current.generation != manifest.generation
+            || current.pack_index_hash != manifest.pack_index_hash
+            || current.git_validation_digest != manifest.git_validation_digest
+        {
+            return Ok(None);
+        }
     }
     let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
     let storage = store.as_storage().clone();
@@ -16454,28 +16829,23 @@ pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
         &storage_router,
     )
     .await?;
-    for _ in 0..3 {
-        let (mut current, etag) = read_manifest(store, router).await?;
-        if current.generation != manifest.generation
-            || current.pack_index_hash != manifest.pack_index_hash
-            || current.git_validation_digest != manifest.git_validation_digest
-        {
-            return Ok(None);
-        }
-        if let Some(existing) = current.commit_graph_hash.as_ref() {
-            return Ok(Some(existing.clone()));
-        }
-        current.commit_graph_hash = Some(hash.clone());
-        match write_manifest_cas(store, router, &current, &etag).await {
-            Ok(_) => return Ok(Some(hash)),
-            Err(CrabError::CasConflict { .. }) => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(CrabError::CasConflict {
-        path: router.manifest_path().to_string(),
-        expected_etag: None,
-    })
+    let Some(hash) = attach_split_commit_graph_if_current(store, router, &manifest, &hash).await?
+    else {
+        return Ok(None);
+    };
+    let descriptor =
+        load_split_commit_graph_descriptor(&storage, &storage_router, &hash, maximum_bytes)
+            .await
+            .map_err(CrabError::from)?;
+    let (layers, bytes, bytes_written) = commit_graph_descriptor_stats(&descriptor)?;
+    Ok(Some(SplitCommitGraphRebuild {
+        hash,
+        incremental: false,
+        layers,
+        bytes,
+        bytes_read: materialized.fetched_bytes,
+        bytes_written,
+    }))
 }
 
 /// Rebuild a missing shallow-closure index from one pinned remote pack set.
@@ -17460,6 +17830,290 @@ mod tests {
         let (temp, _pack_path, idx_path, rev_path, git_sha1, oid, pack_size) =
             locator_pack_fixture_for(b"locator fixture object\n");
         (temp, idx_path, rev_path, git_sha1, oid, pack_size)
+    }
+
+    #[test]
+    fn remote_commit_graph_input_preserves_commit_edges_and_metadata() {
+        let parent = gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+            .expect("parent oid");
+        let tree = gix_hash::ObjectId::from_hex(b"2222222222222222222222222222222222222222")
+            .expect("tree oid");
+        let oid = gix_hash::ObjectId::from_hex(b"3333333333333333333333333333333333333333")
+            .expect("commit oid");
+        let data = format!(
+            "tree {tree}\nparent {parent}\nauthor Crab Test <crab@example.invalid> 1 +0000\ncommitter Crab Test <crab@example.invalid> 7 +0000\n\nmessage\n"
+        );
+        let object = RemoteGitObject {
+            oid,
+            kind: gix_object::Kind::Commit,
+            data: Bytes::from(data),
+        };
+
+        let input = remote_commit_graph_input(&object).expect("parse remote commit");
+
+        assert_eq!(input.oid, commit_graph_oid_bytes(&oid));
+        assert_eq!(input.tree_oid, commit_graph_oid_bytes(&tree));
+        assert_eq!(input.commit_time, 7);
+        assert_eq!(input.parents, vec![commit_graph_oid_bytes(&parent)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_appends_remote_commit_graph_from_prior_generation() {
+        fn run_git(git_dir: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+            let mut command = Command::new("git");
+            command
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Crab Test")
+                .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Crab Test")
+                .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+                .env("GIT_AUTHOR_DATE", "@1 +0000")
+                .env("GIT_COMMITTER_DATE", "@1 +0000")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().expect("spawn git");
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(input)
+                .expect("write git input");
+            let output = child.wait_with_output().expect("wait for git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        let temporary = tempfile::tempdir().expect("graph fixture tempdir");
+        let git_dir = temporary.path().join("repo.git");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&git_dir)
+            .output()
+            .expect("initialize graph fixture");
+        assert!(init.status.success());
+
+        let blob = String::from_utf8(run_git(
+            &git_dir,
+            &["hash-object", "-w", "--stdin"],
+            b"graph fixture\n",
+        ))
+        .expect("blob oid UTF-8")
+        .trim()
+        .to_owned();
+        let tree = String::from_utf8(run_git(
+            &git_dir,
+            &["mktree"],
+            format!("100644 blob {blob}\tfile.txt\n").as_bytes(),
+        ))
+        .expect("tree oid UTF-8")
+        .trim()
+        .to_owned();
+        let first = String::from_utf8(run_git(
+            &git_dir,
+            &["commit-tree", &tree, "-m", "first"],
+            &[],
+        ))
+        .expect("first commit oid UTF-8")
+        .trim()
+        .to_owned();
+        let second = String::from_utf8(run_git(
+            &git_dir,
+            &["commit-tree", &tree, "-p", &first, "-m", "second"],
+            &[],
+        ))
+        .expect("second commit oid UTF-8")
+        .trim()
+        .to_owned();
+        let pack_base = temporary.path().join("fixture");
+        let pack_hash = String::from_utf8(run_git(
+            &git_dir,
+            &[
+                "pack-objects",
+                "--index-version=2",
+                pack_base.to_str().expect("pack base UTF-8"),
+            ],
+            format!("{second}\n{first}\n{tree}\n{blob}\n").as_bytes(),
+        ))
+        .expect("pack hash UTF-8")
+        .trim()
+        .to_owned();
+        let pack_path = temporary.path().join(format!("fixture-{pack_hash}.pack"));
+        let idx_path = temporary.path().join("fixture.idx");
+        let index_output = Command::new("git")
+            .args(["index-pack", "-o"])
+            .arg(&idx_path)
+            .arg(&pack_path)
+            .output()
+            .expect("index graph fixture pack");
+        assert!(index_output.status.success());
+        let rev_path = temporary.path().join("fixture.rev");
+        crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+            .expect("write graph fixture reverse index");
+        let pack_bytes = std::fs::read(&pack_path).expect("read graph fixture pack");
+        let index = gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1)
+            .expect("open graph fixture index");
+        let pack_size = pack_bytes.len() as u64;
+        let object_count = u64::from(index.num_objects());
+        let pack_id = blake3::hash(&pack_bytes).to_hex().to_string();
+        let first_oid = gix_hash::ObjectId::from_hex(first.as_bytes()).expect("first oid");
+        let second_oid = gix_hash::ObjectId::from_hex(second.as_bytes()).expect("second oid");
+        let tree_oid = gix_hash::ObjectId::from_hex(tree.as_bytes()).expect("tree oid");
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_size,
+            content_hash: pack_id.clone(),
+            ref_tips: vec![first.clone(), second.clone()],
+            object_count,
+        };
+        let (pack_index_hash, _, pack_write) =
+            crate::metadata::manifest::compact_pack_index(1, &[pack.clone()])
+                .expect("build graph fixture pack index");
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "owner-remote-graph".to_owned());
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index: pack_write,
+            },
+        )
+        .await
+        .expect("upload graph fixture pack index");
+        store
+            .put(&router.pack_path(&pack_id), Bytes::from(pack_bytes))
+            .await
+            .expect("upload graph fixture pack");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read graph fixture index")),
+            )
+            .await
+            .expect("upload graph fixture index");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&rev_path).expect("read graph fixture reverse index")),
+            )
+            .await
+            .expect("upload graph fixture reverse index");
+
+        let first_input = CommitGraphInput {
+            oid: commit_graph_oid_bytes(&first_oid),
+            tree_oid: commit_graph_oid_bytes(&tree_oid),
+            commit_time: 1,
+            parents: Vec::new(),
+        };
+        let mut base_manifest = Manifest::default_for_repo("refs/heads/main");
+        base_manifest.generation = 1;
+        base_manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), first.clone());
+        base_manifest.pack_index_hash = pack_index_hash.clone();
+        base_manifest.seal_git_validation();
+        let base_storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let base_write = append_split_commit_graph(
+            None,
+            base_manifest.generation,
+            base_manifest.pack_index_hash.clone(),
+            base_manifest.git_validation_digest.clone(),
+            &[commit_graph_oid_bytes(&first_oid)],
+            vec![first_input],
+        )
+        .expect("build base graph")
+        .expect("base graph write");
+        upload_split_commit_graph(store.as_storage(), &base_storage_router, &base_write)
+            .await
+            .expect("upload base graph");
+        base_manifest.commit_graph_hash = Some(base_write.descriptor_hash);
+        crate::metadata::manifest::create_manifest(&store, &router, &base_manifest)
+            .await
+            .expect("publish base graph manifest");
+        let mut current_manifest = base_manifest.clone();
+        current_manifest.generation = 2;
+        current_manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), second.clone());
+        current_manifest.commit_graph_hash = None;
+        current_manifest.session_id = "second-generation".to_owned();
+        current_manifest.seal_git_validation();
+        let (_, etag) = read_manifest(&store, &router)
+            .await
+            .expect("read base graph manifest");
+        write_manifest_cas(&store, &router, &current_manifest, &etag)
+            .await
+            .expect("publish second graph generation");
+
+        let anchor = CommittedManifestAnchor {
+            generation: current_manifest.generation,
+            shard_index_hash: MerkleHash::default(),
+            pack_index_hash: MerkleHash::from_hex(&pack_index_hash)
+                .expect("parse graph fixture pack index hash"),
+        };
+        let mut writer =
+            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+                object_count,
+            )
+            .await
+            .expect("open graph fixture locator writer");
+        publish_pack_locator_inventory_for_owner(&mut writer, &store, &router, anchor, &[pack])
+            .await
+            .expect("publish graph fixture locator");
+        writer
+            .close()
+            .await
+            .expect("close graph fixture locator writer");
+
+        let rebuild = rebuild_split_commit_graph_from_remote_packs_if_current(
+            &store,
+            &router,
+            current_manifest.generation,
+            64 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("append remote graph");
+        let rebuild = rebuild.expect("remote graph rebuild result");
+        assert!(rebuild.incremental);
+        assert_eq!(rebuild.layers, 2);
+        assert!(rebuild.bytes_read > 0);
+        assert!(rebuild.bytes_written > 0);
+        let (attached_manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("read appended graph manifest");
+        let graph_hash = attached_manifest
+            .commit_graph_hash
+            .as_deref()
+            .expect("appended graph hash");
+        let graph = load_split_commit_graph(
+            store.as_storage(),
+            &base_storage_router,
+            graph_hash,
+            64 * 1024 * 1024,
+        )
+        .await
+        .expect("load appended graph");
+        assert_eq!(graph.descriptor.commit_count, 2);
+        assert_eq!(
+            graph.is_ancestor(
+                &commit_graph_oid_bytes(&first_oid),
+                &commit_graph_oid_bytes(&second_oid)
+            ),
+            Some(true)
+        );
     }
 
     #[tokio::test]

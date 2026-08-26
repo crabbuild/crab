@@ -328,6 +328,14 @@ not download covered stable packs. When the sidecar is complete, fresh
 kind-only filters select ordinals and resolve only the retained OIDs; an old or
 incomplete sidecar uses the bounded canonical traversal path.
 
+The same owner maintains the complete split commit graph incrementally. When
+the previous generation has a validated graph, it opens a generation-pinned
+remote-Git history operation, resolves the current ref closure in bounded OID
+batches, and writes only the new graph layer plus descriptor. A missing or
+invalid predecessor takes the existing complete-pack rebuild path; the owner
+reports that distinction as `commit_graph_incremental` versus
+`commit_graph_rebuild` so qualification can measure pack-read avoidance.
+
 `crab metadb rebuild` is the repository-scoped migration and repair boundary.
 It ignores the retired `git_locator_db/` namespace, reconstructs the catalog
 from manifest-pinned immutable packs, and publishes coverage only after every

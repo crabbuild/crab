@@ -132,6 +132,21 @@ pub async fn list_manifest_history(
         .map_err(CrabError::from)
 }
 
+pub async fn list_manifest_history_for_generation(
+    store: &Store,
+    router: &StoreLayout,
+    generation: u64,
+) -> Result<Vec<ManifestHistoryEntry>> {
+    let router = storage_layout(store, router);
+    crab_metadata::manifest_store::list_manifest_history_for_generation(
+        store.as_storage(),
+        &router,
+        generation,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
 pub async fn select_manifest_history(
     store: &Store,
     router: &StoreLayout,

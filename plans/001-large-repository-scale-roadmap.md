@@ -829,6 +829,10 @@ as authoritative.
 2. Store a complete graph as immutable split layers. Push appends new commits;
    the owner geometrically compacts layers without rewriting stable history on
    every push.
+   The owner now resolves a missing current graph from the validated previous
+   generation through bounded remote-Git commit batches and appends the new
+   layer; it falls back to complete pack materialization when that predecessor
+   proof is unavailable.
 3. Replace string parent maps in hot ancestry and shallow-boundary paths with
    positional reads.
 4. Validate graph closure, parent ordering, generation monotonicity, duplicate

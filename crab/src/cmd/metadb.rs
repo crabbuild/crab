@@ -662,8 +662,7 @@ async fn generation_owner_sample(
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
     }
-    let mut graph =
-        maintain_split_commit_graph(store, router, &manifest, active_pack_bytes, cancel).await?;
+    let mut graph = maintain_split_commit_graph(store, router, &manifest, cancel).await?;
     if graph.action != "superseded" {
         match crate::git::push::rebuild_shallow_closure_index_from_remote_packs_if_current(
             store,
@@ -681,7 +680,7 @@ async fn generation_owner_sample(
             Some(true) if graph.action == "none" => {
                 graph.action = "shallow_closure_rebuild";
             }
-            Some(false) | Some(true) => {}
+            Some(_) => {}
         }
     }
     if graph.action == "none" && geometric_repack_packs > 0 {
@@ -799,7 +798,6 @@ async fn maintain_split_commit_graph(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
     manifest: &crab_metadata::manifests::Manifest,
-    active_pack_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CommitGraphMaintenance> {
     if manifest.refs.is_empty() {
@@ -815,17 +813,18 @@ async fn maintain_split_commit_graph(
     let storage_router =
         crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
     let rebuilt_hash;
-    let (hash, rebuilt) = if let Some(hash) = manifest.commit_graph_hash.as_deref() {
-        (hash, false)
+    let (hash, rebuild) = if let Some(hash) = manifest.commit_graph_hash.as_deref() {
+        (hash, None)
     } else {
-        let Some(hash) = crate::git::push::rebuild_split_commit_graph_from_remote_packs_if_current(
-            store,
-            router,
-            manifest.generation,
-            GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES,
-            cancel,
-        )
-        .await?
+        let Some(rebuild) =
+            crate::git::push::rebuild_split_commit_graph_from_remote_packs_if_current(
+                store,
+                router,
+                manifest.generation,
+                GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES,
+                cancel,
+            )
+            .await?
         else {
             return Ok(CommitGraphMaintenance {
                 action: "superseded",
@@ -835,15 +834,15 @@ async fn maintain_split_commit_graph(
                 bytes_written: 0,
             });
         };
-        rebuilt_hash = hash;
-        (rebuilt_hash.as_str(), true)
+        rebuilt_hash = rebuild.hash.clone();
+        (rebuilt_hash.as_str(), Some(rebuild))
     };
-    if !rebuilt {
+    if rebuild.is_none() {
         let descriptor = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
             storage,
             &storage_router,
             hash,
-            crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES,
         )
         .await?;
         if descriptor.generation != manifest.generation
@@ -868,11 +867,24 @@ async fn maintain_split_commit_graph(
             });
         }
     }
+    if let Some(rebuild) = rebuild {
+        return Ok(CommitGraphMaintenance {
+            action: if rebuild.incremental {
+                "commit_graph_incremental"
+            } else {
+                "commit_graph_rebuild"
+            },
+            layers: rebuild.layers,
+            bytes: rebuild.bytes,
+            bytes_read: rebuild.bytes_read,
+            bytes_written: rebuild.bytes_written,
+        });
+    }
     let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
         storage,
         &storage_router,
         hash,
-        crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES,
     )
     .await?;
     if graph.descriptor.generation != manifest.generation
@@ -901,15 +913,6 @@ async fn maintain_split_commit_graph(
         .iter()
         .map(|layer| layer.bytes)
         .sum();
-    if rebuilt {
-        return Ok(CommitGraphMaintenance {
-            action: "commit_graph_rebuild",
-            layers: current_layers,
-            bytes: current_bytes,
-            bytes_read: active_pack_bytes,
-            bytes_written: current_bytes,
-        });
-    }
     let Some(write) = crab_metadata::split_commit_graph::compact_split_commit_graph(graph)? else {
         return Ok(CommitGraphMaintenance {
             action: "none",

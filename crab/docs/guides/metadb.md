@@ -139,6 +139,14 @@ rows lack kind metadata falls back to the bounded canonical planner. Direct
 pushes continue to publish kinds for newly introduced objects when the local
 Git source is available.
 
+When a current generation is missing its split commit graph but the immediately
+previous generation has a validated graph, the owner reads only the new commit
+closure through the pinned remote-Git operation and appends one immutable graph
+layer. The JSONL action is `commit_graph_incremental` and its maintenance byte
+counters cover the remote commit payloads and newly written graph objects. If a
+valid predecessor is unavailable, the owner uses the complete pack-materializing
+rebuild once; later generations can return to the incremental path.
+
 `--once` executes one decision, not the entire backlog. Repeat it until
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per
 sample with the selected action, active pack count/bytes, geometric roll-up

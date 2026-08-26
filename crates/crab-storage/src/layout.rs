@@ -176,6 +176,12 @@ impl<S> StoreLayout<S> {
         self.repo_path("manifests/history")
     }
 
+    /// Prefix containing immutable historical manifests for one generation.
+    #[must_use]
+    pub fn manifest_history_generation_prefix(&self, generation: u64) -> ObjectPath {
+        self.repo_path(&format!("manifests/history/{generation:020}-"))
+    }
+
     /// Path to one immutable historical manifest root.
     #[must_use]
     pub fn manifest_history_path(&self, generation: u64, digest: &str) -> ObjectPath {
@@ -517,6 +523,10 @@ mod tests {
         assert_eq!(
             layout.manifest_history_prefix().as_ref(),
             "org/models/manifests/history"
+        );
+        assert_eq!(
+            layout.manifest_history_generation_prefix(42).as_ref(),
+            "org/models/manifests/history/00000000000000000042-"
         );
         assert_eq!(
             layout.manifest_history_path(42, &digest).as_ref(),
