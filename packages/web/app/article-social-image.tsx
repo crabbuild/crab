@@ -3,6 +3,7 @@ import { join } from "node:path"
 
 import { ImageResponse } from "next/og"
 
+import { getBlogPost } from "@/lib/blog-posts"
 import { getLibraryGuide } from "@/lib/library-guides"
 
 const logoDataUrl = readFile(
@@ -10,16 +11,30 @@ const logoDataUrl = readFile(
   "base64"
 ).then((logo) => `data:image/svg+xml;base64,${logo}`)
 
-export const LIBRARY_SOCIAL_IMAGE_SIZE = { width: 1200, height: 630 }
+export const ARTICLE_SOCIAL_IMAGE_SIZE = { width: 1200, height: 630 }
 
-export async function createLibrarySocialImage(slug: string) {
-  const logo = await logoDataUrl
-  const post = getLibraryGuide(slug)
-  const title = post?.title ?? "Crab Library"
-  const label =
+export function createBlogSocialImage(slug: string) {
+  const post = getBlogPost(slug)
+
+  return createArticleSocialImage(
+    post?.title ?? "Crab Blog",
     slug === "git-for-large-files-at-any-scale"
       ? "LAUNCH STORY"
-      : (post?.category.toUpperCase() ?? "CRAB LIBRARY")
+      : (post?.category.toUpperCase() ?? "CRAB BLOG")
+  )
+}
+
+export function createLibrarySocialImage(slug: string) {
+  const guide = getLibraryGuide(slug)
+
+  return createArticleSocialImage(
+    guide?.title ?? "Crab Library",
+    guide?.category.toUpperCase() ?? "CRAB LIBRARY"
+  )
+}
+
+async function createArticleSocialImage(title: string, label: string) {
+  const logo = await logoDataUrl
   const titleSize = title.length > 52 ? 62 : title.length > 36 ? 72 : 84
 
   return new ImageResponse(
@@ -142,6 +157,6 @@ export async function createLibrarySocialImage(slug: string) {
         </div>
       </div>
     </div>,
-    LIBRARY_SOCIAL_IMAGE_SIZE
+    ARTICLE_SOCIAL_IMAGE_SIZE
   )
 }

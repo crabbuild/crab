@@ -7,13 +7,20 @@ category: "product"
 tags: ["beginner", "introduction", "overview"]
 excerpt: "Crab gives large files a separate data path without splitting them from the repository's Git history."
 level: "beginner"
-audience: "Developers and technical leads evaluating version control for large files."
 path: "start-here"
 order: 1
 concepts: ["serverless git", "object storage", "large files"]
 prerequisites: []
 outcome: "Decide whether Crab's Git-plus-object-storage model fits your repository."
 diagramType: "Interactive system tour"
+knowledgeCheck:
+  question: "What does Git store for a Crab-managed large file?"
+  options:
+    - "A compact pointer naming the expected file identity and size"
+    - "Every packed xorb needed to reconstruct the file"
+    - "A mutable bucket URL that always selects the latest upload"
+  answer: 0
+  explanation: "Git commits the stable file identity. Crab metadata describes reconstruction, and object storage holds the immutable large-file bytes."
 meta:
   contentType: "Conceptual"
   goal: "Explain Crab's mental model and help readers decide whether to continue."

@@ -7,21 +7,8 @@ category: "release"
 tags: ["launch", "git", "large-files", "object-storage", "xet", "deduplication", "serverless"]
 excerpt: "Crab keeps Git in charge of history while content-defined chunks, lazy hydration, and your own object store carry the large-file data plane."
 level: "beginner"
-path: "start-here"
-order: 1
-concepts: ["one history", "two data paths", "content-defined chunking", "object storage", "lazy hydration", "atomic publication"]
-prerequisites: []
-outcome: "Understand why Crab exists, how its Git and data paths fit together, and how to publish a first repository to S3, GCS, or Azure."
-diagramType: "Interactive architecture and scale simulators"
+audience: "Developers, ML teams, game studios, data engineers, and platform teams evaluating large-file version control."
 presentation: "feature"
-knowledgeCheck:
-  question: "Which boundary lets Crab publish one Git history without putting large-file bytes in Git?"
-  options:
-    - "Git commits durable file identities while object storage holds reconstructable content"
-    - "Every client rewrites the branch after downloading the complete bucket"
-    - "A hosted Crab data server owns both commits and large-file retention"
-  answer: 0
-  explanation: "The commit selects the exact file identity. Crab publishes the ref only after the object-store data and reconstruction metadata are durable."
 meta:
   contentType: "Conceptual"
   goal: "Introduce Crab through the large-file problem, its architecture, and a complete first workflow."

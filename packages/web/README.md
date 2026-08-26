@@ -222,6 +222,7 @@ Required blog attributes appear on the dashboard and article page:
 - **Audience**: a short description of the intended reader
 - **Tags**: one or more topic labels
 - **Reading time**: calculated automatically; do not add it to frontmatter
+- **Feature layout**: set `presentation: "feature"` only for a flagship article that needs the long-form hero, scale explorer, and reading rail
 
 ## Author Library guides
 
