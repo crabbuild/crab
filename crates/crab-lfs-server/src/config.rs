@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::auth::AuthConfig;
+use crate::auth::{AuthConfig, validate_password_hash};
 use crate::error::LfsServerError;
 
 /// Secret material used to sign short-lived Batch action URLs.
@@ -60,6 +60,12 @@ pub struct LfsServerConfig {
     pub max_object_bytes: u64,
     /// Maximum concurrent upload bodies being spooled or committed.
     pub max_uploads: usize,
+    /// Maximum aggregate bytes held in the upload spool at once.
+    pub max_spool_bytes: u64,
+    /// Process-local request admission rate.
+    pub max_requests_per_second: u64,
+    /// Initial process-local request admission burst.
+    pub request_burst: u64,
     /// Maximum duration of one HTTP request.
     pub request_timeout: Duration,
     /// Optional key for signing short-lived Batch action URLs.
@@ -108,6 +114,9 @@ struct RawServer {
     max_batch_objects: Option<usize>,
     max_object_bytes: Option<u64>,
     max_uploads: Option<usize>,
+    max_spool_bytes: Option<u64>,
+    max_requests_per_second: Option<u64>,
+    request_burst: Option<u64>,
     request_timeout_secs: Option<u64>,
     action_secret: Option<String>,
     action_ttl_secs: Option<u64>,
@@ -160,6 +169,9 @@ impl LfsServerConfig {
             max_batch_objects: None,
             max_object_bytes: None,
             max_uploads: None,
+            max_spool_bytes: None,
+            max_requests_per_second: None,
+            request_burst: None,
             request_timeout_secs: None,
             action_secret: None,
             action_ttl_secs: None,
@@ -196,6 +208,11 @@ impl LfsServerConfig {
             .unwrap_or(DEFAULT_MAX_BATCH_OBJECTS);
         let max_object_bytes = server.max_object_bytes.unwrap_or(DEFAULT_MAX_OBJECT_BYTES);
         let max_uploads = server.max_uploads.unwrap_or(DEFAULT_MAX_UPLOADS);
+        let max_spool_bytes = server
+            .max_spool_bytes
+            .unwrap_or_else(|| max_object_bytes.saturating_mul(max_uploads as u64));
+        let max_requests_per_second = server.max_requests_per_second.unwrap_or(5_000);
+        let request_burst = server.request_burst.unwrap_or(10_000);
         let timeout_secs = server
             .request_timeout_secs
             .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
@@ -212,6 +229,21 @@ impl LfsServerConfig {
         if max_uploads == 0 {
             return Err(LfsServerError::Config(
                 "server.max_uploads must be greater than zero".to_owned(),
+            ));
+        }
+        if max_spool_bytes == 0 {
+            return Err(LfsServerError::Config(
+                "server.max_spool_bytes must be greater than zero".to_owned(),
+            ));
+        }
+        if max_requests_per_second == 0 {
+            return Err(LfsServerError::Config(
+                "server.max_requests_per_second must be greater than zero".to_owned(),
+            ));
+        }
+        if request_burst == 0 {
+            return Err(LfsServerError::Config(
+                "server.request_burst must be greater than zero".to_owned(),
             ));
         }
         if timeout_secs == 0 {
@@ -269,6 +301,9 @@ impl LfsServerConfig {
             max_batch_objects,
             max_object_bytes,
             max_uploads,
+            max_spool_bytes,
+            max_requests_per_second,
+            request_burst,
             request_timeout: Duration::from_secs(timeout_secs),
             action_secret,
             action_ttl: Duration::from_secs(action_ttl_secs),
@@ -360,7 +395,7 @@ impl AuthConfig {
                         }
                         Ok((
                             principal.clone(),
-                            parse_hash(&hash, &format!("auth.users.{principal}"))?,
+                            validate_password_hash(&hash, &format!("auth.users.{principal}"))?,
                         ))
                     })
                     .collect::<Result<HashMap<_, _>, _>>()
@@ -408,23 +443,32 @@ impl AuthConfig {
 mod tests {
     use super::*;
 
-    const HASH: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const PASSWORD_HASH: &str =
+        "$scrypt$ln=16,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E";
 
     #[test]
     fn parses_basic_users_and_defaults() {
         let config = LfsServerConfig::from_toml_str(&format!(
-            "[server]\naction_secret = \"test action secret\"\n[auth]\nmechanism = \"basic\"\n[auth.users]\nalice = \"{HASH}\"\n[origin]\nurl = \"memory://\"\n"
+            "[server]\naction_secret = \"test action secret\"\n[auth]\nmechanism = \"basic\"\n[auth.users]\nalice = \"{PASSWORD_HASH}\"\n[origin]\nurl = \"memory://\"\n"
         ))
         .unwrap();
         assert_eq!(config.listen_addr, "127.0.0.1:8444".parse().unwrap());
         assert_eq!(config.max_batch_objects, DEFAULT_MAX_BATCH_OBJECTS);
+        assert_eq!(
+            config.max_spool_bytes,
+            DEFAULT_MAX_OBJECT_BYTES * DEFAULT_MAX_UPLOADS as u64
+        );
+        assert_eq!(config.max_requests_per_second, 5_000);
+        assert_eq!(config.request_burst, 10_000);
         assert!(matches!(config.auth, AuthConfig::Basic { .. }));
     }
 
     #[test]
     fn rejects_basic_auth_without_action_secret() {
         let error = LfsServerConfig::from_toml_str(
-            "[auth]\nmechanism = \"basic\"\n[auth.users]\nalice = \"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\"\n[origin]\nurl = \"memory://\"\n",
+            &format!(
+                "[auth]\nmechanism = \"basic\"\n[auth.users]\nalice = \"{PASSWORD_HASH}\"\n[origin]\nurl = \"memory://\"\n"
+            ),
         )
         .unwrap_err();
         assert!(error.to_string().contains("require server.action_secret"));
@@ -437,6 +481,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("max_uploads"));
+
+        let error = LfsServerConfig::from_toml_str(
+            "[auth]\nmechanism = \"none\"\n[origin]\nurl = \"memory://\"\n[server]\nrequest_burst = 0\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("request_burst"));
 
         let error = LfsServerConfig::from_toml_str(
             "[auth]\nmechanism = \"none\"\nunknown = true\n[origin]\nurl = \"memory://\"\n",
@@ -457,7 +507,7 @@ mod tests {
             "[auth]\nmechanism = \"basic\"\n[auth.users]\nalice = \"éééééééééééééééééééééééééééééééé\"\n[origin]\nurl = \"memory://\"\n",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("64 hexadecimal characters"));
+        assert!(error.to_string().contains("scrypt PHC"));
     }
 
     #[test]

@@ -21,10 +21,13 @@ remains an optional immutable cache.
 - Give the process only the origin permissions it needs. Do not put cloud
   credentials in this repository, image, policy file, or Git remote URL.
 - Mount `/var/lib/crab-lfs` on durable local storage sized for
-  `max_uploads * max_object_bytes` plus headroom. Uploads are deleted when a
-  request finishes or fails; startup also removes stale files owned by the
-  gateway (`.crab-lfs-upload-*`) after twice `server.request_timeout`.
-  Keep unrelated files out of the spool directory.
+  `server.max_spool_bytes` plus headroom. The gateway rejects uploads with
+  `507 Insufficient Storage` when the process-local spool budget is exhausted.
+  Configure `server.max_requests_per_second` and `server.request_burst` to
+  bound request admission; rejected requests return `429` with `Retry-After`.
+  Uploads are deleted when a request finishes or fails; startup also removes
+  stale files owned by the gateway (`.crab-lfs-upload-*`) after twice
+  `server.request_timeout`. Keep unrelated files out of the spool directory.
 
 ## Build and run
 

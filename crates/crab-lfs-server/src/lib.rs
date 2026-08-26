@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod http;
+mod limits;
 pub mod metrics;
 pub mod server;
 

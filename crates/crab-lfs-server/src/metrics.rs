@@ -18,6 +18,8 @@ pub struct LfsMetrics {
     request_bytes_total: AtomicU64,
     response_bytes_total: AtomicU64,
     active_requests: AtomicU64,
+    rate_limited_total: AtomicU64,
+    spool_rejections_total: AtomicU64,
 }
 
 impl LfsMetrics {
@@ -25,6 +27,16 @@ impl LfsMetrics {
     pub fn request_started(&self) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         self.active_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a request rejected by process-local rate admission.
+    pub fn rate_limited(&self) {
+        self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records an upload rejected by the aggregate spool-byte budget.
+    pub fn spool_rejected(&self) {
+        self.spool_rejections_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records the response observed by the HTTP middleware.
@@ -125,6 +137,18 @@ impl LfsMetrics {
             "HTTP requests currently inside the gateway middleware",
             self.active_requests.load(Ordering::Relaxed),
         );
+        append_counter(
+            &mut body,
+            "crab_lfs_http_rate_limited_total",
+            "Requests rejected by process-local rate admission",
+            self.rate_limited_total.load(Ordering::Relaxed),
+        );
+        append_counter(
+            &mut body,
+            "crab_lfs_http_spool_rejections_total",
+            "Uploads rejected by aggregate spool-byte admission",
+            self.spool_rejections_total.load(Ordering::Relaxed),
+        );
         body
     }
 }
@@ -182,5 +206,10 @@ mod tests {
         assert!(rendered.contains("crab_lfs_http_responses_total{class=\"4xx\"} 1"));
         assert!(rendered.contains("crab_lfs_http_request_duration_ms_total 10"));
         assert!(rendered.contains("crab_lfs_http_active_requests 0"));
+        metrics.rate_limited();
+        metrics.spool_rejected();
+        let rendered = metrics.render();
+        assert!(rendered.contains("crab_lfs_http_rate_limited_total 1"));
+        assert!(rendered.contains("crab_lfs_http_spool_rejections_total 1"));
     }
 }

@@ -25,8 +25,8 @@ operational endpoints.
 
 The first shipped deployment contract supports HTTP Basic, bearer tokens,
 and mTLS. Credentials are verified by the gateway; clients never receive
-bucket or provider credentials. Basic and bearer configuration stores only
-BLAKE3 hashes. Repository policy rules grant read, write, or admin actions
+bucket or provider credentials. Basic configuration stores bounded scrypt PHC
+password hashes; bearer configuration stores BLAKE3 token hashes. Repository policy rules grant read, write, or admin actions
 to an authenticated principal. Force unlock requires admin authorization
 when a policy is configured.
 
@@ -56,19 +56,25 @@ use the client certificate as the action-request credential instead.
 Retries may reuse an unexpired action, as required for idempotent Git LFS
 transfers.
 
+Batch and File Locking requests accept the standard optional Git ref/refspec
+context. The current lock namespace is repository-wide, so the context is
+validated but does not yet partition locks by branch.
+
 ## Operational boundary
 
 The gateway applies a bounded Batch body, per-object size limit, request
-timeout, concurrent request limit, upload concurrency limit, streamed-download
-concurrency bound, temporary disk spooling, and bounded lock-list page
-retention. The gateway exports process-wide request/status/byte counters
+timeout, concurrent request limit, upload concurrency limit, bounded password
+verification concurrency, aggregate process-local spool-byte budget,
+streamed-download concurrency bound, temporary disk spooling, and bounded
+lock-list page retention. The gateway exports process-wide request/status/byte counters
 without repository or path labels, and readiness detects a missing spool
 directory. Lock creation is exclusive, and unlock CAS operations are bound to
 the requested lock ID. The origin URL is built only through crab-storage.
 Native mTLS or an explicitly configured trusted proxy is required for mTLS
-identity; an untrusted `x-client-cn` header is never accepted. Metrics,
-rate-limit integration, and managed protected-push binding remain follow-up
-controls before broad internet exposure.
+identity; an untrusted `x-client-cn` header is never accepted. The request
+rate limit is process-local and protects each replica; durable cross-replica
+quotas and managed protected-push binding remain follow-up controls before
+broad internet exposure.
 
 ## Compatibility contract
 

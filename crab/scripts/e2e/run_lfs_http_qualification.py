@@ -32,7 +32,7 @@ DEFAULT_ENDPOINT = os.environ.get("AWS_ENDPOINT_URL", "http://127.0.0.1:9000")
 DEFAULT_MIN_SIZE = 1024 * 1024
 DEFAULT_MAX_SIZE = 2 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
-PASSWORD_HASH = "513aa29dba88e034b1f55f1f8f488c781e5823c21e852603dc84a3807421590f"
+PASSWORD_HASH = "$scrypt$ln=16,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E"
 URL_RE = re.compile(r"https?://[^\s\"']+")
 RUN_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -125,6 +125,7 @@ class Qualification:
         self.remote = self.root / "remote.git"
         self.source = self.root / "source"
         self.clone = self.root / "clone"
+        self.conflict = self.root / "conflict"
         self.spool = self.root / "spool"
         self.server_log = self.root / "server.log"
         self.config = self.root / "server.toml"
@@ -245,6 +246,85 @@ class Qualification:
     def lfs(self, args: Sequence[str], cwd: Path, name: str) -> str:
         return self.run_command(name, [self.git_lfs_bin, *args], cwd)
 
+    def configure_lfs_client(
+        self, repository: Path, username: str, password: str, label: str
+    ) -> None:
+        self.git(
+            [
+                "config",
+                "lfs.url",
+                f"{self.server_url}/{self.repository}.git/info/lfs",
+            ],
+            repository,
+            f"configure {label} HTTP LFS URL",
+        )
+        self.git(
+            ["config", "--local", "credential.helper", ""],
+            repository,
+            f"clear {label} inherited credentials",
+        )
+        self.git(
+            [
+                "config",
+                "--local",
+                "--add",
+                "credential.helper",
+                f"!f() {{ echo username={username}; echo password={password}; }}; f",
+            ],
+            repository,
+            f"configure {label} credentials",
+        )
+        self.lfs(["install", "--local"], repository, f"install {label} Git LFS")
+
+    def enable_lock_verification(self, repository: Path, label: str) -> None:
+        self.git(
+            [
+                "config",
+                f"lfs.{self.server_url}/{self.repository}.git/info/lfs.locksverify",
+                "true",
+            ],
+            repository,
+            f"enable {label} LFS locking",
+        )
+
+    def expected_failure(
+        self, name: str, command: Sequence[str], cwd: Path
+    ) -> str:
+        started = time.monotonic()
+        completed = subprocess.run(
+            list(command),
+            cwd=cwd,
+            env=self.environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=self.args.command_timeout,
+        )
+        stdout = redact_text(completed.stdout, self.hidden_secrets)
+        stderr = redact_text(completed.stderr, self.hidden_secrets)
+        if completed.returncode == 0:
+            raise QualificationError(f"{name} unexpectedly succeeded")
+        self.report.setdefault("commands", []).append(
+            {
+                "name": name,
+                "argv": [redact_text(str(item), self.hidden_secrets) for item in command],
+                "cwd": str(cwd),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "exit_code": completed.returncode,
+                "expected_failure": True,
+                "stdout": stdout[-8192:],
+                "stderr": stderr[-8192:],
+            }
+        )
+        self.save_report()
+        return f"{stdout}\n{stderr}"
+
+    def git_expected_failure(
+        self, args: Sequence[str], cwd: Path, name: str
+    ) -> str:
+        return self.expected_failure(name, [self.git_bin, *args], cwd)
+
     def write_config(self) -> None:
         self.root.mkdir(parents=True)
         self.config.write_text(
@@ -264,6 +344,7 @@ class Qualification:
                     "",
                     "[auth.users]",
                     f'crab = "{PASSWORD_HASH}"',
+                    f'bob = "{PASSWORD_HASH}"',
                     "",
                     "[origin]",
                     f'url = {toml_string(f"s3://{self.args.bucket}/{self.origin_prefix}")}',
@@ -329,13 +410,13 @@ class Qualification:
             [
                 "config",
                 "credential.helper",
-                "!f() { echo username=crab; echo password=crab; }; f",
+                "!f() { echo username=crab; echo password=password; }; f",
             ],
             self.source,
             "configure test credentials",
         )
         self.lfs(["install", "--local"], self.source, "git lfs install")
-        self.lfs(["track", "*.bin"], self.source, "git lfs track")
+        self.lfs(["track", "--lockable", "*.bin"], self.source, "git lfs track lockable")
         self.git(["add", ".gitattributes"], self.source, "stage LFS attributes")
         self.git(["commit", "-m", "configure Git LFS"], self.source, "commit LFS attributes")
 
@@ -375,7 +456,7 @@ class Qualification:
             [
                 "config",
                 "credential.helper",
-                "!f() { echo username=crab; echo password=crab; }; f",
+                "!f() { echo username=crab; echo password=password; }; f",
             ],
             self.clone,
             "configure clone credentials",
@@ -413,10 +494,65 @@ class Qualification:
             )
 
         lock_path = next(iter(self.final_objects))
-        self.git(["config", f"lfs.{self.server_url}/{self.repository}.git/info/lfs.locksverify", "true"], self.source, "enable LFS locking")
+        self.enable_lock_verification(self.source, "source")
         self.lfs(["lock", lock_path], self.source, "git lfs lock")
         self.lfs(["locks"], self.source, "git lfs locks")
+
+        self.git(
+            ["clone", "--branch", "main", str(self.remote), str(self.conflict)],
+            self.root,
+            "clone lock-conflict client",
+        )
+        self.configure_lfs_client(self.conflict, "bob", "password", "conflict")
+        self.git(
+            ["config", "user.name", "Crab LFS lock conflict"],
+            self.conflict,
+            "configure conflict identity name",
+        )
+        self.git(
+            ["config", "user.email", "crab-lfs-conflict@example.invalid"],
+            self.conflict,
+            "configure conflict identity email",
+        )
+        self.enable_lock_verification(self.conflict, "conflict")
+        conflict_path = self.conflict / lock_path
+        write_payload(
+            conflict_path,
+            self.args.min_size,
+            f"{self.args.seed}:lock-conflict",
+            self.args.object_count,
+        )
+        self.git(["add", "--", lock_path], self.conflict, "stage lock-conflict object")
+        self.git(["commit", "-m", "attempt locked update"], self.conflict, "commit locked update")
+        blocked = self.git_expected_failure(
+            ["push", "origin", "main"],
+            self.conflict,
+            "git push blocked by LFS lock",
+        )
+        self.check(
+            "file-locking-blocks-protected-push",
+            "lock" in blocked.lower() and "locked" in blocked.lower(),
+        )
+        remote_after_block = self.git(
+            ["ls-remote", str(self.remote), "refs/heads/main"],
+            self.conflict,
+            "read ref after blocked push",
+        ).split()[0]
+        self.check("blocked-push-does-not-publish-ref", remote_after_block == remote_ref)
+
         self.lfs(["unlock", lock_path], self.source, "git lfs unlock")
+        self.git(["push", "origin", "main"], self.conflict, "git push after unlock")
+        conflict_ref = self.git(["rev-parse", "HEAD"], self.conflict, "read conflict ref").strip()
+        published_ref = self.git(
+            ["ls-remote", str(self.remote), "refs/heads/main"],
+            self.conflict,
+            "read ref after unlocked push",
+        ).split()[0]
+        self.check(
+            "unlocked-push-publishes-ref",
+            conflict_ref == published_ref,
+            {"local": conflict_ref, "remote": published_ref},
+        )
         self.check("file-locking-round-trip", True)
 
     def run(self) -> None:

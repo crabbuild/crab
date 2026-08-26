@@ -1,6 +1,7 @@
 //! Authentication and repository authorization for the Git LFS gateway.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,6 +10,10 @@ use axum::http::{Extensions, HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
+use scrypt::{
+    Scrypt,
+    password_hash::{PasswordHash, PasswordVerifier},
+};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -16,18 +21,40 @@ use crate::error::{LfsServerError, Result};
 
 const POLICY_ACTIONS: &[&str] = &["read", "write", "admin"];
 const MTLS_CN_HEADER: &str = "x-client-cn";
+const DUMMY_BASIC_PASSWORD_HASH: &str =
+    "$scrypt$ln=16,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E";
+const MAX_SCRYPT_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_SCRYPT_PARALLELISM: u32 = 4;
+pub(crate) const MAX_AUTH_CONCURRENCY: usize = 4;
 
 /// Authentication method selected by the gateway configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum AuthConfig {
     /// Do not require a credential. The principal is anonymous.
     None,
-    /// HTTP Basic authentication backed by BLAKE3 password hashes.
-    Basic { users: HashMap<String, [u8; 32]> },
+    /// HTTP Basic authentication backed by bounded scrypt PHC password hashes.
+    Basic { users: HashMap<String, String> },
     /// Bearer authentication backed by BLAKE3 token hashes.
     Bearer { users: HashMap<String, [u8; 32]> },
     /// mTLS identity from the native TLS acceptor or an explicitly trusted proxy header.
     Mtls,
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("AuthConfig");
+        match self {
+            Self::None => debug.field("mechanism", &"none"),
+            Self::Basic { users } => debug
+                .field("mechanism", &"basic")
+                .field("user_count", &users.len()),
+            Self::Bearer { users } => debug
+                .field("mechanism", &"bearer")
+                .field("principal_count", &users.len()),
+            Self::Mtls => debug.field("mechanism", &"mtls"),
+        }
+        .finish()
+    }
 }
 
 /// Identity established by the authentication middleware.
@@ -143,15 +170,22 @@ pub async fn auth_middleware(
     if matches!(request.uri().path(), "/healthz" | "/readyz" | "/metrics") {
         return next.run(request).await;
     }
+    if let Some(retry_after) = state.request_limiter.retry_after() {
+        state.metrics.rate_limited();
+        return request_rate_limited(retry_after);
+    }
     let signed_action_candidate = state.config.action_secret.is_some()
         && crate::http::is_signed_action_candidate(request.method(), request.uri());
-    match extract_identity(
+    match authenticate_identity(
         &state.config.auth,
         &headers,
         request.extensions(),
         state.native_mtls(),
         state.config.trust_proxy_mtls,
-    ) {
+        &state.auth_permits,
+    )
+    .await
+    {
         Ok(identity) => {
             debug!(principal = %identity.principal, "authenticated LFS request");
             request.extensions_mut().insert(identity);
@@ -166,6 +200,40 @@ pub async fn auth_middleware(
         }
         Err(reason) => unauthorized(&state.config.auth, reason),
     }
+}
+
+async fn authenticate_identity(
+    config: &AuthConfig,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    native_mtls: bool,
+    trusted_proxy: bool,
+    auth_permits: &Arc<tokio::sync::Semaphore>,
+) -> std::result::Result<ClientIdentity, String> {
+    let AuthConfig::Basic { users } = config else {
+        return extract_identity(config, headers, extensions, native_mtls, trusted_proxy);
+    };
+    let (principal, password) = basic_credentials(headers)?;
+    let expected = users
+        .get(&principal)
+        .map(String::as_str)
+        .unwrap_or(DUMMY_BASIC_PASSWORD_HASH)
+        .to_owned();
+    let permit = auth_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| "authentication service is shutting down".to_owned())?;
+    let verified = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_password(&expected, password.as_bytes())
+    })
+    .await
+    .map_err(|_| "password verification task failed".to_owned())?;
+    if !verified || !users.contains_key(&principal) {
+        return Err("invalid Basic credentials".to_owned());
+    }
+    Ok(ClientIdentity { principal })
 }
 
 /// Extracts an identity from the configured HTTP/TLS credential.
@@ -184,8 +252,9 @@ pub(crate) fn extract_identity(
             let (principal, password) = basic_credentials(headers)?;
             let expected = users
                 .get(&principal)
-                .ok_or_else(|| "invalid Basic credentials".to_owned())?;
-            if !constant_time_eq(blake3::hash(password.as_bytes()).as_bytes(), expected) {
+                .map(String::as_str)
+                .unwrap_or(DUMMY_BASIC_PASSWORD_HASH);
+            if !verify_password(expected, password.as_bytes()) || !users.contains_key(&principal) {
                 return Err("invalid Basic credentials".to_owned());
             }
             Ok(ClientIdentity { principal })
@@ -226,6 +295,36 @@ pub(crate) fn extract_identity(
             })
         }
     }
+}
+
+pub(crate) fn validate_password_hash(value: &str, field: &str) -> Result<String> {
+    let parsed = PasswordHash::new(value).map_err(|_| {
+        LfsServerError::Config(format!("{field} must be a valid scrypt PHC password hash"))
+    })?;
+    if !value.starts_with("$scrypt$") || !scrypt_params_are_safe(&parsed) {
+        return Err(LfsServerError::Config(format!(
+            "{field} must be a valid scrypt PHC password hash with at most 128 MiB of verification memory and parallelism at most {MAX_SCRYPT_PARALLELISM}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn verify_password(encoded: &str, password: &[u8]) -> bool {
+    let Ok(parsed) = PasswordHash::new(encoded) else {
+        return false;
+    };
+    scrypt_params_are_safe(&parsed) && Scrypt.verify_password(password, &parsed).is_ok()
+}
+
+fn scrypt_params_are_safe(hash: &PasswordHash<'_>) -> bool {
+    let Ok(params) = scrypt::Params::try_from(hash) else {
+        return false;
+    };
+    let memory = 128u64
+        .checked_mul(u64::from(params.r()))
+        .and_then(|value| value.checked_shl(u32::from(params.log_n())))
+        .unwrap_or(u64::MAX);
+    memory <= MAX_SCRYPT_MEMORY_BYTES && params.p() <= MAX_SCRYPT_PARALLELISM
 }
 
 fn basic_credentials(headers: &HeaderMap) -> std::result::Result<(String, String), String> {
@@ -280,6 +379,25 @@ fn unauthorized(config: &AuthConfig, reason: String) -> Response {
             header::HeaderName::from_static("lfs-authenticate"),
             header::HeaderValue::from_static(challenge),
         );
+    }
+    response
+}
+
+fn request_rate_limited(retry_after: std::time::Duration) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "message": "request rate limit exceeded"
+        })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/vnd.git-lfs+json"),
+    );
+    let seconds = retry_after.as_secs().max(1).to_string();
+    if let Ok(value) = header::HeaderValue::from_str(&seconds) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
     }
     response
 }
@@ -369,9 +487,9 @@ mod tests {
     #[test]
     fn basic_credentials_map_to_configured_principal() {
         let mut users = HashMap::new();
-        users.insert("alice".to_owned(), *blake3::hash(b"secret").as_bytes());
+        users.insert("alice".to_owned(), DUMMY_BASIC_PASSWORD_HASH.to_owned());
         let mut headers = HeaderMap::new();
-        let encoded = base64::engine::general_purpose::STANDARD.encode("alice:secret".as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode("alice:password".as_bytes());
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Basic {encoded}")).expect("valid header"),
@@ -385,6 +503,41 @@ mod tests {
         )
         .expect("credentials should authenticate");
         assert_eq!(identity.principal, "alice");
+    }
+
+    #[test]
+    fn basic_credentials_reject_wrong_password_and_unknown_user() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_owned(), DUMMY_BASIC_PASSWORD_HASH.to_owned());
+        for credentials in ["alice:wrong", "unknown:password"] {
+            let mut headers = HeaderMap::new();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Basic {encoded}")).expect("valid header"),
+            );
+            let error = extract_identity(
+                &AuthConfig::Basic {
+                    users: users.clone(),
+                },
+                &headers,
+                &Extensions::new(),
+                false,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error, "invalid Basic credentials");
+        }
+    }
+
+    #[test]
+    fn password_hash_validation_rejects_expensive_parameters() {
+        let error = validate_password_hash(
+            "$scrypt$ln=21,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E",
+            "auth.users.alice",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("at most 128 MiB"));
     }
 
     #[test]

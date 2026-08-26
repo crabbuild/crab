@@ -24,6 +24,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::{AuthPolicy, ClientIdentity};
 use crate::config::{ActionSecret, LfsServerConfig};
+use crate::limits::{RequestRateLimiter, SpoolBudget, SpoolReservation};
 use crate::server::UPLOAD_SPOOL_PREFIX;
 
 const LFS_JSON: &str = "application/vnd.git-lfs+json";
@@ -47,6 +48,12 @@ pub struct AppState {
     pub upload_permits: Arc<tokio::sync::Semaphore>,
     /// Bounds concurrent streamed downloads for the lifetime of each body.
     pub download_permits: Arc<tokio::sync::Semaphore>,
+    /// Bounds aggregate bytes held in upload spool files.
+    pub(crate) spool_budget: Arc<SpoolBudget>,
+    /// Bounds concurrent password-hash verification work.
+    pub(crate) auth_permits: Arc<tokio::sync::Semaphore>,
+    /// Applies process-local request admission before authentication work.
+    pub(crate) request_limiter: Arc<RequestRateLimiter>,
     /// Process-local request and saturation counters.
     pub metrics: Arc<crate::metrics::LfsMetrics>,
 }
@@ -309,6 +316,9 @@ async fn dispatch(
                     Ok(request) => request,
                     Err(response) => return response,
                 };
+            if let Err(message) = validate_lfs_ref(request.reference.as_ref()) {
+                return error_response(StatusCode::BAD_REQUEST, message);
+            }
             let force = request.force.unwrap_or(false);
             let action = if force { "admin" } else { "write" };
             if !authorized(&state, &identity, &endpoint.repository, action) {
@@ -713,6 +723,13 @@ struct BatchRequest {
     transfers: Option<Vec<String>>,
     objects: Vec<BatchObjectRequest>,
     hash_algo: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<LfsRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LfsRef {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -772,17 +789,23 @@ struct VerifyRequest {
 #[derive(Debug, Deserialize)]
 struct LockRequest {
     path: String,
+    #[serde(rename = "ref")]
+    reference: Option<LfsRef>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct UnlockRequest {
     force: Option<bool>,
+    #[serde(rename = "ref")]
+    reference: Option<LfsRef>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct LockVerifyRequest {
     cursor: Option<String>,
     limit: Option<usize>,
+    #[serde(rename = "ref")]
+    reference: Option<LfsRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -824,6 +847,7 @@ struct LockQuery {
     id: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
+    refspec: Option<String>,
 }
 
 async fn batch(
@@ -873,6 +897,9 @@ async fn batch(
             StatusCode::UNPROCESSABLE_ENTITY,
             "only the sha256 LFS object hash is supported",
         );
+    }
+    if let Err(message) = validate_lfs_ref(request.reference.as_ref()) {
+        return error_response(StatusCode::BAD_REQUEST, message);
     }
     let action = if request.operation == "upload" {
         "write"
@@ -1261,6 +1288,19 @@ async fn upload(
             );
         }
     };
+    let mut spool_reservation = match SpoolReservation::acquire(
+        Arc::clone(&state.spool_budget),
+        content_length.unwrap_or_default(),
+    ) {
+        Some(reservation) => reservation,
+        None => {
+            state.metrics.spool_rejected();
+            return error_response(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "upload spool capacity is temporarily exhausted",
+            );
+        }
+    };
     let temporary = match tempfile::Builder::new()
         .prefix(UPLOAD_SPOOL_PREFIX)
         .tempfile_in(&state.config.spool_dir)
@@ -1306,6 +1346,13 @@ async fn upload(
             return error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "upload body is larger than Content-Length",
+            );
+        }
+        if content_length.is_none() && !spool_reservation.extend(chunk_size) {
+            state.metrics.spool_rejected();
+            return error_response(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "upload spool capacity is temporarily exhausted",
             );
         }
         if let Err(source) = file.write_all(&chunk).await {
@@ -1577,6 +1624,9 @@ async fn create_lock(
     if let Err(message) = validate_lock_path(&request.path) {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
+    if let Err(message) = validate_lfs_ref(request.reference.as_ref()) {
+        return error_response(StatusCode::BAD_REQUEST, message);
+    }
     let manager = lock_manager(state, repository);
     match manager
         .lock_exclusive(&request.path, &identity.principal)
@@ -1609,6 +1659,9 @@ async fn verify_locks(
         Ok(request) => request,
         Err(response) => return response,
     };
+    if let Err(message) = validate_lfs_ref(request.reference.as_ref()) {
+        return error_response(StatusCode::BAD_REQUEST, message);
+    }
     let limit = match parse_limit(request.limit) {
         Ok(limit) => limit,
         Err(response) => return response,
@@ -1706,8 +1759,14 @@ fn parse_lock_query(uri: &Uri) -> Result<LockQuery, Response> {
                     error_response(StatusCode::BAD_REQUEST, source.to_string())
                 })?);
             }
+            "refspec" => query.refspec = Some(value.into_owned()),
             _ => {}
         }
+    }
+    if let Some(refspec) = query.refspec.as_deref()
+        && let Err(message) = validate_lfs_ref_name(refspec)
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, message));
     }
     query.limit = Some(parse_limit(query.limit)?);
     Ok(query)
@@ -1745,6 +1804,23 @@ fn validate_lock_path(path: &str) -> Result<(), String> {
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
         return Err("lock path must be repository-relative".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_lfs_ref(reference: Option<&LfsRef>) -> Result<(), String> {
+    if let Some(reference) = reference {
+        validate_lfs_ref_name(&reference.name)?;
+    }
+    Ok(())
+}
+
+fn validate_lfs_ref_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 1024 || name.chars().any(char::is_control) {
+        return Err(
+            "LFS ref name must be non-empty, at most 1024 bytes, and contain no control characters"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -1806,6 +1882,14 @@ mod tests {
         secret: Option<&str>,
         auth: crate::auth::AuthConfig,
     ) -> (Router, TempDir) {
+        app_with_action_secret_and_auth_with_spool(secret, auth, 2 * 1024 * 1024)
+    }
+
+    fn app_with_action_secret_and_auth_with_spool(
+        secret: Option<&str>,
+        auth: crate::auth::AuthConfig,
+        max_spool_bytes: u64,
+    ) -> (Router, TempDir) {
         let spool = TempDir::new().expect("spool directory");
         let config = Arc::new(LfsServerConfig {
             listen_addr: "127.0.0.1:0".parse().expect("socket address"),
@@ -1818,6 +1902,9 @@ mod tests {
             max_batch_objects: 10,
             max_object_bytes: 1024 * 1024,
             max_uploads: 2,
+            max_spool_bytes,
+            max_requests_per_second: 1_000,
+            request_burst: 2_000,
             request_timeout: std::time::Duration::from_secs(30),
             action_secret: secret
                 .map(|value| ActionSecret::from_value(value).expect("action secret")),
@@ -1831,6 +1918,11 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             upload_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             download_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            spool_budget: Arc::new(crate::limits::SpoolBudget::new(max_spool_bytes)),
+            auth_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::auth::MAX_AUTH_CONCURRENCY,
+            )),
+            request_limiter: Arc::new(crate::limits::RequestRateLimiter::new(5_000, 10_000)),
             metrics: Arc::new(crate::metrics::LfsMetrics::default()),
         });
         (build_router(state), spool)
@@ -1865,7 +1957,11 @@ mod tests {
     #[tokio::test]
     async fn readiness_and_metrics_are_public_operational_endpoints() {
         let mut users = HashMap::new();
-        users.insert("alice".to_owned(), *blake3::hash(b"secret").as_bytes());
+        users.insert(
+            "alice".to_owned(),
+            "$scrypt$ln=16,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E"
+                .to_owned(),
+        );
         let (app, _spool) = app_with_action_secret_and_auth(
             Some("test action secret"),
             crate::auth::AuthConfig::Basic { users },
@@ -1893,6 +1989,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_rejects_unknown_length_after_spool_budget_is_exhausted() {
+        let (app, spool) = app_with_action_secret_and_auth_with_spool(
+            None,
+            crate::auth::AuthConfig::None,
+            128 * 1024,
+        );
+        let payload = vec![0x5a; 256 * 1024];
+        let oid = format!("{:x}", Sha256::digest(&payload));
+        let response = request(
+            &app,
+            Method::PUT,
+            &format!("/repo.git/info/lfs/objects/{oid}"),
+            Body::from(payload),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(
+            std::fs::read_dir(spool.path())
+                .expect("spool directory")
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn basic_transfer_batch_upload_download_and_range_are_end_to_end() {
         let (app, _spool) = app();
         let payload = b"crab-lfs-http";
@@ -1905,7 +2026,8 @@ mod tests {
                 serde_json::json!({
                     "operation": "upload",
                     "transfers": ["basic"],
-                    "objects": [{"oid": oid, "size": payload.len()}]
+                    "objects": [{"oid": oid, "size": payload.len()}],
+                    "ref": {"name": "refs/heads/main"}
                 })
                 .to_string(),
             ),
@@ -2098,7 +2220,11 @@ mod tests {
     #[tokio::test]
     async fn signed_actions_do_not_require_repository_credentials() {
         let mut users = HashMap::new();
-        users.insert("alice".to_owned(), *blake3::hash(b"secret").as_bytes());
+        users.insert(
+            "alice".to_owned(),
+            "$scrypt$ln=16,r=8,p=1$aM15713r3Xsvxbi31lqr1Q$nFNh2CVHVjNldFVKDHDlm4CbdRSCdEBsjjJxD+iCs5E"
+                .to_owned(),
+        );
         let (app, _spool) = app_with_action_secret_and_auth(
             Some("test action secret"),
             crate::auth::AuthConfig::Basic { users },
@@ -2110,7 +2236,7 @@ mod tests {
             "objects": [{"oid": oid, "size": payload.len()}]
         })
         .to_string();
-        let credentials = base64::engine::general_purpose::STANDARD.encode("alice:secret");
+        let credentials = base64::engine::general_purpose::STANDARD.encode("alice:password");
         let batch = app
             .clone()
             .oneshot(
@@ -2195,7 +2321,13 @@ mod tests {
             &app,
             Method::POST,
             "/lfs/repo/info/lfs/locks",
-            Body::from(serde_json::json!({"path": "model.bin"}).to_string()),
+            Body::from(
+                serde_json::json!({
+                    "path": "model.bin",
+                    "ref": {"name": "refs/heads/main"}
+                })
+                .to_string(),
+            ),
         )
         .await;
         assert_eq!(created.status(), StatusCode::CREATED);
@@ -2226,7 +2358,7 @@ mod tests {
         let listed = request(
             &app,
             Method::GET,
-            "/lfs/repo/info/lfs/locks?path=model.bin",
+            "/lfs/repo/info/lfs/locks?path=model.bin&refspec=refs%2Fheads%2Fmain",
             Body::empty(),
         )
         .await;
@@ -2238,11 +2370,26 @@ mod tests {
             serde_json::from_slice(&listed_body).expect("lock list JSON");
         assert_eq!(listed_json["locks"].as_array().expect("locks").len(), 1);
 
+        let verified = request(
+            &app,
+            Method::POST,
+            "/lfs/repo/info/lfs/locks/verify",
+            Body::from(serde_json::json!({"ref": {"name": "refs/heads/main"}}).to_string()),
+        )
+        .await;
+        assert_eq!(verified.status(), StatusCode::OK);
+        let verified_body = to_bytes(verified.into_body(), MAX_SMALL_BODY_BYTES)
+            .await
+            .expect("lock verify body");
+        let verified_json: serde_json::Value =
+            serde_json::from_slice(&verified_body).expect("lock verify JSON");
+        assert_eq!(verified_json["ours"].as_array().expect("ours").len(), 1);
+
         let unlocked = request(
             &app,
             Method::POST,
             &format!("/lfs/repo/info/lfs/locks/{id}/unlock"),
-            Body::from("{}"),
+            Body::from(serde_json::json!({"ref": {"name": "refs/heads/main"}}).to_string()),
         )
         .await;
         assert_eq!(unlocked.status(), StatusCode::OK);

@@ -66,6 +66,14 @@ pub fn prepare_server(
         download_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::http::MAX_CONCURRENT_REQUESTS,
         )),
+        spool_budget: Arc::new(crate::limits::SpoolBudget::new(config.max_spool_bytes)),
+        auth_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::auth::MAX_AUTH_CONCURRENCY,
+        )),
+        request_limiter: Arc::new(crate::limits::RequestRateLimiter::new(
+            config.max_requests_per_second,
+            config.request_burst,
+        )),
         metrics: Arc::new(crate::metrics::LfsMetrics::default()),
         config: Arc::new(config),
         origin,

@@ -39,17 +39,21 @@ name form the object-store namespace; requests cannot select an arbitrary
 bucket path.
 
 The configuration file is TOML. Authentication supports none for trusted
-development, Basic users with BLAKE3 password hashes, bearer tokens with
-BLAKE3 token hashes, and mTLS identity supplied by the native TLS acceptor or
+development, Basic users with bounded scrypt PHC password hashes, bearer
+tokens with BLAKE3 token hashes, and mTLS identity supplied by the native TLS acceptor or
 an explicitly trusted reverse proxy (`auth.trust_proxy_mtls = true`). The
 gateway rejects proxy identity headers unless that trust is configured.
 Production deployments should use HTTPS, a policy file that grants
 read/write/admin actions per repository, and `server.action_secret` (or
 `CRAB_LFS_ACTION_SECRET`) so Batch actions are short-lived and bound to their
-repository, operation, OID, and size. The dedicated spool directory is scanned
-at startup and stale `.crab-lfs-upload-*` files older than twice
-`server.request_timeout` are removed; keep unrelated files out of that
-directory.
+repository, operation, OID, and size. Set `server.max_spool_bytes` to the
+capacity reserved for in-flight upload files; the gateway returns `507` when
+that process-local budget is exhausted. Set `server.max_requests_per_second`
+and `server.request_burst` for process-local `429` admission protection;
+responses include `Retry-After` and Git LFS may retry them. The dedicated
+spool directory is scanned at startup and stale `.crab-lfs-upload-*` files
+older than twice `server.request_timeout` are removed; keep unrelated files
+out of that directory.
 
 Signed Batch actions also include Git LFS `expires_in` metadata, matching the
 capability lifetime advertised by the URL.
@@ -57,7 +61,10 @@ capability lifetime advertised by the URL.
 Lock creation is exclusive, including repeated requests from the same owner,
 and lock listing is ID-ordered with bounded page retention. Unlock operations
 bind the compare-and-swap release to the requested lock ID so a stale force
-unlock cannot release a replacement lock for the same path.
+unlock cannot release a replacement lock for the same path. Batch and locking
+requests accept the standard optional Git ref/refspec context; the current
+lock namespace is repository-wide, so that context is validated but does not
+yet partition locks by branch.
 
 When no action secret is configured, the gateway permits unauthenticated
 object actions only with `auth.mechanism = "none"`, or with an end-to-end mTLS
