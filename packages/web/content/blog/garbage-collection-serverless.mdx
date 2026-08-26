@@ -19,192 +19,202 @@ meta:
   audience: "Repository operators reclaiming object-storage capacity."
 ---
 
-Crab creates immutable Git packs, xorbs, and shards. Ref updates can make earlier objects unreachable, and interrupted pushes can leave unreferenced uploads. Garbage collection reclaims only objects that are outside every retained recovery boundary.
+Deleting a branch does **not** mean its 400 GB experiment disappears from
+object storage.
 
-<GarbageCollectionDiagram />
+The branch name may be gone while recovery history still reaches its commits,
+pointers, recipes, and shared xorbs. Crab deletes an object only when two keys
+turn:
 
-## Garbage collection has five explicit phases
+1. No retained root reaches it.
+2. It is older than the grace window.
 
-Repository garbage collection is easier to review as a proof pipeline:
+<GcObjectEvidenceLab />
 
-1. **Snapshot** the repository and maintenance boundary used for classification.
-2. **Enumerate roots** from refs, journals, workflows, and recovery policy.
-3. **Mark dependencies** by walking Git and Crab metadata to immutable objects.
-4. **Classify candidates** by subtracting the marked set and applying age and storage-class rules.
-5. **Delete and reconcile** the approved candidates, then verify repository state.
+## Start with one object
 
-Each phase can stop the operation without making the remaining objects less safe. A failed root read or incomplete listing blocks candidate proof. A partial delete reports progress and leaves the next run to reconcile current storage.
+Consider `xorb d77c…`, a 4.2 GB immutable object.
 
-Dry run executes the reasoning without the destructive phase. Treat its output as the review artifact for the later apply.
+Crab first builds a **root set** from current refs, the ref journal, workflow
+artifacts, and recovery history. It walks each pointer through its file recipe
+and marks every required xorb.
 
-## Mark starts from more than current branches
+Then it compares the complete storage listing with that mark set:
 
-The live set includes the current repository state, the ref journal, workflow artifact roots, and immutable recovery roots. Crab walks those roots through shards and file recipes to mark every referenced data object.
-
-Historical roots used by `crab recover history` are retained without a time or count limit by default. Deleting a branch therefore does not imply that all associated objects become immediate GC candidates.
-
-The walk follows both data lanes. Git roots reach commits, trees, packs, and pointer blobs. Each pointer reaches a file recipe, shard terms, and xorb ranges. A collector that marked only Git object IDs would miss the large-file closure behind those pointers.
-
-Shared chunks complicate intuition but not the rule. An xorb remains live when any retained recipe needs one of its chunks. The branch or file that first uploaded it does not own the complete object.
-
-<GarbageCollectionReachabilityDiagram />
-
-## Retained roots express recovery policy
-
-Current branches and tags describe active Git history. The ref journal records committed transitions. Recovery history preserves earlier states that operators may restore after an accidental ref change.
-
-Workflow artifact catalogs can protect data outside the current branch tree. Immutable recovery roots can also preserve objects required by repair and rollback operations.
-
-The collector must take the union of these roots. An xorb referenced by any retained file recipe remains live even if no current branch names the commit that first created it.
-
-## Classification is conservative
-
-An object becomes a candidate only when the complete mark walk cannot reach it. Missing metadata, failed listings, or incomplete repository registration block confident deletion rather than shrinking the live set by assumption.
-
-Repository-scoped collection is the normal operating boundary. Bucket-scoped collection reasons across registered repositories and requires broader coordination and evidence.
-
-Crab takes a snapshot boundary before it classifies objects. Data added after that boundary must not enter the unreachable set because a concurrent push may still be publishing its metadata.
-
-Listing failures also stop confident deletion. An incomplete object listing cannot prove that the mark walk examined the complete namespace.
-
-## The grace window protects concurrent work
-
-A candidate must also be older than the configured grace period. The `crab gc` command defaults to one hour and enforces a one-hour minimum unless force mode is used.
-
-The time check protects uploads created after the collector's snapshot and work that has not yet reached its ref transaction. A longer period can be appropriate for slow or intermittently connected workflows.
-
-Force mode bypasses the age check, but it does not convert unknown reachability into proof. Use it only within a documented maintenance plan with current repository coordination evidence.
-
-Storage classes may add minimum-retention charges. Class-aware garbage collection can retain or report objects whose early deletion would create a provider penalty.
-
-Consider a writer that uploads a xorb after GC takes its snapshot but before the writer publishes shard metadata. The snapshot cannot yet reach that object. The age rule prevents the collector from treating the new upload as an old orphan.
-
-On the next collection, the xorb will either be reachable through the committed writer state or remain an aged orphan after an abandoned push. Only the second case becomes eligible.
-
-Choose a grace period longer than the slowest expected preparation and recovery interval. A one-hour minimum protects the default path, while offline or archival workflows may require a wider policy.
-
-## Preview before deletion
-
-Start with a repository-scoped dry run:
-
-```bash
-crab fsck
-crab gc --scope repo --dry-run
+```text
+listed objects − marked objects = unreachable objects
 ```
 
-Review object counts, bytes, skipped recent objects, and any warning about incomplete proof. Then run the same scope without `--dry-run`:
+Unreachable does not yet mean deletable. Crab applies object age, storage-class
+rules, and current coordination evidence before creating a candidate batch.
 
-```bash
-crab gc --scope repo
-crab fsck
-```
+## Recovery history is still a root
 
-Successful deletions are idempotent. If some object deletion or reconciliation step fails, Crab exits nonzero and reports the partial outcome so rerunning the command is safe.
+Crab retains recovery-history roots without a time or count limit by default.
+That is why deleting `experiment/branch-17` may reclaim nothing.
 
-Before apply, compare the dry-run snapshot inputs with current activity. A long delay between preview and deletion can invalidate the operational review even when the collector will take a new safe snapshot.
+These are separate decisions:
 
-Record the repository identity, scope, grace period, root counts, candidate counts, candidate bytes, and storage-class skips. Approval should name the same scope and policy that the apply command uses.
+| Action                 | What it removes              |
+| ---------------------- | ---------------------------- |
+| Delete a branch        | An active ref name           |
+| Prune recovery history | Supported restore points     |
+| Run GC                 | Unreachable physical objects |
 
-## Read the dry-run result as a proof report
-
-Do not review only the byte total. Inspect how the collector reached that total.
-
-The report should distinguish these classes:
-
-- **Reachable**: protected by a current or retained root
-- **Recent orphan**: unreachable at the snapshot but still inside the grace period
-- **Deletion candidate**: unreachable and old enough for the selected policy
-- **Class-protected**: eligible by reachability but blocked by storage-class rules
-- **Unknown**: not safe to classify because listing or metadata proof failed
-
-A large recent-orphan count can follow an interrupted import or push. A growing reachable set can reflect unlimited recovery history. Unknown objects require investigation before another destructive run.
-
-Save structured dry-run output with the maintenance record. It provides the candidate inventory and policy inputs reviewed before deletion.
-
-## History retention is a separate decision
-
-If recovery history protects more data than your policy requires, preview an explicit retention boundary:
+If the recovery policy needs only the latest 20 generations, preview that
+change first:
 
 ```bash
 crab recover history prune --keep-last 20
 ```
 
-Apply the prune only after review, then run GC again:
+Apply it explicitly, then recalculate garbage:
 
 ```bash
 crab recover history prune --keep-last 20 --apply
 crab gc --scope repo --dry-run
 ```
 
-Pruning recovery roots changes what can be restored. It should be governed as a retention policy, not hidden inside routine storage cleanup.
+Pruning history does not delete xorbs. It removes roots; GC separately proves
+which objects became unreachable.
 
-Branch retention, recovery-history retention, and provider object retention answer different questions. A deleted branch removes an active name. Pruning recovery history removes a supported ref-restoration path. Garbage collection removes unreachable physical objects after proof.
+## Shared data has no single owner
 
-Perform the decisions in that order. Decide what history the product must recover, update retained roots, preview resulting candidates, and only then delete physical data.
+Suppose two repositories reuse chunks stored in `xorb f093…`. Repo `vision`
+can stop referencing it while repo `labs` still needs it.
 
-Signed releases, legal holds, experiment records, and workflow artifacts may need longer retention than ordinary branches. Express those requirements as explicit roots or supported repository policy instead of relying on an operator to remember object names.
+Repository GC stays inside its supported repository boundary. Bucket GC must
+take the union of every registered repository’s marks. Missing one repository
+creates a destructive blind spot, so incomplete registration blocks the run.
 
-## Schedule collection around repository activity
+Use repository scope for routine maintenance. Treat bucket scope as a separate,
+coordinated operation.
 
-Repository GC takes a renewable maintenance lease and cannot overlap conflicting history maintenance. Run it during a window that can tolerate object listings and deletes.
+## The default grace window is 24 hours
 
-Start with a dry run, review unexpected growth, then apply the same scope and policy. Run `crab fsck` afterward so deletion and reconciliation failures remain visible.
+New uploads can exist before their ref transaction publishes. During that gap,
+a storage listing sees the object but the root snapshot cannot reach it yet.
 
-Avoid routine bucket-scope collection unless the operator owns every registered repository in that bucket. Global deduplication means a bucket object may serve several repositories, so incomplete registration can create a destructive blind spot.
+Crab’s configured default grace period is **24 hours**. Non-force runs clamp a
+shorter value to at least one hour.
 
-Track reclaimed bytes, candidates skipped by grace, candidates blocked by storage class, failed deletes, and reconciliation outcome. Trends help distinguish healthy cleanup from a retention policy that never releases old roots.
+```bash
+crab gc --scope repo --grace-period 24h --dry-run
+```
 
-## Use a safety checklist before apply
+Choose a window longer than the slowest expected push or offline workflow.
 
-Confirm these conditions for every destructive run:
+<GcRaceReplay />
 
-- **Scope**: the command targets the intended repository, not an entire shared bucket
-- **Registration**: every repository that can reference shared objects is represented in the mark boundary
-- **Roots**: current refs, recovery history, workflows, and holds are readable
-- **Activity**: maintenance coordination protects current writers and history operations
-- **Age**: the grace period exceeds the in-flight preparation window
-- **Preview**: the reviewed dry run has no unknown classification
-- **Recovery**: operators know which history cannot be restored after deletion
+Two mechanisms protect concurrent work:
 
-Stop when any item is uncertain. Delayed reclamation costs storage. Incorrect reclamation can remove the only durable bytes behind a retained pointer.
+- **Grace:** a recent, unmarked upload stays protected.
+- **Fencing:** writers hold shared admission through publication; destructive
+  GC takes short exclusive sweep fences around reconciliation and delete
+  batches.
 
-## Treat deletion failures as partial progress
+If a writer enters between batches, the writer epoch changes. GC stops before
+another batch instead of trusting an outdated snapshot.
 
-Object stores can accept some deletes and reject others. Crab reports the successful and failed counts, then exits nonzero when repository-scope deletion or reconciliation is incomplete.
+`--force` bypasses the age key only. It does not bypass reachability, registry,
+closure, or coordinator proof.
 
-Do not restore already deleted unreferenced objects merely to make the batch appear atomic. Rerun the idempotent collection after fixing the provider or permission error.
+## Preview the exact repository first
 
-If reconciliation fails after successful deletes, preserve the command output and run integrity checks before the next maintenance action. The repository needs an accurate post-delete view even when every deleted object was a valid candidate.
+Start with integrity verification and structured dry-run output:
 
-Provider versioning or replication can make physical reclamation lag behind the logical delete. Billing inventory may therefore change after the Crab command completes. Measure provider-visible bytes over the lifecycle interval rather than assuming immediate capacity recovery.
+```bash
+crab fsck
+crab gc --scope repo --dry-run --json
+```
 
-Do not interpret a missing candidate on retry as unexplained drift. It may be one of the objects deleted successfully in the earlier partial batch. Reconciliation and structured output should connect that current absence to the completed action.
+A summary includes candidate counts and safety state:
 
-## Verify recovery assumptions after collection
+```json
+{
+  "packs_deleted": 3,
+  "xorbs_deleted": 12,
+  "shards_deleted": 4,
+  "bytes_reclaimed": 21743271936,
+  "dry_run": true,
+  "partial_enumeration": false,
+  "delete_failures": 0,
+  "reconciliation_failed": false
+}
+```
 
-Run `crab fsck` after the apply and hydrate representative current and retained historical files from an isolated client. Integrity checks cover repository relationships, while hydration proves that readable data still backs selected pointers.
+In dry-run mode, “deleted” fields mean **would delete**. Save the repository
+identity, scope, grace period, counts, and bytes with the review.
 
-Include a ref from the oldest supported recovery boundary. A successful default-branch checkout cannot prove that recovery roots retained every older xorb required by policy.
+Do not approve a preview with partial enumeration or unreadable roots. Missing
+evidence protects objects; it never shrinks the live set by assumption.
 
-Also confirm that a known deleted ref outside retention no longer appears as recoverable through the supported history interface. Storage reclamation and recovery behavior should match the policy reviewed before collection.
+## Apply the same policy
 
-Retain the dry run, apply result, integrity result, and provider deletion report as one maintenance record. This evidence connects candidate proof to the final repository state.
+After review, run the same scope without `--dry-run`:
 
-## Explain a dry run that reclaims little data
+```bash
+crab gc --scope repo
+crab fsck
+```
 
-A small candidate set does not mean the collector failed. Current branches may share most xorbs with deleted branches, recovery history may retain earlier commits, or recent interrupted uploads may still be inside the grace period.
+<GcRunPermit />
 
-Break the protected total down by root class and age. This shows whether storage remains because active history uses it, policy retains it, or time-based protection has not expired.
+Keep preview and apply close together. A long delay may change repository
+activity even though the apply run takes a fresh safe snapshot.
 
-Do not shorten the grace period to make one report look productive. Wait for the next safe window or change the documented recovery policy through its own review.
+Use force only for a documented exception:
 
-Provider storage can also remain after successful deletion because versioning, replication, or lifecycle retention preserves physical copies. Compare Crab's logical result with provider inventory after those controls have had time to apply.
+```bash
+crab gc --scope repo --force
+```
 
-The useful outcome is an explainable live set and candidate set. Reclaimed bytes are secondary to proving that every deletion respects repository history and recovery policy.
+The command asks for confirmation unless `--yes` is provided. Recent
+unreachable uploads lose age protection, so current coordination evidence is
+essential.
 
-<TakeawayBox title="Deletion requires two proofs">
-  The object is unreachable from every retained root, and it is older than the
-  protection window. Uncertainty keeps the object.
+## Read partial failure as progress, not success
+
+An object store can accept some deletes and reject others. Crab reports
+successful and failed counts and exits nonzero with `CRAB-E0322` when repository
+deletion or reconciliation is incomplete.
+
+Fix the provider or permission failure, preserve the output, and rerun GC.
+Successful deletes are idempotent; already removed candidates do not need to be
+restored.
+
+Provider versioning, replication, or lifecycle retention can also delay the
+billing change after Crab’s logical delete.
+
+## Why a dry run may reclaim little
+
+A small candidate set is often correct:
+
+- Current branches share most xorbs with deleted branches.
+- Recovery history still retains the old commits.
+- Interrupted uploads remain inside the grace window.
+- Storage-class minimum-retention policy protects early deletion.
+
+Do not shorten the grace window to make the report look productive. Change the
+recovery policy explicitly or wait for the next safe collection window.
+
+## Operator checklist
+
+Before apply, confirm:
+
+- Repository identity and scope are exact.
+- Current refs, journals, workflows, and recovery roots are readable.
+- The reviewed dry run has complete enumeration.
+- The grace window covers the longest expected publication delay.
+- Maintenance coordination can seal the sweep.
+- `crab fsck` is planned after deletion.
+
+If any answer is uncertain, stop. Extra storage is cheaper than deleting the
+only durable bytes behind a retained pointer.
+
+<TakeawayBox title="Deletion requires two keys">
+  The object is unreachable from every retained root, and it is old enough.
+  Unknown evidence keeps the object.
 </TakeawayBox>
 
-Next, [build a cost model before changing storage classes](/blog/cost-optimization-s3-storage).
+For exact flags and structured output, see the [`crab gc`](/docs/cli/reference/crab-gc) reference. Next, [build a cost model before changing storage classes](/blog/cost-optimization-s3-storage).

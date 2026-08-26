@@ -28,6 +28,31 @@ Crab is a Git remote helper for repositories that contain large binary files. Gi
 
 <CrabMentalModelDiagram />
 
+## Start with one repository you can picture
+
+Imagine a project that keeps training code beside the model it produces:
+
+```text
+vision-search/
+├── README.md
+├── src/
+│   └── train.py
+└── models/
+    └── encoder.safetensors
+```
+
+The README and Python file remain ordinary Git blobs. A rule such as `crab track '*.safetensors'` sends the model through Crab. The repository still creates one commit containing all three paths.
+
+| Path | Git commits | Object storage keeps | A pointer-only clone sees |
+| --- | --- | --- | --- |
+| `README.md` | File bytes | Nothing extra | File bytes |
+| `src/train.py` | File bytes | Nothing extra | File bytes |
+| `models/encoder.safetensors` | Crab pointer | Reconstructable model data | Pointer until hydration |
+
+Select each stage below to follow the model and source file from the working tree to one visible repository state.
+
+<GitArchitecturePlayer story="overview" />
+
 ## Crab changes the data path, not the history
 
 Source code, configuration, and documentation remain ordinary Git blobs. Files matched by Crab tracking rules pass through Crab's filter, which replaces the Git blob with a pointer to a byte-identical recipe.
@@ -48,6 +73,12 @@ That distinction matters during recovery. A loose bucket URL can change, disappe
 
 The pointer also gives publication a testable boundary. Before the branch can advance, Crab must prove that the pointer resolves through durable metadata to durable data. During hydration, Crab must rebuild the complete file and match the recorded identity. Both sides test the same contract.
 
+For example, suppose commit `A` names a 4 GB model. Git records the small pointer for that exact model version. Crab metadata records every chunk required to rebuild it, in order. Object storage holds the packed byte ranges. A checkout succeeds only after those layers reconstruct the expected 4 GB file and verify its identity.
+
+<HydrationPlanDiagram />
+
+This is why a pointer-only checkout is useful rather than ambiguous: it already knows _which_ file belongs at the path, even before the client downloads the file's bytes.
+
 ## “Serverless” means the bucket is the shared service
 
 Crab does not require a Crab data server or database between the repository and object storage. Each client reads and writes the bucket directly with the credentials and policies your team controls.
@@ -59,6 +90,10 @@ This removes a service from the architecture, but it does not remove coordinatio
 Git handles text changes well because its object model and compression are designed around source history. Large binary changes can make whole-file versions expensive.
 
 Crab finds content-defined chunks inside a file. If a new checkpoint reuses most bytes from the previous checkpoint, those identical chunks keep the same identity and do not need another upload. Storage grows with new content, not automatically with every full file version.
+
+<ChunkReuseDiagram />
+
+In the diagram, the middle region changes while the surrounding regions keep their earlier identities. Crab uploads the new region and writes a new ordered recipe; it does not upload the four unchanged regions again.
 
 ## Crab is a strong fit when three conditions hold
 
@@ -78,6 +113,17 @@ Git LFS can be a better fit when your forge already supplies enough storage and 
 ## Different contributors can materialize different working sets
 
 One repository does not require one checkout shape. A source developer can keep all model paths as pointers. A model engineer can hydrate the active checkpoints. A release job can hydrate a committed manifest, while an exploratory analysis tool can read through a mount.
+
+<LazyCheckoutDiagram />
+
+For the `vision-search` repository, that can look like this:
+
+| Contributor or job | Local choice | Large bytes downloaded |
+| --- | --- | --- |
+| Source developer changing `train.py` | Keep model pointers | None |
+| Evaluation job using the current encoder | `crab hydrate models/encoder.safetensors` | One selected model |
+| Asset explorer with unpredictable reads | Mount the repository | Only ranges that are read |
+| Release job validating all artifacts | Hydrate a committed manifest | The declared release set |
 
 These clients still share the same commits and refs. Materialization is local policy, not a separate version of history. A pointer-only checkout and a hydrated checkout agree about which file belongs at a path, even though only one has the full bytes on disk.
 

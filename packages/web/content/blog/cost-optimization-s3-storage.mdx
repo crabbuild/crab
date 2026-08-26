@@ -19,220 +19,209 @@ meta:
   audience: "Repository operators responsible for cloud cost and access latency."
 ---
 
-A Crab storage bill has four main terms: bytes stored by class, object requests, cold-data retrieval, and network transfer. Deduplication, xorb packing, caching, garbage collection, and tiering each change a different term.
+A cheaper storage class does not guarantee a cheaper repository.
 
-<StorageTierDiagram />
-
-## Start with a formula, not a provider price table
-
-Provider prices vary by region, account, storage class, and date. Use the current calculator and contract for your bucket, then model the workload with this shape:
+Suppose a Crab repository stores **10 TB** and reads **2 TB** from origin each
+month. Storage is only one line on the bill:
 
 ```text
-monthly cost ≈
-  stored GB by class × storage rate
-  + write, list, and read requests × request rate
-  + restored or retrieved GB × retrieval rate
-  + transferred GB × network rate
-  + minimum-retention or early-deletion charges
+storage + requests + retrieval + transfer + early-deletion charges
 ```
 
-A cheaper storage class can cost more overall when each monthly workflow rereads the working set or deletes objects before the class minimum.
+Move the wrong 8 TB into archive and the storage line falls while restore
+delay and other charges rise.
 
-## Build one row per data temperature
+<CostReceiptMixer />
 
-Separate hot, warm, and archival xorbs instead of averaging the complete repository into one access rate. Each group has a different storage rate, read frequency, retrieval charge, and restore-time objective.
+The receipt uses Crab’s embedded S3 `us-east-1` rates as an illustration. Use
+your current region, negotiated contract, and provider calculator for a real
+decision.
 
-| Input | Hot set | Warm set | Archive set |
-| --- | --- | --- | --- |
-| Stored GB | `gb_hot` | `gb_warm` | `gb_archive` |
-| Monthly reads | `reads_hot` | `reads_warm` | `reads_archive` |
-| Retrieved GB | Direct-read bytes | Direct or metered bytes | Restored bytes |
-| Required latency | Interactive | Batch-compatible | Restore-compatible |
-| Minimum retention | Provider class rule | Provider class rule | Provider class rule |
+## Measure four inputs
 
-Multiply each set by its current regional prices, then add request and transfer terms. Separate rows expose a cold-tail policy that one storage total would hide.
-
-Run a sensitivity check as well. Double the archive read frequency, increase the hot set by one release cycle, and model an early-delete event. The policy should remain acceptable under plausible workload changes.
-
-## Build a workload worksheet before selecting controls
-
-Use one row for each workflow and one row for each retained data class. The worksheet should connect repository behavior to billable operations.
-
-| Workflow | Runs per month | Managed GB read | Managed GB written | Object requests | Restore-compatible |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Developer hydration | `developer_runs` | `developer_read_gb` | 0 | `developer_requests` | No |
-| CI model test | `ci_runs` | `ci_read_gb` | 0 | `ci_requests` | No |
-| Training publish | `training_runs` | 0 | `training_write_gb` | `training_requests` | No |
-| Recovery drill | `recovery_runs` | `recovery_read_gb` | 0 | `recovery_requests` | Yes |
-| Repository GC | `gc_runs` | Metadata only | 0 | `gc_requests` | Not applicable |
-
-Populate the table from logs and Crab counters rather than estimates where possible. Multiply per-run values by frequency, then map reads and writes to the storage classes involved.
-
-Keep cache-served and origin-served bytes separate. Provider billing sees the origin path, while application latency sees both. A shared cache may trade object-store transfer for cache-service compute and network cost.
-
-## Work one tiering decision with concrete numbers
-
-Use a small calculation to test whether a lower storage rate pays for retrieval and transition work. The rates below illustrate the method; replace them with the current rates and minimum-retention rules for your provider.
-
-Assume access logs identify 6,000 GB of reachable xorbs that workflows read once per quarter. The proposed class lowers storage by `$0.014` per GB-month, charges `$0.02` per retrieved GB, and requires `$18` of one-time transition requests.
-
-| Term | Calculation | Effect |
-| --- | ---: | ---: |
-| Monthly storage reduction | `6,000 GB × $0.014` | `$84` saved |
-| Expected monthly retrieval | `200 GB × $0.02` | `$4` added |
-| Steady monthly savings | `$84 - $4` | `$80` saved |
-| Transition payback | `$18 ÷ $80` | `0.225 months` |
-
-The arithmetic supports the transition, but it does not prove the policy is safe. Confirm that quarterly restores meet the recovery-time objective and that early-deletion charges cannot erase the `$80` estimate.
-
-## Measure local and remote bytes
-
-Use Crab's inventory before changing policy:
+Start with repository inventory and Crab’s cost report:
 
 ```bash
-crab du
 crab du --remote
+crab doctor --cost --json > before.json
 crab optimize repo --json
 ```
 
-Record total remote bytes, object counts, age distribution, retrieval frequency, and the size of the active working set. Compare that baseline after each change.
+Then add evidence the object listing cannot provide:
 
-Provider billing and Crab inventory answer different questions. Billing shows charged usage. `crab du --remote` shows repository storage. Access logs and cache metrics show which bytes created requests and transfer.
+- Origin bytes read by workflow.
+- GET, PUT, LIST, and restore request counts.
+- Cache-served versus origin-served bytes.
+- Required time to first readable byte.
 
-Keep the observation window long enough to include releases, training cycles, and recovery drills. A quiet week can make active data look archival when the monthly workflow still needs it.
+Crab’s live inventory may infer Standard class when provider listings do not
+expose storage class consistently. Retrieval estimates are incomplete without
+access telemetry. Keep the pricing-table version from the report so the model
+is reproducible.
 
-Measure growth by cause. New unique chunks, retained historical roots, abandoned uploads inside the grace period, repacking overlap, and delayed provider deletion all add remote bytes for different reasons.
+Use at least one full release, training, and recovery cycle. A quiet week can
+make monthly data look archival.
 
-One inventory total cannot identify the failing cost term. Deduplication affects new unique data. Retention policy and GC affect unreachable data.
+## Match the control to the bill term
 
-Repacking affects object layout. Provider lifecycle affects the rate charged for reachable xorb bytes.
+| Bill term                          | First control to inspect          |
+| ---------------------------------- | --------------------------------- |
+| Stored GB keeps growing            | Deduplication, retained roots, GC |
+| Too many object operations         | Xorb packing and range coalescing |
+| Repeat origin reads                | Local or shared cache             |
+| Cold reachable bytes cost too much | Lifecycle tiering                 |
+| Retrieval charges rise             | Move the threshold later          |
+| Early-delete charges appear        | Respect class retention periods   |
 
-## Reduce unique bytes before moving them
+Do not change all controls together. The next bill will not show which change
+worked.
 
-Content-defined chunking prevents known chunks from uploading again. Garbage collection removes objects that are no longer protected by any retained root. These controls reduce the number of billable bytes.
+## Reduce bytes before moving bytes
 
-Packing and repacking target request economics. Larger well-formed xorbs let groups of chunks share object writes and coalesced range reads, which avoids a request per chunk.
+Use this order:
 
-Preview combined recommendations before applying layout changes:
+1. Measure unique chunk growth and deduplication.
+2. Review recovery roots and collect unreachable objects.
+3. Optimize the live xorb layout.
+4. Tier only the cold, reachable tail.
+5. Cache repeat reads close to the workload.
+
+Tiering first can archive objects GC would remove. Repacking first can rewrite
+objects that retention policy will release.
+
+Preview layout work before changing remote objects:
 
 ```bash
+crab gc --scope repo --dry-run
 crab optimize plan --include-xorbs --profile ml --json
 crab optimize xorbs --profile ml --dry-run
 ```
 
-Layout optimization can trade one term against another. Repacking may create temporary additional bytes while new objects upload. Larger xorbs can reduce requests but may increase extra range bytes for sparse reads.
+Larger xorbs can reduce requests, but sparse reads may fetch extra range bytes.
+Record both sides of that trade.
 
-Record both the steady-state estimate and migration cost. A policy that saves a small monthly amount may not repay its rewrite, transfer, and early-deletion charges within the repository's lifetime.
+## Tier xorbs, not repository metadata
 
-Apply controls in dependency order. Improve deterministic file production and measure chunk reuse first. Review retained roots and collect unreachable objects next.
+Crab lifecycle plans target `.crab/xorbs/` only. Refs, manifests, shards,
+file indexes, and Git packs stay directly readable.
 
-Optimize xorb layout after the live set is known. Tier the resulting cold reachable set last.
+Why? A 4 KiB shard may unlock a 40 GB model. Archiving that metadata saves
+almost nothing and can block every hydration plan that needs it.
 
-Reversing the order can archive bytes that GC would remove or repack objects that retention policy will release. It can also make migration traffic larger than the steady-state repository.
+The opt-in defaults transition xorbs to a warm class after 30 days and a
+deep-cold class after 180 days. Those numbers are starting points, not proof
+that the data is cold.
 
-Use a payback period for each layout or lifecycle change:
+<TierEligibilitySorter />
 
-```text
-payback months = one-time migration cost / expected monthly savings
-```
+Build separate age and access rows:
 
-Include temporary storage, requests, retrieval, transfer, and operator time in the numerator. Reject a change whose payback exceeds the expected repository or policy lifetime.
+| Set  | Example evidence                      | Starting policy              |
+| ---- | ------------------------------------- | ---------------------------- |
+| Hot  | Read daily by developers or CI        | Standard                     |
+| Warm | Read in a monthly model test          | Direct-read infrequent class |
+| Cold | Read only by quarterly recovery drill | Restore-compatible archive   |
 
-## Tier only immutable data objects
+Shared xorbs follow object age and lifecycle prefix, not the branch that first
+uploaded them. Confirm that every workflow using a shared object can tolerate
+the destination class.
 
-Crab lifecycle plans scope transitions to `.crab/xorbs/`. Refs, manifests, shards, file indexes, and Git packs remain in readable storage because repository discovery and hydration planning depend on them.
+## Plan now; do not assume apply is supported
 
-The default tier schedule is opt-in: warm-class transition after 30 days and deep-cold transition after 180 days. Treat those values as a starting point, then adjust them to measured access and provider retention rules.
+Generate the provider policy without mutation:
 
 ```bash
 crab tier plan
-crab tier plan --apply --merge
 ```
 
-`--merge` preserves unrelated lifecycle rules and replaces only Crab-managed rules. An apply writes a backup so the prior configuration can be restored.
+`crab tier plan --apply` currently fails closed for S3, GCS, and Azure because
+Crab does not yet have a qualified conditional, prefix-preserving lifecycle
+write path. S3’s lifecycle API has no conditional write.
 
-Keep metadata out of archive rules. A small metadata object can sit on the critical path for every ref list or hydration plan. Its storage savings are negligible compared with restore latency and request failure risk.
+That distinction matters: the plan is useful evidence, but it is not proof
+that Crab changed the bucket. Manage the reviewed lifecycle policy through
+your qualified infrastructure workflow until safe apply support exists.
 
-Review provider lifecycle precedence when the bucket already has infrastructure-managed rules. Merge mode protects unrelated rules, but overlapping prefixes or broader provider rules can still affect Crab objects.
+When a provider adapter becomes qualified, `--merge` will preserve unrelated
+rules and replace Crab-managed rules. Still inspect broader Terraform or
+bucket rules that overlap `.crab/xorbs/`.
 
-Test lifecycle changes in a non-production prefix with the same provider controls. Confirm which rule wins when object age, prefix, tags, and existing infrastructure policy overlap.
+## Treat restore time as a cost
 
-Keep the generated backup and the exact applied plan with the cost record. Restoring a previous lifecycle configuration changes future transitions, but it may not immediately restore objects already moved into an archive class.
+Some classes remain directly readable with a retrieval fee. Other archive
+classes require a provider restore before Crab can hydrate their xorbs.
 
-Metadata and ref objects should remain in an interactive class even when old data xorbs become archival. Their byte volume is small, while every repository discovery and hydration plan can depend on them.
+<RestoreDispatchBoard />
 
-## Include restore time in the policy
+Choose behavior per workload:
 
-Archive classes may require a restore before hydration can read an xorb. That changes both latency and retrieval cost.
+- CI can use `--no-restore` and fail instead of waiting.
+- Scheduled jobs can request a lower-cost bulk restore.
+- Incident recovery can request the fastest supported tier.
+- Warm data should stay directly readable.
 
-```bash
-crab hydrate --all --restore
-crab hydrate --all --no-restore
+Restored copies are temporary. Model restore-request charges, retrieved GB,
+the restored-copy duration, and the complete wait until hydration finishes.
+
+Run a recovery drill before relying on an archive objective. Record:
+
+1. Time to request all restores.
+2. Time until every xorb is readable.
+3. Retrieval and transfer bytes.
+4. Hydration duration after restore.
+
+A cheap class fails the policy if the release or incident cannot wait.
+
+## Watch minimum retention
+
+In Crab’s embedded S3 table, Standard-IA has a 30-day minimum, Glacier Instant
+and Flexible Retrieval have 90-day minimums, and Deep Archive has 180 days.
+Other providers differ.
+
+Deleting or rewriting earlier can create a charge for the remaining period.
+Class-aware `crab gc` blocks early deletion by default and estimates the
+penalty.
+
+Include migration cost in payback:
+
+```text
+payback months =
+  transition requests + temporary storage + retrieval + operator time
+  ------------------------------------------------------------------
+                    expected monthly savings
 ```
 
-Use `--no-restore` for jobs that should fail instead of waiting or incurring restore cost. Reserve archive tiers for data whose recovery-time objective can tolerate the provider's delay.
+Reject a migration whose payback exceeds the repository or policy lifetime.
 
-Model restores as events, not only GB. One recovery can request several xorbs with minimum billed retrieval units, restore-request charges, and a temporary restored-copy duration.
+## Cache the repeated path
 
-Run a scheduled recovery drill before committing to a deep-cold objective. Record time to request restore, time until every required range is readable, retrieval bytes, provider charges, and hydration duration after restoration.
+A local cache avoids repeat origin reads on one machine. A shared cache can do
+the same across developers and CI.
 
-The archive policy succeeds only when the complete workflow meets its recovery-time objective. A low storage rate is not useful if the release or incident process requires data sooner than the provider can restore it.
+Caching does not reduce origin storage. Count cache compute, disk, and
+cross-zone traffic, then subtract avoided origin retrieval and transfer.
 
-## Assign a request budget by workflow
+Use byte-weighted hit rate. A 95% object hit rate is weak evidence if the
+largest xorbs are the misses.
 
-Storage cost receives attention because it scales with total bytes, but request cost can dominate small-object layouts and repeated metadata scans.
+## Review one change per billing window
 
-Set budgets for common workflows:
+Keep a compact record:
 
-- **Push**: object checks, xorb writes, shard writes, Git-pack writes, and ref operations
-- **Lazy clone**: ref reads, Git-pack reads, and metadata synchronization
-- **Hydration**: shard reads, xorb range reads, restore requests, and verification work
-- **Garbage collection**: namespace listings, metadata reads, object deletes, and reconciliation
-- **Mount**: metadata lookup plus range reads driven by application access
+- Baseline dates and pricing-table version.
+- Workflow access and restore evidence.
+- One control changed.
+- Expected bill and availability effect.
+- Rollback or infrastructure revert path.
+- First complete billing window for review.
 
-Measure operations per completed workflow, not per command invocation. One hydration command can read several xorbs, and one xorb range can satisfy several chunks.
+End with one decision: keep the policy, adjust one measured threshold, or
+collect more evidence.
 
-Request batching and range coalescing should lower operations without downloading excessive unused bytes. Track both request count and transferred bytes to expose that tradeoff.
-
-Request budgets also expose unexpected metadata loops. A small hydration that performs repeated shard listings may cost little in bytes but add latency and operation charges. Compare requests per completed file and requests per hydrated GB.
-
-Segment provider error retries. A transient throttling event can multiply requests without increasing completed work. Backoff and bounded concurrency may lower both retry cost and tail latency.
-
-## Use caching for repeated reads
-
-A local cache removes repeat downloads on one machine. The optional shared cache service can remove repeat origin reads across developers and CI runners.
-
-Caching does not reduce stored origin bytes, and it introduces its own capacity and operations cost. Measure cache hit rate and transfer savings before treating it as a cost win.
-
-Calculate cache value from origin cost avoided minus cache cost added. Include service compute, local solid-state drive storage, cross-zone or cross-region transfer, and operational support.
-
-Prefer byte-weighted hit rate for large-file economics. An object-count hit rate can look healthy while the largest xorbs continue to miss and dominate transfer.
-
-## Review cost as a recurring repository operation
-
-Run a monthly review with repository inventory, provider billing, cache metrics, lifecycle transitions, restores, and garbage-collection results. Compare the same normalized workflow measures each month.
-
-Investigate changes by term. Growing unique bytes may reflect new data or expired deduplication assumptions. Growing reads may reflect a wider working set, cache eviction, or more workers. Growing retrieval charges may indicate that tier transitions happen too early.
-
-Document every applied lifecycle plan and retain its generated backup. Cost controls change availability behavior, so rollback evidence belongs beside the financial estimate.
-
-The review should end with one of three decisions: keep the policy, change a measured threshold, or collect more access evidence. Avoid changing several controls at once because the next bill will not reveal which control caused the result.
-
-Maintain an evidence table for each policy change:
-
-- **Baseline window**: dates and workflows included
-- **Control**: one deduplication, retention, packing, cache, or lifecycle change
-- **Expected effect**: the bill term and measured amount targeted
-- **Availability effect**: added restore delay, cache dependency, or maintenance work
-- **Rollback**: configuration or repository action that reverses the policy
-- **Review date**: the first complete billing window used to accept or revert it
-
-This discipline keeps cost work connected to repository behavior. It also makes provider-price changes easier to apply because workload measurements remain useful when rates change.
-
-<TakeawayBox title="Match the lever to the term">
-  Deduplication and GC reduce bytes. Packing reduces requests. Caching reduces
-  repeated reads. Tiering trades access latency and retrieval cost for a lower
+<TakeawayBox title="Move the expensive term, not just the bytes">
+  Deduplication and GC reduce stored bytes. Packing reduces requests. Caching
+  reduces repeat reads. Tiering trades retrieval cost and latency for a lower
   storage rate.
 </TakeawayBox>
 
-Review the [`crab tier`](/docs/cli/reference/crab-tier) and [`crab optimize`](/docs/cli/reference/crab-optimize) references before applying provider changes.
+Review the [`crab tier`](/docs/cli/reference/crab-tier), [`crab optimize`](/docs/cli/reference/crab-optimize), and [pricing tables](/docs/cli/reference/pricing-tables) before changing provider policy.

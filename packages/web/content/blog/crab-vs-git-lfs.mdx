@@ -1,156 +1,185 @@
 ---
 title: "Should you use Crab or Git LFS?"
-description: "Compare Crab and Git LFS by data path, infrastructure, deduplication, checkout behavior, and migration cost."
+description: "Compare Crab and Git LFS with one 8 GB model, a small second revision, selective checkout, and migration choices."
 date: "2026-05-15"
 author: "Crab Team"
 category: "product"
 tags: ["beginner", "comparison", "git-lfs"]
-excerpt: "Both keep large bytes out of normal Git blobs. The important difference is who serves the data and how versions reuse content."
+excerpt: "Both keep large bytes out of normal Git blobs. The important difference is what gets transferred and who owns the data path."
 level: "beginner"
 path: "start-here"
 order: 3
 concepts: ["Git LFS", "comparison", "serverless git"]
 prerequisites: ["What is Crab, and when should you use it?"]
 outcome: "Choose between Crab and Git LFS using repository and operations constraints."
-diagramType: "Comparison matrix"
+diagramType: "Comparison flow"
 meta:
   contentType: "Conceptual"
   goal: "Help readers choose a large-file architecture without treating either option as universally better."
   audience: "Teams evaluating or migrating large-file version control."
 ---
 
-Git LFS and Crab solve the same first problem: keep large-file bytes out of ordinary Git blobs while preserving a pointer in Git history. Git LFS usually sends each file object through an LFS service. Crab sends content-defined chunks directly to your object-storage bucket.
+Both tools keep an 8 GB model out of ordinary Git blobs. The difference starts after Git stores the pointer: **Git LFS transfers a complete file object through an LFS endpoint; Crab splits the file into reusable chunks and transfers them to your bucket.**
 
 <LfsComparisonDiagram />
 
-## The architecture determines the operating model
+## Compare one repository
 
-| Decision | Git LFS | Crab |
+Use a concrete project instead of a feature checklist:
+
+```text
+vision-search/
+├── README.md
+├── src/train.py
+└── models/encoder.safetensors  # 8 GB
+```
+
+The source files stay in normal Git. Only the model follows the large-file path.
+
+### Git LFS
+
+```bash
+git lfs install
+git lfs track '*.safetensors'
+git add .gitattributes models/encoder.safetensors
+git commit -m "Train encoder v1"
+git push
+```
+
+`git lfs track` writes the shared rule to `.gitattributes`. The commit contains an LFS pointer; the pre-push hook sends the 8 GB object to the configured LFS endpoint.
+
+### Crab
+
+In a configured Crab repository:
+
+```bash
+crab track '*.safetensors'
+crab ship . -m "Train encoder v1"
+```
+
+`crab track` also writes a shared `.gitattributes` rule. `crab ship` stages the files, creates the commit, and pushes new chunks through Crab's native pipeline.
+
+| After the first push | Git LFS | Crab |
 | --- | --- | --- |
-| Shared data service | Hosted or self-managed LFS endpoint | S3, GCS, or Azure bucket |
-| Stored unit | Whole file object identified by its content | Content-defined chunks packed into xorbs |
-| Reuse across changed versions | Depends on whole-file identity | Identical chunks can be reused |
-| Checkout model | LFS smudge or fetch workflow | Pointer checkout, selective hydration, or mount |
-| Operations owner | Forge provider or your LFS service team | Your bucket policies and client credentials |
-| Git integration | LFS filters and LFS API | Crab filters and a Git remote helper |
+| Git stores | LFS pointer | Crab pointer |
+| Large data stores | One 8 GB LFS object | Chunks packed into xorbs |
+| Data path owner | Forge or LFS service operator | Your object-storage account |
 
-Git LFS has the lowest adoption friction when a forge already provides enough storage, bandwidth, and reliability. Git clients and forge integrations understand its pointer format.
+## The second version is the useful test
 
-Crab is a better fit when large versions share substantial content, the team wants data in its own bucket, or selective hydration matters for repository scale.
+Now train version 2. It is still 8 GB, but 7.5 GB of encoded bytes are unchanged and 0.5 GB are new.
 
-## Choose Git LFS when service integration is the priority
+```bash
+# Git LFS
+git add models/encoder.safetensors
+git commit -m "Train encoder v2"
+git push
 
-Git LFS fits teams that want their forge to own the data endpoint and are comfortable with its quotas and transfer model. It also fits repositories whose large files change infrequently enough that whole-file storage is not a significant cost.
+# Crab
+crab ship models/encoder.safetensors -m "Train encoder v2"
+```
 
-A self-managed LFS service can provide more control, but then its availability, scaling, and maintenance become your responsibility.
+The [Git LFS pointer specification](https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md#the-pointer) gives the complete file one SHA-256 object ID and size. A changed file gets a new ID. The [LFS Batch API](https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md) requests that object by ID and size, and the standard [basic transfer](https://github.com/git-lfs/git-lfs/blob/main/docs/api/basic-transfers.md) uploads its raw bytes.
 
-## Choose Crab when data ownership and reuse are the priority
+Crab hashes chunks inside the file. Chunks already proven in the remote do not need another upload.
 
-Crab fits repositories with iterative models, datasets, media, or build artifacts where new versions reuse large byte regions. Its chunk index can recognize identical content across paths and revisions, so a push only needs to upload chunks that are new to the repository.
+<ChunkReuseDiagram />
 
-The bucket remains under your access, retention, and lifecycle policies. Clients talk to it directly, which removes a Crab data service but requires each working environment to have Crab and valid credentials.
+| Illustrative result | Git LFS | Crab |
+| --- | ---: | ---: |
+| Version 1 data | 8 GB | 8 GB |
+| New data for version 2 | 8 GB | about 0.5 GB |
+| Data after two versions | 16 GB | about 8.5 GB |
 
-## Daily Git work is similar, but maintenance is different
+These numbers show the storage unit, not a promised ratio. Recompression, encryption, or a format rewrite can change bytes across the whole file and leave little for Crab to reuse. Test the real files your team produces.
 
-Both systems use Git attributes and pointer blobs, so contributors still add, commit, switch branches, and merge through Git. The distinction becomes visible during setup, large-file transfer, troubleshooting, and repository maintenance.
+## Checkout: decide when the 8 GB becomes local
 
-With hosted Git LFS, the forge usually supplies the endpoint, authorization flow, storage quota, and usage reporting. Teams may need little infrastructure knowledge until they reach a quota or service limitation. With self-hosted LFS, the team owns the endpoint and its backing storage.
+Git LFS normally replaces pointers during checkout. You can skip that download and fetch a narrower path later:
 
-Crab removes the endpoint from the data path. Clients need direct access to the repository prefix, and operators use object-store inventory, lifecycle, access logs, and retention policy. Crab also adds native operations for hydration, dehydration, mounts, integrity checking, optimization, and garbage collection.
+```bash
+git lfs install --skip-smudge
+git lfs fetch --include='models/encoder.safetensors'
+git lfs checkout models/encoder.safetensors
+```
 
-Include repository operators in the comparison. A workflow that saves transfer but has no sustainable credential path is not a successful migration.
+Crab can keep managed files as pointers, hydrate a known working set, or expose files through a mount:
 
-## Changed-file behavior can dominate the comparison
+```bash
+crab config set checkout.lazy true
+crab hydrate models/encoder.safetensors
+```
 
-The stored unit matters most when large files change frequently. Git LFS identifies a complete file object with a SHA-256 object ID. If one byte changes, the new file has a new object identity and transfer is based on that complete object.
+<LazyCheckoutDiagram />
 
-Crab identifies chunks inside the file, then records their order in a native Crab recipe. A new version can reuse any chunk whose durable location is already proven. The benefit depends on physical byte overlap, not semantic similarity.
+The practical question is local disk, not clone speed alone. If a developer needs one checkpoint from a 500 GB repository, measure how clearly each workflow selects and removes that working set.
 
-| Update pattern | Expected implication |
-| --- | --- |
-| Rarely changed design export | Whole-file storage may be sufficient |
-| Iterative model checkpoints | Chunk reuse can reduce repeated upload |
-| Encrypted archive rebuilt each run | Both systems may store nearly all bytes again |
-| Dataset with appended partitions | Stable earlier regions can remain reusable |
-| Repeated copies of the same asset | Content identity can avoid duplicate native chunks |
+## Who handles a failed transfer?
 
-Measure with representative data before choosing. File extension and logical purpose do not reveal the stable-byte share between versions.
+| Question | Hosted Git LFS | Crab |
+| --- | --- | --- |
+| Who serves large data? | Forge's LFS service | Object-storage provider |
+| What does the client authenticate to? | LFS endpoint | Repository bucket or prefix |
+| Where do you inspect access? | Forge or LFS service logs | Bucket access logs and policy |
+| Who owns quotas and retention? | Forge plan and service policy | Your storage account and lifecycle rules |
 
-## Checkout behavior affects local capacity
+Self-hosting Git LFS changes the first column: you gain control and also own another service. Crab removes a Crab data server, but every developer machine and CI runner still needs Crab plus valid object-storage credentials.
 
-Git LFS commonly materializes files through smudge, fetch, pull, and checkout operations. Its include and exclude controls can narrow transfer, but the working model remains centered on LFS objects.
+Choose the boundary your team can operate at 2 a.m. A lower upload number does not rescue an unusable credential flow.
 
-Crab clones managed files as pointers by default. You can hydrate paths, use a committed manifest, hydrate everything, or mount a repository for on-demand reads. This range matters when the repository is larger than a developer machine or continuous integration runner.
+## Migration is a separate choice
 
-Both approaches require tooling on the client. A checkout without the required filter can leave pointer text in the working tree, so installation and diagnostic checks belong in developer setup and automation.
+Do not rewrite history just because a two-version pilot favors Crab.
 
-## Security follows the data path
+Crab's LFS compatibility path keeps existing LFS pointers and commit IDs while routing transfers through Crab:
 
-Git LFS clients authenticate to an LFS endpoint, which can translate forge identity into object access. That service becomes the policy and audit boundary for large-file transfers.
+```bash
+crab lfs install
+crab lfs fetch
+crab lfs checkout
+crab lfs fsck
+```
 
-Crab clients authenticate to object storage through the provider's credential flow. This can support short-lived roles, workload identity, prefix-scoped permissions, provider encryption controls, and storage access logs without a Crab credential database.
+A native conversion is different:
 
-Direct access also increases the importance of policy design. Clients should receive the operations required for their repository prefix, not broad bucket administration. Continuous integration should use short-lived workload credentials. Lifecycle and deletion permissions should remain separate from ordinary read and push roles when the provider supports that split.
+```bash
+crab lfs migrate export \
+  --include '*.safetensors' \
+  --to-crab \
+  --everything \
+  --object-map ../lfs-to-crab.csv
+```
 
-Compare revocation and incident response as well as initial login. Ask how long access revocation takes, which audit record identifies an object read, and who owns credential delivery on developer machines and runners.
+That command replaces selected LFS pointers with Crab pointers. Rewritten commits and their descendants get new Git IDs, so test it in an isolated clone and coordinate the cutover.
 
-## Compare control and recovery boundaries
-
-Hosted Git LFS delegates service availability, quotas, and retention behavior to the forge provider. Self-managed LFS gives you control but adds a service to deploy and recover.
-
-Crab delegates durability to your object-store provider and keeps repository coordination in stored metadata. Your team owns bucket access, lifecycle rules, retained recovery roots, and client credential delivery.
-
-The recovery question differs between the systems. Ask where large bytes live, who can restore them, how a deleted ref affects retention, and which logs prove a completed transfer.
-
-## Compare cost with version churn included
-
-Model stored bytes, requests, network transfer, retrieval, service charges, and operator time. Whole-file storage grows with each distinct file object. Native Crab storage grows with chunks that lack durable proof, plus recipe and shard metadata.
-
-The difference is workload-dependent. Two compressed or encrypted versions may share little physical content, so chunking cannot create savings from semantic similarity. Two checkpoints with stable byte regions may reuse most chunks even though the full-file hashes differ.
-
-Object-store request economics matter as well. Crab packs chunks into xorbs so hydration can coalesce ranges, but a sparse workload can still issue more requests than a single whole-file download. Hosted LFS bandwidth may include egress or enforce quotas, while a self-owned bucket exposes provider-specific transfer prices.
-
-Measure two versions, a cold clone, a warm read, and the expected retention period. Projecting cost from the first upload alone hides the version behavior that separates the systems.
-
-## Compatibility and migration are separate decisions
-
-Crab's `crab lfs` commands support an interoperability path for Git LFS workflows. This is useful when a repository must continue to work with existing LFS pointers or automation.
-
-A full native conversion is a different operation. `crab lfs migrate export --to-crab` rewrites selected LFS history into Crab-managed pointers, so it requires planning, coordination, and verification. Compatibility lets a team bridge systems; migration changes repository history.
+<LfsMigrationDiagram />
 
 ## Run a two-version pilot
 
-Test more than one initial upload. Choose a repository slice with ordinary source, one frequently changed binary, and one stable large asset.
+<FlowSteps
+  title="A comparison that exposes the real difference"
+  steps={[
+    "Push the same source tree and 8 GB model from an empty cache.",
+    "Clone from another machine and materialize only encoder.safetensors.",
+    "Create version 2 with the same training or export process used in production.",
+    "Push again; record uploaded bytes, requests, elapsed time, and local disk use.",
+    "Reconstruct both versions from a fresh client and compare their cryptographic hashes.",
+  ]}
+/>
 
-Evaluate both systems with the same sequence:
+Also record setup time, credential delivery, quota visibility, and recovery from an interrupted push. Those results often decide the system before raw transfer speed does.
 
-1. Publish the initial files from an empty client cache.
-2. Clone on another machine and materialize only the required paths.
-3. Change a representative region in the frequently updated file.
-4. Publish the second version and record uploaded bytes and requests.
-5. Reconstruct both versions and compare their cryptographic hashes.
-6. Simulate a stale push or interrupted transfer and record the recovery path.
+## Choose in 30 seconds
 
-Include operational effort in the result. A transfer saving does not compensate for a credential flow the team cannot maintain. A hosted workflow advantage may outweigh storage savings for a smaller repository.
+Choose **Git LFS** when your forge's LFS service is the easiest boundary to operate, existing tools require LFS pointers, and large files change infrequently.
 
-## Turn the pilot into a decision record
+Choose **Crab** when versions share substantial encoded bytes, the team wants data in its own bucket, or contributors should hydrate and mount only what they need.
 
-Record the result in terms that another reviewer can challenge. Include repository size, number of managed files, changed-byte pattern, measured upload and hydration bytes, request counts, local disk use, and the tested failure scenarios.
+Choose **a pilot** when files are compressed, encrypted, or regenerated. Their extensions cannot tell you how many bytes will survive between versions.
 
-Then document the non-performance constraints:
-
-- **Integration**: which forges, build systems, release tools, and developer environments must understand the pointer path
-- **Ownership**: who operates the endpoint or bucket policy and who responds to access failures
-- **Recovery**: which refs and historical objects remain recoverable after branch deletion
-- **Security**: how clients authenticate, how access is revoked, and where reads and writes are audited
-- **Migration**: whether existing commit identities and LFS pointers must remain stable
-
-A written record prevents one impressive transfer number from deciding the architecture. It also gives the team a baseline to revisit when repository churn, provider pricing, or forge limits change.
-
-<TakeawayBox title="Choose from constraints">
-  Use Git LFS when hosted integration and ecosystem compatibility dominate. Use
-  Crab when chunk reuse, direct bucket ownership, and selective hydration
-  dominate.
+<TakeawayBox title="Use the second version to decide">
+  The first 8 GB upload looks similar. The next realistic version reveals the
+  reuse, transfer, checkout, and operating model you will pay for every day.
 </TakeawayBox>
 
-If Crab matches your constraints, continue with [How do you set up a Crab repository?](/blog/getting-started-crab). If you already use LFS, read [How do you move a Git LFS repository to Crab?](/blog/git-lfs-compatibility-layer) before changing history.
+If Crab fits, continue with [How do you set up a Crab repository?](/blog/getting-started-crab). If you already use LFS, read [How do you move a Git LFS repository to Crab?](/blog/git-lfs-compatibility-layer) before changing history.

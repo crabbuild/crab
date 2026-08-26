@@ -1,203 +1,182 @@
 ---
 title: "How does Crab avoid storing duplicate data?"
-description: "Follow a file through content-defined chunking, BLAKE3 identities, deduplication, and xorb packing."
+description: "See how content-defined chunks, proof, recipes, shards, and xorbs turn a changed file into a small upload."
 date: "2026-06-12"
 author: "Crab Team"
 category: "architecture"
 tags: ["deduplication", "chunking", "xorb", "blake3", "storage"]
-excerpt: "Crab recognizes unchanged regions inside changed files and uploads only chunks that lack durable remote proof."
+excerpt: "An interactive byte-level tour of what Crab reuses, uploads, and records when a large file changes."
 level: "intermediate"
 path: "core-internals"
 order: 1
 concepts: ["deduplication", "chunking", "xorb", "BLAKE3"]
 prerequisites: ["How does Crab connect to Git?"]
-outcome: "Explain when a changed file can reuse stored bytes and when Crab must create a new xorb."
-diagramType: "Chunking pipeline"
+outcome: "Predict which bytes a changed file can reuse and which evidence makes that reuse safe."
+diagramType: "Interactive chunk laboratory"
 meta:
   contentType: "Conceptual"
   goal: "Explain Crab's reuse unit and the proof required to skip an upload."
   audience: "Developers evaluating Crab's storage and transfer behavior."
 ---
 
-Crab deduplicates below the file level. It divides a tracked file into content-defined chunks, identifies each chunk with the cryptographic BLAKE3 hash, and packs only new chunks into immutable objects called xorbs.
+Crab does not ask, “Have I seen this file before?”
 
-<DedupPipelineDiagram />
+It asks, **“Which regions of these bytes already exist?”**
 
-## Content chooses the boundaries
+A changed 10 GiB checkpoint might contain 8 GiB of familiar chunks. Crab can reuse those chunks and upload only the 2 GiB it cannot prove durable.
 
-Fixed-size chunking divides a file every _n_ bytes. Insert one byte near the beginning, and every later boundary shifts even when most content remains unchanged.
+<DedupBoundaryLab />
 
-Content-defined chunking chooses boundaries from the byte stream itself. A local edit disturbs nearby boundaries, but stable regions later in the file tend to produce the same chunks as before.
+## 1. Content chooses the cut points
 
-<ChunkReuseDiagram />
+Fixed-size chunking cuts every _n_ bytes. Insert one byte near the start and every later offset shifts.
 
-Boundary recovery creates reuse in model checkpoints, database snapshots, archives, and media containers that preserve large byte regions between versions.
+Content-defined chunking examines a rolling window of bytes. The content itself decides when a chunk ends.
 
-## Boundary stability is local, not absolute
+```text
+fixed size       [ A ][ B ][ C ][ D ]
+insert one byte  [ A ][? B][? C][? D]   every offset stays shifted
 
-Content-defined chunking does not guarantee that one edited byte changes one chunk. The boundary algorithm examines a rolling region of input, so an edit can alter nearby chunks and boundary positions.
+content defined  [ A ][ B ][ C ][ D ]
+insert one byte  [ A ][ N ][ O ][ D ]   boundaries resynchronize
+```
 
-The useful property is resynchronization. Once the rolling content reaches a stable region, later boundaries can match the earlier file again. Fixed-size boundaries remain shifted after an insertion because every later offset changed.
+An edit can change several nearby chunks. The useful property is **recovery**: once the rolling content becomes familiar again, later boundaries can match the earlier version.
 
-A replacement with the same byte length may preserve even more boundaries. An insertion or deletion creates a larger disturbed region, but stable content after that region can still recover its former chunk identities.
+Crab's gearhash chunker targets 64 KiB chunks. That is a target, not a promise that every chunk has the same size.
 
-## Chunk size trades metadata for reuse precision
+## One checkpoint, worked through
 
-Smaller target chunks can isolate local edits and increase potential reuse. They also create more hashes, recipe terms, index entries, and packing work. Larger chunks reduce metadata but make each disturbed region account for more bytes.
+Suppose `models/ranker.bin` is 10 GiB. Version 2 replaces one region but keeps most encoded bytes stable.
 
-Content-defined chunking therefore uses bounded sizes around a target rather than accepting an arbitrary boundary at every matching byte pattern. Minimum and maximum limits prevent pathological tiny chunks or unbounded regions.
+```bash
+crab add models/ranker.bin
+git commit -m "Update ranking model"
+crab push origin main
+```
 
-Choose the target size from the repository's file producers and access patterns. A checkpoint workload and a media archive may preserve byte regions at different scales.
+Use this illustrative classification:
 
-Crab's file identity does not depend on the chosen storage packing. Changing chunking policy for new files can affect reuse with earlier chunks, so policy changes need measurement and a migration rationale.
+| Version 2 source bytes | Amount | Push decision |
+| --- | ---: | --- |
+| Chunks with canonical remote proof | 8 GiB | Reuse their existing locations |
+| Chunks without proof | 2 GiB | Pack and upload them |
+| Complete file | 10 GiB | Record one ordered recipe |
 
-## Hashes turn byte equality into identity
+The **chunk reuse ratio** is 80%. The upload can be smaller than 2 GiB after compression, but xorb framing and metadata add some overhead. Reuse ratio and upload ratio are related, not identical.
 
-Crab computes a BLAKE3 identity for each chunk. Identical bytes produce the same chunk identity regardless of file name, directory, commit, or position.
+## 2. A matching hash is only identity
 
-The identity is useful only with proof. Before Crab skips a chunk, local or remote metadata must establish that the corresponding bytes already exist in durable storage. A cache hint alone is not enough to make a push complete.
+Crab computes a BLAKE3 hash for each chunk. Equal bytes produce the same identity across paths, branches, commits, and file versions.
 
-The file itself also receives a BLAKE3 identity. Chunk hashes support reuse and range verification. The full-file hash closes over recipe order and detects a result that contains the right chunks in the wrong sequence.
+But a hash does not answer:
 
-Hash identity is independent of compression. Crab can compress chunks inside xorbs while keeping the uncompressed content identity used by recipes and reconstruction. A storage-layout change therefore does not require a new file pointer.
+- Where are the bytes?
+- Are they durable?
+- Can another machine read them?
 
-## Deduplication separates identity from location
+Select each evidence level below. Only the final level can authorize skipping a remote upload.
 
-A chunk hash answers whether two byte sequences are equal. It does not answer where the bytes are stored. Shard and chunk-index metadata connect the identity to an xorb and byte range.
+<DedupEvidenceLadder />
 
-Separating identity from location lets storage layout change without changing file identity. A repack operation can place a chunk in a better xorb while the file recipe continues to name the same content hash.
+The distinction prevents a dangerous shortcut. Your local cache may contain a chunk while the shared origin does not. Publishing a pointer from that cache hint would create a file that works only on the writer's machine.
 
-It also protects deletion. Garbage collection cannot treat an unknown location as proof that a chunk is unused. The collector must walk retained recipes and shard terms before classifying an object as unreachable.
+The authority ladder is:
 
-| Evidence | Safe conclusion |
-| --- | --- |
-| Same BLAKE3 chunk hash | The chunk bytes have the same identity |
-| Local cache entry only | The client may avoid a local read, but remote durability is unproven |
-| Staged chunk and recipe | The current client can prepare an upload |
-| Canonical shard term and xorb | A remote reader can locate durable bytes |
-| Complete ordered recipe | Crab can plan reconstruction of the file version |
+1. Session evidence saves repeated work in one process.
+2. Staging evidence proves this client can prepare the bytes.
+3. Canonical placement and origin receipts prove remote durability.
 
-## Deduplication checks several evidence layers
+Negative local lookup results are also provisional. Another writer may have published the chunk. Refreshing canonical state can turn a planned upload into safe reuse.
 
-The cheapest useful evidence should answer first, but each layer has a different authority:
+## 3. Identity, location, and order are separate
 
-1. **Session state** can recognize chunks produced earlier in the same clean or staging operation.
-2. **Local indexes and staging** can reuse recent chunks and recipes without another origin lookup.
-3. **Canonical shard and chunk indexes** prove that a remote reader can locate the durable bytes.
+Crab stores three different facts:
 
-A local hit can remove repeated CPU or disk work. It cannot authorize publication when canonical storage has no corresponding location. Push resolves that distinction before it omits a chunk upload.
-
-Treat a negative lookup as provisional. A stale local metadata view may not know about a chunk published by another writer. Crab can refresh canonical state before classifying the chunk as new, which trades one lookup for an avoided duplicate upload.
-
-## Estimate the byte outcome before compression
-
-For a 10 GB second checkpoint, suppose chunk classification finds 8 GB already durable and 2 GB new. The source-level reuse ratio is 80 percent.
-
-Crab packs only the 2 GB of new source chunks. Compression may reduce the uploaded xorb bytes below 2 GB, while xorb framing and metadata add a smaller overhead. The resulting upload ratio is therefore related to, but not identical to, the reuse ratio.
-
-Hydrating the new checkpoint still produces 10 GB. A cold reader may fetch ranges containing all required chunks, including reused chunks from earlier xorbs. Deduplication reduces new storage and push transfer; it does not mean every first read downloads only the changed 2 GB.
-
-A warm reader can avoid more origin transfer when earlier ranges remain cached. Keep push reuse, cold hydration, and warm hydration as separate measurements.
-
-## New chunks become xorbs
-
-Uploading every chunk as a separate object would create excessive request overhead. Crab therefore packs sequences of new chunks into compressed, content-addressed xorbs.
-
-A xorb is immutable. Once uploaded, any file recipe can refer to its chunk ranges. Shard metadata records where each chunk lives so readers do not need to scan the bucket to reconstruct a file.
-
-Packing balances object size against request and recovery behavior. Tiny objects create excessive writes, listings, and reads. Extremely large objects can make retries and sparse range access less efficient.
-
-Crab uses bounded xorb targets and can optimize layout later. The file contract does not depend on one permanent packing choice because chunk identities remain stable across repacking.
-
-Packing happens after chunk classification. Reused chunks keep their proven locations, while new chunks accumulate into one or more xorb builders. Each completed xorb receives an immutable content identity before upload.
-
-The xorb boundary is an operational unit, not a file boundary. One xorb can contain chunks from several files, and one file can reference chunks across several xorbs created at different times. Cross-file packing improves reuse, so object deletion must follow reachability metadata rather than path naming.
-
-Compression and packing also affect retry size. A bounded xorb limits how much work a failed upload repeats. The target must remain large enough to avoid turning every chunk into its own object-store request.
-
-## Shards make packed data discoverable
-
-Packing removes the one-file-to-one-object relationship, so readers need an index from chunk identity to physical range. Shards publish that relationship in immutable metadata that can evolve as new xorbs arrive.
-
-A shard term identifies the xorb and range required to obtain a chunk. File recipes remain ordered identity lists, while shards answer location. This split lets one shard generation add new locations without rewriting every file recipe that reuses the chunk.
-
-Readers synchronize relevant shard state before planning ranges. Writers prove that every recipe term has a canonical durable location before publishing a ref.
-
-Repacking can add replacement locations, and later maintenance can retire old layouts after retained readers no longer depend on them. Chunk and file identities remain stable throughout that physical change.
-
-## A file recipe preserves order
-
-Deduplication changes storage layout, not file meaning. Crab records the complete ordered chunk sequence for each file hash. The same chunk may appear in multiple files or more than once in one file.
-
-A valid recipe must cover every byte in order. Hydration either reconstructs the byte-identical file and verifies its hash or returns an error.
-
-Repeated chunks remain repeated recipe terms. If a 4 MB block appears three times in one file, Crab can store the bytes once and reference that identity at three logical positions. Reconstruction writes it three times in the declared order.
-
-Recipes also preserve zero-length and boundary conditions explicitly through the file identity and expected size. An empty file does not need data chunks, while a non-empty file cannot succeed with an empty recipe.
-
-## Reuse can cross ordinary boundaries
-
-Because content determines identity, reuse is not limited to adjacent commits. It can occur across renamed paths, copied assets, branches, and file versions, provided the repository metadata can prove that the chunk is already stored.
-
-Savings follow the encoded bytes, not the logical edit. Encrypted or recompressed files may change most bytes even when their logical content changes little. Append-heavy snapshots and iterative checkpoints can preserve physical overlap across versions.
-
-Consider three representative overlap patterns:
-
-| Pattern | Boundary behavior | Expected reuse |
+| Fact | Structure | Answers |
 | --- | --- | --- |
-| Append records to a stable file | Earlier boundaries remain unchanged | High reuse before the append |
-| Replace a fixed-size region | Nearby chunks change, later chunks resynchronize | Reuse on both sides of the edit |
-| Recompress one monolithic archive | The encoded stream can change after the edit | Low physical reuse |
-| Copy an existing asset to another path | Content and chunk identities remain equal | Complete data reuse |
-| Encrypt with a new random nonce | Ciphertext changes throughout | Little or no reuse |
+| Ordered chunk hashes | File recipe | What bytes make this file? |
+| Chunk-to-xorb mapping | `ChunkPlacement` / shard | Where is each identity stored? |
+| Packed compressed bytes | Xorb | Which object-store range contains it? |
 
-These outcomes follow bytes, not filenames or application semantics. A “small” logical edit can still rewrite the full physical stream.
+Select a recipe term to follow it into physical storage.
 
-## Metadata has a cost worth measuring
+<ChunkAddressMap />
 
-Chunk reuse is not free. Each file needs a recipe, each unique chunk needs identity and location metadata, and clients need indexes to resolve those structures.
+This separation matters in two ways.
 
-For large files, metadata should remain a small fraction of source bytes. Repositories with huge numbers of tiny managed files can invert that relationship and create more lookup and request work than the data warrants.
+First, the same chunk can appear more than once in a file. The recipe repeats its identity at each logical position while storage keeps one physical copy.
 
-Keep small source and configuration files on Git's ordinary blob path. Use Crab tracking for content whose size, churn, or materialization pattern earns the additional metadata path.
+Second, Crab can repack a chunk into a better xorb. Its location changes, but the chunk hash and file recipe do not.
 
-Measure recipe terms per file, shard bytes, index synchronization time, and metadata requests beside storage savings. A high reuse ratio can still produce a poor workflow if metadata fan-out dominates every checkout.
+The full file also receives a BLAKE3 identity. That final hash catches missing, reordered, or corrupted chunks during hydration.
 
-## Estimate reuse with two representative versions
+## 4. New chunks become xorbs
 
-Use real output from the producer that creates your large files. Synthetic zero-filled files can prove transport, but they do not represent compression, ordering, or metadata changes in production artifacts.
+Uploading one object per 64 KiB chunk would create too many object-store requests. Crab packs new chunks into immutable compressed objects called **xorbs**.
 
-Publish a baseline, clear any assumptions about local cache, then publish the changed version. Record source bytes, new chunk bytes, reused chunk bytes, xorb bytes uploaded, and object requests.
+The default target is 64 MiB of compressed data, bounded between smaller and larger operational limits. A xorb may contain chunks from several files, and one file may reference several xorbs.
 
-Interpret the counters together. High chunk reuse with high uploaded bytes can indicate packing or staged flush work. Low reuse may reflect a serializer that rewrites the complete file. Low uploaded bytes with a high request count can indicate an inefficient object layout.
+```text
+new chunks from file A ─┐
+new chunks from file B ─┼─► xorb builder ─► immutable xorb
+new chunks from file C ─┘                    hash + chunk metadata
+```
 
-Calculate at least three ratios:
+Once uploaded, shard metadata publishes each chunk's `xorb_hash`, `chunk_index`, and uncompressed size. Readers can resolve recipes without scanning the bucket.
 
-- **Chunk reuse ratio**: reused source bytes divided by total source bytes
-- **Upload ratio**: uploaded xorb bytes divided by total source bytes
-- **Request density**: object-store operations divided by uploaded or hydrated GB
+Packing is deliberately separate from file identity:
 
-The ratios answer different questions. Chunk reuse describes physical overlap. Upload ratio includes packing and compression. Request density shows whether the storage layout turns useful byte savings into excessive provider operations.
+- Reused chunks keep their proven locations.
+- New chunks enter a bounded xorb builder.
+- Shards record complete reconstruction terms.
+- The file recipe continues to name ordered chunk identities.
 
-Repeat the same measurement after clearing only the state you intend to classify as cold. Removing canonical remote data would change the repository, while clearing local cache changes only the client path.
+An interrupted push may leave an unreachable xorb. That object is still valid; a retry can reuse it, and garbage collection can remove it later if no retained root reaches it.
 
-## Design file production for stable bytes
+## What kind of files deduplicate well?
 
-Deduplication works on physical content, so upstream file generation affects the result. Deterministic serialization keeps equivalent data byte-identical. Stable record ordering prevents unrelated entries from shifting. Partitioned outputs isolate changes to smaller files.
+Savings follow encoded bytes, not filenames or logical meaning.
 
-Compression settings also matter. Recompressing one large container can alter the byte stream after a local logical edit. Compressing stable partitions independently can preserve more reusable regions.
+| Producer behavior | Likely physical reuse |
+| --- | --- |
+| Append records to a stable file | High reuse before the new tail |
+| Replace a fixed-size region | Reuse on both sides after resynchronization |
+| Copy or rename an existing asset | Complete data reuse |
+| Recompress one monolithic archive | Often low reuse |
+| Encrypt again with a random nonce | Little or no reuse |
 
-Do not weaken encryption or integrity controls to improve reuse. When confidentiality requires randomized ciphertext, plan for whole-object change and optimize with retention, tiering, or file partitioning instead.
+Deterministic serialization helps. Stable record ordering, stable headers, and independently compressed partitions preserve byte regions between versions.
 
-Version format and serializer changes as data migrations. A new library version can reorder fields, change compression headers, or rewrite container indexes even when the logical tensors or records remain stable.
+Do not weaken encryption or integrity controls for deduplication. When randomized ciphertext is required, plan for whole-stream change and optimize retention or partitioning instead.
 
-Publish one sample through both producer versions before changing the pipeline. Compare full-file bytes, chunk reuse, xorb upload, and hydration behavior. The test can reveal a storage-cost regression before the new format enters long-lived history.
+## Measure three different ratios
 
-When partitioning is valid for the application, use stable independently encoded files. One changed partition then creates local file and chunk changes without forcing every other partition through a new container stream.
+Use two representative outputs from the real producer—not zero-filled synthetic files.
+
+```bash
+# Baseline version
+crab add --jsonl models/ranker.bin | tee add-v1.jsonl
+git commit -m "Add baseline model"
+crab push --jsonl | tee push-v1.jsonl
+
+# Changed version
+crab add --jsonl models/ranker.bin | tee add-v2.jsonl
+git commit -m "Update model"
+crab push --jsonl | tee push-v2.jsonl
+```
+
+Compare:
+
+- **Chunk reuse ratio:** reused source bytes ÷ total source bytes.
+- **Upload ratio:** uploaded xorb bytes ÷ total source bytes.
+- **Request density:** object-store operations ÷ uploaded GiB.
+
+Keep cold hydration separate. Deduplication reduces new storage and push transfer. A new reader still needs all ranges required to reconstruct the 10 GiB file; a warm cache may avoid more origin traffic.
 
 <TakeawayBox title="The deduplication rule">
-  A changed file does not imply a full upload. A chunk uploads only when Crab
-  cannot prove that identical bytes are already durable.
+  A changed file does not imply a full upload. Crab uploads a chunk only when
+  it cannot prove that identical bytes already have a durable remote location.
 </TakeawayBox>
 
-The next layer is transaction ordering. [Trace the fourteen stages that make a push visible](/blog/push-pipeline-14-steps).
+Next, [trace how those proven objects become visible through one ref transaction](/blog/push-pipeline-14-steps).

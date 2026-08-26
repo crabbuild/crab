@@ -1,184 +1,171 @@
 ---
 title: "How does Crab avoid repeated object-store reads?"
-description: "See how verified local data, staging, metadata indexes, and an optional shared cache reduce object-store traffic."
+description: "Follow one immutable read through local disk, an optional team cache, and canonical object storage."
 date: "2026-06-26"
 author: "Crab Team"
 category: "architecture"
 tags: ["caching", "performance", "xorb", "object-storage"]
-excerpt: "Crab resolves immutable data locally when possible and falls back to canonical object storage when proof is missing."
+excerpt: "Crab serves verified immutable data from the nearest available source, then falls back to canonical object storage."
 level: "intermediate"
 path: "core-internals"
 order: 3
 concepts: ["cache", "range reads", "metadata indexes", "object storage"]
 prerequisites: ["What happens during a Crab push?"]
-outcome: "Explain which cache can accelerate a read and why cache state cannot replace remote proof."
-diagramType: "Cache hierarchy"
+outcome: "Predict which source serves a read and measure the difference between cold and warm hydration."
+diagramType: "Interactive cache routing"
 meta:
   contentType: "Conceptual"
-  goal: "Explain caching as verified reuse rather than a collection of opaque layers."
-  audience: "Developers diagnosing hydration performance or object-store traffic."
+  goal: "Explain caching through one repeated hydration instead of a list of cache layers."
+  audience: "Developers diagnosing hydration time or object-store traffic."
 ---
 
-Crab's origin is object storage, but repeated work should not require repeated origin reads. Local data and metadata caches shorten the path while content identities keep the result verifiable.
+Suppose `models/encoder.safetensors` is 12 GiB. Alex hydrates it, dehydrates it, then hydrates it again.
 
-<CacheHierarchyDiagram />
+The second read should not travel to the bucket for bytes already verified on Alex's machine.
 
-## Metadata answers where; cached data answers whether to download
+That is the whole cache model:
 
-Hydration begins with a file pointer and reconstruction metadata. The file index and shards identify the ordered chunks, their xorb objects, and their byte ranges.
+> Ask the nearest verified source. Stop on a hit. Use object storage when no cache can prove the bytes.
 
-The local cache can then satisfy xorb data that the machine has already fetched. If a required range is absent, Crab reads the canonical object from the origin and can retain the verified result for later work.
+<CacheRouteTicket />
 
-These are related but different responsibilities. Metadata resolves placement. The data cache avoids downloading known immutable bytes again.
+## One file, three possible trips
 
-## A cold hydration fills several caches
+The file pointer does not contain 12 GiB of data. It identifies a file recipe. That recipe identifies ordered chunks and the xorb objects that contain them.
 
-Consider a pointer whose recipe references twelve chunks across three xorbs. The first hydration may need shard metadata, xorb range reads, decompression, and final file verification.
-
-Crab can retain verified xorb data and metadata after that read. A second hydration on the same machine can resolve the pointer with fewer origin operations. A different file that references six of the same chunks may reuse the same cached xorb ranges.
-
-The working-tree file is not the cache entry. Dehydrating the path removes materialized content but does not require Crab to discard separately managed cache data.
-
-## The lookup order favors the nearest verified source
-
-Crab can resolve one requested chunk through several sources. The client first checks session-owned data and local staging, then verified local cache state, then an optional shared cache, and finally canonical object storage.
+For each immutable object, Crab follows this route:
 
 ```text
-session or staging
-        ↓ miss
-verified local cache
-        ↓ miss
-optional shared cache
-        ↓ miss or unavailable
-canonical object storage
+local disk → optional team cache → object storage
 ```
 
-A hit must still correspond to the expected content identity. The order optimizes latency and repeated transfer, not trust based on proximity. Wrong or incomplete bytes fail verification and cannot become the hydrated output.
+- **First read:** both caches miss, so origin serves the bytes.
+- **Repeat read:** Alex's local disk serves them.
+- **Teammate read:** a team cache may serve bytes that another machine warmed.
+- **Cache outage:** Crab bypasses the accelerator and reads origin.
 
-Metadata follows a related path. In-memory and local indexes can answer repeated lookups, while canonical shard and file-index state remains the authority when the client lacks a complete generation.
+A cache hit changes the trip, not the expected content identity.
 
-## Local staging can satisfy recent content
+## Try a cold and warm hydration
 
-Staging contains chunks and recipes produced by clean operations before or during a push. When the same process or repository needs those bytes again, Crab can reuse them without round-tripping through object storage.
-
-Staging is not a substitute for publication. A remote reader can rely only on objects and metadata that the push proved durable.
-
-Staging can also bridge repeated Git filter operations before push. If a tool asks Git to clean the same content again, the session and staging indexes can avoid repeating chunk work.
-
-This reuse remains local to the repository operation. Another machine cannot resolve the pointer until a successful push publishes its shared dependencies.
-
-## Immutable identity makes cache reuse safe
-
-Xorbs and chunks are content-addressed. A cache entry is useful because Crab can connect it to the expected identity, not because the file happens to exist at a familiar path.
-
-Corrupt or incomplete data must fail verification and return to the canonical read path. Hydration does not expose a partially reconstructed file as a successful result.
-
-## Content addressing changes invalidation
-
-Mutable caches need invalidation when the value behind a key changes. A content-addressed xorb has a different rule: the key names immutable content, so a valid cached value never becomes an older version of that key.
-
-Crab still needs eviction, corruption handling, and metadata generation checks. Eviction controls disk capacity. Hash verification detects wrong bytes. Generation-aware metadata prevents a stale index view from hiding newer canonical state.
-
-Immutable keys reduce invalidation complexity, but they do not eliminate authority checks. A locally known chunk cannot prove that the remote repository published the same dependency.
-
-Concurrent readers can share immutable cache entries without coordinating version replacement. If two hydrations request the same absent xorb range, request coalescing can prevent duplicate origin reads while both consumers wait for one verified result.
-
-A failed producer must wake consumers with an error rather than leaving a partial cache entry. The next request can retry from origin after the temporary state is removed or marked invalid.
-
-## Range planning reduces request fan-out
-
-A file recipe may reference dozens of chunks inside the same xorb. Fetching each chunk with a separate request would make request overhead dominate the data transfer.
-
-Crab groups required chunks by xorb and coalesces compatible byte ranges. It can fetch independent xorb ranges concurrently while keeping memory and I/O bounded.
-
-Coalescing has an economic threshold. One wider range may cost fewer requests but transfer bytes that the file does not need. Several narrow ranges reduce unused transfer but add latency and request charges.
-
-Choose range width from xorb layout and workload locality. Sequential model reads favor wider adjacent ranges. Sparse access through a mount may favor narrow reads, especially when object-store transfer costs exceed request costs.
-
-Cache measurements should retain both figures. A lower request count is not automatically an improvement if origin bytes increase enough to erase the benefit.
-
-## A shared cache is optional
-
-The default local cache serves one machine. Teams can also deploy the optional Crab cache service so developers and CI runners share recently used objects before falling back to cloud storage.
-
-The shared service is an acceleration layer, not the repository's source of truth. If it is unavailable or misses an object, canonical object storage remains the durable origin.
-
-The service should receive no authority to edit repository refs or delete canonical data. Its access path can be limited to reading immutable objects and serving cached responses to authenticated clients.
-
-Segment shared-cache metrics by repository or tenant boundary. A global hit rate can hide a repository whose active set never fits or a workload that evicts higher-value objects for other teams.
-
-## Decide whether a shared cache pays for itself
-
-A shared cache helps when several machines read the same active data set. Developer teams, repeated continuous integration jobs, and regional training workers can avoid duplicate object-store reads.
-
-It helps less when every job reads unique content or already runs near the bucket. The service also needs capacity planning, authentication, health checks, and eviction policy.
-
-Compare these measurements before deployment:
-
-- **Origin bytes avoided**: data served by the shared cache instead of object storage
-- **Request reduction**: origin operations removed from repeated hydration
-- **Cache hit rate**: hits divided by eligible lookups, segmented by workload
-- **Added latency**: cache lookup time on hits and misses
-- **Operating cost**: compute, local solid-state drive capacity, and network transfer
-
-Treat a high hit rate carefully. Tiny metadata hits can dominate count while large xorb misses dominate bytes and cost.
-
-## Inspect and reset local cache state
-
-Use the cache commands to observe local behavior or reclaim disk space:
+Use one real file so the comparison stays honest:
 
 ```bash
 crab cache stats
-crab cache clean
+time crab hydrate 'models/encoder.safetensors' --jsonl | tee cold.jsonl
+
+crab dehydrate 'models/encoder.safetensors'
+
+time crab hydrate 'models/encoder.safetensors' --jsonl | tee warm.jsonl
+crab cache stats
 ```
 
-Cleaning the cache does not delete repository data. It removes local copies that Crab can fetch again from the origin.
+The warm run can remove remote transfer. It cannot remove local work: Crab still assembles chunks in order, writes 12 GiB, and verifies the result.
 
-## Set capacity from byte value, not object count
+If you only need to warm the cache, skip file materialization:
 
-Cache policy needs a disk budget and an eviction rule. Object count alone is misleading because metadata entries, small xorb ranges, and complete xorb objects have different sizes and retrieval costs.
+```bash
+crab fetch --include 'models/*.safetensors'
+```
 
-Prioritize content that is expensive to fetch again or likely to serve another near-term task. A frequently reused model xorb can be more valuable than thousands of one-time metadata entries. Archived-origin data may have higher cache value because a miss can trigger restore delay and retrieval cost.
+`crab fetch` resolves the same immutable data and sends reconstructed bytes to a discard sink. Later hydration can use the warmed cache.
 
-Leave headroom for reconstruction output and application scratch space. Filling the disk with cache can make hydration fail even though the cache itself reports a high hit rate.
+## Metadata is the map; cached bytes are the cargo
 
-For developer machines, expose cache cleanup as a recoverable disk action. For shared runners, set an explicit capacity and monitor eviction bytes, not only evicted entries.
+Two questions happen during a read:
 
-## Distinguish positive and negative metadata cache entries
+| Question                    | Answered by                   | Example                           |
+| --------------------------- | ----------------------------- | --------------------------------- |
+| Where are the file's bytes? | file index and shard metadata | chunk C is in xorb X, position 14 |
+| Do I need to download them? | local or team data cache      | range 14–18 is already verified   |
 
-A positive entry says a file recipe or chunk location was known at a particular canonical generation. A negative entry says the client did not find that identity in the state it examined.
+A warm metadata index does not mean the xorb bytes are local. A warm data cache does not tell Crab the file's chunk order. Hydration needs both answers.
 
-Positive immutable data can remain valid after newer repository writes. Negative knowledge can become stale as soon as another writer publishes the missing identity. Crab must therefore refresh or generation-check negative results before deciding that push needs a new upload or hydration lacks metadata.
+This distinction is useful when debugging: repeated metadata reads point to index synchronization; repeated xorb reads point to cache capacity, eviction, or a changing working set.
 
-This difference explains a common concurrent pattern. Writer A publishes a chunk after writer B cached a miss. Writer B refreshes canonical index state, finds A's durable location, and avoids uploading the duplicate.
+## Range reads are a request-versus-bytes trade
 
-Cache freshness policy should match the consequence. A stale performance hint costs work. A stale authority decision could produce an incomplete plan, so publication and integrity checks consult canonical state.
+A recipe may need several chunks from one xorb. Fetching each chunk separately wastes request round trips. Fetching one enormous span may transfer bytes the file never uses.
 
-## Protect cache state from partial writes
+Select an access pattern below. Green blocks are required; striped amber blocks are extra bytes accepted to remove requests.
 
-Download into temporary cache state, verify the expected identity, then publish the entry for readers. A process crash or full disk must not leave a truncated file under a key that later lookups treat as valid.
+<RangePlanningTape />
 
-On startup, Crab can discard incomplete temporary entries and retain verified immutable ones. This keeps crash recovery local and avoids clearing the complete cache after one interrupted read.
+The toy tape uses 8 MiB blocks for legibility. Crab's planner works from actual chunk offsets and xorb layout.
 
-Shared cache responses need the same content verification at the client boundary. Transport security and service authentication protect the connection, while content hashes protect the repository result.
+The useful measurement is not hit count alone. Track both:
 
-## Diagnose performance from the miss path
+- origin request count
+- origin bytes transferred
 
-Begin with `crab cache stats`, then compare a cold and warm hydration of the same file. Record elapsed time, bytes read from origin, cache bytes read, request count, and verification failures.
+One request can be faster than three and still cost more transfer. Sparse access often favors narrow ranges. Neighboring reads often favor coalescing.
 
-If metadata lookup dominates, warming xorb data alone will not help. Inspect shard synchronization and chunk-index state. If origin range reads dominate, inspect xorb grouping, cache capacity, and access locality.
+## Why cached content stays safe
 
-A warm run that remains slow may be doing required final assembly and hashing. Cache eliminates remote work, not the byte processing needed to produce and verify the output file.
+Chunks and xorbs are content-addressed. Their identity names their content. A valid object under that identity does not become an older version later.
 
-Use cache cleaning only as a controlled diagnostic or disk-reclamation action. Repeatedly clearing healthy cache state makes every workload look cold and hides the benefit you are trying to measure.
+That removes the usual “is this cached value stale?” problem for immutable data. Crab still needs three safeguards:
 
-When a warm result becomes slower, separate cache lookup time from verification and assembly. A large file still requires ordered writes and a final hash even when every source range is local. CPU saturation or destination-disk throughput can dominate after origin traffic disappears.
+1. Verify that bytes match the expected identity.
+2. Publish a cache entry only after a complete write.
+3. Evict or repair corrupt entries before returning file content.
 
-When a cold result issues unexpected reads, map each request back to a shard lookup or xorb range. This exposes missing metadata warming, fragmented xorb layout, or a working set wider than cache capacity.
+Mutable repository state follows a different rule.
 
-<TakeawayBox title="Cache is acceleration, not authority">
-  Local and shared caches reduce latency and requests. Canonical object
-  storage and verified content identities remain the correctness boundary.
+<CacheObjectPassport />
+
+A branch ref can move from commit A to commit B. Treating a cached ref as authority could hide B. Mutable paths therefore consult origin directly, while immutable shards and xorbs can use the read-through cache.
+
+This is why “cache is acceleration, not authority” is more than a slogan. It describes which objects may take the shortcut.
+
+## Dehydrating is not clearing the cache
+
+These actions affect different state:
+
+```text
+crab dehydrate   → replace working-tree content with a pointer
+crab cache clean → remove reusable local cache data
+```
+
+Dehydrating a file frees working-tree space. It does not require Crab to forget separately cached xorb ranges.
+
+Use the cache commands deliberately:
+
+```bash
+crab cache stats   # capacity, resident bytes, and entries
+crab cache verify  # verify entries; evict corrupt ones
+crab cache clean   # reclaim local disk; later reads become cold
+```
+
+Cleaning does not delete repository data from object storage. It removes local copies that Crab can fetch again.
+
+## When a team cache helps
+
+The optional cache service pays off when machines repeat the same reads:
+
+| Workload                               | Likely value  |
+| -------------------------------------- | ------------- |
+| CI runners test the same checkpoint    | high          |
+| A team pulls the same active model set | high          |
+| Every job reads unique data once       | low           |
+| Workers already sit next to the bucket | measure first |
+
+Do not judge it by object hit rate alone. Thousands of tiny metadata hits can hide one large xorb miss. Compare origin bytes avoided, origin requests avoided, added lookup latency, and cache operating cost.
+
+## Diagnose the slow leg
+
+Start with one cold run and one warm run of the same file.
+
+- **Cold is slow, warm is fast:** remote transfer dominates. The cache is helping.
+- **Both are slow:** assembly, hashing, or destination-disk throughput may dominate.
+- **Warm still contacts origin:** inspect cache size, eviction, integrity failures, and whether the working set changed.
+- **Many small origin reads:** inspect range grouping and xorb locality.
+
+Keep the experiment controlled. Repeatedly clearing healthy cache state only proves that cold reads are cold.
+
+<TakeawayBox title="Nearest verified bytes win">
+  Local disk avoids a network trip. A team cache avoids a bucket trip. Object
+  storage remains the durable fallback and authority.
 </TakeawayBox>
 
-Continue with [How does Crab rebuild a file from chunks?](/blog/shard-reconstruction-hydration) to see how metadata and range reads become one verified file.
+Continue with [How does Crab rebuild a file from chunks?](/blog/shard-reconstruction-hydration) to follow the selected ranges into one verified file.
