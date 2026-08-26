@@ -41,6 +41,9 @@ read/write/admin actions per repository, and `server.action_secret` (or
 `CRAB_LFS_ACTION_SECRET`) so Batch actions are short-lived and bound to their
 repository, operation, OID, and size.
 
+Signed Batch actions also include Git LFS `expires_in` metadata, matching the
+capability lifetime advertised by the URL.
+
 Lock creation is exclusive, including repeated requests from the same owner,
 and lock listing is ID-ordered with bounded page retention. Unlock operations
 bind the compare-and-swap release to the requested lock ID so a stale force

@@ -482,6 +482,14 @@ fn action_url(
     format!("{path}?expires={expires}&size={size}&token={token}")
 }
 
+fn action_expires_in(state: &AppState) -> Option<u64> {
+    state
+        .config
+        .action_secret
+        .as_ref()
+        .map(|_| state.config.action_ttl.as_secs())
+}
+
 #[expect(
     clippy::result_large_err,
     reason = "HTTP response is the intentional handler error boundary"
@@ -692,6 +700,8 @@ struct BatchActions {
 #[derive(Debug, Serialize)]
 struct BatchAction {
     href: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -847,6 +857,7 @@ async fn batch(
 
     let store = lfs_store(state, repository);
     let endpoint = lfs_endpoint_url(state, headers, repository);
+    let action_expires_in = action_expires_in(state);
     let mut objects = Vec::with_capacity(parsed_objects.len());
     for (object, oid) in parsed_objects {
         let response = if request.operation == "upload" {
@@ -866,7 +877,15 @@ async fn batch(
                 object.size,
                 ActionOperation::Verify,
             );
-            batch_upload_object(&store, &upload_href, &verify_href, object, oid).await
+            batch_upload_object(
+                &store,
+                &upload_href,
+                &verify_href,
+                action_expires_in,
+                object,
+                oid,
+            )
+            .await
         } else {
             let download_href = action_url(
                 state,
@@ -876,7 +895,7 @@ async fn batch(
                 object.size,
                 ActionOperation::Download,
             );
-            batch_download_object(&store, &download_href, object, oid).await
+            batch_download_object(&store, &download_href, action_expires_in, object, oid).await
         };
         objects.push(response);
     }
@@ -894,6 +913,7 @@ async fn batch_upload_object(
     store: &LfsObjectStore,
     upload_href: &str,
     verify_href: &str,
+    expires_in: Option<u64>,
     object: BatchObjectRequest,
     oid: [u8; 32],
 ) -> BatchObjectResponse {
@@ -917,7 +937,7 @@ async fn batch_upload_object(
             store.verify_size(&oid, object.size).await
         }
         Err(error) if is_missing(&error) => {
-            return upload_action_response(upload_href, verify_href, object);
+            return upload_action_response(upload_href, verify_href, expires_in, object);
         }
         Err(error) => return object_error_response(object, 500, error.to_string()),
     };
@@ -930,10 +950,10 @@ async fn batch_upload_object(
             error: None,
         },
         Err(LfsError::ObjectCorrupt { .. }) => {
-            upload_action_response(upload_href, verify_href, object)
+            upload_action_response(upload_href, verify_href, expires_in, object)
         }
         Err(error) if is_missing(&error) => {
-            upload_action_response(upload_href, verify_href, object)
+            upload_action_response(upload_href, verify_href, expires_in, object)
         }
         Err(error) => object_error_response(object, 500, error.to_string()),
     }
@@ -942,6 +962,7 @@ async fn batch_upload_object(
 async fn batch_download_object(
     store: &LfsObjectStore,
     download_href: &str,
+    expires_in: Option<u64>,
     object: BatchObjectRequest,
     oid: [u8; 32],
 ) -> BatchObjectResponse {
@@ -970,6 +991,7 @@ async fn batch_download_object(
         actions: Some(BatchActions {
             download: Some(BatchAction {
                 href: download_href.to_owned(),
+                expires_in,
             }),
             upload: None,
             verify: None,
@@ -981,6 +1003,7 @@ async fn batch_download_object(
 fn upload_action_response(
     upload_href: &str,
     verify_href: &str,
+    expires_in: Option<u64>,
     object: BatchObjectRequest,
 ) -> BatchObjectResponse {
     let oid = object.oid.clone();
@@ -992,9 +1015,11 @@ fn upload_action_response(
             download: None,
             upload: Some(BatchAction {
                 href: upload_href.to_owned(),
+                expires_in,
             }),
             verify: Some(BatchAction {
                 href: verify_href.to_owned(),
+                expires_in,
             }),
         }),
         error: None,
@@ -1927,6 +1952,14 @@ mod tests {
         let batch_json: serde_json::Value =
             serde_json::from_slice(&batch_body).expect("batch JSON");
         assert_eq!(batch_json["objects"][0]["authenticated"], true);
+        assert_eq!(
+            batch_json["objects"][0]["actions"]["upload"]["expires_in"],
+            900
+        );
+        assert_eq!(
+            batch_json["objects"][0]["actions"]["verify"]["expires_in"],
+            900
+        );
         let upload = batch_json["objects"][0]["actions"]["upload"]["href"]
             .as_str()
             .expect("upload action");
