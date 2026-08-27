@@ -82,7 +82,8 @@ baseline for this branch, but its push/clone comparison is explicitly invalid
 for performance promotion. Repeatability and the remaining large-team
 rollout gates are still open.
 
-The 2026-08-26 follow-up is committed as `c57ee1f4`:
+The earlier 2026-08-26 follow-up is committed as `c57ee1f4`. The current
+continuation is committed as `ba7aa84b`:
 
 - `GitObjectLocatorWriter` keeps exact OID point reads for sparse batches but
   switches to one validated object-family scan once accumulated candidates
@@ -106,6 +107,14 @@ The 2026-08-26 follow-up is committed as `c57ee1f4`:
   repository-local repair failure. The bucket-wide state remains visible in
   diagnostics and destructive bucket GC remains disabled until its separate
   completeness gate is proven.
+
+- A new destination ref at a large existing commit tip emits bounded
+  first-parent visibility evidence instead of attempting to walk the complete
+  history. Materialized and catalog compaction reuse that base closure only
+  when the parent is an exact visible ref tip in the target manifest; otherwise
+  the handoff defers conservatively. This closes the `ls-remote`/catalog-proof
+  failure found by the current Kubernetes qualification while preserving the
+  bounded-walk guard for tags, unrelated bases, and missing history.
 
 The next owner hardening keeps the documented one-action-per-cycle contract
 literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
