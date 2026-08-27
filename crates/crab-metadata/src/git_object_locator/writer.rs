@@ -124,6 +124,18 @@ impl GitObjectLocatorWriter {
         Self::open_with_settings(store, repo_prefix, locator_settings(compact)).await
     }
 
+    /// Open a writer for a coverage-only update without starting a compactor.
+    ///
+    /// The caller must already have proved that the current pack inventory is
+    /// unchanged. This keeps a generation-only owner pass from waiting for a
+    /// repository-sized locator compaction when no object rows will be written.
+    pub async fn open_for_coverage_update(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+    ) -> Result<Self> {
+        Self::open_with_settings(store, repo_prefix, locator_settings(false)).await
+    }
+
     async fn open_with_settings(
         store: Arc<dyn ObjectStore>,
         repo_prefix: &str,

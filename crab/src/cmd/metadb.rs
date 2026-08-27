@@ -780,16 +780,47 @@ async fn maintain_object_catalog(
     crab_metadata::git_object_locator::GitObjectCatalogStats,
     crab_metadata::git_object_locator::LocatorSweepStats,
 )> {
+    let (coverage, bindings) = {
+        let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+        .map_err(CrabError::from)?;
+        let coverage = session.coverage();
+        let bindings = session.pack_bindings().await.map_err(CrabError::from);
+        let close = session.close().await.map_err(CrabError::from);
+        match (bindings, close) {
+            (Ok(bindings), Ok(())) => (coverage, bindings),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+            (Err(error), Err(close_error)) => {
+                warn!(
+                    error = %close_error,
+                    "Git locator session close also failed after reading pack bindings"
+                );
+                return Err(error);
+            }
+        }
+    };
+    let planned_object_rows = uncovered_locator_object_rows(coverage, &bindings, packs);
+    let pack_inventory_unchanged = anchor.is_some_and(|anchor| {
+        coverage.is_some_and(|coverage| coverage.pack_index_hash == anchor.pack_index_hash)
+    }) && planned_object_rows == 0;
     let mut lock = acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
-    let planned_object_rows = packs
-        .iter()
-        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-    let writer = crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-        Arc::clone(store.inner()),
-        router.repo_prefix(),
-        planned_object_rows,
-    )
-    .await;
+    let writer = if pack_inventory_unchanged {
+        crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_coverage_update(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await
+    } else {
+        crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+            planned_object_rows,
+        )
+        .await
+    };
     let mut writer = match writer {
         Ok(writer) => writer,
         Err(error) => {
@@ -845,6 +876,46 @@ async fn maintain_object_catalog(
         (Ok(result), Ok(_), Ok(())) => Ok(result),
         (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(_), Err(error)) => Err(error),
     }
+}
+
+fn uncovered_locator_object_rows(
+    coverage: Option<crab_metadata::git_object_locator::GitLocatorCoverage>,
+    bindings: &[crab_metadata::git_object_locator::GitPackLocatorBinding],
+    packs: &[crab_metadata::manifests::PackManifestEntry],
+) -> u64 {
+    let Some(coverage) = coverage else {
+        return packs
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+    };
+    let covered = bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.record.pack_id,
+                (
+                    binding.record.committed_generation,
+                    binding.record.object_count,
+                    binding.record.pack_size,
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    packs
+        .iter()
+        .filter(|pack| {
+            let Ok(pack_id) = crab_xet::hash::MerkleHash::from_hex(&pack.pack_id) else {
+                return true;
+            };
+            !covered
+                .get(&pack_id)
+                .is_some_and(|(committed_generation, object_count, pack_size)| {
+                    *object_count == pack.object_count
+                        && *pack_size == pack.size
+                        && *committed_generation <= coverage.generation
+                })
+        })
+        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count))
 }
 
 async fn maintain_split_commit_graph(
@@ -3902,6 +3973,49 @@ mod tests {
         for (action, reason) in reasons {
             assert_eq!(generation_owner_reason(action), reason);
         }
+    }
+
+    #[test]
+    fn locator_planning_counts_only_uncovered_pack_objects() {
+        let covered_pack_id = "a".repeat(64);
+        let new_pack_id = "b".repeat(64);
+        let covered_pack = crab_metadata::manifests::PackManifestEntry {
+            pack_id: covered_pack_id.clone(),
+            size: 128,
+            content_hash: covered_pack_id.clone(),
+            ref_tips: Vec::new(),
+            object_count: 1_000_000,
+        };
+        let new_pack = crab_metadata::manifests::PackManifestEntry {
+            pack_id: new_pack_id.clone(),
+            size: 256,
+            content_hash: new_pack_id,
+            ref_tips: Vec::new(),
+            object_count: 7,
+        };
+        let covered_id =
+            crab_xet::hash::MerkleHash::from_hex(&covered_pack_id).expect("covered pack id");
+        let bindings = [crab_metadata::git_object_locator::GitPackLocatorBinding {
+            pack_slot: 1,
+            record: crab_metadata::git_object_locator::GitPackLocatorRecord {
+                pack_id: covered_id,
+                committed_generation: 4,
+                pack_index_hash: crab_xet::hash::MerkleHash::from_hex(&"c".repeat(64))
+                    .expect("pack index hash"),
+                object_count: covered_pack.object_count,
+                pack_size: covered_pack.size,
+            },
+        }];
+        let coverage = Some(crab_metadata::git_object_locator::GitLocatorCoverage {
+            generation: 5,
+            pack_index_hash: crab_xet::hash::MerkleHash::from_hex(&"d".repeat(64))
+                .expect("coverage hash"),
+        });
+
+        assert_eq!(
+            uncovered_locator_object_rows(coverage, &bindings, &[covered_pack, new_pack]),
+            7
+        );
     }
 
     #[tokio::test]
