@@ -290,6 +290,7 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let started = std::time::Instant::now();
     let mut read_admission = acquire_read_admission(store, prefix, cancellation).await?;
     let result = serve_with_read_admission(
         &mut read_admission,
@@ -303,7 +304,18 @@ where
         cancellation,
     )
     .await;
+    tracing::debug!(
+        result = result.is_ok(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "protocol-v2 upload-pack session completed before read-admission release"
+    );
+    let release_started = std::time::Instant::now();
     let release = read_admission.release().await.map_err(CrabError::from);
+    tracing::debug!(
+        result = release.is_ok(),
+        elapsed_ms = release_started.elapsed().as_millis() as u64,
+        "upload-pack read admission released"
+    );
     match (result, release) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),

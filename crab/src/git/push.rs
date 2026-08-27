@@ -6546,6 +6546,7 @@ pub(crate) async fn publish_committed_pack_locators(
         lock_ttl,
         cancel,
         true,
+        true,
     )
     .await
 }
@@ -6559,6 +6560,7 @@ async fn publish_committed_pack_locators_with_mode(
     lock_ttl: Duration,
     cancel: &CancellationToken,
     wait_for_lock: bool,
+    allow_compaction: bool,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
     if git_generation_owner_is_active(store, router).await? {
         debug!(
@@ -6633,17 +6635,26 @@ async fn publish_committed_pack_locators_with_mode(
             &loaded_inventory
         };
 
-        // Locator publication is an owner/repair action. The caller has
-        // already released the push boundary, so this path may use the
-        // compaction-aware writer and its uncovered-pack budget.
-        let planned_object_rows = planned_locator_object_rows(store, router, current_packs).await?;
-        let mut writer =
+        let mut writer = if allow_compaction {
+            // Owner publication can amortize locator maintenance over the
+            // write, using the uncovered-pack budget to decide when to compact.
+            let planned_object_rows =
+                planned_locator_object_rows(store, router, current_packs).await?;
             crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
                 Arc::clone(store.inner()),
                 router.repo_prefix(),
                 planned_object_rows,
             )
-            .await?;
+            .await?
+        } else {
+            // A read admission must not turn a one-object repair into a
+            // repository-sized compaction; the owner handles that maintenance.
+            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_incremental_publication(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+            )
+            .await?
+        };
         let operation = publish_pack_locator_inventory(
             &mut writer,
             store,
@@ -6695,6 +6706,7 @@ pub(crate) async fn repair_git_object_locator_if_current(
         lock_ttl,
         cancel,
         true,
+        true,
     )
     .await
 }
@@ -6713,6 +6725,7 @@ pub(crate) async fn repair_git_object_locator_if_current_for_reader(
         lock_ttl,
         cancel,
         false,
+        false,
     )
     .await
 }
@@ -6724,6 +6737,7 @@ async fn repair_git_object_locator_if_current_with_mode(
     lock_ttl: Duration,
     cancel: &CancellationToken,
     wait_for_lock: bool,
+    allow_compaction: bool,
 ) -> Result<bool> {
     let (manifest, _) = read_manifest(store, router).await?;
     // An active ref-journal transaction asks readers for the next generation.
@@ -6757,6 +6771,7 @@ async fn repair_git_object_locator_if_current_with_mode(
         lock_ttl,
         cancel,
         wait_for_lock,
+        allow_compaction,
     )
     .await?;
     Ok(stats.coverage_updated)
@@ -6855,6 +6870,21 @@ async fn repair_git_visibility_if_current_with_options(
     }
     if manifest.refs.is_empty() {
         return Ok(Some(GitVisibilityPublication::Published));
+    }
+    if allow_catalog_materialization {
+        let storage = store.as_storage().clone();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        if crab_metadata::git_visibility::ensure_catalog_bound(&storage, &storage_router, &manifest)
+            .await
+            .map_err(CrabError::from)?
+        {
+            debug!(
+                generation = manifest.generation,
+                "completed pending Git catalog visibility handoff"
+            );
+            return Ok(Some(GitVisibilityPublication::Published));
+        }
     }
     let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
     if let Some(capacity) = git_visibility_capacity_exceeded_at_limit(

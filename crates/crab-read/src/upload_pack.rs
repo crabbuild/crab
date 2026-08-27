@@ -579,6 +579,7 @@ async fn plan_upload_pack_inner(
     let operation = repository
         .operation(OperationKind::UploadPack, cancellation)
         .await?;
+    tracing::debug!("upload-pack plan operation opened");
     let result = plan_with_operation(
         repository,
         &operation,
@@ -588,7 +589,12 @@ async fn plan_upload_pack_inner(
         cancellation,
     )
     .await;
-    match operation.finish(result).await {
+    let result = operation.finish(result).await;
+    tracing::debug!(
+        result = result.is_ok(),
+        "upload-pack plan operation finished"
+    );
+    match result {
         Err(RemoteGitError::AuthorizationDenied) => Err(ReadError::UnauthorizedObject),
         result => result.map_err(ReadError::from),
     }
@@ -638,7 +644,13 @@ async fn plan_with_operation(
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<PackPlan> {
+    tracing::debug!(
+        wants = request.wants.len(),
+        haves = request.haves.len(),
+        "upload-pack plan authorization started"
+    );
     authorize_wants_source(operation, visibility, visible_ref_names, &request.wants).await?;
+    tracing::debug!("upload-pack plan authorization completed");
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
     if let Some(plan) = plan_from_visibility_source(
@@ -985,16 +997,28 @@ async fn visibility_object_selection(
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>();
-            let selected_objects = visibility
-                .objects_for_refs(operation, &selected_refs_owned)
+            let tag_references = references
+                .iter()
+                .filter_map(|reference| {
+                    let peeled = reference.peeled?;
+                    (reference.name.starts_with("refs/tags/")
+                        && visible.contains(reference.name.as_str()))
+                    .then_some((reference.name.as_str(), peeled))
+                })
+                .collect::<Vec<_>>();
+            let tag_targets = tag_references
+                .iter()
+                .map(|(_, peeled)| *peeled)
+                .collect::<Vec<_>>();
+            let tag_targets_reachable = visibility
+                .contains_for_refs(operation, &selected_refs_owned, &tag_targets)
                 .await?;
-            selected_refs.extend(references.iter().filter_map(|reference| {
-                let peeled = reference.peeled?;
-                (reference.name.starts_with("refs/tags/")
-                    && visible.contains(reference.name.as_str())
-                    && selected_objects.contains(&peeled))
-                .then_some(reference.name.as_str())
-            }));
+            selected_refs.extend(
+                tag_references
+                    .into_iter()
+                    .zip(tag_targets_reachable)
+                    .filter_map(|((name, _), reachable)| reachable.then_some(name)),
+            );
         }
         let selected_refs_owned = selected_refs
             .iter()
@@ -1004,6 +1028,10 @@ async fn visibility_object_selection(
             .objects_for_refs(operation, &selected_refs_owned)
             .await?
     } else {
+        tracing::debug!(
+            haves = request.haves.len(),
+            "upload-pack visibility incremental selection started"
+        );
         let visible_haves = visibility
             .contains_for_refs(operation, visible_ref_names, &request.haves)
             .await?;
@@ -1024,6 +1052,12 @@ async fn visibility_object_selection(
             };
             objects.extend(increment);
         }
+
+        tracing::debug!(
+            common_haves = common_haves.len(),
+            selected_objects = objects.len(),
+            "upload-pack visibility incremental selection completed"
+        );
 
         if request.include_tags {
             let selected = objects.iter().copied().collect::<HashSet<_>>();
