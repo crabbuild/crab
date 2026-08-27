@@ -139,17 +139,17 @@ export function CrabLfsDirectStorageLab() {
   const StageIcon = stage.icon
 
   return (
-    <figure className="wide-article-visual not-prose relative left-1/2 my-10 w-[min(64rem,calc(100vw-1rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-[1.5rem] border-2 border-[#17233b] bg-[#eef1f4] text-[#17233b] shadow-[0_24px_70px_rgba(23,35,59,0.18)] min-[1400px]:-translate-x-[calc(50%+1.75rem)] sm:w-[min(64rem,calc(100vw-2rem))] lg:w-[min(64rem,calc(100vw-24.5rem))]">
-      <header className="border-b border-[#aab5c3] px-5 py-5 sm:px-7">
-        <p className="m-0 font-mono text-[10px] font-black tracking-[0.2em] text-[#49617d]">
+    <figure className="wide-article-visual not-prose relative left-1/2 my-8 w-[min(64rem,calc(100vw-1rem))] max-w-none -translate-x-1/2 overflow-hidden rounded-[1.5rem] border-2 border-[#17233b] bg-[#eef1f4] text-[#17233b] shadow-[0_24px_70px_rgba(23,35,59,0.18)] min-[1400px]:-translate-x-[calc(50%+1.75rem)] sm:w-[min(64rem,calc(100vw-2rem))] lg:w-[min(64rem,calc(100vw-24.5rem))]">
+      <header className="border-b border-[#aab5c3] px-4 py-4 sm:px-5 sm:py-5">
+        <p className="m-0 font-mono text-[11px] font-black tracking-[0.16em] text-[#49617d]">
           DIRECT STORAGE LAB / CLICK A BOUNDARY
         </p>
-        <div className="mt-3 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h3 className="m-0 text-2xl font-black tracking-[-0.04em] sm:text-3xl">
+            <h3 className="m-0 text-[1.8rem] leading-tight font-black tracking-[-0.04em] sm:text-[2.2rem]">
               One LFS file. No gateway.
             </h3>
-            <p className="m-0 mt-2 max-w-2xl text-sm leading-6 text-[#52637a]">
+            <p className="m-0 mt-2 max-w-2xl text-base leading-6 text-[#52637a]">
               Crab runs on the developer machine and talks to the bucket. The
               Git LFS pointer remains standard so existing tooling can keep
               reading it.
@@ -168,7 +168,7 @@ export function CrabLfsDirectStorageLab() {
                 aria-selected={stageId === candidate.id}
                 onClick={() => setStageId(candidate.id)}
                 className={cn(
-                  "min-h-11 rounded-lg border px-3 py-2 font-mono text-[10px] font-black transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[#e56b5d] focus-visible:ring-offset-2 focus-visible:ring-offset-[#eef1f4]",
+                  "min-h-11 rounded-lg border px-3 py-2 font-mono text-xs font-black transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[#e56b5d] focus-visible:ring-offset-2 focus-visible:ring-offset-[#eef1f4]",
                   stageId === candidate.id
                     ? "border-[#17233b] bg-[#17233b] text-white"
                     : "border-[#9aa8b9] bg-white text-[#49617d] hover:border-[#17233b] hover:text-[#17233b]"
@@ -185,13 +185,13 @@ export function CrabLfsDirectStorageLab() {
         className="grid lg:grid-cols-[minmax(0,1fr)_18rem]"
         aria-live="polite"
       >
-        <section className="border-b border-[#aab5c3] p-5 sm:p-7 lg:border-r lg:border-b-0">
+        <section className="border-b border-[#aab5c3] p-4 sm:p-5 lg:border-r lg:border-b-0">
           <div className="flex items-center gap-2">
             <StageIcon className="size-5 text-[#e56b5d]" aria-hidden="true" />
-            <h4 className="m-0 text-lg font-black">{stage.title}</h4>
+            <h4 className="m-0 text-xl leading-7 font-black">{stage.title}</h4>
           </div>
 
-          <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch">
+          <div className="mt-4 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch">
             <SurfaceCard
               icon={Laptop}
               title="Your machine"
@@ -208,32 +208,32 @@ export function CrabLfsDirectStorageLab() {
             />
           </div>
 
-          <div className="mt-4 rounded-2xl bg-[#17233b] p-4 text-white sm:p-5">
-            <div className="flex items-center gap-2 font-mono text-[9px] font-black tracking-[0.16em] text-[#9db1ca]">
+          <div className="mt-3 rounded-2xl bg-[#17233b] p-3 text-white sm:p-4">
+            <div className="flex items-center gap-2 font-mono text-[10px] font-black tracking-[0.14em] text-[#9db1ca]">
               <Terminal
                 className="size-3.5 text-[#39a9db]"
                 aria-hidden="true"
               />
               RUNS ON YOUR MACHINE
             </div>
-            <code className="mt-3 block overflow-x-auto font-mono text-[11px] leading-6 whitespace-pre-wrap text-[#dce7f3]">
+            <code className="mt-2 block overflow-x-auto font-mono text-xs leading-6 whitespace-pre-wrap text-[#dce7f3]">
               $ {stage.command}
             </code>
-            <p className="m-0 mt-3 text-xs leading-5 text-[#b9c9da]">
+            <p className="m-0 mt-2 text-sm leading-5 text-[#b9c9da]">
               {stage.description}
             </p>
           </div>
         </section>
 
-        <aside className="bg-white p-5 sm:p-7">
+        <aside className="bg-white p-4 sm:p-5">
           <ServerOff className="size-7 text-[#e56b5d]" aria-hidden="true" />
-          <p className="m-0 mt-5 font-mono text-[9px] font-black tracking-[0.16em] text-[#61738a]">
+          <p className="m-0 mt-4 font-mono text-[10px] font-black tracking-[0.14em] text-[#61738a]">
             DELIBERATELY ABSENT
           </p>
-          <p className="m-0 mt-2 text-lg leading-6 font-black">
+          <p className="m-0 mt-2 text-xl leading-7 font-black">
             No Crab LFS server to deploy.
           </p>
-          <ul className="m-0 mt-5 space-y-3 text-sm leading-5 text-[#52637a]">
+          <ul className="m-0 mt-4 space-y-2.5 text-[15px] leading-6 text-[#52637a]">
             <li className="flex gap-2">
               <GitBranch
                 className="mt-0.5 size-4 shrink-0 text-[#e56b5d]"
@@ -256,11 +256,11 @@ export function CrabLfsDirectStorageLab() {
               Your credentials go directly to object storage.
             </li>
           </ul>
-          <div className="mt-6 border-t border-dashed border-[#aab5c3] pt-4">
-            <p className="m-0 font-mono text-[9px] font-black tracking-[0.14em] text-[#61738a]">
+          <div className="mt-5 border-t border-dashed border-[#aab5c3] pt-3">
+            <p className="m-0 font-mono text-[10px] font-black tracking-[0.12em] text-[#61738a]">
               PROTECTED IN THIS STEP
             </p>
-            <p className="m-0 mt-2 text-sm leading-6 font-bold text-[#245c3a]">
+            <p className="m-0 mt-2 text-base leading-6 font-bold text-[#245c3a]">
               {stage.invariant}
             </p>
           </div>
@@ -280,28 +280,28 @@ function SurfaceCard({
   items: SurfaceItem[]
 }) {
   return (
-    <div className="rounded-2xl border-2 border-[#17233b] bg-white p-4">
+    <div className="rounded-2xl border-2 border-[#17233b] bg-white p-3">
       <div className="flex items-center gap-2">
         <Icon className="size-4 text-[#49617d]" aria-hidden="true" />
-        <p className="m-0 font-mono text-[10px] font-black tracking-[0.14em] text-[#49617d]">
+        <p className="m-0 font-mono text-[11px] font-black tracking-[0.12em] text-[#49617d]">
           {title.toUpperCase()}
         </p>
       </div>
-      <div className="mt-4 space-y-2">
+      <div className="mt-3 space-y-2">
         {items.map((item) => {
           const style = TONE_STYLES[item.tone]
           return (
             <div
               key={`${item.label}-${item.value}`}
               className={cn(
-                "rounded-xl border p-3",
+                "rounded-xl border p-2.5",
                 style.border,
                 style.background
               )}
             >
               <p
                 className={cn(
-                  "m-0 font-mono text-[9px] font-black tracking-[0.12em]",
+                  "m-0 font-mono text-[10px] font-black tracking-[0.1em]",
                   style.label
                 )}
               >
@@ -309,7 +309,7 @@ function SurfaceCard({
               </p>
               <p
                 className={cn(
-                  "m-0 mt-1 font-mono text-[10px] leading-5 font-bold",
+                  "m-0 mt-1 font-mono text-xs leading-5 font-bold",
                   style.value
                 )}
               >
