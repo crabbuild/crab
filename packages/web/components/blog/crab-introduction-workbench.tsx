@@ -23,45 +23,67 @@ const stages = [
       "train.py → bytes",
       "encoder.safetensors → not committed yet",
     ],
-    bucket: ["No model data yet"],
+    crabTitle: "Tracking rule",
+    crab: ["No chunks prepared", "Object storage unchanged"],
     state: "Working tree knows the tracking rule.",
   },
   {
+    id: "add",
+    label: "2. Add",
+    action: "crab add models/encoder.safetensors",
+    note: "Crab chunks the model, prepares xorbs locally, and stages a compact pointer in Git's index. Nothing is uploaded.",
+    git: [
+      "README.md → bytes",
+      "train.py → bytes",
+      "encoder.safetensors → pointer staged",
+    ],
+    crabTitle: "Local staging",
+    crab: [
+      "chunks + recipe → .crab/staging",
+      "xorbs → prepared for push",
+      "object storage unchanged",
+    ],
+    state: "The pointer and its reconstruction data are ready locally.",
+  },
+  {
     id: "commit",
-    label: "2. Commit",
+    label: "3. Commit",
     action: "git commit -m 'Add encoder'",
-    note: "Git records one tree. The large path becomes a compact, verifiable pointer.",
+    note: "Git records the pointer already staged by crab add. Prepared xorbs remain local until push.",
     git: [
       "README.md → bytes",
       "train.py → bytes",
       "encoder.safetensors → Crab pointer",
     ],
-    bucket: ["Chunks prepared locally", "Reconstruction recipe staged"],
+    crabTitle: "Local staging",
+    crab: ["recipe + xorbs remain local", "object storage unchanged"],
     state: "One commit names code and the exact model version.",
   },
   {
     id: "push",
-    label: "3. Push",
-    action: "git push crab main",
-    note: "Crab uploads missing chunks and metadata before the branch can move.",
+    label: "4. Push",
+    action: "crab push origin main",
+    note: "Crab uploads missing xorbs and complete shard metadata before the branch can move.",
     git: ["commit 8fc2", "tree → three paths", "model path → pointer f41a"],
-    bucket: [
-      "xorb → packed chunks",
-      "shard → byte ranges",
-      "recipe → ordered file",
+    crabTitle: "Object storage",
+    crab: [
+      "xorbs → packed chunk data",
+      "shards → chunk locations + file recipes",
+      "file recipe → ordered xorb chunk ranges",
     ],
     state: "main becomes visible only after its data is durable.",
   },
   {
     id: "hydrate",
-    label: "4. Hydrate",
+    label: "5. Hydrate",
     action: "crab hydrate models/encoder.safetensors",
-    note: "A new client reads the pointer, fetches only the required ranges, and verifies the rebuilt file.",
-    git: ["checkout → pointer f41a", "history stays unchanged"],
-    bucket: [
-      "recipe resolves chunks",
-      "ranges reconstruct 4 GB",
-      "file hash verifies",
+    note: "Crab resolves the complete recipe, rebuilds and verifies the file from local cache or object storage, and leaves the committed pointer unchanged.",
+    git: ["commit → pointer f41a", "history stays unchanged"],
+    crabTitle: "Read path",
+    crab: [
+      "shard → complete file recipe",
+      "xorbs or cache → chunk data",
+      "output → rebuilt and hash-verified",
     ],
     state: "The working tree now has byte-identical model data.",
   },
@@ -85,14 +107,14 @@ export function CrabIntroductionWorkbench() {
             </h2>
           </div>
           <p className="m-0 max-w-sm text-sm leading-6 text-muted-foreground">
-            Select a stage to see what Git stores, what the bucket stores, and
-            which state becomes true.
+            Select a stage to see what Git records, what Crab prepares or
+            stores, and which state becomes true.
           </p>
         </div>
       </header>
 
       <div
-        className="grid border-b border-border bg-muted/40 sm:grid-cols-4"
+        className="grid border-b border-border bg-muted/40 sm:grid-cols-5"
         role="tablist"
         aria-label="Crab repository stages"
       >
@@ -149,12 +171,16 @@ export function CrabIntroductionWorkbench() {
             items={active.git}
           />
           <DataLane
-            icon={Cloud}
+            icon={
+              active.id === "push" || active.id === "hydrate"
+                ? Cloud
+                : HardDrive
+            }
             eyebrow="CRAB LANE"
-            title="Object storage"
+            title={active.crabTitle}
             iconClassName="text-orange-600 dark:text-orange-400"
             dotClassName="bg-orange-600 dark:bg-orange-400"
-            items={active.bucket}
+            items={active.crab}
           />
         </div>
 
