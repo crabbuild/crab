@@ -6373,6 +6373,78 @@ async fn publish_pack_locator_inventory(
     Ok((true, sweep))
 }
 
+async fn planned_locator_object_rows(
+    store: &Store,
+    router: &StoreLayout,
+    current_packs: &[PackManifestEntry],
+) -> Result<u64> {
+    let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+        Arc::clone(store.inner()),
+        router.repo_prefix(),
+    )
+    .await
+    .map_err(CrabError::from)?;
+    let coverage = session.coverage();
+    let bindings = session.pack_bindings().await.map_err(CrabError::from);
+    let close = session.close().await.map_err(CrabError::from);
+    let bindings = match (bindings, close) {
+        (Ok(bindings), Ok(())) => bindings,
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+        (Err(error), Err(close_error)) => {
+            warn!(
+                error = %close_error,
+                "Git locator budget session close also failed after reading pack bindings"
+            );
+            return Err(error);
+        }
+    };
+    Ok(uncovered_locator_object_rows(
+        coverage,
+        &bindings,
+        current_packs,
+    ))
+}
+
+pub(crate) fn uncovered_locator_object_rows(
+    coverage: Option<crab_metadata::git_object_locator::GitLocatorCoverage>,
+    bindings: &[crab_metadata::git_object_locator::GitPackLocatorBinding],
+    packs: &[PackManifestEntry],
+) -> u64 {
+    let Some(coverage) = coverage else {
+        return packs
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+    };
+    let covered = bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.record.pack_id,
+                (
+                    binding.record.committed_generation,
+                    binding.record.object_count,
+                    binding.record.pack_size,
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    packs
+        .iter()
+        .filter(|pack| {
+            let Ok(pack_id) = MerkleHash::from_hex(&pack.pack_id) else {
+                return true;
+            };
+            !covered
+                .get(&pack_id)
+                .is_some_and(|(committed_generation, object_count, pack_size)| {
+                    *object_count == pack.object_count
+                        && *pack_size == pack.size
+                        && *committed_generation <= coverage.generation
+                })
+        })
+        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count))
+}
+
 pub(crate) async fn publish_pack_locator_inventory_for_owner(
     writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
     store: &Store,
@@ -6516,9 +6588,11 @@ async fn publish_committed_pack_locators_with_mode(
             &loaded_inventory
         };
 
-        let planned_object_rows = current_packs
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        // The locator lock also serializes this budget snapshot with the
+        // owner. Count only packs whose rows are not already covered; using
+        // the whole inventory here can start a repository-sized compactor on
+        // an ordinary push that introduces only a small pack.
+        let planned_object_rows = planned_locator_object_rows(store, router, current_packs).await?;
         let mut writer =
             crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
                 Arc::clone(store.inner()),

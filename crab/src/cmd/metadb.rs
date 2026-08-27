@@ -810,7 +810,8 @@ async fn maintain_object_catalog(
                         }
                     }
                 };
-                let planned_object_rows = uncovered_locator_object_rows(coverage, &bindings, packs);
+                let planned_object_rows =
+                    crate::git::push::uncovered_locator_object_rows(coverage, &bindings, packs);
                 let pack_inventory_unchanged = anchor.is_some_and(|anchor| {
                     coverage.is_some_and(|coverage| coverage.pack_index_hash == anchor.pack_index_hash)
                 }) && planned_object_rows == 0;
@@ -880,46 +881,6 @@ async fn maintain_object_catalog(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
-}
-
-fn uncovered_locator_object_rows(
-    coverage: Option<crab_metadata::git_object_locator::GitLocatorCoverage>,
-    bindings: &[crab_metadata::git_object_locator::GitPackLocatorBinding],
-    packs: &[crab_metadata::manifests::PackManifestEntry],
-) -> u64 {
-    let Some(coverage) = coverage else {
-        return packs
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-    };
-    let covered = bindings
-        .iter()
-        .map(|binding| {
-            (
-                binding.record.pack_id,
-                (
-                    binding.record.committed_generation,
-                    binding.record.object_count,
-                    binding.record.pack_size,
-                ),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    packs
-        .iter()
-        .filter(|pack| {
-            let Ok(pack_id) = crab_xet::hash::MerkleHash::from_hex(&pack.pack_id) else {
-                return true;
-            };
-            !covered
-                .get(&pack_id)
-                .is_some_and(|(committed_generation, object_count, pack_size)| {
-                    *object_count == pack.object_count
-                        && *pack_size == pack.size
-                        && *committed_generation <= coverage.generation
-                })
-        })
-        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count))
 }
 
 async fn maintain_split_commit_graph(
@@ -4017,7 +3978,11 @@ mod tests {
         });
 
         assert_eq!(
-            uncovered_locator_object_rows(coverage, &bindings, &[covered_pack, new_pack]),
+            crate::git::push::uncovered_locator_object_rows(
+                coverage,
+                &bindings,
+                &[covered_pack, new_pack],
+            ),
             7
         );
     }
