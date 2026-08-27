@@ -677,6 +677,21 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install macOS FUSE dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install pkg-config
+          brew install --cask macfuse
+          fuse_pc="$(find "$(brew --prefix)" /usr/local /Library/Frameworks \
+            -path '*/pkgconfig/fuse.pc' -print -quit 2>/dev/null || true)"
+          if [ -z "${fuse_pc}" ]; then
+            echo "::error::macFUSE fuse.pc was not found after installation"
+            exit 1
+          fi
+          echo "PKG_CONFIG_PATH=$(dirname "${fuse_pc}")${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "${GITHUB_ENV}"
+
       - name: Run workflow contract tests
         run: cargo test -p crab-workflow --locked
 
