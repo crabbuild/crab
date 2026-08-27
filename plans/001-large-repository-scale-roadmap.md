@@ -139,6 +139,14 @@ from running in the same poll. Owner JSONL samples also expose a stable
 represented as zero after supersession. This makes maintenance backlog and
 lease occupancy observable without adding public configuration knobs.
 
+The owner compaction budget is now bounded to the uncovered portion of the
+current pack inventory (`4a8fc34e`). Before opening SlateDB, the owner reads the
+published pack bindings and counts only packs whose physical facts are not
+already covered. A same-inventory pass uses a metadata-only writer, while a
+delayed pass no longer starts a repository-sized compactor merely because the
+historical catalog is large. This source fix still needs fresh release-binary
+RustFS evidence at the 1,000-pack scale.
+
 Focused source proof for this follow-up passes formatting, `cargo check -p
 crab`, the complete Crab library suite, the complete metadata suite, strict
 metadata clippy, and the targeted exact-tip visibility regressions. The
@@ -250,7 +258,8 @@ Implemented on the current branch (pre-lazy qualification evidence at
 fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
 recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
 transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
-reader-fanout hardening at `fd95e8fd`):
+reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
+`4a8fc34e`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -333,6 +342,10 @@ Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current lazy binary
   after the large-batch locator scan change;
+- the fresh release-binary owner-budget qualification after `4a8fc34e`. The
+  prior `b637edfe` Kubernetes replay exposed a 902-pack `catalog_advance` that
+  took 814,991 ms; that run proves the bottleneck and correctness, but it uses
+  the pre-fix binary and cannot serve as a post-fix performance result;
 - a valid 1,000-push growth and latency comparison across isolated runs; the
   current post-lazy comparison is invalid because push and clone medians drifted
   by roughly 41% on the shared host;
