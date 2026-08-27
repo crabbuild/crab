@@ -82,8 +82,9 @@ baseline for this branch, but its push/clone comparison is explicitly invalid
 for performance promotion. Repeatability and the remaining large-team
 rollout gates are still open.
 
-The earlier 2026-08-26 follow-up is committed as `c57ee1f4`. The current
-continuation is committed as `ba7aa84b`:
+The earlier 2026-08-26 follow-up is committed as `c57ee1f4`. The anchored
+visibility continuation is committed as `ba7aa84b`, with the exact-visible-tip
+correction in `cdc2335e`:
 
 - `GitObjectLocatorWriter` keeps exact OID point reads for sparse batches but
   switches to one validated object-family scan once accumulated candidates
@@ -115,6 +116,12 @@ continuation is committed as `ba7aa84b`:
   the handoff defers conservatively. This closes the `ls-remote`/catalog-proof
   failure found by the current Kubernetes qualification while preserving the
   bounded-walk guard for tags, unrelated bases, and missing history.
+- A new destination ref whose tip already equals an existing visible ref tip
+  reuses that exact tip as the visibility base, producing an empty delta rather
+  than anchoring to its non-visible first parent. The source-side tip set is
+  captured from the manifest snapshot used by the ref journal, so catalog
+  handoff remains bound to a real target-manifest ref and still defers
+  conservatively when no reusable base exists.
 
 The next owner hardening keeps the documented one-action-per-cycle contract
 literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
@@ -124,11 +131,42 @@ represented as zero after supersession. This makes maintenance backlog and
 lease occupancy observable without adding public configuration knobs.
 
 Focused source proof for this follow-up passes formatting, `cargo check -p
-crab`, 30 catalog-visibility tests, 39 locator tests with one intentional
-stress test ignored, five repack tests, and 23 upload-pack tests. The fresh
-release-binary Kubernetes/RustFS run, 10,000-push differential, and team-scale
-fault/provider/concurrency evidence are intentionally not claimed by this
-commit.
+crab`, the complete Crab library suite, the complete metadata suite, strict
+metadata clippy, and the targeted exact-tip visibility regressions. The
+release binary embeds `cdc2335e` and is the binary used by the current
+Kubernetes/RustFS qualification below.
+
+The current release-binary qualification
+`crabbuild-team-load-anchored-cdc2335e-k8s-20260826` used Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, the external local RustFS
+endpoint, `replay_count=100`, and the team-load harness with one client per
+fanout. It completed with `status=ok`, 27/27 checks passed, the source
+checkout was unchanged, all sampled objects were byte-identical, full and
+incremental fsck passed, and both local worktrees and the remote qualification
+prefix were cleaned. The run saw the full 140,054-commit source history and
+1,643,211 Git objects; the binary provenance and report are retained with the
+run artifacts.
+
+- Generation maintenance reduced the active generated-pack inventory from 92
+  packs to 2 and swept 91 obsolete locator-pack rows.
+- Cold full clone completed in 254 seconds end to end. Its two-pack response
+  was 1,241,817,145 bytes, generated from 1,264,940,590 source bytes in
+  174 seconds of server-side response-pack work.
+- Warm full clone hit the generated response-pack cache and completed in 138
+  seconds end to end; server-side response-pack work was 83 seconds.
+- Blobless planning used `catalog_filter`, planned 1,102,159 objects, and
+  omitted 541,052 blobs. Depth-100 planning used the shallow-closure index in
+  240 ms; depth-1,000 planning used it in 424 ms.
+- The one-client incremental fetch completed in 674 ms. One independent ref
+  push completed in 10,076 ms and one same-ref push completed in 6,309 ms;
+  both were accepted with zero unexpected failures. The exact-tip seed push
+  emitted `added_objects=0`, `deferred_updates=0`, and the later advertised
+  refs check passed, reproducing the failure boundary fixed by `cdc2335e`.
+
+This is a current-binary single-host qualification, not production SLO proof:
+the 100-client synthetic fanout, repeated isolated runs, 1,000/10,000-push
+differentials, fault/provider/failover/canary evidence, and default-on rollout
+gates remain open below.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
