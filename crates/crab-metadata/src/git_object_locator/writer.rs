@@ -131,6 +131,17 @@ impl GitObjectLocatorWriter {
         Self::open_with_settings(store, repo_prefix, locator_settings(compact)).await
     }
 
+    /// Open a bounded publication writer without starting a compactor.
+    ///
+    /// Latency-sensitive readers use this for a small coverage repair. The
+    /// repository owner remains responsible for geometric locator maintenance.
+    pub async fn open_for_incremental_publication(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+    ) -> Result<Self> {
+        Self::open_with_settings(store, repo_prefix, locator_settings(false)).await
+    }
+
     /// Open a writer for a coverage-only update without starting a compactor.
     ///
     /// The caller must already have proved that the current pack inventory is
