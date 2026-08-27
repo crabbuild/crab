@@ -323,7 +323,11 @@ class Qualification:
         self.verify_source()
         self.verify_clone()
         ended_children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        self.report["metrics"]["peak_child_rss_bytes"] = max(started_children, ended_children) * 1024
+        # macOS reports ru_maxrss in bytes; Linux and most other Unix
+        # platforms report it in KiB. Keep the qualification report honest
+        # on the developer platform as well as in CI.
+        rss_unit = 1 if sys.platform == "darwin" else 1024
+        self.report["metrics"]["peak_child_rss_bytes"] = max(started_children, ended_children) * rss_unit
         self.report["metrics"]["object_count"] = len(self.report["objects"])
         self.report["metrics"]["wire_bytes"] = None
         self.report["metrics"]["wire_bytes_source"] = "not instrumented by the standalone client"

@@ -37,7 +37,6 @@ use crab::core::config::Config;
 use crab::core::context::AppContext;
 use crab::core::error::{CrabError, Result};
 use crab::core::output::{ErrorInfo, JsonlStream, OutputMode, emit_error_json};
-use crab::git::filter_process::run_filter_process;
 use crab::git::remote_helper::{StdIo, run_remote_helper};
 
 /// Name Git uses when exec-ing the remote helper for `crab://` URLs.
@@ -3272,26 +3271,21 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             // materialized inline or through delayed smudge.
             let needs_remote_smudge = filter_process_should_wire_remote_smudge(&config);
 
-            // Try to resolve the LFS remote store for content staging.
-            // If not configured, the filter-process still works — content
-            // is cached locally and uploaded by the pre-push hook later.
-            let lfs_store = if config.checkout.lazy {
-                None
-            } else {
-                crab::cmd::lfs::store_setup::resolve_lfs_remote()
-                    .await
-                    .ok()
-                    .map(|remote_ctx| remote_ctx.store)
-            };
+            // Resolve the LFS store only after a non-lazy smudge misses the
+            // local cache. Clean and cache-hit smudge operations remain
+            // independent of remote availability.
+            let lfs_store_loader =
+                (!config.checkout.lazy).then(crab::cmd::lfs::filter_process::lazy_lfs_store_loader);
 
             let remote_smudge =
                 build_filter_process_remote_smudge(&config, &cancel, needs_remote_smudge).await;
 
-            run_filter_process(
+            crab::git::filter_process::run_filter_process_with_lfs_loader(
                 std::io::stdin(),
                 std::io::stdout(),
                 ctx,
-                lfs_store,
+                None,
+                lfs_store_loader,
                 remote_smudge.prefetch,
                 remote_smudge.hydrator,
                 #[cfg(unix)]

@@ -9,7 +9,7 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: MED
-- **Depends on**: Phases 0–4; Phase 5 for migration; Phase 6 for managed/HTTP profiles
+- **Depends on**: Phases 0–4; Phase 5 for migration; Phase 6 for managed direct transfers
 - **Category**: tests, operations, release
 - **Planned at**: commit `2cbd0d92`, 2026-08-25
 
@@ -60,7 +60,7 @@ Unit tests and one successful live scale run do not prove failure recovery, boun
 
 ### Step 1: Define qualification profiles and budgets
 
-Create `smoke`, `scale-safe`, `full-scale`, `large-object`, `failure`, `locking`, `migration`, `managed-standalone`, and optional `http` profiles. Pin seed, Git/Git LFS/Crab/RustFS versions, object count, unique OIDs, logical bytes, wire bytes, commit/path counts, and host capacity. Refuse to start if estimated free disk/object-store space is below a safe margin.
+Create `smoke`, `scale-safe`, `full-scale`, `large-object`, `failure`, `locking`, `migration`, and `managed-standalone` profiles. Pin seed, Git/Git LFS/Crab/RustFS versions, object count, unique OIDs, logical bytes, wire bytes, commit/path counts, and host capacity. Refuse to start if estimated free disk/object-store space is below a safe margin.
 
 Recommended profiles:
 
@@ -105,7 +105,7 @@ Prove callers with `rg`; remove uncalled duplicate lifecycle prune/fsck logic or
 
 - PR: deterministic smoke and representative failure cases on pinned ephemeral RustFS.
 - Scheduled: scale-safe, large-object, linked-Worktree, named-remote, locking, migration, and managed profiles.
-- Release: full-scale capacity-qualified soak, supported OS binaries, provider matrix where credentials exist, and HTTP profile when shipped.
+- Release: full-scale capacity-qualified soak, supported OS binaries, provider matrix where credentials exist, and the managed standalone profile when shipped.
 - Every profile validates refs, SHA-256/size, request/byte counters, peak resources, recovery outcome, and secret redaction in one schema-bound artifact.
 
 ## Acceptance criteria
@@ -115,7 +115,7 @@ Prove callers with `rg`; remove uncalled duplicate lifecycle prune/fsck logic or
 - [ ] Peak transfer memory is bounded; no one-task-per-object or full-payload retention appears in metrics.
 - [ ] Already-published push performs one pointer scan and zero payload GET bytes.
 - [ ] Push dependency failures never publish refs.
-- [ ] Linux, macOS, and Windows supported profiles pass; managed and HTTP profiles use official Git LFS when Phase 6 ships.
+- [ ] Linux, macOS, and Windows supported profiles pass; the managed standalone profile uses official Git LFS when Phase 6 ships.
 - [ ] Release workflow requires evidence bound to the exact commit.
 - [ ] Documentation claims exactly the profiles certified by evidence.
 - [ ] Diagnostic and qualification artifacts contain no URL credentials, authorization headers, action URLs, raw malformed protocol bodies, or local secret paths.

@@ -296,7 +296,6 @@ SPLIT_CRATE_PACKAGES := \
 	-p crab-diff \
 	-p crab-git \
 	-p crab-lfs \
-	-p crab-lfs-server \
 	-p crab-metadata \
 	-p crab-read \
 	-p crab-staging \

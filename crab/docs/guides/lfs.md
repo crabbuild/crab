@@ -14,10 +14,10 @@ crab lfs <subcommand> [OPTIONS]
 without a centralized LFS server. The CLI supports the repository-scoped
 standalone transfer-agent profile, which requires Git LFS to be configured to
 invoke Crab and requires Crab to have access to the selected object store.
-For unmodified Git LFS clients, the separate `crab-lfs-server` package
-provides the standard HTTP Batch, basic-transfer, verify, byte-range, and File
-Locking APIs. That gateway is qualified for the standard HTTP profile; custom
-managed, SSH, and TUS transfer adapters remain separate compatibility work.
+Crab does not provide or require a deployable Git LFS HTTP gateway. An
+unmodified `git-lfs` installation can still use Crab's standalone custom
+transfer agent: `crab lfs install` configures Git LFS to invoke the local Crab
+binary, and Crab accesses the configured object store directly.
 
 The core transfer flow mirrors the supported standalone Git LFS profile:
 clean/smudge, custom transfer-agent,
@@ -109,6 +109,8 @@ transfer-agent entry point:
 [lfs "customtransfer.crab"]
     path = /path/to/crab
     args = lfs-transfer-agent
+    concurrent = true
+    direction = both
 [lfs]
     standalonetransferagent = crab
 ```
@@ -393,6 +395,10 @@ identity with `O`, and marks stale local cache records missing from the remote
 with `X`/`broken`; JSON output includes `ours`, `local`, and `broken` fields.
 `--id`, `--path`, and `--limit` also filter verified output.
 `unlock --force` skips the working-tree existence and clean-status checks.
+
+These are Crab's direct object-storage lock commands. They do not implement
+the Git LFS File Locking HTTP API, so stock `git lfs lock`, `git lfs unlock`,
+and `git lfs locks` require an external LFS server.
 
 ---
 
@@ -744,7 +750,9 @@ compatibility and uses the same transfer protocol implementation.
 
 ## crab lfs env
 
-Print LFS diagnostic environment information.
+Print LFS diagnostic environment information, including the direct Crab
+object-storage remote and local transfer-agent configuration. Crab does not
+report or require an HTTP LFS endpoint.
 
 ```bash
 crab lfs env

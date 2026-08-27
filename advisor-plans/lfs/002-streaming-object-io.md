@@ -49,7 +49,7 @@ Current large uploads are bounded, but downloads and corruption repair can mater
 **Out of scope**:
 - changing `{prefix}/lfs/objects/{aa}/{bb}/{oid}`
 - remote presence receipts; Phase 4 owns them
-- HTTP LFS APIs
+- standard HTTP LFS APIs owned by an external LFS server
 - weakening legacy-object verification
 
 ## Git workflow

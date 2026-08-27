@@ -37,7 +37,7 @@ enum InboundEvent {
         operation: String,
         #[serde(default)]
         remote: String,
-        #[serde(default)]
+        #[serde(default = "default_concurrent")]
         concurrent: bool,
         #[serde(default = "default_concurrency")]
         concurrenttransfers: u32,
@@ -58,9 +58,27 @@ fn default_concurrency() -> u32 {
     8
 }
 
+fn default_concurrent() -> bool {
+    true
+}
+
+fn effective_concurrency(concurrent: bool, requested: u32) -> u32 {
+    if concurrent {
+        // Git LFS starts one process per concurrent transfer in this mode.
+        // Keeping each process serial prevents the installed default from
+        // multiplying the configured concurrency by the process count.
+        1
+    } else {
+        requested.clamp(1, 100)
+    }
+}
+
 /// Init response sent back to the LFS client.
 #[derive(Debug, Serialize)]
-struct InitResponse {}
+struct InitResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<TransferError>,
+}
 
 /// Progress event emitted during a transfer.
 #[derive(Debug, Serialize)]
@@ -89,6 +107,15 @@ struct CompleteEvent {
 struct TransferError {
     code: u32,
     message: String,
+}
+
+fn init_error_response(error: &CrabError) -> InitResponse {
+    InitResponse {
+        error: Some(TransferError {
+            code: 32,
+            message: error.to_string(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,21 +296,37 @@ where
                 ..
             } => {
                 if initialized {
-                    loop_error = Some(CrabError::LfsTransferProtocol(
-                        "duplicate init event".into(),
-                    ));
+                    let error = CrabError::LfsTransferProtocol("duplicate init event".into());
+                    loop_error = Some(
+                        match write_json_line(&output, &init_error_response(&error)).await {
+                            Ok(()) => error,
+                            Err(send_error) => send_error,
+                        },
+                    );
                     break;
                 }
                 if !matches!(operation.as_str(), "upload" | "download") {
-                    loop_error = Some(CrabError::LfsTransferProtocol(format!(
+                    let error = CrabError::LfsTransferProtocol(format!(
                         "unsupported transfer operation: {operation}"
-                    )));
+                    ));
+                    loop_error = Some(
+                        match write_json_line(&output, &init_error_response(&error)).await {
+                            Ok(()) => error,
+                            Err(send_error) => send_error,
+                        },
+                    );
                     break;
                 }
                 let Some(resolver) = resolver.take() else {
-                    loop_error = Some(CrabError::LfsTransferProtocol(
+                    let error = CrabError::LfsTransferProtocol(
                         "transfer store resolver already consumed".into(),
-                    ));
+                    );
+                    loop_error = Some(
+                        match write_json_line(&output, &init_error_response(&error)).await {
+                            Ok(()) => error,
+                            Err(send_error) => send_error,
+                        },
+                    );
                     break;
                 };
                 let remote = (!remote.trim().is_empty()).then_some(remote);
@@ -291,15 +334,16 @@ where
                     match resolver(operation.clone(), remote).await {
                         Ok(result) => result,
                         Err(error) => {
-                            loop_error = Some(error);
+                            loop_error = Some(
+                                match write_json_line(&output, &init_error_response(&error)).await {
+                                    Ok(()) => error,
+                                    Err(send_error) => send_error,
+                                },
+                            );
                             break;
                         }
                     };
-                let concurrency = if concurrent {
-                    concurrenttransfers.clamp(1, 100)
-                } else {
-                    1
-                };
+                let concurrency = effective_concurrency(concurrent, concurrenttransfers);
                 let mut resolved_config = resolved_config;
                 resolved_config.concurrent_transfers = concurrency;
                 initialized = true;
@@ -315,7 +359,7 @@ where
                 );
 
                 // Respond with empty JSON object.
-                write_json_line(&output, &InitResponse {}).await?;
+                write_json_line(&output, &InitResponse { error: None }).await?;
             }
 
             InboundEvent::Upload { oid, size, path } => {
@@ -886,6 +930,14 @@ mod tests {
         oid
     }
 
+    #[test]
+    fn custom_transfer_concurrency_has_one_owner() {
+        assert_eq!(effective_concurrency(true, 8), 1);
+        assert_eq!(effective_concurrency(false, 0), 1);
+        assert_eq!(effective_concurrency(false, 8), 8);
+        assert_eq!(effective_concurrency(false, 101), 100);
+    }
+
     /// Collect all JSON lines written to the output buffer.
     fn parse_output_lines(output: &[u8]) -> Vec<serde_json::Value> {
         let text = String::from_utf8_lossy(output);
@@ -1352,6 +1404,37 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().as_ref(),
             Some(&("download".to_owned(), Some("archive".to_owned())))
+        );
+    }
+
+    #[tokio::test]
+    async fn init_resolver_failure_is_reported_to_git_lfs() {
+        let input = concat!(
+            r#"{"event":"init","operation":"download","remote":"origin"}"#,
+            "\n",
+        );
+        let reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
+        let output = SharedOutput::new();
+        let output_clone = output.clone();
+
+        let error = run_transfer_agent_with_resolver(reader, output, |_operation, _remote| async {
+            Err::<(LfsObjectStore, TransferAgentConfig), _>(CrabError::Configuration {
+                key: "lfs.remote".to_owned(),
+                origin: "credentials unavailable".to_owned(),
+            })
+        })
+        .await
+        .expect_err("resolver failure must terminate the protocol");
+
+        assert!(matches!(error, CrabError::Configuration { .. }));
+        assert_eq!(
+            parse_output_lines(&output_clone.into_bytes()),
+            vec![serde_json::json!({
+                "error": {
+                    "code": 32,
+                    "message": "configuration error [CRAB-E0050] in credentials unavailable: lfs.remote"
+                }
+            })]
         );
     }
 

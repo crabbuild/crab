@@ -38,7 +38,7 @@ Crab LFS is functional and has strong content-integrity foundations. Focused tes
 | 3 | [Make pointer discovery and publication scale](004-scalable-discovery-and-publication.md) | P1 | L | 002, 003 | TODO |
 | 4 | [Add durable presence receipts and safe locking](005-presence-receipts-and-locking.md) | P1 | L | 002, 003 | TODO |
 | 5 | [Make history migration bounded and transactional](006-bounded-history-migration.md) | P1 | L | 001, 002 | TODO |
-| 6 | [Complete managed transfers and expose standard HTTP LFS](007-managed-and-standard-http-lfs.md) | P2 | XL | 001–005 | TODO |
+| 6 | [Close managed direct-transfer gaps](007-managed-and-standard-http-lfs.md) | P1 | L | 001–005 | TODO |
 | 7 | [Establish production qualification and release gates](008-production-qualification.md) | P1 | L | 001–005; 006 for migration; 007 for managed/HTTP profiles | TODO |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED: reason`, or `REJECTED: reason`.
@@ -48,26 +48,26 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED: reason`, or `REJECTED: r
 - Phase 0 fixes the product vocabulary and creates deterministic compatibility fixtures. Later phases must not invent a different meaning of “compatible.”
 - Phase 1 establishes streaming integrity primitives. Phase 2 must compose them instead of retaining the existing `Bytes`-based paths.
 - Phase 3 changes the object-before-ref durability gate, so it follows the canonical transfer coordinator and must preserve lock-before-publication ordering.
-- Phase 4 makes remote presence cheap without trusting provider ETags as SHA-256. It is needed before the HTTP Batch gateway can return upload/download actions cheaply and safely.
+- Phase 4 makes remote presence cheap without trusting provider ETags as SHA-256. It is needed before direct transfer can avoid redundant object-body verification safely.
 - Phase 5 is independent of the push fast path but is required before claiming Git LFS migration parity on large repositories.
-- Phase 6 first closes managed standalone-agent authorization, then adds the optional HTTP product surface. Direct/serverless Crab remains supported.
-- Phase 7 can start native/standalone profiles after Phase 4. Migration waits for Phase 5; managed/HTTP profiles wait for Phase 6.
+- Phase 6 closes managed standalone-agent authorization and explicitly does not add an LFS gateway. Direct/serverless Crab remains the only supported Crab LFS deployment model.
+- Phase 7 can start native/standalone profiles after Phase 4. Migration waits for Phase 5; managed direct transfers wait for Phase 6.
 
 ## Product decision encoded by this roadmap
 
 “Replace Git LFS” has two separate support levels:
 
 1. **Crab-managed repositories**: Crab supplies filters, porcelain, publication, object storage, and locking; `git-lfs` is optional.
-2. **Standard Git LFS interoperability**: unmodified Git LFS clients discover an HTTPS endpoint and use the documented Batch, basic-transfer, and File Locking APIs.
+2. **Standalone Git LFS interoperability**: unmodified Git LFS clients delegate the documented custom-transfer events to the local Crab binary, which accesses object storage directly.
 
-Phase 7 may certify these levels independently. Documentation must not say “drop-in replacement” until the standard-interoperability profile passes its release gate.
+Phase 7 may certify these levels independently. Documentation must not claim arbitrary HTTP-server compatibility; standard HTTP discovery remains the responsibility of an external LFS server.
 
 ## Findings considered and rejected or deferred
 
 - Implementing the proposed pipelined custom-transfer-agent protocol now: deferred. Current Git LFS custom-transfer protocol is serial per process; speculative pipelining would not improve current clients.
 - Treating S3 ETag as the LFS OID: rejected. Multipart ETags are not SHA-256 and provider semantics differ.
 - Removing full verification for legacy objects: rejected. Objects without a trusted Crab receipt must continue to use streamed SHA-256 verification.
-- Adding an HTTP server to `crab-lfs`: rejected. `crab-lfs` owns reusable object mechanics; authentication and HTTP composition belong at a product/server boundary.
+- Adding an HTTP server to Crab LFS: rejected. The product remains direct-to-object-storage; standard HTTP discovery is an external-server concern.
 - Wiring `crab/src/lfs/lifecycle.rs::run_prune` or `run_fsck`: rejected. Those are stale duplicate implementations; Phase 7 removes or narrows them after proving the canonical CLI paths.
 - Bucket-wide LFS garbage collection in this roadmap: deferred. It requires the repository-wide GC ownership and fencing design; local LFS prune and remote lifecycle policy generation are the only in-scope maintenance behaviors.
 

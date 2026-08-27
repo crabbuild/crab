@@ -28,18 +28,17 @@ verified bytes through crab-storage
 ```
 
 `LfsObjectStore` provides idempotent `put`, bounded-memory `put_stream`,
-`get`, `exists`, and `verify` operations. Its stream APIs let an HTTP
-composition boundary verify an immutable object before serving a bounded
-range. Successful streamed verification records a validator-bound receipt when
-the provider exposes an ETag or version, allowing later presence checks to
-avoid re-reading the object body. A configured primary fallback can serve reads
-when a selected replica is stale or unavailable; receipts are written to the
-source that passed verification.
+`get`, `exists`, and `verify` operations. Its stream APIs let the direct Crab
+CLI transfer path verify immutable objects while keeping file-sized payloads
+out of memory. Successful streamed verification records a validator-bound
+receipt when the provider exposes an ETag or version, allowing later presence
+checks to avoid re-reading the object body. A configured primary fallback can
+serve reads when a selected replica is stale or unavailable; receipts are
+written to the source that passed verification.
 
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
-`{prefix}/lfs/locks/{blake3(path)}`. The CLI and the standard HTTP gateway
-must use this namespace so locks acquired by either client are visible to the
-other.
+`{prefix}/lfs/locks/{blake3(path)}`. Crab's CLI uses this namespace so locks
+remain visible across local clients and worktrees.
 
 ## Usage
 
@@ -61,7 +60,8 @@ assert_eq!(lfs.verify(&oid).await?, data);
 
 For large local files, use `put_stream(&oid, path)` so the upload uses bounded
 multipart buffers and aborts an incomplete upload on hash failure. Use
-`object_path_for` when a higher-level transfer agent needs range requests.
+`object_path_for` when a higher-level Crab read path needs the canonical object
+key.
 
 ## Boundaries
 
@@ -69,7 +69,6 @@ multipart buffers and aborts an incomplete upload on hash failure. Use
 - [`crab-storage`](../crab-storage/README.md) builds the object store and maps provider
   errors.
 - The CLI and transfer-agent protocol remain in higher-level product crates.
-- `crab-lfs-server` owns standard HTTP protocol, authentication, and policy.
 
 The only content identity used here is the Git LFS SHA-256 OID. Crab-native
 file hashes, shards, and Xorbs are owned by [`crab-xet`](../crab-xet/README.md).

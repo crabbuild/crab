@@ -124,10 +124,6 @@ CHECKS = (
         "crab-cache-server package Interface",
         ("check", "-p", "crab-cache-server", "--all-targets"),
     ),
-    Check(
-        "crab-lfs-server package Interface",
-        ("check", "-p", "crab-lfs-server", "--all-targets"),
-    ),
 )
 
 

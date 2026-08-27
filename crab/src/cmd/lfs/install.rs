@@ -2,7 +2,8 @@
 //! crab for LFS filters and transfers.
 //!
 //! `install` sets the `lfs.customtransfer.crab.path`,
-//! `lfs.customtransfer.crab.args`, and repository-scoped
+//! `lfs.customtransfer.crab.args`, `lfs.customtransfer.crab.concurrent`,
+//! `lfs.customtransfer.crab.direction`, and repository-scoped
 //! `lfs.standalonetransferagent`
 //! git config keys, registers Crab's standalone `filter.lfs`
 //! clean/smudge commands, and writes a pre-push hook that delegates
@@ -20,6 +21,8 @@ use crate::core::error::{CrabError, Result};
 const LFS_TRANSFER_CONFIG_KEYS: &[(&str, &str)] = &[
     ("lfs.customtransfer.crab.path", "{bin}"),
     ("lfs.customtransfer.crab.args", "lfs-transfer-agent"),
+    ("lfs.customtransfer.crab.concurrent", "true"),
+    ("lfs.customtransfer.crab.direction", "both"),
     ("lfs.standalonetransferagent", "crab"),
 ];
 
@@ -67,6 +70,7 @@ pub struct LfsUninstallOptions {
 /// Install crab as the LFS filter driver and transfer agent.
 ///
 /// Sets `lfs.customtransfer.crab.path`, `lfs.customtransfer.crab.args`,
+/// `lfs.customtransfer.crab.concurrent`, `lfs.customtransfer.crab.direction`,
 /// `lfs.standalonetransferagent`, and `filter.lfs.*` in git config,
 /// and writes a pre-push hook to Git's configured hooks directory.
 ///
@@ -144,6 +148,8 @@ fn print_manual_instructions(bin: &str, skip_smudge: bool) {
     println!();
     println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
     println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
+    println!("  git config --local lfs.customtransfer.crab.concurrent true");
+    println!("  git config --local lfs.customtransfer.crab.direction both");
     println!("  git config --local lfs.standalonetransferagent crab");
     println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
     if skip_smudge {
@@ -543,6 +549,12 @@ mod tests {
 
         let args = get_config(dir.path(), "--local", "lfs.customtransfer.crab.args");
         assert_eq!(args.as_deref(), Some("lfs-transfer-agent"));
+
+        let concurrent = get_config(dir.path(), "--local", "lfs.customtransfer.crab.concurrent");
+        assert_eq!(concurrent.as_deref(), Some("true"));
+
+        let direction = get_config(dir.path(), "--local", "lfs.customtransfer.crab.direction");
+        assert_eq!(direction.as_deref(), Some("both"));
     }
 
     #[test]

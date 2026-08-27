@@ -37,6 +37,40 @@ const FILTER_PROTOCOL_VERSION: &str = "version=2";
 const CAPABILITIES: &[&str] = &["clean", "smudge", "delay"];
 const SPECULATION_DECAY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// Synchronously resolves an LFS object store when a non-lazy smudge needs it.
+pub type LfsStoreLoader = Arc<dyn Fn() -> Option<Arc<LfsObjectStore>> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct LfsStoreSource {
+    eager: Option<Arc<LfsObjectStore>>,
+    loader: Option<LfsStoreLoader>,
+    resolved: Arc<std::sync::OnceLock<Option<Arc<LfsObjectStore>>>>,
+}
+
+impl LfsStoreSource {
+    #[cfg(test)]
+    fn eager(store: Option<Arc<LfsObjectStore>>) -> Self {
+        Self::new(store, None)
+    }
+
+    fn new(store: Option<Arc<LfsObjectStore>>, loader: Option<LfsStoreLoader>) -> Self {
+        Self {
+            eager: store,
+            loader,
+            resolved: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    fn resolve(&self) -> Option<Arc<LfsObjectStore>> {
+        if let Some(store) = &self.eager {
+            return Some(Arc::clone(store));
+        }
+
+        let loader = self.loader.as_ref()?;
+        self.resolved.get_or_init(|| loader()).clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FilterWorktreePaths {
     current_worktree_root: PathBuf,
@@ -96,6 +130,39 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    run_filter_process_with_lfs_loader(
+        input,
+        output,
+        ctx,
+        lfs_store,
+        None,
+        prefetch,
+        hydrator,
+        #[cfg(unix)]
+        idle,
+    )
+    .await
+}
+
+/// Runs the filter protocol with an optional lazy LFS store resolver.
+///
+/// The resolver is called only after a non-lazy LFS smudge misses the local
+/// cache. This keeps clean and cache-hit smudge operations independent of
+/// remote configuration while preserving the existing eager-store API.
+pub async fn run_filter_process_with_lfs_loader<R, W>(
+    input: R,
+    output: W,
+    ctx: AppContext,
+    lfs_store: Option<Arc<LfsObjectStore>>,
+    lfs_store_loader: Option<LfsStoreLoader>,
+    prefetch: Option<Arc<PrefetchQueue>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    #[cfg(unix)] idle: Option<(std::os::fd::RawFd, std::time::Duration)>,
+) -> Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
     // Do NOT open the staging area here. Staging is only needed by
     // the `clean` command; deferring the open until the first clean
     // arrives means `git status` — which only drives smudge commands
@@ -113,6 +180,7 @@ where
     // `spawn_blocking`; the lock is never held across `.await`.
     let staging_cell: Arc<std::sync::Mutex<LazyStaging>> =
         Arc::new(std::sync::Mutex::new(LazyStaging::from_root(staging_root)));
+    let lfs_store = LfsStoreSource::new(lfs_store, lfs_store_loader);
 
     // Lazily-initialized speculation state. Initialized on the first
     // smudge when `hydrate.speculative = true`; `None` otherwise.
@@ -153,7 +221,7 @@ where
 
         let input = BufReader::with_capacity(256 * 1024, input);
         let output = BufWriter::with_capacity(256 * 1024, output);
-        run_filter_loop(
+        run_filter_loop_with_lfs_source(
             input,
             output,
             ctx,
@@ -591,12 +659,39 @@ impl FilterCommand {
 /// tear down the session.
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn run_filter_loop<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    ctx: AppContext,
+    staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
+    lfs_store: Option<Arc<LfsObjectStore>>,
+    prefetch: Option<Arc<PrefetchQueue>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    handle: Option<tokio::runtime::Handle>,
+    speculation: Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
+) -> Result<()> {
+    run_filter_loop_with_lfs_source(
+        input,
+        output,
+        ctx,
+        staging_cell,
+        LfsStoreSource::eager(lfs_store),
+        prefetch,
+        hydrator,
+        handle,
+        speculation,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
+fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     mut input: R,
     mut output: W,
     ctx: AppContext,
     staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
-    lfs_store: Option<Arc<LfsObjectStore>>,
+    lfs_store: LfsStoreSource,
     prefetch: Option<Arc<PrefetchQueue>>,
     hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<tokio::runtime::Handle>,
@@ -665,7 +760,10 @@ fn run_filter_loop<R: BufRead, W: Write>(
             }
         };
 
-        if cmd.command == "clean" && !file_index_checker_attempted {
+        let is_lfs_clean = cmd.command == "clean"
+            && session.resolve_filter_for(&cmd.pathname)
+                == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
+        if cmd.command == "clean" && !is_lfs_clean && !file_index_checker_attempted {
             file_index_checker_attempted = true;
             if let Some(handle) = handle.as_ref() {
                 install_clean_file_index_checker(&mut session, &ctx, handle);
@@ -682,7 +780,7 @@ fn run_filter_loop<R: BufRead, W: Write>(
                 &mut session,
                 &ctx,
                 &staging_cell,
-                lfs_store.as_ref(),
+                &lfs_store,
                 prefetch.as_ref(),
                 hydrator.as_ref(),
                 handle.as_ref(),
@@ -930,7 +1028,7 @@ fn dispatch_command<R: Read, W: Write>(
     session: &mut super::clean::CleanSession,
     ctx: &AppContext,
     staging_cell: &Arc<std::sync::Mutex<LazyStaging>>,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     prefetch: Option<&Arc<PrefetchQueue>>,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1205,7 +1303,7 @@ fn write_delayed_response<W: Write>(output: &mut W) -> Result<()> {
 fn try_stream_lfs_smudge(
     content: &[u8],
     pathname: &str,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
     lazy: bool,
     handle: Option<&tokio::runtime::Handle>,
@@ -1236,7 +1334,7 @@ fn try_stream_lfs_smudge(
         return Ok(Some(SmudgeOutput::File(local_path)));
     }
 
-    let Some(store) = lfs_store else {
+    let Some(store) = lfs_store.resolve() else {
         return if session.should_skip_lfs_download_errors() {
             Ok(Some(SmudgeOutput::Bytes(Bytes::copy_from_slice(content))))
         } else {
@@ -1244,11 +1342,11 @@ fn try_stream_lfs_smudge(
         };
     };
 
-    let temp = crate::lfs::cache::new_temp_path(&lfs_dir)?;
-    let temp_path = temp.to_path_buf();
     let Some(handle) = handle else {
         return Ok(None);
     };
+    let temp = crate::lfs::cache::new_temp_path(&lfs_dir)?;
+    let temp_path = temp.to_path_buf();
     let result = handle.block_on(store.download_to_file(&pointer.oid, pointer.size, &temp_path));
     match result {
         Ok(()) => {
@@ -1284,7 +1382,7 @@ fn smudge_content(
     content: &[u8],
     pathname: &str,
     lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1318,7 +1416,7 @@ fn smudge_content(
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
                     return Ok(Bytes::from(content));
                 }
-                if let Some(store) = lfs_store {
+                if let Some(store) = lfs_store.resolve() {
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
                     let rt = tokio::runtime::Handle::current();
                     let bytes = match rt.block_on(store.verify(&ptr.oid)) {
@@ -1397,7 +1495,7 @@ fn smudge_by_blob_classification(
     content: &[u8],
     pathname: &str,
     lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1426,7 +1524,7 @@ fn smudge_by_blob_classification(
             }
 
             // Fall back to remote store download.
-            if let Some(store) = lfs_store {
+            if let Some(store) = lfs_store.resolve() {
                 tracing::debug!(
                     oid = %oid_hex,
                     size = pointer.size,
@@ -1955,6 +2053,25 @@ mod tests {
     use std::process::{Command, Output};
     use std::sync::MutexGuard;
 
+    #[test]
+    fn lfs_store_source_caches_unavailable_remote() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::clone(&calls);
+        let source = LfsStoreSource::new(
+            None,
+            Some(Arc::new(move || {
+                loader_calls.fetch_add(1, Ordering::SeqCst);
+                None
+            })),
+        );
+
+        assert!(source.resolve().is_none());
+        assert!(source.resolve().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     struct GitEnvGuard {
         _lock: MutexGuard<'static, ()>,
         prev_git_dir: Option<std::ffi::OsString>,
@@ -2187,7 +2304,16 @@ mod tests {
         let mut session = super::super::clean::CleanSession::new(AppContext::default());
         session.set_repo_root(repo.path().to_path_buf());
 
-        let output = smudge_content(b"", "empty.bin", false, None, &session, None, None).unwrap();
+        let output = smudge_content(
+            b"",
+            "empty.bin",
+            false,
+            &LfsStoreSource::eager(None),
+            &session,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(output.is_empty());
     }
@@ -2242,7 +2368,7 @@ mod tests {
         let result = try_stream_lfs_smudge(
             &pointer.serialize(),
             "model.bin",
-            None,
+            &LfsStoreSource::eager(None),
             &session,
             false,
             None,
@@ -2725,7 +2851,7 @@ size 1048576\n";
             &pointer.serialize(),
             "model.bin",
             false,
-            None,
+            &LfsStoreSource::eager(None),
             &session,
             None,
             None,
@@ -2758,7 +2884,7 @@ size 1048576\n";
             &pointer_bytes,
             "model.bin",
             false,
-            None,
+            &LfsStoreSource::eager(None),
             &session,
             None,
             None,
@@ -2907,7 +3033,7 @@ size 1048576\n";
                 &pointer_bytes,
                 "blocked/model.bin",
                 false,
-                Some(&lfs_store),
+                &LfsStoreSource::eager(Some(Arc::clone(&lfs_store))),
                 &session,
                 None,
                 None,
@@ -2919,7 +3045,7 @@ size 1048576\n";
                 &pointer_bytes,
                 "allowed/model.bin",
                 false,
-                Some(&lfs_store),
+                &LfsStoreSource::eager(Some(Arc::clone(&lfs_store))),
                 &session,
                 None,
                 None,

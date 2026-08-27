@@ -1299,8 +1299,9 @@ FUSE mount).
 
 ### 14.2 Git LFS Compatibility
 
-**Goal:** Seamlessly read Git-LFS pointers and fetch from LFS servers,
-enabling migration from LFS to crab without rewriting history.
+**Goal:** Seamlessly read Git-LFS pointers and fetch them from Crab's directly
+configured object store, enabling migration from LFS to Crab without rewriting
+history. Standard Git LFS HTTP endpoints remain external to Crab.
 
 **Extension points:**
 - `crab/src/lfs/` — new module for LFS transfer agent

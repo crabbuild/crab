@@ -1,8 +1,8 @@
 //! Git LFS file-lock records backed by object storage.
 //!
-//! The lock record format is shared by the CLI and HTTP LFS service. Records
-//! live at `{prefix}/lfs/locks/{blake3(path)}` and are released with a CAS
-//! tombstone so a stale unlock cannot remove a newer lock for the same path.
+//! Records live at `{prefix}/lfs/locks/{blake3(path)}` and are released with a
+//! CAS tombstone so a stale unlock cannot remove a newer lock for the same
+//! path.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,9 +66,10 @@ pub struct LockRecord {
     pub released_at: Option<u64>,
 }
 
-/// Shared object-store implementation for native and HTTP-compatible LFS
-/// locking. The namespace is normally `lfs/locks`; native Crab locks use
-/// `locks/files` through the same implementation.
+/// Object-store implementation for Crab-native and CLI LFS locking.
+///
+/// The namespace is normally `lfs/locks`; native Crab locks use `locks/files`
+/// through the same implementation.
 pub struct LfsLockManager {
     store: Store,
     prefix: String,
@@ -111,15 +112,7 @@ impl LfsLockManager {
         owner: &str,
         expires_in: Option<Duration>,
     ) -> LockResult<LockRecord> {
-        self.lock_with_expiry_mode(path, owner, expires_in, false)
-            .await
-    }
-
-    /// Acquires a lock and reports an existing lock as a conflict, including
-    /// when the current owner matches. This is the exclusive HTTP API
-    /// contract; the native CLI keeps the idempotent `lock` behavior.
-    pub async fn lock_exclusive(&self, path: &str, owner: &str) -> LockResult<LockRecord> {
-        self.lock_with_expiry_mode(path, owner, None, true).await
+        self.lock_with_expiry_mode(path, owner, expires_in).await
     }
 
     async fn lock_with_expiry_mode(
@@ -127,7 +120,6 @@ impl LfsLockManager {
         path: &str,
         owner: &str,
         expires_in: Option<Duration>,
-        same_owner_is_conflict: bool,
     ) -> LockResult<LockRecord> {
         let key = self.lock_path(path);
         let object_path = Path::from(key.as_str());
@@ -157,7 +149,7 @@ impl LfsLockManager {
                         .await?;
                     return Ok(record);
                 }
-                if existing.owner == owner && !same_owner_is_conflict {
+                if existing.owner == owner {
                     return Ok(existing);
                 }
                 Err(LfsLockError::Conflict {
@@ -545,10 +537,6 @@ mod tests {
         let manager = manager();
         let first = manager.lock("model.bin", "alice").await.unwrap();
         assert_eq!(manager.lock("model.bin", "alice").await.unwrap(), first);
-        assert!(matches!(
-            manager.lock_exclusive("model.bin", "alice").await,
-            Err(LfsLockError::Conflict { owner, .. }) if owner == "alice"
-        ));
         assert!(matches!(
             manager.lock("model.bin", "bob").await,
             Err(LfsLockError::Conflict { owner, .. }) if owner == "alice"

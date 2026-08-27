@@ -87,7 +87,6 @@ CHECKS = (
     Check("crab-coordination contract behavior", ("test", "-p", "crab-coordination")),
     Check("crab-auth-server package behavior", ("test", "-p", "crab-auth-server", "--lib")),
     Check("crab-cache-server package behavior", ("test", "-p", "crab-cache-server", "--lib")),
-    Check("crab-lfs-server package behavior", ("test", "-p", "crab-lfs-server", "--lib")),
 )
 
 

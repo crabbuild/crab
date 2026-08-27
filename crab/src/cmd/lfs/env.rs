@@ -1,6 +1,6 @@
 //! `crab lfs env` / `crab lfs version` — diagnostic and version output.
 //!
-//! `env` prints LFS-relevant configuration: endpoint, transfer agent,
+//! `env` prints LFS-relevant configuration: direct-storage remote, transfer agent,
 //! storage path, filter settings, and git version.
 //!
 //! `version` prints the crab package version and the LFS protocol version.
@@ -13,13 +13,13 @@ use crate::lfs::config::LfsConfig;
 
 /// Print LFS diagnostic environment information to stdout.
 ///
-/// Displays the LFS endpoint, transfer agent path, standalone agent config,
+/// Displays the direct-storage remote, transfer agent path, standalone agent config,
 /// storage directory, smudge/clean filter settings, and git version.
 pub fn run_lfs_env() -> Result<()> {
     let lfs_url = git_config_value("lfs.url")
         .or_else(|| git_config_value("remote.origin.url"))
         .unwrap_or_default();
-    println!("Endpoint={lfs_url}");
+    println!("DirectStorageRemote={lfs_url}");
 
     let agent_path = git_config_value("lfs.customtransfer.crab.path").unwrap_or_default();
     let cwd = std::env::current_dir().ok();

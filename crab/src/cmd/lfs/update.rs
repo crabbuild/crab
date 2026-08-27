@@ -44,6 +44,8 @@ fn print_manual_instructions(bin: &str) {
     println!();
     println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
     println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
+    println!("  git config --local lfs.customtransfer.crab.concurrent true");
+    println!("  git config --local lfs.customtransfer.crab.direction both");
     println!("  git config --local lfs.standalonetransferagent crab");
     println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
     println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
@@ -66,6 +68,8 @@ fn update_config(root: &Path, bin: &str) -> Result<()> {
             "lfs.customtransfer.crab.args",
             "lfs-transfer-agent".to_owned(),
         ),
+        ("lfs.customtransfer.crab.concurrent", "true".to_owned()),
+        ("lfs.customtransfer.crab.direction", "both".to_owned()),
         ("lfs.standalonetransferagent", "crab".to_owned()),
         ("filter.lfs.clean", format!("{bin} lfs clean -- %f")),
         ("filter.lfs.smudge", format!("{bin} lfs smudge -- %f")),
@@ -146,6 +150,12 @@ mod tests {
 
         let args = get_config(dir.path(), "lfs.customtransfer.crab.args");
         assert_eq!(args.as_deref(), Some("lfs-transfer-agent"));
+
+        let concurrent = get_config(dir.path(), "lfs.customtransfer.crab.concurrent");
+        assert_eq!(concurrent.as_deref(), Some("true"));
+
+        let direction = get_config(dir.path(), "lfs.customtransfer.crab.direction");
+        assert_eq!(direction.as_deref(), Some("both"));
 
         let clean = get_config(dir.path(), "filter.lfs.clean");
         assert!(

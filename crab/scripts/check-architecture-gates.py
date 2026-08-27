@@ -1742,13 +1742,11 @@ SHIPPED_BINARY_PACKAGES = {
     "crab": {"crab"},
     "crab-auth-server": {"crab-auth-receive", "crab-auth-view"},
     "crab-cache-server": {"crab-cache-server"},
-    "crab-lfs-server": {"crab-lfs-server"},
 }
-SERVER_PACKAGES = {"crab-auth-server", "crab-cache-server", "crab-lfs-server"}
+SERVER_PACKAGES = {"crab-auth-server", "crab-cache-server"}
 ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-auth-server": set(),
     "crab-cache-server": {"crab", "crab-cache-store"},
-    "crab-lfs-server": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab": {
@@ -1806,7 +1804,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-diff": {"normal": {"crab-types", "crab-xet"}},
     "crab-git": {"normal": {"crab-types"}},
     "crab-lfs": {"normal": {"crab-git", "crab-storage"}},
-    "crab-lfs-server": {"normal": {"crab-lfs", "crab-storage"}},
     "crab-metadata": {"normal": {"crab-storage", "crab-xet"}},
     "crab-read": {
         "normal": {
@@ -1855,7 +1852,6 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-diff": "crates/crab-diff",
     "crab-git": "crates/crab-git",
     "crab-lfs": "crates/crab-lfs",
-    "crab-lfs-server": "crates/crab-lfs-server",
     "crab-metadata": "crates/crab-metadata",
     "crab-read": "crates/crab-read",
     "crab-remote-git": "crates/crab-remote-git",

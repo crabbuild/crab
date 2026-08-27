@@ -966,12 +966,16 @@ size {bytes}
 
 Detection: first line starts with `version https://git-lfs.github.com/`.
 
-When crab’s smudge filter sees an LFS pointer:
+When crab’s smudge filter sees an LFS pointer, it resolves the repository's
+Crab object-store remote and fetches the object directly. The local Crab
+transfer agent can also be selected by an unmodified Git LFS client through
+the standalone custom-transfer configuration. Crab does not implement the
+Git LFS HTTP discovery, Batch, or File Locking APIs; repositories that still
+use those APIs keep their external LFS server during migration.
 
-- If `crab.lfs_compat.enabled = false` (default): error with migration instructions.
-- If `crab.lfs_compat.enabled = true`: look up `.lfsconfig` for LFS server URL, fetch via LFS protocol.
-
-This allows gradual migration: enable lfs_compat, incrementally re-add files with `crab track`, eventually disable.
+This allows gradual migration: keep existing LFS pointers while Crab handles
+direct transfers, then incrementally re-add files with `crab track` or run a
+history conversion when the repository is ready.
 
 -----
 

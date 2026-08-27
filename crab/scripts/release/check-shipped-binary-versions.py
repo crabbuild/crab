@@ -23,7 +23,6 @@ CHECKS = (
     BinaryVersionCheck("Crab Auth receive helper", "crab-auth-server", "crab-auth-receive"),
     BinaryVersionCheck("Crab Auth view helper", "crab-auth-server", "crab-auth-view"),
     BinaryVersionCheck("Crab cache server", "crab-cache-server", "crab-cache-server"),
-    BinaryVersionCheck("Crab LFS server", "crab-lfs-server", "crab-lfs-server"),
 )
 
 

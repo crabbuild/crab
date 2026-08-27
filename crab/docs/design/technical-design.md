@@ -445,7 +445,12 @@ The file-hash is the full content’s blake3 hash. It’s chosen over SHA-256 fo
 
 Future-compatibility: the `version` URL will increment on breaking format changes. Old clients reading a newer pointer will error with a clear message to upgrade.
 
-**Compatibility note**: crab can optionally read Git-LFS pointers in a best-effort mode for seamless migration. LFS pointers are detected by their distinctive `version https://git-lfs.github.com/spec/v1` header and processed through an LFS-compat code path that fetches from the LFS server URL (stored in `.lfsconfig`). See §19 for details.
+**Compatibility note**: crab can read Git-LFS pointers in a best-effort mode for
+seamless migration. LFS pointers are detected by their distinctive
+`version https://git-lfs.github.com/spec/v1` header and processed through the
+direct Crab LFS path when the repository's Crab object-store remote is
+available. Standard Git LFS HTTP discovery remains an external-server
+integration. See §19 for details.
 
 ### 6.4 Object Format Compatibility
 
@@ -1947,7 +1952,13 @@ crab v1 doesn’t ship a CDN config, but documents how to layer one. Key: use a 
 
 Git-LFS is the incumbent solution for large files in Git. crab offers a migration path:
 
-**Read-compatibility**: crab’s smudge filter detects LFS-format pointers (they have a distinctive `version https://git-lfs.github.com/spec/v1` header) and can fetch from the LFS server specified in `.lfsconfig`. This means a user migrating a repo can `git pull` from a crab remote and have LFS files work transparently during transition.
+**Read-compatibility**: crab’s smudge filter detects LFS-format pointers (they
+have a distinctive `version https://git-lfs.github.com/spec/v1` header) and can
+fetch them from the repository's directly configured Crab object store. This
+means a user migrating a repo can `git pull` from a Crab remote and have LFS
+files work transparently during transition. A repository that still relies on
+an external LFS HTTP endpoint must retain its Git LFS client for that endpoint
+until the objects are cached or migrated.
 
 **Migration command**: `crab migrate --from lfs` walks repo history, for each commit that references LFS objects:
 

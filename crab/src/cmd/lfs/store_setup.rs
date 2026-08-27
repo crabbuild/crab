@@ -49,10 +49,7 @@ pub async fn resolve_lfs_remote_for_operation_with_remote_from(
 ) -> Result<LfsRemoteContext> {
     let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
     let repo_root = &worktree.current_worktree_root;
-    let url = match remote {
-        Some(name) => read_git_remote_url_from(name, repo_root)?,
-        None => read_repo_remote_url_from(repo_root)?,
-    };
+    let url = resolve_lfs_remote_url(remote, repo_root)?;
     let config = crate::core::config::Config::resolve_for_repo(repo_root)?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
@@ -193,6 +190,16 @@ fn is_lfs_read_operation(operation: &str) -> bool {
         operation,
         "pull" | "fetch" | "smudge" | "download" | "checkout" | "migrate-export" | "prune"
     )
+}
+
+/// Resolve the Git LFS `remote` field, which may be either a Git remote name
+/// or a repository URL supplied directly by the client.
+fn resolve_lfs_remote_url(remote: Option<&str>, repo_root: &Path) -> Result<String> {
+    match remote.map(str::trim) {
+        Some(value) if value.contains("://") => Ok(value.to_owned()),
+        Some(name) if !name.is_empty() => read_git_remote_url_from(name, repo_root),
+        _ => read_repo_remote_url_from(repo_root),
+    }
 }
 
 /// Read the remote URL from `.crab/config.toml`.
@@ -387,6 +394,15 @@ mod tests {
             .unwrap();
 
         let url = read_git_remote_url_from("archive", dir.path()).unwrap();
+
+        assert_eq!(url, "crab://bucket/repo");
+    }
+
+    #[test]
+    fn standalone_remote_url_is_used_without_git_remote_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let url = resolve_lfs_remote_url(Some("crab://bucket/repo"), dir.path()).unwrap();
 
         assert_eq!(url, "crab://bucket/repo");
     }

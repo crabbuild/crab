@@ -125,7 +125,7 @@ impl LfsObjectStore {
     }
 
     /// Borrows the underlying [`Store`] for operations not covered by
-    /// the `LfsObjectStore` API (e.g., range requests for download resume).
+    /// the `LfsObjectStore` API.
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -137,8 +137,7 @@ impl LfsObjectStore {
 
     /// Returns the object store [`Path`] for the given OID.
     ///
-    /// Public so callers (e.g., the transfer agent) can issue range
-    /// requests directly against the store for download resume.
+    /// Public so higher-level Crab read paths can use the canonical key.
     pub fn object_path_for(&self, oid: &[u8; 32]) -> Path {
         self.object_path(oid)
     }
@@ -176,10 +175,10 @@ impl LfsObjectStore {
         }
     }
 
-    /// Verifies an object before opening a backpressured stream for an HTTP
-    /// response. Range reads are checked against the complete SHA-256 object
-    /// first, so a corrupt immutable key is never served as a successful
-    /// transfer.
+    /// Verifies an object before opening a backpressured stream.
+    ///
+    /// Range reads are checked against the complete SHA-256 object first, so a
+    /// corrupt immutable key is never served as a successful transfer.
     pub async fn get_stream(
         &self,
         oid: &[u8; 32],

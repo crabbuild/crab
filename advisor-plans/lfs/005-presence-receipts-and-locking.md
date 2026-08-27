@@ -23,7 +23,7 @@ Content-addressing makes repeated payload verification unnecessary only when Cra
 - `crates/crab-storage/src/store.rs:1103` HEAD returns size, ETag, and version but no authoritative SHA-256 metadata.
 - S3 multipart ETag is not SHA-256; GCS/Azure validators have different semantics.
 - `crab/src/lfs/lock.rs:155` documents a read-then-delete TOCTOU window because the current object-store trait has no conditional delete.
-- Lock records are Crab JSON under `{prefix}/lfs/locks/{blake3(path)}`; the standard HTTP representation will be an adapter in Phase 6.
+- Lock records are Crab JSON under `{prefix}/lfs/locks/{blake3(path)}`; the CLI is the supported compatibility surface.
 - `crab/src/cmd/lfs/locks.rs:51` hashes raw CLI paths while push checks Git-produced repository-relative paths, so aliases and paths outside the Worktree can create a different lock identity.
 - `crab/src/cmd/lfs/store_setup.rs:303` uses mutable Git author identity as lock owner; managed authorization needs an authenticated principal instead.
 - `crab/src/cmd/lfs/locks.rs:472` updates shared local lock caches with non-atomic read/modify/write operations.
@@ -46,7 +46,7 @@ Content-addressing makes repeated payload verification unnecessary only when Cra
 
 **Out of scope**:
 - provider ETag-as-digest shortcuts
-- standard HTTP request/response models; Phase 6 owns them
+- standard HTTP request/response models; an external LFS server owns that surface
 - bucket-wide deletion or GC
 - silently backfilling receipts without hashing legacy payloads
 
