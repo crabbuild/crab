@@ -1571,8 +1571,7 @@ jobs:
             gh release delete "$TAG" --repo "$RELEASE_REPO" --yes
           fi
 
-          notes_file="$(mktemp)"
-          trap 'rm -f "$notes_file"' EXIT
+          notes_file="${RUNNER_TEMP}/release-notes.md"
           awk -v version="$VERSION" '
             $0 ~ "^## " version " - " { found = 1; next }
             found && /^## / { exit }
