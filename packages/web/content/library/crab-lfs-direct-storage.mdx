@@ -1,0 +1,220 @@
+---
+title: "How does Crab LFS work without a server?"
+description: "Follow a standard Git LFS pointer from your worktree to direct object storage and back—then verify the path from a clean client."
+date: "2026-08-26"
+author: "Crab Team"
+category: "tutorial"
+tags: ["beginner", "git-lfs", "serverless", "direct-storage", "object-storage"]
+excerpt: "Use standard Git LFS pointers with Crab's local transfer agent. Your clients talk directly to your bucket; no Git LFS server or gateway is required."
+level: "beginner"
+path: "start-here"
+order: 3
+concepts:
+  ["Git LFS", "direct storage", "serverless", "pointers", "verification"]
+prerequisites: ["What is Crab, and when should you use it?"]
+outcome: "Choose Crab LFS for the right compatibility boundary, configure it locally, and prove a fresh client can recover the exact bytes."
+diagramType: "Interactive direct-storage lab"
+knowledgeCheck:
+  question: "Where does a Crab LFS client send the large-file object?"
+  options:
+    - "Directly to the configured object-storage bucket"
+    - "To a Git LFS HTTP gateway that Crab deploys"
+    - "Into every Git commit as a complete binary blob"
+  answer: 0
+  explanation: "Crab runs the filters and transfer agent locally. The bucket is the shared origin, so no Crab data server or Git LFS gateway is part of the path."
+meta:
+  contentType: "Tutorial"
+  goal: "Give new users an explicit mental model and working setup for direct-storage Crab LFS."
+  audience: "Developers who need Git LFS compatibility but do not want to operate an LFS server."
+---
+
+Crab LFS is the **“I need the Git LFS contract, not a Git LFS server”** path.
+Git keeps the normal LFS pointer in the commit. Crab runs locally on each
+developer machine or CI runner and reads or writes the object-storage bucket
+directly.
+
+<TakeawayBox title="The shared service is your bucket">
+  Install Crab on the clients that work with the repository. Give those clients
+  scoped object-storage access. There is no Crab data server, LFS HTTP gateway,
+  or extra database to deploy.
+</TakeawayBox>
+
+<CrabLfsDirectStorageLab />
+
+## Start with the one important choice
+
+Large does not automatically mean LFS. Choose the pointer format that your
+repository and tools actually need:
+
+| Need                                         | Tracking command            | Pointer in Git  | Storage shape                         |
+| -------------------------------------------- | --------------------------- | --------------- | ------------------------------------- |
+| Existing LFS history or standard LFS tooling | <code>crab lfs track</code> | Git LFS pointer | One whole-file LFS object per version |
+| New Crab workflow with internal chunk reuse  | <code>crab track</code>     | Crab pointer    | Reusable chunks, xorbs, and shards    |
+| Source code, config, or small text           | No tracking rule            | Normal Git blob | Git object database                   |
+
+The two large-file modes can coexist when their path rules do not overlap:
+
+```gitattributes
+models/releases/** filter=lfs diff=lfs merge=lfs -text
+datasets/**         filter=crab diff=crab merge=crab -text
+```
+
+Use Crab LFS when a repository already contains lines like these:
+
+```text
+version https://git-lfs.github.com/spec/v1
+oid sha256:91ae...b72c
+size 8589934592
+```
+
+Use native Crab when you want content-defined chunking and deduplication across
+versions. Choosing LFS is a compatibility decision, not a requirement imposed
+by file size.
+
+## Configure the direct route
+
+Run the setup once in a new or existing Git repository:
+
+```bash
+crab init --storage-provider s3 crab://team-bucket/model-repository
+crab lfs install --local
+crab lfs track '*.safetensors'
+
+git add .crab.toml .gitattributes
+git commit -m "Configure direct Crab LFS"
+git push origin main
+```
+
+The URL names a bucket and repository prefix. The client uses your normal
+provider credential chain; never put credentials in the URL or committed
+configuration.
+
+<FlowSteps
+  title="The direct-storage loop"
+  steps={[
+    "Install Crab and grant the client scoped access to the bucket prefix.",
+    "Track only the paths that must remain standard Git LFS pointers.",
+    "Push through Git; Crab uploads the object before the ref advances.",
+    "Clone the history, pull the object, and verify its SHA-256 identity.",
+  ]}
+/>
+
+<code>crab lfs install</code> configures:
+
+- Crab's clean, smudge, and filter-process commands for <code>filter=lfs</code>.
+- The <code>crab</code> standalone transfer agent for an unmodified Git LFS
+  client.
+- A pre-push hook that uploads missing LFS objects before Git publishes the
+  commit ref.
+
+The hook and transfer settings live in local Git configuration. The
+
+<code>.gitattributes</code> rule belongs in the repository and must be
+committed.
+
+## The daily loop looks like Git
+
+Once installed, contributors can use familiar commands:
+
+```bash
+cp /path/to/encoder-v2.safetensors models/encoder.safetensors
+git add models/encoder.safetensors
+git commit -m "Update encoder"
+git push origin main
+```
+
+At <code>git add</code>, the worktree keeps the full bytes while Git receives a
+small pointer. At <code>git push</code>, Crab's local hook or transfer agent
+uploads the missing object directly to the bucket. Git history still contains
+the standard LFS pointer, so existing pointer-aware tools can inspect it.
+
+For explicit operations and diagnostics:
+
+```bash
+crab lfs status
+crab lfs push origin main
+crab lfs fsck HEAD
+```
+
+The direct LFS object is intentionally a whole-file object. If a model changes,
+the new pointer names a new object. Crab LFS preserves compatibility; native
+Crab is the choice when chunk-level reuse is the priority.
+
+## A collaborator can pull only what they need
+
+Install the integration after cloning, then keep large files as pointers until
+the task needs them:
+
+```bash
+git clone crab://team-bucket/model-repository model-repository
+cd model-repository
+crab lfs install --local --skip-smudge
+
+crab lfs fetch origin --include 'models/**'
+crab lfs checkout 'models/**'
+```
+
+If Git LFS is installed, this is the equivalent standard retrieval command:
+
+```bash
+git lfs pull origin main
+```
+
+If Git LFS is not installed, use:
+
+```bash
+crab lfs pull origin
+```
+
+The result is the same: a pointer in Git history, a verified object in the
+local LFS cache, and materialized bytes in the worktree.
+
+## Prove it from an empty cache
+
+Do not treat a successful upload progress bar as the whole proof. A useful
+pilot crosses both write and read boundaries:
+
+```bash
+crab lfs env
+git check-attr filter -- models/encoder.safetensors
+git show HEAD:models/encoder.safetensors
+crab lfs fsck HEAD
+```
+
+Then use a disposable bucket prefix and a separate clone:
+
+1. Add a representative model or dataset and confirm the staged Git object is
+   a small LFS pointer.
+2. Push with <code>git lfs push</code> or <code>crab lfs push</code>.
+3. Confirm the object exists under the repository's
+   <code>lfs/objects/</code> prefix.
+4. Clone with an empty local cache and run <code>git lfs pull</code> or
+   <code>crab lfs pull</code>.
+5. Compare the recovered file's SHA-256 with the pointer's OID.
+6. Run <code>crab lfs fsck HEAD</code> on the reader.
+
+A clean clone proves more than local status: it checks Git pointer selection,
+credentials, remote object discovery, transfer, checkout, and byte identity.
+
+## What Crab LFS does not require
+
+You do not need to:
+
+- deploy a Git LFS HTTP server;
+- configure an LFS Batch API endpoint;
+- run a Crab gateway or repository database;
+- rewrite existing commits just to change the transfer route.
+
+You do need Crab installed on every client that pushes or materializes these
+LFS paths, and each client needs permission to the repository prefix. The
+supported direct route is a <code>crab://bucket/repository</code> remote plus
+Crab's local standalone transfer agent.
+
+If you want to convert existing LFS pointers into native Crab pointers, that is
+a separate history-rewrite decision. Read [How do you move a Git LFS repository
+to Crab?](/library/git-lfs-compatibility-layer) after this guide.
+
+<TakeawayBox title="Remember the boundary">
+  Git owns the commit and standard LFS pointer. Crab owns the local transfer
+  path. Your object store owns the durable bytes. No gateway is required.
+</TakeawayBox>

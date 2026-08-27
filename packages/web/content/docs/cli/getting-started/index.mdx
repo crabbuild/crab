@@ -93,6 +93,28 @@ crab hydrate 'models/*.safetensors' data/evaluation/**
 
 Use `crab hydrate --all` when the machine needs the complete working tree. Use `crab dehydrate` after a task to replace clean hydrated files with pointers and reclaim local disk space.
 
+## Need Git LFS compatibility?
+
+Most new Crab repositories should use Crab-native tracking with `crab track`.
+Choose **Crab LFS** when the repository already contains standard LFS pointers
+or a tool requires `filter=lfs` and `git lfs` commands. Crab runs the filters and
+transfer agent on each client and writes directly to your object-storage
+bucket—there is no Git LFS server or gateway to deploy.
+
+```bash
+crab init --storage-provider s3 crab://team-bucket/model-repository
+crab lfs install --local
+crab lfs track '*.safetensors'
+git add .gitattributes
+git commit -m "Track model files with Crab LFS"
+git push origin main
+```
+
+Start with [Use Crab LFS directly](/docs/cli/getting-started/crab-lfs) when
+you need standard LFS pointers. It explains the direct-storage route, daily
+commands, fresh-clone verification, and the boundary between `crab lfs` and
+Crab-native tracking.
+
 ## Check whether Crab fits the repository
 
 Crab is a strong fit when large files change across versions, clients need different working sets, and the team can operate cloud credentials. Deduplication depends on encoded byte overlap, so encrypted or recompressed versions may reuse little data.
