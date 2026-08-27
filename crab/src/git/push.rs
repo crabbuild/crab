@@ -6652,7 +6652,7 @@ async fn publish_committed_pack_locators_with_mode(
             anchor,
             current_packs,
             false,
-            true,
+            wait_for_lock,
             cancel,
         )
         .await;
