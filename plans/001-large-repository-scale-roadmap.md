@@ -550,6 +550,46 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
   preventing an earlier holder from unlinking the pathname after a waiter has
   acquired it; the focused handoff regression is committed as `d9c93263`.
 
+### PR #87 push-admission follow-up
+
+The released-shape PR workflow `gha-33086829129-1-concurrent` failed only the
+`same-branch-locator-request-budget` check. Reproducing the exact four-agent
+same-ref workload locally recorded 2,028 locator-catalog requests for four
+successful pushes, including 1,443 compacted catalog reads. The request spike
+was in the short-lived push process: post-CAS locator publication and its
+catalog-bound readiness check reopened the repository-sized SlateDB catalog on
+each incremental push.
+
+The follow-up moves that work to the existing generation-owner boundary:
+
+- ref-journal admission publishes only an immutable digest-bound V4 visibility
+  proof and uses the catalog identity/checkpoint marker for a metadata-only
+  readiness check;
+- a normal committed push no longer opens the locator catalog, publishes
+  locator rows, or writes a generation receipt after the active marker;
+- the generation owner retains compaction-aware locator publication and
+  catalog-bound V5 visibility repair, while reader repair remains bounded and
+  uses the existing complete-pack fallback for oversized repositories;
+- the initial bounded-pack E2E test now asserts the authoritative pack/index
+  publication, and focused owner/repair tests prove that deferred locator
+  coverage remains repairable.
+
+The released Crab binary passed the exact RustFS lifecycle locally as
+`codex-pr87-owner-deferred-20260827`: 1,001 pushes, 23/23 checks, all crash,
+marker-fault, branch-fanout, same-ref integration, and FSCK checks passed. The
+four same-ref pushes observed 483.75 locator requests per successful push
+against the 500-request budget, and the final protocol-v2 clone saw all four
+same-ref files. Focused and broad proof also passed: Crab library tests
+`3752 passed, 0 failed, 2 ignored`, `crab-remote-git` tests `89 + 61 passed`,
+`crab-metadata` remote-index/storage tests `258 passed, 0 failed, 1 ignored`,
+and the qualification verifier/smoke harness tests `35 passed`.
+
+This closes the observed PR admission regression, but it does not close the
+remaining roadmap gates below: independent Kubernetes repeatability, valid
+1,000-push and 10,000-ancestry differentials, sustained owner/rebuild and
+response-pack SLOs, provider/fault/failover/canary evidence, and the final
+catalog/readiness handoff proof.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
