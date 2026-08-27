@@ -175,7 +175,8 @@ the 100-client synthetic fanout, repeated isolated runs, 1,000/10,000-push
 differentials, fault/provider/failover/canary evidence, and default-on rollout
 gates remain open below.
 
-The subsequent stale-pack membership-index change is source-tested but not yet
+The subsequent stale-pack membership-index change (`ad2554fa`, with the
+deterministic delta-base regression in `b9859f28`) is source-tested but not yet
 represented in a fresh release-binary Kubernetes report. Its live acceptance
 gate is to show that repeated owner sweeps report stale-row work without
 reading the retained OID catalog, while preserving the existing exact refs,
@@ -321,6 +322,9 @@ reader-fanout hardening at `fd95e8fd`):
 - protocol-v2 upload-pack sessions use bounded repository-scoped read
   admission with renewal, cancellation, crash-reclaimable TTL leases, and
   non-blocking reader-side repair probes.
+- stale locator-pack cleanup uses an atomic derived pack-slot membership index;
+  marker-less catalogs rebuild it once, while routine sweeps avoid scanning
+  retained OID rows.
 
 Still required before the roadmap is DONE:
 
@@ -1215,9 +1219,9 @@ environment dumps, or credentials.
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4` | Normal seed/full/warm/blobless/shallow helper logs contain no `catalog_materialization`; owner maintenance intentionally does. Dense ordinal resolution has bounded read-ahead, and the large-batch locator scan is source-verified but needs a fresh release run |
 | 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Final inventory is 2 active packs with 1,263,705,690 bytes; cold/warm full clones are 199,311/72,101 ms, blobless is 110,384 ms, and depth-1/10/100/1,000 are 45,570/58,702/174,452/191,898 ms. Physical history has 1,004 immutable pack objects, while the active inventory remains 2; suffix reuse is covered by focused repack tests, but response-pack egress, fanout, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Owner publication now skips stable pack-body downloads for optional kinds, but maintenance latency, memory, and full rebuild paths remain large-team bottlenecks |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Owner publication now skips stable pack-body downloads for optional kinds, and locator stale cleanup is bounded by stale membership rows; fresh maintenance latency, memory, and full rebuild-path evidence remain open |
 | 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `cbe848f4`; `c57ee1f4` | Incremental fetch at pushes 1/10/100/1,000 used 51/60/74/662 ms of visibility planning and 2/6/33/226 requests; shallow planner times were 11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 before the large-batch scan policy. The ordinal handoff covers sequential same-ref edits in focused tests; 10,000-pair differential, response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; stale locator cleanup avoids retained-catalog scans and marker-less migration is idempotent. Interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
 | 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Current single-client correctness and warm-cache checks pass; fresh post-follow-up K8s evidence, shallow planner optimization, large-team concurrency, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
@@ -1297,6 +1301,14 @@ or sparse requests and selects a bounded 16 MiB read-ahead scan when a large
 request covers at least one sixty-fourth of the pinned catalog. The K8s run
 below predates this follow-up, so its depth-1/10 planning numbers remain the
 before-change measurement.
+
+The stale-pack follow-up (`ad2554fa`) additionally passes strict metadata
+clippy, the complete metadata suite (`256` passed, `1` ignored), and locator
+regressions proving that pure repacks remove old membership rows without
+scanning the object catalog, while a marker-less catalog rebuilds the derived
+index once. The remote-Git test follow-up (`b9859f28`) passes the complete
+`crab-remote-git` suite (`84` unit tests and `61` repository tests) and makes
+the shared delta-base coalescing assertion independent of scheduler timing.
 
 The last command needs the explicit larger test stack for
 `protocol_edges::eof_mid_fetch_batch_finalizes_without_blank_line`; the exact
