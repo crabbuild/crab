@@ -1581,7 +1581,7 @@ jobs:
             echo "::error::Could not extract release notes for $VERSION from CHANGELOG.md." >&2
             exit 1
           fi
-          printf '\n---\n\nSource commit: `%s`\n\nVerify an archive with `%s`.\n' \
+          printf '\n---\n\nSource commit: %s\n\nVerify an archive with: %s\n' \
             "$SOURCE_SHA" \
             "gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}" \
             >> "$notes_file"
