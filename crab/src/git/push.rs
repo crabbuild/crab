@@ -8734,6 +8734,7 @@ impl PushPipeline {
                 Err(error) => return Err(error),
             };
         let current = current_snapshot.materialized_manifest();
+        let reusable_visibility_base_oids = current.refs.values().cloned().collect::<HashSet<_>>();
         let conflicts = ref_base_conflicts(&self.specs, &decisions, base.as_ref(), &current);
         if self.config.atomic
             && let Some(conflict) = conflicts.first()
@@ -8862,7 +8863,12 @@ impl PushPipeline {
         .await?;
         match visibility {
             GitVisibilityPublication::Published => {
-                self.publish_ref_visibility_edits(store, &mut edits).await?;
+                self.publish_ref_visibility_edits(
+                    store,
+                    &mut edits,
+                    &reusable_visibility_base_oids,
+                )
+                .await?;
             }
             GitVisibilityPublication::CompletePackOnly(capacity) => {
                 warn!(
@@ -8936,6 +8942,7 @@ impl PushPipeline {
         &self,
         store: &crate::storage::store::Store,
         edits: &mut [crate::metadata::manifest::RefJournalEdit],
+        reusable_visibility_base_oids: &HashSet<String>,
     ) -> Result<()> {
         let storage = store.as_storage();
         let storage_router =
@@ -8960,10 +8967,16 @@ impl PushPipeline {
 
         let started = Instant::now();
         let git_dir = self.common_git_dir()?;
+        let reusable_visibility_base_oids = reusable_visibility_base_oids.clone();
         let evidence = tokio::task::spawn_blocking(move || {
             let mut evidence = Vec::with_capacity(plans.len());
             for (index, ref_name, old_oid, new_oid) in plans {
-                let Some(edit) = visibility_edit_for_ref(&git_dir, old_oid.as_deref(), &new_oid)?
+                let Some(edit) = visibility_edit_for_ref(
+                    &git_dir,
+                    old_oid.as_deref(),
+                    &new_oid,
+                    &reusable_visibility_base_oids,
+                )?
                 else {
                     evidence.push((index, ref_name, None));
                     continue;
@@ -17548,6 +17561,7 @@ fn visibility_edit_for_ref(
     git_dir: &Path,
     old_oid: Option<&str>,
     new_oid: &str,
+    reusable_base_oids: &HashSet<String>,
 ) -> Result<Option<crab_metadata::git_visibility::GitVisibilityEdit>> {
     let maximum =
         usize::try_from(crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS)
@@ -17556,6 +17570,7 @@ fn visibility_edit_for_ref(
             })?;
     let base_oid = match old_oid {
         Some(old_oid) => Some(old_oid.to_owned()),
+        None if reusable_base_oids.contains(new_oid) => Some(new_oid.to_owned()),
         None => visibility_base_oid(git_dir, new_oid)?,
     };
     let Some(base_oid) = base_oid else {
@@ -20557,7 +20572,7 @@ mod tests {
         let new = enumerate_visibility_difference(&git_dir, &new_oid, None, 100)
             .expect("enumerate new closure")
             .expect("new closure fits");
-        let edit = visibility_edit_for_ref(&git_dir, Some(&old_oid), &new_oid)
+        let edit = visibility_edit_for_ref(&git_dir, Some(&old_oid), &new_oid, &HashSet::new())
             .expect("build visibility edit")
             .expect("incremental evidence fits");
 
@@ -20583,7 +20598,8 @@ mod tests {
         std::fs::write(repo.path().join("tracked.txt"), "third\n").expect("write third file");
         run_git(&["commit", "-am", "third"]);
         let anchored_oid = run_git(&["rev-parse", "HEAD"]);
-        let anchored = visibility_edit_for_ref(&git_dir, None, &anchored_oid)
+        let reusable_bases = HashSet::from([new_oid.clone()]);
+        let anchored = visibility_edit_for_ref(&git_dir, None, &anchored_oid, &reusable_bases)
             .expect("build anchored visibility edit")
             .expect("anchored visibility delta fits");
         assert_eq!(anchored.old_oid, Some(new_oid.clone()),);
@@ -20591,9 +20607,18 @@ mod tests {
         assert!(anchored.added.contains(&anchored_oid));
         assert!(anchored.removed.is_empty());
 
+        let exact_base = HashSet::from([new_oid.clone()]);
+        let reused = visibility_edit_for_ref(&git_dir, None, &new_oid, &exact_base)
+            .expect("build exact-base visibility edit")
+            .expect("exact-base visibility delta fits");
+        assert_eq!(reused.old_oid, Some(new_oid.clone()));
+        assert!(!reused.replaces);
+        assert!(reused.added.is_empty());
+        assert!(reused.removed.is_empty());
+
         run_git(&["tag", "-a", "release", "-m", "release", &new_oid]);
         let tag_oid = run_git(&["rev-parse", "refs/tags/release"]);
-        let replacement = visibility_edit_for_ref(&git_dir, None, &tag_oid)
+        let replacement = visibility_edit_for_ref(&git_dir, None, &tag_oid, &HashSet::new())
             .expect("build tag replacement")
             .expect("tag replacement fits");
         assert!(replacement.replaces);
