@@ -377,6 +377,15 @@ for a warm lookup, while the artifact checksum, response limit, and corruption
 tests remain unchanged. It is a request-amplification fix, not a substitute
 for the still-required response-pack SLO and provider-range qualification.
 
+The assembled-pack follow-up is committed as `d50cbd89`. `PackWriter` already
+updates the Git SHA-1 and content hash on every bounded write, so its finish
+path no longer rereads the complete temporary response solely to recompute
+those values. The new checksum regression recomputes both digests in the test
+and strict-pack coverage remains in place; externally sourced repack and cache
+artifacts continue to use independent full-file verification. This removes a
+second full disk pass from sparse/dense response assembly without weakening
+the response-size, cancellation, or downstream Git integrity boundaries.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is
