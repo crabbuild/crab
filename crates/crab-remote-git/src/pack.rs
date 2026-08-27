@@ -1008,7 +1008,9 @@ async fn publish_cached_pack(
     generated: &GeneratedPack,
     cancellation: &CancellationToken,
 ) -> Result<()> {
-    generated.verify_checksum()?;
+    // Every `GeneratedPack` constructor validates the complete file before it
+    // escapes generation or cache loading. Rehashing it here would add another
+    // repository-sized read on every cold cache miss before the multipart upload.
     let request_hash = cache_key.hex();
     let content_hash = generated.content_hash_hex();
     let artifact_path = repository
