@@ -175,6 +175,9 @@ def check_release_script(root: Path) -> list[str]:
     for forbidden in FORBIDDEN_CLI_ARCHIVE_BINARIES:
         if forbidden in text:
             errors.append(f"release.sh: CLI release archive script must not package {forbidden}")
+    for forbidden in ("gh release create", "gh release upload", "RELEASE_REPO"):
+        if forbidden in text:
+            errors.append(f"release.sh: local builds must not publish releases: {forbidden!r}")
 
     return errors
 
@@ -243,7 +246,7 @@ def check_release_workflow(root: Path) -> list[str]:
             if needle not in verify_step:
                 errors.append(f"release.yml Verify archive layout: expected {needle!r}")
 
-    if 'DIST_DIR="$PWD/dist" crab/scripts/release/update-homebrew.sh --local "$TAG"' not in text:
+    if 'crab/scripts/release/update-homebrew.sh "$TAG"' not in text:
         errors.append("release.yml: Homebrew publishing must use crab/scripts/release/update-homebrew.sh")
 
     for needle in (
@@ -267,9 +270,18 @@ def check_release_workflow(root: Path) -> list[str]:
         "if-no-files-found: error",
         "sha256sum crab-*.* > SHA256SUMS.txt",
         "FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)",
+        "RELEASE_REPO: ${{ github.repository }}",
+        "contents: write",
+        "Publish GitHub release",
+        "GH_TOKEN: ${{ github.token }}",
+        "--verify-tag",
+        "--fail-on-no-commits",
+        '--notes-file "$notes_file"',
         "require_nfs_evidence:",
+        "require_cloud_evidence:",
         "nfs_release_verify_args:",
-        "vars.CRAB_RELEASE_REQUIRE_NFS_EVIDENCE != 'false'",
+        "vars.CRAB_RELEASE_REQUIRE_NFS_EVIDENCE == 'true'",
+        "vars.CRAB_RELEASE_REQUIRE_CLOUD_EVIDENCE == 'true'",
         "CRAB_NFS_RELEASE_VERIFY_ARGS",
         "nfs_evidence_run_id:",
         "NFS_RELEASE_EVIDENCE_RUN_ID",
@@ -298,6 +310,9 @@ def check_release_workflow(root: Path) -> list[str]:
         "cargo install cargo-xwin",
         "cargo xwin build",
         "cross build",
+        "CRAB_RELEASE_GITHUB_TOKEN",
+        "crabbuild/crab-release",
+        "--clobber",
     ):
         if forbidden in text:
             errors.append(f"release.yml: unexpected {forbidden!r}")
@@ -340,6 +355,43 @@ def check_homebrew_script(
 def checks(root: Path) -> list[TextCheck]:
     return [
         TextCheck(
+            "version bump keeps all shipped product manifests aligned",
+            root / "crab" / "scripts" / "release" / "bump-version.sh",
+            contains=(
+                "PRODUCT_MANIFESTS=(",
+                '"$CRAB_DIR/Cargo.toml"',
+                '"$WORKSPACE_DIR/crates/crab-auth-server/Cargo.toml"',
+                '"$WORKSPACE_DIR/crates/crab-cache-server/Cargo.toml"',
+                "cargo metadata --format-version 1 --no-deps",
+                "restore_on_error",
+            ),
+            excludes=(),
+        ),
+        TextCheck(
+            "public release badge follows the source repository",
+            root / "README.md",
+            contains=(
+                "https://github.com/crabbuild/crab-oss/releases/latest",
+                "github/v/release/crabbuild/crab-oss",
+            ),
+            excludes=("github/v/release/crabbuild/crab-release",),
+        ),
+        TextCheck(
+            "self-updater follows the source repository release API",
+            root / "crab" / "src" / "cmd" / "update.rs",
+            contains=(
+                "https://api.github.com/repos/crabbuild/crab-oss/releases/latest",
+                "No crab release is available from crabbuild/crab-oss.",
+            ),
+            excludes=("crabbuild/crab-release",),
+        ),
+        TextCheck(
+            "Homebrew updater follows source repository releases",
+            root / "crab" / "scripts" / "release" / "update-homebrew.sh",
+            contains=('RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-oss}"',),
+            excludes=("crabbuild/crab-release",),
+        ),
+        TextCheck(
             "release profile strips symbols from published binaries",
             root / "Cargo.toml",
             contains=(
@@ -376,7 +428,7 @@ def checks(root: Path) -> list[TextCheck]:
             "POSIX installer targets release repo and verifies archives",
             root / "packages" / "web" / "public" / "install.sh",
             contains=(
-                'REPO="crabbuild/crab-release"',
+                'REPO="crabbuild/crab-oss"',
                 "verify_checksum",
                 "verify_tarball_layout",
                 "crab-fuse-mount",
@@ -385,19 +437,19 @@ def checks(root: Path) -> list[TextCheck]:
                 'ln -sf "crab" "$INSTALL_DIR/crab-nfs-mount"',
                 'ln -sf "$INSTALL_DIR/crab" "$INSTALL_DIR/git-remote-crab"',
             ),
-            excludes=("CrabBuild/crab-release",),
+            excludes=("CrabBuild/crab-release", "crabbuild/crab-release"),
         ),
         TextCheck(
             "PowerShell installer targets release repo and installs helper exe",
             root / "packages" / "web" / "public" / "install.ps1",
             contains=(
-                '$Repo = "crabbuild/crab-release"',
+                '$Repo = "crabbuild/crab-oss"',
                 "Verify-Checksum",
                 "Verify-ZipLayout",
                 '"crab-nfs-mount.exe"',
                 '"git-remote-crab.exe"',
             ),
-            excludes=("CrabBuild/crab-release", "Created wrapper: git-remote-crab.cmd"),
+            excludes=("CrabBuild/crab-release", "crabbuild/crab-release", "Created wrapper: git-remote-crab.cmd"),
         ),
         TextCheck(
             "local install-layout verifier covers mount helpers",
@@ -644,7 +696,8 @@ def checks(root: Path) -> list[TextCheck]:
                 "NFS_RELEASE_REQUIRE_EXPECTED_GIT_COMMIT ?= 1",
                 "NFS_RELEASE_EXPECTED_GIT_COMMIT is required for release-grade NFS evidence",
                 "--expected-git-commit",
-                "RELEASE_REQUIRE_NFS_EVIDENCE ?= 1",
+                "RELEASE_REQUIRE_NFS_EVIDENCE ?= 0",
+                "RELEASE_REQUIRE_CLOUD_EVIDENCE ?= 0",
                 "NFS_RELEASE_EVIDENCE_RUN_ID is required for make release-ci",
                 "Run the NFS Mount Evidence workflow on the exact release commit",
                 "NFS_RELEASE_EVIDENCE_WAIT",
@@ -674,7 +727,13 @@ def checks(root: Path) -> list[TextCheck]:
                 "--test prop_coordinator response_contains --features fuse",
                 "scripts/verify-nfs-smoke-report.py self-test",
             ),
-            excludes=(),
+            excludes=(
+                "release-macos-publish:",
+                "release-publish-dist:",
+                "RELEASE_BYPASS_EVIDENCE",
+                "gh release create",
+                "gh release upload",
+            ),
         ),
         TextCheck(
             "Native NFS smoke script contract checker covers retained evidence",

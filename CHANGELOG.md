@@ -5,6 +5,45 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.1.0 - 2026-08-27
+
+### Git And Large Files
+
+- Made Crab LFS a direct object-storage workflow with bounded transfers,
+  publication coordination, lock ownership, and fail-closed push behavior.
+- Hardened partial clone, fetch, push, and remote-pack maintenance for large
+  repositories, including generation-aware visibility and bounded locator work.
+- Added safer mixed LFS/Xet conversion and filtering, with expanded regression
+  coverage across checkout, fetch, transfer-agent, and concurrent publication
+  paths.
+
+### Storage And Performance
+
+- Hardened repository and bucket garbage collection so referenced content and
+  grace-period objects remain protected while remote collections scale.
+- Added geometric remote-pack compaction and reduced lock, listing, and
+  publication amplification on hot repositories.
+- Moved xorb maintenance under `crab optimize` and expanded RustFS performance
+  qualification for repository creation and large-repository workflows.
+
+### Release And Distribution
+
+- Consolidated release publishing into the open-source repository's tag-driven
+  GitHub Actions workflow; local tooling can build but cannot publish or replace
+  release assets.
+- Added native ARM64 and x86_64 archives for macOS, Linux, and Windows,
+  checksums, packaged-binary smoke tests, and GitHub build-provenance
+  attestations.
+- Made the installer, self-updater, release badge, and Homebrew formula consume
+  releases from `crabbuild/crab-oss`.
+
+### Documentation And Website
+
+- Launched the learning library and file-backed blog with improved navigation,
+  structured SEO data, and responsive architecture and workflow diagrams.
+- Added direct-storage Crab LFS onboarding and expanded large-file, GC,
+  optimization, and Continuity architecture guidance.
+
 ## 1.0.15 - 2026-08-22
 
 ### Release Automation

@@ -828,13 +828,14 @@ and do not replace the live evidence harnesses below.
 
 The root GitHub workflow `.github/workflows/replica-enterprise.yml` runs the
 locked offline gate on replica-related pull requests and pushes to `main`.
-The release workflow also runs `make replica-feature-matrix-all-locked`,
-replica schema validation, and retained-evidence recorder contract tests before
-building release archives. Release packaging then downloads a retained live
-evidence artifact from `.github/workflows/replica-live-evidence.yml` and runs
+When enterprise evidence is required, the release workflow runs
+`make replica-feature-matrix-all-locked`, replica schema validation, and
+retained-evidence recorder contract tests before building release archives. It
+then downloads a retained live artifact from
+`.github/workflows/replica-live-evidence.yml` and runs
 `crab/scripts/release/verify-replica-release-evidence.sh` against the artifact's
-`replica-live-evidence/` directory. A release cannot build archives unless that
-bundle passes `crab replica evidence verify --profile enterprise
+`replica-live-evidence/` directory. The enterprise gate passes only when that
+bundle satisfies `crab replica evidence verify --profile enterprise
 --require-redacted --expected-run-id replica-live-<run-id>-<attempt>`.
 
 For workflow-dispatch releases, pass the GitHub run ID from the enterprise live
@@ -857,12 +858,11 @@ cd crab
 make release-ci REPLICA_RELEASE_EVIDENCE_RUN_ID=<live-evidence-github-run-id>
 ```
 
-Local archive targets are also release-gated by default. `make release-build`,
-`make release-strict`, and `make release-target TARGET=...` require
-`REPLICA_RELEASE_EVIDENCE_DIR` plus the exact
-`REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID=replica-live-<run-id>-<attempt>`.
-Set `REPLICA_RELEASE_REQUIRE_EVIDENCE=0` only for a non-release smoke archive;
-that output is not enterprise release evidence.
+Local archive targets only build artifacts and do not publish releases or
+claim enterprise evidence. Use `make release-build` for the host-supported
+matrix or `make release-target TARGET=...` for one target. The tag-triggered
+GitHub Actions workflow is the only publisher and owns the release evidence
+decision.
 
 ## Live Provider Validation
 

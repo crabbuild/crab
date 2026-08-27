@@ -88,7 +88,7 @@ fn cache_service_workflow_gates_client_cache_integration_surfaces() {
 }
 
 #[test]
-fn makefile_exposes_cache_service_release_gate() {
+fn makefile_exposes_cache_service_release_gate_and_hosted_dispatch() {
     let body = workflow_body("crab/Makefile");
 
     for needle in [
@@ -105,13 +105,19 @@ fn makefile_exposes_cache_service_release_gate() {
         "\"$(CACHE_SERVER_DEBUG_BIN)\" evidence gate",
         "--evidence-dir \"$(CACHE_SERVICE_RELEASE_EVIDENCE_DIR)\"",
         "--expected-run-id \"$(CACHE_SERVICE_RELEASE_EXPECTED_RUN_ID)\"",
-        "release-build: replica-release-gate cache-service-release-gate",
-        "release-strict: replica-release-gate cache-service-release-gate",
-        "release-macos-full: replica-release-gate cache-service-release-gate",
-        "@$(MAKE) --no-print-directory cache-service-release-gate",
+        "release-build:\n\t@./scripts/release/release.sh --allow-partial",
+        "release-ci: release-metadata-check",
+        "CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID is required for make release-ci",
+        "-f \"require_enterprise_evidence=$$require_enterprise_evidence\"",
+        "-f \"cache_service_evidence_run_id=$(CACHE_SERVICE_RELEASE_EVIDENCE_RUN_ID)\"",
     ] {
         assert!(body.contains(needle), "{needle}");
     }
+
+    assert!(
+        !body.contains("release-build: replica-release-gate cache-service-release-gate"),
+        "local archive builds must not own hosted release evidence policy"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml"><img src="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/crabbuild/crab-release/releases/latest"><img src="https://img.shields.io/github/v/release/crabbuild/crab-release?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/crabbuild/crab-oss/releases/latest"><img src="https://img.shields.io/github/v/release/crabbuild/crab-oss?display_name=tag" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/crabbuild/crab-oss" alt="Apache 2.0 license"></a>
 </p>
 
@@ -471,6 +471,8 @@ command -v git-remote-crab
 Use a separate `CARGO_TARGET_DIR` when building multiple checkouts or when
 working on a disk-constrained machine. Do not commit generated build artifacts,
 local credentials, cache contents, staging databases, or cloud test output.
+Maintainers should follow [RELEASING.md](RELEASING.md) for versioning, tagging,
+and GitHub release verification.
 
 ### Local end-to-end testing
 
