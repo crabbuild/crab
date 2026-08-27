@@ -1739,7 +1739,9 @@ impl PackWriter {
             content_hash,
             object_count: self.object_count,
         };
-        pack.verify_checksum()?;
+        // HashingWriter covered every header and entry write. Re-scanning this
+        // file would add a second repository-sized read to every assembled
+        // response; cache loads and repack outputs retain independent checks.
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -2044,6 +2046,24 @@ mod tests {
         assert_strict_pack(&generated);
         assert_eq!(stats.converted_deltas, 1);
         assert_eq!(stats.materialized_entries, 0);
+    }
+
+    #[test]
+    fn pack_writer_finish_returns_the_checksums_streamed_during_writes() {
+        let data = b"streamed checksum proof";
+        let oid = blob_oid(data);
+        let entry = valid_packed_entry(oid, Header::Blob, data, None);
+        let cancellation = CancellationToken::new();
+        let writer = PackWriter::new(1, 1024).expect("pack header fits response bound");
+        let (writer, _) = writer
+            .write_entries(vec![entry], HashMap::new(), &cancellation)
+            .expect("write pack entry");
+        let generated = writer.finish(&cancellation).expect("finish generated pack");
+        let bytes = std::fs::read(generated.path()).expect("read generated pack");
+
+        let checksum: [u8; 20] = Sha1::digest(&bytes[..bytes.len() - 20]).into();
+        assert_eq!(generated.checksum, checksum);
+        assert_eq!(generated.content_hash, *blake3::hash(&bytes).as_bytes());
     }
 
     fn assert_strict_pack(pack: &GeneratedPack) {
