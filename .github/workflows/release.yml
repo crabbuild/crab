@@ -192,16 +192,29 @@ jobs:
             -e RUSTFS_SECRET_KEY \
             -v "${RUNNER_TEMP}/rustfs-data:/data" \
             "${WORKFLOW_RUSTFS_IMAGE}" server /data --address :9000
+          ready=false
           for _ in $(seq 1 60); do
             status="$(curl -sS -o /dev/null -w '%{http_code}' "${WORKFLOW_RUSTFS_ENDPOINT}" || true)"
-            if [ "${status:-000}" != "000" ] && [ "${status}" -lt 500 ]; then exit 0; fi
+            if [ "${status:-000}" != "000" ] && [ "${status}" -lt 500 ]; then
+              ready=true
+              break
+            fi
             sleep 1
           done
-          docker logs crab-workflow-rustfs >&2 || true
-          exit 1
+          if [ "${ready}" != true ]; then
+            docker logs crab-workflow-rustfs >&2 || true
+            exit 1
+          fi
+          if ! aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null 2>&1; then
+            aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api create-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null
+          fi
+          aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null
         env:
           RUSTFS_ACCESS_KEY: ${{ env.WORKFLOW_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ env.WORKFLOW_RUSTFS_SECRET_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ env.WORKFLOW_RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.WORKFLOW_RUSTFS_SECRET_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.WORKFLOW_RUSTFS_REGION }}
       - name: Run workflow smoke against release candidate
         env:
           CRAB_RUSTFS_IMAGE: ${{ env.WORKFLOW_RUSTFS_IMAGE }}
