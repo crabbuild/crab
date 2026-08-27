@@ -13,10 +13,12 @@ use tracing::{debug, warn};
 
 use super::format::{
     LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
-    StoredObjectLocation, coverage, decode_metadata, decode_object_key, decode_object_location,
-    decode_pack_key, decode_pack_record, encode_metadata, encode_object_location,
-    encode_object_metadata, encode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
-    pack_key, validate_location_for_pack,
+    PACK_OBJECT_FAMILY, PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE,
+    PACK_OBJECT_VALUE_LEN, StoredObjectLocation, coverage, decode_metadata, decode_object_key,
+    decode_object_location, decode_pack_key, decode_pack_object_key, decode_pack_object_ordinal,
+    decode_pack_record, encode_metadata, encode_object_location, encode_object_metadata,
+    encode_pack_object_ordinal, encode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
+    pack_key, pack_object_key, pack_object_prefix, validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
@@ -50,6 +52,7 @@ const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
 #[derive(Debug, Clone, Copy)]
 struct ExistingObject {
     ordinal: GitObjectOrdinal,
+    pack_slot: u64,
     metadata: GitObjectMetadata,
 }
 
@@ -92,6 +95,7 @@ pub struct GitObjectLocatorWriter {
     replacement_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
     existing_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
     ordinal_lookup_candidates: u64,
+    pack_membership_index_ready: bool,
     catalog_dirty: bool,
     checkpoint_required: bool,
     stats: LocatorWriteStats,
@@ -197,6 +201,28 @@ impl GitObjectLocatorWriter {
             Ok(bindings) => bindings,
             Err(error) => return Err((db, error)),
         };
+        let pack_membership_index_ready = match db.get(PACK_OBJECT_INDEX_MARKER_KEY).await {
+            Ok(Some(value)) if value.as_ref() == PACK_OBJECT_INDEX_MARKER_VALUE => true,
+            Ok(Some(_)) => {
+                return Err((
+                    db,
+                    corrupt(
+                        "pack-object-index",
+                        "invalid compact locator pack membership marker",
+                    ),
+                ));
+            }
+            Ok(None) => metadata.next_object_ordinal == 0,
+            Err(source) => {
+                return Err((
+                    db,
+                    MetadataError::SlateDbRead {
+                        db: DB_LABEL.to_owned(),
+                        source,
+                    },
+                ));
+            }
+        };
         let catalog_dirty = metadata.identity.map_or_else(
             || metadata.next_object_ordinal != 0 || !bindings.is_empty(),
             |identity| {
@@ -228,6 +254,7 @@ impl GitObjectLocatorWriter {
             replacement_ordinals: None,
             existing_ordinals: None,
             ordinal_lookup_candidates: 0,
+            pack_membership_index_ready,
             catalog_dirty,
             checkpoint_required,
             stats: LocatorWriteStats::default(),
@@ -441,12 +468,19 @@ impl GitObjectLocatorWriter {
             } else {
                 self.db.get(key).await.map_err(read_error)?
             };
-            let (ordinal, previous_metadata) = match (existing_object, existing) {
-                (Some(existing), _) => (existing.ordinal, Some(existing.metadata)),
+            let (ordinal, previous_object) = match (existing_object, existing) {
+                (Some(existing), _) => (existing.ordinal, Some(existing)),
                 (None, Some(value)) => {
                     let location = decode_object_location(&value)
                         .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
-                    (location.ordinal, Some(location.metadata))
+                    (
+                        location.ordinal,
+                        Some(ExistingObject {
+                            ordinal: location.ordinal,
+                            pack_slot: location.pack_slot,
+                            metadata: location.metadata,
+                        }),
+                    )
                 }
                 (None, None) => (self.allocate_ordinal()?, None),
             };
@@ -454,8 +488,24 @@ impl GitObjectLocatorWriter {
             // logical facts. Preserve facts already proven by the covered
             // catalog so owner maintenance need not download the whole new
             // pack merely to recover object kinds.
-            let metadata = Self::merge_object_metadata(previous_metadata, entry.metadata);
-            let object = ExistingObject { ordinal, metadata };
+            let metadata = Self::merge_object_metadata(
+                previous_object.map(|object| object.metadata),
+                entry.metadata,
+            );
+            let object = ExistingObject {
+                ordinal,
+                pack_slot: binding.pack_slot,
+                metadata,
+            };
+            if let Some(previous) = previous_object
+                && previous.pack_slot != binding.pack_slot
+            {
+                batch.delete(
+                    pack_object_key(previous.pack_slot, &entry.oid).ok_or_else(|| {
+                        corrupt("pack-object-index", "object row has an invalid pack slot")
+                    })?,
+                );
+            }
             if let Some(ordinals) = &mut self.replacement_ordinals {
                 ordinals.insert(entry.oid, object);
             }
@@ -472,6 +522,11 @@ impl GitObjectLocatorWriter {
             });
             batch.put(key, value);
             batch.put(ordinal_key(ordinal), entry.oid);
+            let pack_object_key =
+                pack_object_key(binding.pack_slot, &entry.oid).ok_or_else(|| {
+                    corrupt("pack-object-index", "object row has an invalid pack slot")
+                })?;
+            batch.put(pack_object_key, encode_pack_object_ordinal(ordinal));
             let metadata_key = ordinal_metadata_key(ordinal);
             let metadata_value = encode_object_metadata(metadata);
             batch.put(metadata_key, metadata_value);
@@ -480,9 +535,14 @@ impl GitObjectLocatorWriter {
                 + value.len()
                 + ordinal_key(ordinal).len()
                 + entry.oid.len()
+                + pack_object_key.len()
+                + PACK_OBJECT_VALUE_LEN
                 + metadata_key.len()
                 + metadata_value.len();
             if batch_rows >= MAX_BATCH_ROWS || batch_bytes >= MAX_BATCH_LOGICAL_BYTES {
+                if self.pack_membership_index_ready {
+                    batch.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
+                }
                 batch.put(METADATA_KEY, encode_metadata(self.metadata));
                 write_batch(&self.db, batch, "write compact locator objects").await?;
                 self.record_object_batch(batch_rows, batch_bytes);
@@ -492,6 +552,9 @@ impl GitObjectLocatorWriter {
             }
         }
         if batch_rows != 0 {
+            if self.pack_membership_index_ready {
+                batch.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
+            }
             batch.put(METADATA_KEY, encode_metadata(self.metadata));
             write_batch(&self.db, batch, "write compact locator objects").await?;
             self.record_object_batch(batch_rows, batch_bytes);
@@ -548,6 +611,7 @@ impl GitObjectLocatorWriter {
                 oid,
                 ExistingObject {
                     ordinal: location.ordinal,
+                    pack_slot: location.pack_slot,
                     metadata: location.metadata,
                 },
             );
@@ -599,6 +663,7 @@ impl GitObjectLocatorWriter {
             OBJECT_FAMILY,
             super::format::ORDINAL_FAMILY,
             ORDINAL_METADATA_FAMILY,
+            PACK_OBJECT_FAMILY,
         ] {
             let mut rows = self
                 .db
@@ -637,6 +702,17 @@ impl GitObjectLocatorWriter {
         self.replacement_ordinals = Some(HashMap::new());
         self.existing_ordinals = None;
         self.ordinal_lookup_candidates = 0;
+        self.pack_membership_index_ready = true;
+        let mut marker = slatedb::WriteBatch::new();
+        marker.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
+        write_batch(
+            &self.db,
+            marker,
+            "mark empty compact locator pack membership index",
+        )
+        .await?;
+        self.writes_durable = false;
+        self.flush_objects().await?;
         Ok(())
     }
 
@@ -651,7 +727,10 @@ impl GitObjectLocatorWriter {
         Ok(())
     }
 
-    /// Delete object and pack rows whose slots are absent from canonical inventory.
+    /// Delete rows whose pack slots are absent from canonical inventory.
+    ///
+    /// A complete membership index makes the object work proportional to stale
+    /// rows; a marker-less historical catalog is rebuilt once before sweeping.
     pub async fn sweep_unreferenced(
         &mut self,
         retained_slots: &HashSet<u64>,
@@ -664,89 +743,176 @@ impl GitObjectLocatorWriter {
                 "Git locator sweep retained an invalid pack slot".to_owned(),
             ));
         }
-        if self
+        let mut stale_slots = self
             .bindings
             .keys()
-            .all(|slot| retained_slots.contains(slot))
-        {
+            .filter(|slot| !retained_slots.contains(slot))
+            .copied()
+            .collect::<Vec<_>>();
+        stale_slots.sort_unstable();
+        if stale_slots.is_empty() && self.pack_membership_index_ready {
             return Ok(LocatorSweepStats::default());
         }
 
+        let mut stats = if self.pack_membership_index_ready {
+            self.sweep_stale_pack_membership(&stale_slots).await?
+        } else {
+            self.rebuild_pack_membership_and_sweep(retained_slots)
+                .await?
+        };
+        stats.pack_rows_scanned = u64::try_from(stale_slots.len()).unwrap_or(u64::MAX);
+        stats.pack_rows_deleted = stats.pack_rows_scanned;
+
+        let mut deletes = slatedb::WriteBatch::new();
+        for slot in &stale_slots {
+            deletes.delete(
+                pack_key(*slot)
+                    .ok_or_else(|| corrupt("pack", "stale locator pack slot is invalid"))?,
+            );
+        }
+        if !stale_slots.is_empty() {
+            write_batch(&self.db, deletes, "sweep compact locator packs").await?;
+            self.writes_durable = false;
+            self.catalog_dirty = true;
+            self.checkpoint_required = true;
+        }
+        self.flush_objects().await?;
+        for slot in stale_slots {
+            self.bindings.remove(&slot);
+        }
+        Ok(stats)
+    }
+
+    async fn sweep_stale_pack_membership(
+        &mut self,
+        stale_slots: &[u64],
+    ) -> Result<LocatorSweepStats> {
         let mut stats = LocatorSweepStats::default();
-        let mut object_rows = self
+        let mut deletes = slatedb::WriteBatch::new();
+        let mut delete_count = 0_usize;
+        for slot in stale_slots {
+            let prefix = pack_object_prefix(*slot).ok_or_else(|| {
+                corrupt("pack-object-index", "stale locator pack slot is invalid")
+            })?;
+            let mut rows = self.db.scan_prefix(prefix, ..).await.map_err(read_error)?;
+            while let Some(row) = rows.next().await.map_err(read_error)? {
+                stats.object_rows_scanned = stats.object_rows_scanned.saturating_add(1);
+                let (row_slot, oid) = decode_pack_object_key(&row.key).ok_or_else(|| {
+                    corrupt(
+                        "pack-object-index",
+                        "invalid compact locator pack membership key",
+                    )
+                })?;
+                let ordinal = decode_pack_object_ordinal(&row.value).ok_or_else(|| {
+                    corrupt(
+                        "pack-object-index",
+                        "invalid compact locator pack membership ordinal",
+                    )
+                })?;
+                if row_slot != *slot {
+                    return Err(corrupt(
+                        "pack-object-index",
+                        "pack membership row crossed its slot prefix",
+                    ));
+                }
+                let value = self
+                    .db
+                    .get(object_key(&oid))
+                    .await
+                    .map_err(read_error)?
+                    .ok_or_else(|| {
+                        corrupt(
+                            "pack-object-index",
+                            "pack membership row has no canonical object row",
+                        )
+                    })?;
+                let location = decode_object_location(&value)
+                    .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
+                if location.pack_slot != *slot || location.ordinal != ordinal {
+                    return Err(corrupt(
+                        "pack-object-index",
+                        "pack membership row disagrees with its object row",
+                    ));
+                }
+                if let Some(ordinals) = &mut self.existing_ordinals {
+                    ordinals.remove(&oid);
+                }
+                deletes.delete(object_key(&oid));
+                deletes.delete(ordinal_key(ordinal));
+                deletes.delete(ordinal_metadata_key(ordinal));
+                stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
+                self.catalog_dirty = true;
+                self.checkpoint_required = true;
+                deletes.delete(row.key);
+                delete_count += 1;
+                if delete_count == MAX_BATCH_ROWS {
+                    write_batch(&self.db, deletes, "sweep compact locator membership").await?;
+                    self.writes_durable = false;
+                    deletes = slatedb::WriteBatch::new();
+                    delete_count = 0;
+                }
+            }
+        }
+        if delete_count != 0 {
+            write_batch(&self.db, deletes, "sweep compact locator membership").await?;
+            self.writes_durable = false;
+        }
+        Ok(stats)
+    }
+
+    async fn rebuild_pack_membership_and_sweep(
+        &mut self,
+        retained_slots: &HashSet<u64>,
+    ) -> Result<LocatorSweepStats> {
+        let mut stats = LocatorSweepStats::default();
+        let mut rows = self
             .db
             .scan_prefix([OBJECT_FAMILY], ..)
             .await
             .map_err(read_error)?;
-        let mut deletes = slatedb::WriteBatch::new();
-        let mut delete_count = 0_usize;
-        while let Some(row) = object_rows.next().await.map_err(read_error)? {
+        let mut batch = slatedb::WriteBatch::new();
+        let mut batch_rows = 0_usize;
+        while let Some(row) = rows.next().await.map_err(read_error)? {
             stats.object_rows_scanned = stats.object_rows_scanned.saturating_add(1);
-            decode_object_key(&row.key)
+            let oid = decode_object_key(&row.key)
                 .ok_or_else(|| corrupt("object", "invalid compact locator object key"))?;
             let location = decode_object_location(&row.value)
                 .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
-            if !retained_slots.contains(&location.pack_slot) {
-                if let Some(ordinals) = &mut self.existing_ordinals
-                    && let Some(oid) = decode_object_key(&row.key)
-                {
+            if retained_slots.contains(&location.pack_slot) {
+                batch.put(
+                    pack_object_key(location.pack_slot, &oid).ok_or_else(|| {
+                        corrupt("pack-object-index", "object row has an invalid pack slot")
+                    })?,
+                    encode_pack_object_ordinal(location.ordinal),
+                );
+            } else {
+                if let Some(ordinals) = &mut self.existing_ordinals {
                     ordinals.remove(&oid);
                 }
-                deletes.delete(row.key);
-                deletes.delete(ordinal_key(location.ordinal));
-                deletes.delete(ordinal_metadata_key(location.ordinal));
-                delete_count += 1;
+                batch.delete(row.key);
+                batch.delete(ordinal_key(location.ordinal));
+                batch.delete(ordinal_metadata_key(location.ordinal));
                 stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
                 self.catalog_dirty = true;
                 self.checkpoint_required = true;
-                if delete_count == MAX_BATCH_ROWS {
-                    write_batch(&self.db, deletes, "sweep compact locator objects").await?;
-                    self.writes_durable = false;
-                    deletes = slatedb::WriteBatch::new();
-                    delete_count = 0;
-                }
+            }
+            batch_rows += 1;
+            if batch_rows == MAX_BATCH_ROWS {
+                write_batch(&self.db, batch, "rebuild compact locator membership").await?;
+                self.writes_durable = false;
+                batch = slatedb::WriteBatch::new();
+                batch_rows = 0;
             }
         }
-        if delete_count != 0 {
-            write_batch(&self.db, deletes, "sweep compact locator objects").await?;
+        if batch_rows != 0 {
+            write_batch(&self.db, batch, "rebuild compact locator membership").await?;
             self.writes_durable = false;
         }
-
-        let mut pack_rows = self
-            .db
-            .scan_prefix([PACK_FAMILY], ..)
-            .await
-            .map_err(read_error)?;
-        let mut deletes = slatedb::WriteBatch::new();
-        let mut delete_count = 0_usize;
-        let mut removed_slots = Vec::new();
-        while let Some(row) = pack_rows.next().await.map_err(read_error)? {
-            stats.pack_rows_scanned = stats.pack_rows_scanned.saturating_add(1);
-            let slot = decode_pack_key(&row.key)
-                .ok_or_else(|| corrupt("pack", "invalid compact locator pack key"))?;
-            if !retained_slots.contains(&slot) {
-                deletes.delete(row.key);
-                delete_count += 1;
-                removed_slots.push(slot);
-                stats.pack_rows_deleted = stats.pack_rows_deleted.saturating_add(1);
-                self.catalog_dirty = true;
-                self.checkpoint_required = true;
-                if delete_count == MAX_BATCH_ROWS {
-                    write_batch(&self.db, deletes, "sweep compact locator packs").await?;
-                    self.writes_durable = false;
-                    deletes = slatedb::WriteBatch::new();
-                    delete_count = 0;
-                }
-            }
-        }
-        if delete_count != 0 {
-            write_batch(&self.db, deletes, "sweep compact locator packs").await?;
-            self.writes_durable = false;
-        }
-        self.flush_objects().await?;
-        for slot in removed_slots {
-            self.bindings.remove(&slot);
-        }
+        let mut marker = slatedb::WriteBatch::new();
+        marker.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
+        write_batch(&self.db, marker, "mark rebuilt compact locator membership").await?;
+        self.writes_durable = false;
+        self.pack_membership_index_ready = true;
         Ok(stats)
     }
 
@@ -1590,6 +1756,7 @@ mod tests {
             .expect("sweep original pack");
 
         assert_eq!(sweep.object_rows_deleted, 0);
+        assert_eq!(sweep.object_rows_scanned, 0);
         assert_eq!(sweep.pack_rows_deleted, 1);
         writer
             .set_coverage(GitLocatorCoverage {
@@ -1898,6 +2065,68 @@ mod tests {
             .expect("skip retained sweep");
 
         assert_eq!(stats, LocatorSweepStats::default());
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn stale_pack_sweep_uses_pack_membership_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let bindings = writer
+            .bind_packs(&[pack(1), pack(2)])
+            .await
+            .expect("bind packs");
+        writer
+            .write_locations(bindings[0], &[entry(1)])
+            .await
+            .expect("write retained location");
+        writer
+            .write_locations(bindings[1], &[entry(2)])
+            .await
+            .expect("write stale location");
+        let stats = writer
+            .sweep_unreferenced(&HashSet::from([bindings[0].pack_slot]))
+            .await
+            .expect("sweep stale pack");
+        assert_eq!(stats.object_rows_scanned, 1);
+        assert_eq!(stats.object_rows_deleted, 1);
+
+        let stats = writer
+            .sweep_unreferenced(&HashSet::from([bindings[0].pack_slot]))
+            .await
+            .expect("repeat stale sweep");
+        assert_eq!(stats, LocatorSweepStats::default());
+        writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn missing_pack_membership_marker_rebuilds_once() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let binding = writer.bind_packs(&[pack(1)]).await.expect("bind pack")[0];
+        writer.pack_membership_index_ready = false;
+        writer
+            .write_locations(binding, &[entry(1)])
+            .await
+            .expect("write location");
+        writer.close().await.expect("close legacy writer");
+
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("reopen legacy writer");
+        assert!(!writer.pack_membership_index_ready);
+
+        let stats = writer
+            .sweep_unreferenced(&HashSet::from([binding.pack_slot]))
+            .await
+            .expect("rebuild pack membership index");
+        assert_eq!(stats.object_rows_scanned, 1);
+        assert_eq!(stats.object_rows_deleted, 0);
+        assert!(writer.pack_membership_index_ready);
         writer.close().await.expect("close writer");
     }
 

@@ -10,6 +10,9 @@ pub(crate) const OBJECT_FAMILY: u8 = 0x01;
 pub(crate) const PACK_FAMILY: u8 = 0x02;
 pub(crate) const ORDINAL_FAMILY: u8 = 0x03;
 pub(crate) const ORDINAL_METADATA_FAMILY: u8 = 0x04;
+// Derived reverse membership rows let the writer sweep stale packs without
+// scanning the canonical OID catalog; readers never use this family.
+pub(crate) const PACK_OBJECT_FAMILY: u8 = 0x05;
 pub(crate) const FORMAT_FINGERPRINT: [u8; 8] = *b"CRABGCAT";
 pub(crate) const OBJECT_KEY_LEN: usize = 21;
 pub(crate) const OBJECT_VALUE_LEN: usize = 64;
@@ -18,6 +21,11 @@ pub(crate) const PACK_VALUE_LEN: usize = 88;
 pub(crate) const ORDINAL_KEY_LEN: usize = 5;
 pub(crate) const ORDINAL_METADATA_VALUE_LEN: usize = 32;
 pub(crate) const METADATA_VALUE_LEN: usize = 101;
+pub(crate) const PACK_OBJECT_KEY_LEN: usize = 29;
+pub(crate) const PACK_OBJECT_PREFIX_LEN: usize = 9;
+pub(crate) const PACK_OBJECT_VALUE_LEN: usize = 4;
+pub(crate) const PACK_OBJECT_INDEX_MARKER_KEY: [u8; 2] = [PACK_OBJECT_FAMILY, 0xff];
+pub(crate) const PACK_OBJECT_INDEX_MARKER_VALUE: [u8; 1] = [1];
 
 const PACK_HEADER_LEN: u64 = 12;
 const PACK_TRAILER_LEN: u64 = 20;
@@ -108,6 +116,46 @@ pub(crate) fn decode_pack_key(bytes: &[u8]) -> Option<u64> {
     }
     let pack_slot = u64::from_be_bytes(array(bytes, 1)?);
     (pack_slot != 0).then_some(pack_slot)
+}
+
+pub(crate) fn pack_object_prefix(pack_slot: u64) -> Option<[u8; PACK_OBJECT_PREFIX_LEN]> {
+    if pack_slot == 0 {
+        return None;
+    }
+    let mut key = [0; PACK_OBJECT_PREFIX_LEN];
+    key[0] = PACK_OBJECT_FAMILY;
+    key[1..].copy_from_slice(&pack_slot.to_be_bytes());
+    Some(key)
+}
+
+pub(crate) fn pack_object_key(pack_slot: u64, oid: &[u8; 20]) -> Option<[u8; PACK_OBJECT_KEY_LEN]> {
+    let prefix = pack_object_prefix(pack_slot)?;
+    let mut key = [0; PACK_OBJECT_KEY_LEN];
+    key[..PACK_OBJECT_PREFIX_LEN].copy_from_slice(&prefix);
+    key[PACK_OBJECT_PREFIX_LEN..].copy_from_slice(oid);
+    Some(key)
+}
+
+pub(crate) fn decode_pack_object_key(bytes: &[u8]) -> Option<(u64, [u8; 20])> {
+    if bytes.len() != PACK_OBJECT_KEY_LEN || bytes[0] != PACK_OBJECT_FAMILY {
+        return None;
+    }
+    let pack_slot = u64::from_be_bytes(array(bytes, 1)?);
+    if pack_slot == 0 {
+        return None;
+    }
+    Some((pack_slot, array(bytes, PACK_OBJECT_PREFIX_LEN)?))
+}
+
+pub(crate) fn encode_pack_object_ordinal(ordinal: GitObjectOrdinal) -> [u8; PACK_OBJECT_VALUE_LEN] {
+    ordinal.to_be_bytes()
+}
+
+pub(crate) fn decode_pack_object_ordinal(bytes: &[u8]) -> Option<GitObjectOrdinal> {
+    if bytes.len() != PACK_OBJECT_VALUE_LEN {
+        return None;
+    }
+    Some(u32::from_be_bytes(array(bytes, 0)?))
 }
 
 pub(crate) fn encode_object_location(location: StoredObjectLocation) -> [u8; OBJECT_VALUE_LEN] {
@@ -398,6 +446,24 @@ mod tests {
             Some(Default::default())
         );
         assert_eq!(ordinal_key(0x0102_0304)[0], ORDINAL_FAMILY);
+    }
+
+    #[test]
+    fn pack_membership_key_binds_one_oid_to_one_pack_slot_and_ordinal() {
+        let oid = [0x61; 20];
+        let pack_slot = 0x0102_0304_0506_0708;
+        let ordinal = 0x0102_0304;
+        let key = pack_object_key(pack_slot, &oid).expect("valid pack slot");
+
+        assert_eq!(key.len(), PACK_OBJECT_KEY_LEN);
+        assert_eq!(key[0], PACK_OBJECT_FAMILY);
+        assert_eq!(decode_pack_object_key(&key), Some((pack_slot, oid)));
+        assert_eq!(
+            decode_pack_object_ordinal(&encode_pack_object_ordinal(ordinal)),
+            Some(ordinal)
+        );
+        assert_eq!(pack_object_key(0, &oid), None);
+        assert_eq!(decode_pack_object_key(&PACK_OBJECT_INDEX_MARKER_KEY), None);
     }
 
     #[test]
