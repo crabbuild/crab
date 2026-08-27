@@ -744,14 +744,15 @@ class ProtocolV2PartialCloneSmoke:
         items = payload.get("Contents", [])
         canonical_items = []
         generated_cache_items = []
+        coordination_items = []
         for item in items:
-            target = (
-                generated_cache_items
-                if self.is_generated_pack_cache_key(
-                    str(item.get("Key", "")), repository_prefix
-                )
-                else canonical_items
-            )
+            key = str(item.get("Key", ""))
+            if self.is_generated_pack_cache_key(key, repository_prefix):
+                target = generated_cache_items
+            elif self.is_coordination_key(key, repository_prefix):
+                target = coordination_items
+            else:
+                target = canonical_items
             target.append(item)
         snapshot = {
             "stage": stage,
@@ -763,6 +764,8 @@ class ProtocolV2PartialCloneSmoke:
             "generated_cache_bytes": sum(
                 int(item.get("Size", 0)) for item in generated_cache_items
             ),
+            "coordination_objects": len(coordination_items),
+            "coordination_bytes": sum(int(item.get("Size", 0)) for item in coordination_items),
         }
         self.report["store_snapshots"].append(snapshot)
         self.write_report()
@@ -776,6 +779,12 @@ class ProtocolV2PartialCloneSmoke:
         return relative.startswith("generated-packs/") or relative.startswith(
             "locks/internal/generated-pack-"
         )
+
+    @staticmethod
+    def is_coordination_key(key: str, repository_prefix: str) -> bool:
+        if not key.startswith(repository_prefix):
+            return False
+        return key[len(repository_prefix) :].startswith("locks/")
 
     def storage_telemetry(self) -> dict[str, int]:
         requests = 0
