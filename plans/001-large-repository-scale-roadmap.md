@@ -149,6 +149,12 @@ RustFS evidence at the 1,000-pack scale. The exact release-binary smoke below
 now proves the budget on a real Kubernetes repository; the 1,000-push and
 sustained owner-budget gates remain open.
 
+The regular post-CAS locator publication now uses the same uncovered-pack
+budget (`88deb4e0`). Its snapshot is taken while holding the repository locator
+lock, so stable historical packs do not make an ordinary small push start a
+repository-sized SlateDB compactor. Publication and repair regressions pass,
+and the current PR-head release build embeds `88deb4e0`.
+
 The workflow scheduler lock now retains its lock inode across handoffs
 (`d9c93263`). This prevents a releasing holder from unlinking the pathname
 after a waiter has acquired the same inode, and the focused scheduler-lock
@@ -222,7 +228,9 @@ remote cleanup. The correctness fingerprint remained
 This smoke is current release-binary evidence for the compaction budget and
 large-batch read path, not the full 1,000-push qualification. The independent
 full-profile repeatability run, differential, concurrency, fault/provider,
-owner-failover, and rollout gates remain open.
+owner-failover, and rollout gates remain open. The later regular post-CAS
+budget change is release-built and covered by focused publication tests, but
+has not yet been rerun through a full Kubernetes smoke.
 
 The subsequent stale-pack membership-index change (`ad2554fa`, with the
 deterministic delta-base regression in `b9859f28`) is source-tested but not yet
@@ -300,7 +308,7 @@ fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
 recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
 transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
 reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
-`4a8fc34e`):
+`4a8fc34e`; regular locator budgeting at `88deb4e0`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -345,6 +353,8 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - owner locator planning serialized under the repository publication lock,
   with uncovered-pack budgeting and a metadata-only writer for unchanged
   inventories.
+- regular post-CAS locator publication reuses the same lock-scoped uncovered
+  pack budget, so stable inventory does not inflate push-side compaction.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;
@@ -1286,10 +1296,10 @@ environment dumps, or credentials.
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
 | 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce` | The earlier full run ended with 2 active packs; the current smoke retained 103 immutable physical pack objects after 100 replays and measured cold/warm full clones at 173,603/61,513 ms, blobless at 88,798 ms, and depth-1/10/100/1,000 at 18,442/23,523/145,678/184,035 ms. Response-pack egress, fanout, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce` | The current smoke owner totals at seed/1/10/100 were 83.8/77.8/224.8/244.7 s. Post-repack catalog passes scanned/deleted 10/10 and 91/91 stale pack rows with 14.4/37.2 MB maintenance reads; the pre-repack O(N) advance and 1,000-push latency, memory, and interruption budgets remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0` | The current smoke owner totals at seed/1/10/100 were 83.8/77.8/224.8/244.7 s. Post-repack catalog passes scanned/deleted 10/10 and 91/91 stale pack rows with 14.4/37.2 MB maintenance reads; both owner and regular post-CAS publication now use the uncovered-pack budget, while the pre-repack O(N) advance and 1,000-push latency, memory, and interruption budgets remain open |
 | 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | The current 100-replay smoke passes incremental and depth-1/10/100/1,000 correctness with clone generation at 10.0/11.7/101.0/116.9 s; the full 1,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; stale locator cleanup avoids retained-catalog scans and marker-less migration is idempotent. Interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263` | Current single-client correctness and the 100-replay owner-budget smoke pass. The scheduler lock now retains its inode across handoffs with 11 focused tests passing; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
+| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0` | Current single-client correctness and the 100-replay owner-budget smoke pass. The scheduler lock now retains its inode across handoffs with 11 focused tests passing, and regular post-CAS locator budgeting is source-tested/release-built; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
