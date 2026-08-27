@@ -277,6 +277,7 @@ def check_release_workflow(root: Path) -> list[str]:
         "--verify-tag",
         "--fail-on-no-commits",
         '--notes-file "$notes_file"',
+        "cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked",
         "require_nfs_evidence:",
         "require_cloud_evidence:",
         "nfs_release_verify_args:",
