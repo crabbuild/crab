@@ -1,32 +1,57 @@
 //! `crab lfs env` / `crab lfs version` — diagnostic and version output.
 //!
-//! `env` prints LFS-relevant configuration: endpoint, transfer agent,
+//! `env` prints LFS-relevant configuration: direct-storage remote, transfer agent,
 //! storage path, filter settings, and git version.
 //!
 //! `version` prints the crab package version and the LFS protocol version.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::core::error::Result;
+use crate::lfs::config::LfsConfig;
 
 /// Print LFS diagnostic environment information to stdout.
 ///
-/// Displays the LFS endpoint, transfer agent path, standalone agent config,
+/// Displays the direct-storage remote, transfer agent path, standalone agent config,
 /// storage directory, smudge/clean filter settings, and git version.
 pub fn run_lfs_env() -> Result<()> {
     let lfs_url = git_config_value("lfs.url")
         .or_else(|| git_config_value("remote.origin.url"))
         .unwrap_or_default();
-    println!("Endpoint={lfs_url}");
+    println!("DirectStorageRemote={lfs_url}");
 
     let agent_path = git_config_value("lfs.customtransfer.crab.path").unwrap_or_default();
-    println!("LocalWorkingDir={agent_path}");
+    let cwd = std::env::current_dir().ok();
+    let worktree = cwd
+        .as_deref()
+        .and_then(|root| crate::git::worktree::WorktreeContext::resolve_from_path(root).ok());
+    let storage_dir = worktree.as_ref().and_then(|worktree| {
+        LfsConfig::resolve(&worktree.current_worktree_root)
+            .ok()
+            .map(|config| config.storage_dir(&worktree.common_git_dir))
+    });
+
+    let working_dir = worktree
+        .as_ref()
+        .map(|worktree| worktree.current_worktree_root.display().to_string())
+        .or_else(|| cwd.as_ref().map(|path| path.display().to_string()))
+        .unwrap_or_default();
+    println!("LocalWorkingDir={working_dir}");
+    println!("CustomTransferAgentPath={agent_path}");
+
+    if let Some(worktree) = worktree.as_ref() {
+        println!("LocalGitDir={}", worktree.per_worktree_git_dir.display());
+        println!("LocalGitStorageDir={}", worktree.common_git_dir.display());
+    }
 
     let standalone = git_config_value("lfs.standalonetransferagent").unwrap_or_default();
     println!("StandaloneTransferAgent={standalone}");
 
-    let lfs_dir = git_config_value("lfs.lfsdir").unwrap_or_else(|| ".git/lfs".to_owned());
-    println!("LocalMediaDir={lfs_dir}");
+    let lfs_dir = storage_dir.unwrap_or_else(|| PathBuf::from(".git/lfs"));
+    println!("LocalMediaDir={}", lfs_dir.join("objects").display());
+    println!("TempDir={}", lfs_dir.join("tmp").display());
+    println!("LfsStorageDir={}", lfs_dir.display());
 
     let smudge = git_config_value("filter.lfs.smudge").unwrap_or_default();
     println!("git config filter.lfs.smudge = {smudge:?}");

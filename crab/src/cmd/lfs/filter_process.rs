@@ -1,6 +1,7 @@
 //! `crab lfs filter-process` — Git LFS process filter protocol endpoint.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -8,7 +9,23 @@ use std::os::fd::AsRawFd;
 use crate::core::context::AppContext;
 use crate::core::error::Result;
 
-use super::store_setup::resolve_lfs_remote;
+use super::store_setup::resolve_lfs_remote_for_operation_sync;
+
+/// Build the lazy direct-storage resolver used by the LFS filter process.
+pub fn lazy_lfs_store_loader() -> crate::git::filter_process::LfsStoreLoader {
+    Arc::new(|| {
+        resolve_lfs_remote_for_operation_sync("smudge")
+            .map(|remote_ctx| remote_ctx.store)
+            .map_err(|error| {
+                tracing::debug!(
+                    error = %error,
+                    "filter-process: LFS remote unavailable for non-lazy smudge"
+                );
+                error
+            })
+            .ok()
+    })
+}
 
 /// Run `crab lfs filter-process`.
 ///
@@ -26,20 +43,14 @@ async fn run_lfs_filter_process_async(skip: bool) -> Result<()> {
     config.checkout.lazy = effective_skip(skip, std::env::var("GIT_LFS_SKIP_SMUDGE").ok());
 
     let ctx = AppContext::new(config.clone(), tokio_util::sync::CancellationToken::new());
-    let lfs_store = if config.checkout.lazy {
-        None
-    } else {
-        resolve_lfs_remote()
-            .await
-            .ok()
-            .map(|remote_ctx| remote_ctx.store)
-    };
+    let lfs_store_loader = (!config.checkout.lazy).then(lazy_lfs_store_loader);
 
-    crate::git::filter_process::run_filter_process(
+    crate::git::filter_process::run_filter_process_with_lfs_loader(
         std::io::stdin(),
         std::io::stdout(),
         ctx,
-        lfs_store,
+        None,
+        lfs_store_loader,
         None,
         None,
         #[cfg(unix)]

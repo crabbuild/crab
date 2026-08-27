@@ -37,10 +37,49 @@ const FILTER_PROTOCOL_VERSION: &str = "version=2";
 const CAPABILITIES: &[&str] = &["clean", "smudge", "delay"];
 const SPECULATION_DECAY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// Synchronously resolves an LFS object store when a non-lazy smudge needs it.
+pub type LfsStoreLoader = Arc<dyn Fn() -> Option<Arc<LfsObjectStore>> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct LfsStoreSource {
+    eager: Option<Arc<LfsObjectStore>>,
+    loader: Option<LfsStoreLoader>,
+    resolved: Arc<std::sync::OnceLock<Option<Arc<LfsObjectStore>>>>,
+}
+
+impl LfsStoreSource {
+    #[cfg(test)]
+    fn eager(store: Option<Arc<LfsObjectStore>>) -> Self {
+        Self::new(store, None)
+    }
+
+    fn new(store: Option<Arc<LfsObjectStore>>, loader: Option<LfsStoreLoader>) -> Self {
+        Self {
+            eager: store,
+            loader,
+            resolved: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    fn resolve(&self) -> Option<Arc<LfsObjectStore>> {
+        if let Some(store) = &self.eager {
+            return Some(Arc::clone(store));
+        }
+
+        let loader = self.loader.as_ref()?;
+        self.resolved.get_or_init(|| loader()).clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FilterWorktreePaths {
     current_worktree_root: PathBuf,
     shared_staging_root: PathBuf,
+}
+
+enum SmudgeOutput {
+    Bytes(Bytes),
+    File(PathBuf),
 }
 
 /// How long the filter process will wait for the next command before
@@ -91,6 +130,39 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    run_filter_process_with_lfs_loader(
+        input,
+        output,
+        ctx,
+        lfs_store,
+        None,
+        prefetch,
+        hydrator,
+        #[cfg(unix)]
+        idle,
+    )
+    .await
+}
+
+/// Runs the filter protocol with an optional lazy LFS store resolver.
+///
+/// The resolver is called only after a non-lazy LFS smudge misses the local
+/// cache. This keeps clean and cache-hit smudge operations independent of
+/// remote configuration while preserving the existing eager-store API.
+pub async fn run_filter_process_with_lfs_loader<R, W>(
+    input: R,
+    output: W,
+    ctx: AppContext,
+    lfs_store: Option<Arc<LfsObjectStore>>,
+    lfs_store_loader: Option<LfsStoreLoader>,
+    prefetch: Option<Arc<PrefetchQueue>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    #[cfg(unix)] idle: Option<(std::os::fd::RawFd, std::time::Duration)>,
+) -> Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
     // Do NOT open the staging area here. Staging is only needed by
     // the `clean` command; deferring the open until the first clean
     // arrives means `git status` — which only drives smudge commands
@@ -108,6 +180,7 @@ where
     // `spawn_blocking`; the lock is never held across `.await`.
     let staging_cell: Arc<std::sync::Mutex<LazyStaging>> =
         Arc::new(std::sync::Mutex::new(LazyStaging::from_root(staging_root)));
+    let lfs_store = LfsStoreSource::new(lfs_store, lfs_store_loader);
 
     // Lazily-initialized speculation state. Initialized on the first
     // smudge when `hydrate.speculative = true`; `None` otherwise.
@@ -148,7 +221,7 @@ where
 
         let input = BufReader::with_capacity(256 * 1024, input);
         let output = BufWriter::with_capacity(256 * 1024, output);
-        run_filter_loop(
+        run_filter_loop_with_lfs_source(
             input,
             output,
             ctx,
@@ -586,12 +659,39 @@ impl FilterCommand {
 /// tear down the session.
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn run_filter_loop<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    ctx: AppContext,
+    staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
+    lfs_store: Option<Arc<LfsObjectStore>>,
+    prefetch: Option<Arc<PrefetchQueue>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    handle: Option<tokio::runtime::Handle>,
+    speculation: Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
+) -> Result<()> {
+    run_filter_loop_with_lfs_source(
+        input,
+        output,
+        ctx,
+        staging_cell,
+        LfsStoreSource::eager(lfs_store),
+        prefetch,
+        hydrator,
+        handle,
+        speculation,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
+fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     mut input: R,
     mut output: W,
     ctx: AppContext,
     staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
-    lfs_store: Option<Arc<LfsObjectStore>>,
+    lfs_store: LfsStoreSource,
     prefetch: Option<Arc<PrefetchQueue>>,
     hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<tokio::runtime::Handle>,
@@ -647,10 +747,6 @@ fn run_filter_loop<R: BufRead, W: Write>(
     if let Some(root) = resolve_current_worktree_root() {
         session.set_repo_root(root);
     }
-    if let Some(ref store) = lfs_store {
-        session.set_lfs_store(Arc::clone(store));
-    }
-
     loop {
         // Check for cancellation between operations.
         ctx.check_cancelled()?;
@@ -664,7 +760,10 @@ fn run_filter_loop<R: BufRead, W: Write>(
             }
         };
 
-        if cmd.command == "clean" && !file_index_checker_attempted {
+        let is_lfs_clean = cmd.command == "clean"
+            && session.resolve_filter_for(&cmd.pathname)
+                == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
+        if cmd.command == "clean" && !is_lfs_clean && !file_index_checker_attempted {
             file_index_checker_attempted = true;
             if let Some(handle) = handle.as_ref() {
                 install_clean_file_index_checker(&mut session, &ctx, handle);
@@ -681,7 +780,7 @@ fn run_filter_loop<R: BufRead, W: Write>(
                 &mut session,
                 &ctx,
                 &staging_cell,
-                lfs_store.as_ref(),
+                &lfs_store,
                 prefetch.as_ref(),
                 hydrator.as_ref(),
                 handle.as_ref(),
@@ -929,7 +1028,7 @@ fn dispatch_command<R: Read, W: Write>(
     session: &mut super::clean::CleanSession,
     ctx: &AppContext,
     staging_cell: &Arc<std::sync::Mutex<LazyStaging>>,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     prefetch: Option<&Arc<PrefetchQueue>>,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1129,19 +1228,29 @@ fn dispatch_command<R: Read, W: Write>(
                 return Ok(());
             }
 
-            let result_bytes = smudge_content(
+            let result = match try_stream_lfs_smudge(
                 &content,
                 &cmd.pathname,
-                lazy,
                 lfs_store,
                 session,
-                hydrator,
+                lazy,
                 handle,
-            )?;
+            )? {
+                Some(output) => output,
+                None => SmudgeOutput::Bytes(smudge_content(
+                    &content,
+                    &cmd.pathname,
+                    lazy,
+                    lfs_store,
+                    session,
+                    hydrator,
+                    handle,
+                )?),
+            };
 
             write_status(output, "success")?;
             write_flush(output)?;
-            write_content(output, &result_bytes)?;
+            write_smudge_output(output, &result)?;
             write_flush(output)?;
             write_flush(output)?;
             output.flush().map_err(CrabError::Io)?;
@@ -1185,6 +1294,82 @@ fn write_delayed_response<W: Write>(output: &mut W) -> Result<()> {
     Ok(())
 }
 
+/// Stream a common LFS smudge case directly from the verified cache file.
+///
+/// The packet-line response can be written incrementally, so ordinary
+/// extension-free LFS objects do not need to be retained as a second full
+/// payload in the filter process. Extension-bearing objects fall back to the
+/// existing byte-oriented pipeline because extensions transform the content.
+fn try_stream_lfs_smudge(
+    content: &[u8],
+    pathname: &str,
+    lfs_store: &LfsStoreSource,
+    session: &super::clean::CleanSession,
+    lazy: bool,
+    handle: Option<&tokio::runtime::Handle>,
+) -> Result<Option<SmudgeOutput>> {
+    if lazy || !session.should_lfs_smudge(pathname) {
+        return Ok(None);
+    }
+    if matches!(
+        session.resolve_filter_for(pathname),
+        Some(crate::git::filter_attr_cache::FilterKind::Crab)
+    ) {
+        return Ok(None);
+    }
+
+    let PointerKind::Lfs(pointer) = classify(content) else {
+        return Ok(None);
+    };
+    if !pointer.extensions.is_empty() {
+        return Ok(None);
+    }
+
+    let lfs_dir = match session_lfs_storage_dir(session) {
+        Ok(Some(path)) => path,
+        Ok(None) | Err(_) => return Ok(None),
+    };
+    let local_path = crate::lfs::cache::object_path(&lfs_dir, &pointer.oid);
+    if crate::lfs::cache::is_valid(&lfs_dir, &pointer.oid, pointer.size)? {
+        return Ok(Some(SmudgeOutput::File(local_path)));
+    }
+
+    let Some(store) = lfs_store.resolve() else {
+        return if session.should_skip_lfs_download_errors() {
+            Ok(Some(SmudgeOutput::Bytes(Bytes::copy_from_slice(content))))
+        } else {
+            Ok(None)
+        };
+    };
+
+    let Some(handle) = handle else {
+        return Ok(None);
+    };
+    let temp = crate::lfs::cache::new_temp_path(&lfs_dir)?;
+    let temp_path = temp.to_path_buf();
+    let result = handle.block_on(store.download_to_file(&pointer.oid, pointer.size, &temp_path));
+    match result {
+        Ok(()) => {
+            let installed = crate::lfs::cache::install_verified_temp_path(
+                &lfs_dir,
+                &pointer.oid,
+                pointer.size,
+                temp,
+            )?;
+            Ok(Some(SmudgeOutput::File(installed)))
+        }
+        Err(error) if session.should_skip_lfs_download_errors() => {
+            tracing::warn!(
+                oid = %crab_git::lfs_pointer::hex_encode(&pointer.oid),
+                error = %error,
+                "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+            );
+            Ok(Some(SmudgeOutput::Bytes(Bytes::copy_from_slice(content))))
+        }
+        Err(error) => Err(CrabError::from(error)),
+    }
+}
+
 /// Classify incoming smudge content and return the appropriate output bytes.
 ///
 /// Dispatches based on pointer type:
@@ -1197,7 +1382,7 @@ fn smudge_content(
     content: &[u8],
     pathname: &str,
     lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1226,22 +1411,43 @@ fn smudge_content(
             // Try LFS smudge regardless of blob content type.
             if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
                 let oid_hex = crab_git::lfs_pointer::hex_encode(&ptr.oid);
-                if let Some(local) = try_local_lfs_cache(&ptr, session.repo_root())? {
+                if let Some(local) = try_local_lfs_cache(&ptr, session)? {
                     tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
                     return Ok(Bytes::from(content));
                 }
-                if let Some(store) = lfs_store {
+                if let Some(store) = lfs_store.resolve() {
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
                     let rt = tokio::runtime::Handle::current();
-                    let bytes = rt.block_on(store.verify(&ptr.oid))?;
-                    cache_lfs_locally(&ptr, &bytes, session.repo_root())?;
+                    let bytes = match rt.block_on(store.verify(&ptr.oid)) {
+                        Ok(bytes) => bytes,
+                        Err(error) if session.should_skip_lfs_download_errors() => {
+                            tracing::warn!(
+                                oid = %oid_hex,
+                                error = %error,
+                                "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+                            );
+                            return Ok(Bytes::copy_from_slice(content));
+                        }
+                        Err(error) => return Err(CrabError::from(error)),
+                    };
+                    cache_lfs_locally(&ptr, &bytes, session)?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
                     return Ok(Bytes::from(content));
                 }
+                if session.should_skip_lfs_download_errors() {
+                    tracing::warn!(
+                        oid = %oid_hex,
+                        "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
+                    );
+                    return Ok(Bytes::copy_from_slice(content));
+                }
                 tracing::warn!(oid = %oid_hex, "smudge: LFS object not available for LFS-filtered path");
-                return Ok(Bytes::copy_from_slice(content));
+                return Err(CrabError::Configuration {
+                    key: "lfs remote".to_owned(),
+                    origin: "non-lazy LFS smudge could not resolve a remote store".to_owned(),
+                });
             }
             // Content isn't an LFS pointer — pass through.
             tracing::debug!(path = %pathname, "smudge: LFS-filtered path, content is not an LFS pointer, passing through");
@@ -1289,7 +1495,7 @@ fn smudge_by_blob_classification(
     content: &[u8],
     pathname: &str,
     lazy: bool,
-    lfs_store: Option<&Arc<LfsObjectStore>>,
+    lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
@@ -1311,34 +1517,57 @@ fn smudge_by_blob_classification(
             let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
 
             // Non-lazy: try local .git/lfs/objects/ cache first, then remote.
-            if let Some(local) = try_local_lfs_cache(&pointer, session.repo_root())? {
+            if let Some(local) = try_local_lfs_cache(&pointer, session)? {
                 tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
                 let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
                 return Ok(Bytes::from(content));
             }
 
             // Fall back to remote store download.
-            if let Some(store) = lfs_store {
+            if let Some(store) = lfs_store.resolve() {
                 tracing::debug!(
                     oid = %oid_hex,
                     size = pointer.size,
                     "smudge: downloading LFS object from remote"
                 );
                 let rt = tokio::runtime::Handle::current();
-                let bytes = rt.block_on(store.verify(&pointer.oid))?;
+                let bytes = match rt.block_on(store.verify(&pointer.oid)) {
+                    Ok(bytes) => bytes,
+                    Err(error) if session.should_skip_lfs_download_errors() => {
+                        tracing::warn!(
+                            oid = %oid_hex,
+                            error = %error,
+                            "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+                        );
+                        return Ok(Bytes::copy_from_slice(content));
+                    }
+                    Err(error) => return Err(CrabError::from(error)),
+                };
                 // Cache locally for future checkouts.
-                cache_lfs_locally(&pointer, &bytes, session.repo_root())?;
+                cache_lfs_locally(&pointer, &bytes, session)?;
                 let content =
                     crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
                 return Ok(Bytes::from(content));
             }
 
-            // No local cache and no remote — pass pointer through with a warning.
+            if session.should_skip_lfs_download_errors() {
+                tracing::warn!(
+                    oid = %oid_hex,
+                    "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
+                );
+                return Ok(Bytes::copy_from_slice(content));
+            }
+
+            // Non-lazy smudge must not silently materialize a pointer when
+            // the required remote is unavailable.
             tracing::warn!(
                 oid = %oid_hex,
                 "smudge: LFS object not in local cache and no remote store available"
             );
-            Ok(Bytes::copy_from_slice(content))
+            Err(CrabError::Configuration {
+                key: "lfs remote".to_owned(),
+                origin: "non-lazy LFS smudge could not resolve a remote store".to_owned(),
+            })
         }
         PointerKind::Crab(pointer) => {
             // Lazy mode: pass the pointer through for on-demand hydration,
@@ -1628,67 +1857,87 @@ fn write_content<W: Write>(output: &mut W, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn write_smudge_output<W: Write>(output: &mut W, content: &SmudgeOutput) -> Result<()> {
+    match content {
+        SmudgeOutput::Bytes(data) => write_content(output, data),
+        SmudgeOutput::File(path) => write_content_file(output, path),
+    }
+}
+
+fn write_content_file<W: Write>(output: &mut W, path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path).map_err(CrabError::Io)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(CrabError::Io)?;
+        if read == 0 {
+            return Ok(());
+        }
+        write_content(output, &buffer[..read])?;
+    }
+}
+
 /// Write a flush packet (0000).
 fn write_flush<W: Write>(output: &mut W) -> Result<()> {
     output.write_all(b"0000").map_err(CrabError::Io)?;
     Ok(())
 }
 
-/// Try to read an LFS object from the local `.git/lfs/objects/` cache.
+fn session_lfs_storage_dir(session: &super::clean::CleanSession) -> Result<Option<PathBuf>> {
+    if let Some(path) = session.lfs_storage_dir() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    let Some(root) = session.repo_root() else {
+        return Ok(None);
+    };
+    let worktree = match WorktreeContext::resolve_from_path(root) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                error = %error,
+                "local LFS cache unavailable outside a Git worktree"
+            );
+            return Ok(None);
+        }
+    };
+    let config = match crate::lfs::config::LfsConfig::resolve(&worktree.current_worktree_root) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                error = %error,
+                "invalid LFS config; using the default local cache path"
+            );
+            crate::lfs::config::LfsConfig::default()
+        }
+    };
+    Ok(Some(config.storage_dir(&worktree.common_git_dir)))
+}
+
+/// Try to read an LFS object from the configured local cache.
 fn try_local_lfs_cache(
     pointer: &crab_git::lfs_pointer::LfsPointer,
-    repo_root: Option<&Path>,
+    session: &super::clean::CleanSession,
 ) -> Result<Option<Vec<u8>>> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "local LFS cache unavailable outside a Git worktree");
-                return Ok(None);
-            }
-        },
+    let Some(lfs_dir) = session_lfs_storage_dir(session)? else {
+        return Ok(None);
     };
-    match crate::lfs::cache::read_pointer(&ctx.common_git_dir.join("lfs"), pointer) {
+    match crate::lfs::cache::read_pointer(&lfs_dir, pointer) {
         Err(CrabError::LfsObjectCorrupt { .. }) => Ok(None),
         result => result,
     }
 }
 
-/// Cache an LFS object in the local `.git/lfs/objects/` directory.
+/// Cache an LFS object in the configured local LFS directory.
 fn cache_lfs_locally(
     pointer: &crab_git::lfs_pointer::LfsPointer,
     content: &[u8],
-    repo_root: Option<&Path>,
+    session: &super::clean::CleanSession,
 ) -> Result<()> {
-    let ctx = match repo_root {
-        Some(root) => match WorktreeContext::resolve_from_path(root) {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
-        None => match WorktreeContext::resolve() {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::debug!(error = %error, "skipping local LFS cache outside a Git worktree");
-                return Ok(());
-            }
-        },
+    let Some(lfs_dir) = session_lfs_storage_dir(session)? else {
+        return Ok(());
     };
-    crate::lfs::cache::install_bytes(
-        &ctx.common_git_dir.join("lfs"),
-        &pointer.oid,
-        pointer.size,
-        content,
-    )?;
+    crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, content)?;
     Ok(())
 }
 
@@ -1803,6 +2052,25 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
     use std::sync::MutexGuard;
+
+    #[test]
+    fn lfs_store_source_caches_unavailable_remote() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::clone(&calls);
+        let source = LfsStoreSource::new(
+            None,
+            Some(Arc::new(move || {
+                loader_calls.fetch_add(1, Ordering::SeqCst);
+                None
+            })),
+        );
+
+        assert!(source.resolve().is_none());
+        assert!(source.resolve().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     struct GitEnvGuard {
         _lock: MutexGuard<'static, ()>,
@@ -2036,9 +2304,94 @@ mod tests {
         let mut session = super::super::clean::CleanSession::new(AppContext::default());
         session.set_repo_root(repo.path().to_path_buf());
 
-        let output = smudge_content(b"", "empty.bin", false, None, &session, None, None).unwrap();
+        let output = smudge_content(
+            b"",
+            "empty.bin",
+            false,
+            &LfsStoreSource::eager(None),
+            &session,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn lfs_smudge_streams_from_configured_cache_path() {
+        use crab_git::lfs_pointer::LfsPointer;
+        use sha2::{Digest, Sha256};
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "lfs.storage", "custom-lfs-cache"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let content = b"local LFS cache content";
+        let oid: [u8; 32] = Sha256::digest(content).into();
+        let pointer = LfsPointer {
+            oid,
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let lfs_dir = repo.path().join(".git/custom-lfs-cache");
+        crate::lfs::cache::install_bytes(&lfs_dir, &oid, pointer.size, content).unwrap();
+        let lfs_dir = lfs_dir.canonicalize().unwrap();
+
+        let _env = GitEnvGuard::set(
+            &repo.path().join(".git"),
+            repo.path(),
+            &repo.path().join(".git"),
+        );
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let result = try_stream_lfs_smudge(
+            &pointer.serialize(),
+            "model.bin",
+            &LfsStoreSource::eager(None),
+            &session,
+            false,
+            None,
+        )
+        .unwrap()
+        .expect("valid local LFS object should use the file-backed path");
+
+        let path = match &result {
+            SmudgeOutput::File(path) => path,
+            SmudgeOutput::Bytes(_) => {
+                panic!("local LFS object should not be materialized in memory")
+            }
+        };
+        assert_eq!(path, &crate::lfs::cache::object_path(&lfs_dir, &oid));
+
+        let mut output = Vec::new();
+        write_smudge_output(&mut output, &result).unwrap();
+        assert!(
+            output
+                .windows(content.len())
+                .any(|window| window == content),
+            "file-backed smudge output should contain the cached content"
+        );
     }
 
     /// Build a packet-line text frame: 4-hex-length + data + \n.
@@ -2481,6 +2834,66 @@ size 1048576\n";
         );
     }
 
+    #[test]
+    fn non_lazy_lfs_smudge_fails_without_remote_store() {
+        use crab_git::lfs_pointer::LfsPointer;
+
+        let repo = tempfile::tempdir().unwrap();
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let pointer = LfsPointer {
+            oid: [0xabu8; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+
+        let error = smudge_content(
+            &pointer.serialize(),
+            "model.bin",
+            false,
+            &LfsStoreSource::eager(None),
+            &session,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[test]
+    fn skip_download_errors_preserves_pointer_without_remote_store() {
+        use crab_git::lfs_pointer::LfsPointer;
+
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join(".lfsconfig"),
+            "[lfs]\n    skipdownloaderrors = true\n",
+        )
+        .unwrap();
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        let pointer = LfsPointer {
+            oid: [0xabu8; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+        let pointer_bytes = pointer.serialize();
+
+        let result = smudge_content(
+            &pointer_bytes,
+            "model.bin",
+            false,
+            &LfsStoreSource::eager(None),
+            &session,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.as_ref(), pointer_bytes.as_slice());
+    }
+
     #[tokio::test]
     async fn lfs_pointer_non_lazy_smudge_downloads_content() {
         use crate::core::config::{CheckoutConfig, Config};
@@ -2620,7 +3033,7 @@ size 1048576\n";
                 &pointer_bytes,
                 "blocked/model.bin",
                 false,
-                Some(&lfs_store),
+                &LfsStoreSource::eager(Some(Arc::clone(&lfs_store))),
                 &session,
                 None,
                 None,
@@ -2632,7 +3045,7 @@ size 1048576\n";
                 &pointer_bytes,
                 "allowed/model.bin",
                 false,
-                Some(&lfs_store),
+                &LfsStoreSource::eager(Some(Arc::clone(&lfs_store))),
                 &session,
                 None,
                 None,

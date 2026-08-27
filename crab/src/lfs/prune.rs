@@ -910,19 +910,21 @@ fn collect_referenced_oids() -> Result<HashSet<String>> {
 // Filesystem helpers
 // ---------------------------------------------------------------------------
 
-/// Discover the `.git/lfs/objects` directory from the current repo.
+/// Discover the configured local LFS objects directory from the current repo.
 #[cfg(feature = "gix-revwalk")]
 fn discover_lfs_objects_dir() -> Result<PathBuf> {
-    Ok(crate::git::discover::discover_common_git_dir()?
-        .join("lfs")
-        .join("objects"))
+    Ok(crate::lfs::config::LfsConfig::resolve_storage_dir(
+        &std::env::current_dir().map_err(CrabError::Io)?,
+    )?
+    .join("objects"))
 }
 
 #[cfg(not(feature = "gix-revwalk"))]
 fn discover_lfs_objects_dir() -> Result<PathBuf> {
-    Ok(crate::git::discover::discover_common_git_dir()?
-        .join("lfs")
-        .join("objects"))
+    Ok(crate::lfs::config::LfsConfig::resolve_storage_dir(
+        &std::env::current_dir().map_err(CrabError::Io)?,
+    )?
+    .join("objects"))
 }
 
 /// Read directory entries sorted by name.

@@ -66,7 +66,7 @@ Use a unique target path for this worktree in every Cargo invocation.
 
 ### Step 1: Add a versioned support matrix
 
-Define four named profiles in the design and user docs: `crab-native`, `git-lfs-standalone-direct`, `git-lfs-standalone-managed`, and `git-lfs-http`. For every profile state requirements, supported operations, auth model, locking model, tested Git/Git LFS versions, and release status. Mark managed upload and HTTP as unsupported until Phase 6 and remove unconditional “drop-in” claims.
+Define three named profiles in the design and user docs: `crab-native`, `git-lfs-standalone-direct`, and `git-lfs-standalone-managed`. For every profile state requirements, supported operations, auth model, locking model, tested Git/Git LFS versions, and release status. Mark managed upload as unsupported until Phase 6 and remove unconditional “drop-in” claims. Record standard HTTP discovery as an external-server integration, not a Crab product profile.
 
 Document current installation scope explicitly: the default currently writes an unconditional global standalone-agent setting, which affects unrelated repositories. Mark URL/repository-scoped installation as required production behavior in Phase 2.
 

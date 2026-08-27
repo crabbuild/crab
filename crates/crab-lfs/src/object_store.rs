@@ -5,20 +5,26 @@
 //! Verifies integrity on upload, accepts matching objects idempotently, and
 //! conditionally repairs corrupt objects.
 
+use std::ops::Range;
 use std::path::Path as StdPath;
+use std::pin::Pin;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
-use object_store::{MultipartUpload, ObjectStoreExt, PutPayload};
+use object_store::{MultipartUpload, ObjectMeta, ObjectStoreExt, PutPayload};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crab_git::lfs_pointer::hex_encode;
 use crab_storage::{ETag, StorageError, Store};
 
 /// Result alias for LFS object storage operations.
 pub type Result<T> = std::result::Result<T, LfsError>;
+
+/// Backpressured LFS object stream with storage failures mapped to the LFS
+/// error surface.
+pub type LfsByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
 /// Errors raised by LFS object storage operations.
 #[derive(thiserror::Error, Debug)]
@@ -64,11 +70,24 @@ const MAX_IN_FLIGHT_PARTS: usize = 4;
 /// accumulators. Sized to match the part size so a single read tops up
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = STREAM_PART_SIZE;
+const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x01";
+const RECEIPT_VERIFIER: &str = "crab-lfs/1";
+const MAX_RECEIPT_FIELD_SIZE: usize = 4 * 1024;
+const MAX_RECEIPT_SIZE: u64 = 16 * 1024;
 
 enum ExistingObject {
     Missing,
-    Valid,
+    Valid(ObjectMeta),
     Corrupt(ETag),
+}
+
+struct VerificationReceipt {
+    oid: [u8; 32],
+    size: u64,
+    object_path: String,
+    e_tag: Option<String>,
+    version: Option<String>,
+    verifier: String,
 }
 
 /// LFS object storage backed by a cloud [`Store`].
@@ -106,7 +125,7 @@ impl LfsObjectStore {
     }
 
     /// Borrows the underlying [`Store`] for operations not covered by
-    /// the `LfsObjectStore` API (e.g., range requests for download resume).
+    /// the `LfsObjectStore` API.
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -118,8 +137,7 @@ impl LfsObjectStore {
 
     /// Returns the object store [`Path`] for the given OID.
     ///
-    /// Public so callers (e.g., the transfer agent) can issue range
-    /// requests directly against the store for download resume.
+    /// Public so higher-level Crab read paths can use the canonical key.
     pub fn object_path_for(&self, oid: &[u8; 32]) -> Path {
         self.object_path(oid)
     }
@@ -132,6 +150,70 @@ impl LfsObjectStore {
     #[must_use]
     pub fn object_path_for_prefix(prefix: &str, oid: &[u8; 32]) -> Path {
         Self::object_path_at(prefix, oid)
+    }
+
+    /// Reads object metadata, retrying a configured primary fallback when the
+    /// selected replica is stale or unavailable.
+    pub async fn head(&self, oid: &[u8; 32]) -> Result<ObjectMeta> {
+        let path = self.object_path(oid);
+        match self.store.head(&path).await {
+            Ok(meta) => Ok(meta),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error.into());
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS metadata read from selected remote failed; retrying primary"
+                );
+                fallback_store
+                    .head(&Self::object_path_at(fallback_prefix, oid))
+                    .await
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    /// Verifies an object before opening a backpressured stream.
+    ///
+    /// Range reads are checked against the complete SHA-256 object first, so a
+    /// corrupt immutable key is never served as a successful transfer.
+    pub async fn get_stream(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        match Self::get_verified_stream_at(
+            &self.store,
+            &self.prefix,
+            oid,
+            expected_size,
+            range.clone(),
+        )
+        .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS stream from selected remote failed integrity or availability checks; retrying primary"
+                );
+                Self::get_verified_stream_at(
+                    fallback_store,
+                    fallback_prefix,
+                    oid,
+                    expected_size,
+                    range,
+                )
+                .await
+            }
+        }
     }
 
     /// Returns the object store path for the given OID.
@@ -174,7 +256,11 @@ impl LfsObjectStore {
         let path = self.object_path(oid);
 
         match self.inspect_existing(&path, oid).await? {
-            ExistingObject::Valid => return Ok(()),
+            ExistingObject::Valid(meta) => {
+                Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                    .await;
+                return Ok(());
+            }
             ExistingObject::Corrupt(etag) => {
                 return self.replace_corrupt(&path, oid, bytes, etag).await;
             }
@@ -185,7 +271,9 @@ impl LfsObjectStore {
         // conflict handling, so a race between the exists check and the
         // put is harmless — the second writer sees CasConflict and the
         // Store resolves it by comparing content hashes.
-        self.store.put(&path, bytes).await.map_err(Into::into)
+        self.store.put(&path, bytes).await.map_err(LfsError::from)?;
+        self.record_verification_receipt(oid).await;
+        Ok(())
     }
 
     /// Streaming upload: read the local file in bounded chunks, hash
@@ -206,9 +294,9 @@ impl LfsObjectStore {
     /// partial object lands on the remote.
     ///
     /// A matching existing object short-circuits. A corrupt object at the
-    /// target path is replaced conditionally and reverified. The exceptional
-    /// repair path materializes the local file because the provider-neutral
-    /// conditional-write contract accepts one complete replacement payload.
+    /// target path is replaced only after the local stream has been verified;
+    /// the immutable content-addressed key makes a racing valid replacement
+    /// logically equivalent.
     ///
     /// # Errors
     ///
@@ -219,24 +307,30 @@ impl LfsObjectStore {
     /// - [`LfsError::Io`] — local file read failed.
     /// - [`LfsError::Storage`] — underlying object-store failure after retries.
     pub async fn put_stream(&self, oid: &[u8; 32], file_path: &StdPath) -> Result<()> {
+        self.put_stream_with_size(oid, None, file_path).await
+    }
+
+    /// Streams and verifies an LFS object with an expected pointer size.
+    ///
+    /// The size check is performed during the same pass as SHA-256 hashing,
+    /// so a pointer with a conflicting declared size cannot publish bytes.
+    pub async fn put_stream_with_size(
+        &self,
+        oid: &[u8; 32],
+        expected_size: Option<u64>,
+        file_path: &StdPath,
+    ) -> Result<()> {
         let path = self.object_path(oid);
 
-        match self.inspect_existing(&path, oid).await? {
-            ExistingObject::Valid => return Ok(()),
-            ExistingObject::Corrupt(etag) => {
-                let bytes = tokio::fs::read(file_path)
-                    .await
-                    .map_err(|error| annotate_io_error(error, file_path))?;
-                if !object_matches(oid, &bytes) {
-                    return Err(LfsError::ObjectCorrupt {
-                        oid: hex_encode(oid),
-                    });
-                }
-                return self
-                    .replace_corrupt(&path, oid, Bytes::from(bytes), etag)
-                    .await;
+        if let ExistingObject::Valid(meta) = self.inspect_existing(&path, oid).await? {
+            if expected_size.is_some_and(|expected| expected != meta.size) {
+                return Err(LfsError::ObjectCorrupt {
+                    oid: hex_encode(oid),
+                });
             }
-            ExistingObject::Missing => {}
+            Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                .await;
+            return Ok(());
         }
 
         let mut file = tokio::fs::File::open(file_path)
@@ -257,13 +351,22 @@ impl LfsObjectStore {
         // The hasher runs on the read side, inline with the buffer
         // accumulation, so the whole pipeline is one pass over the
         // file bytes.
-        let hash_result = stream_file_parts(&mut file, &mut *upload, oid, file_path, &path).await;
+        let hash_result = stream_file_parts(
+            &mut file,
+            &mut *upload,
+            oid,
+            expected_size,
+            file_path,
+            &path,
+        )
+        .await;
 
         match hash_result {
             Ok(()) => {
                 upload.complete().await.map_err(|e| {
                     LfsError::from(crab_storage::map_object_store_error(e, path.as_ref()))
                 })?;
+                self.record_verification_receipt(oid).await;
                 Ok(())
             }
             Err(e) => {
@@ -349,6 +452,87 @@ impl LfsObjectStore {
         Ok(bytes)
     }
 
+    /// Verifies an LFS object without retaining its body in memory.
+    pub async fn verify_size(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
+        match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size).await {
+            Ok(meta) => {
+                Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS verification from selected remote failed; retrying primary"
+                );
+                match Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size)
+                    .await
+                {
+                    Ok(meta) => {
+                        Self::record_verification_receipt_with_meta(
+                            fallback_store,
+                            fallback_prefix,
+                            oid,
+                            &meta,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    /// Streams an LFS object to a local file while verifying its size and
+    /// SHA-256 digest.
+    ///
+    /// The destination is truncated before each selected-source attempt. A
+    /// replica read that is missing, corrupt, or unavailable is retried from
+    /// the configured primary fallback; local I/O errors are returned without
+    /// hiding them behind a remote retry.
+    pub async fn download_to_file(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        destination: &StdPath,
+    ) -> Result<()> {
+        match Self::download_from_to_file(
+            &self.store,
+            &self.prefix,
+            oid,
+            expected_size,
+            destination,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ LfsError::Io { .. }) => Err(error),
+            Err(error) => {
+                let Some((fallback_store, fallback_prefix)) = self.primary_fallback.as_ref() else {
+                    return Err(error);
+                };
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "LFS streaming read from selected remote failed; retrying primary"
+                );
+                Self::download_from_to_file(
+                    fallback_store,
+                    fallback_prefix,
+                    oid,
+                    expected_size,
+                    destination,
+                )
+                .await
+            }
+        }
+    }
+
     /// Deletes an LFS object from the store.
     ///
     /// Behavior on missing objects depends on the backend: some backends
@@ -389,6 +573,110 @@ impl LfsObjectStore {
         }
     }
 
+    async fn verify_size_at(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+    ) -> Result<ObjectMeta> {
+        let path = Self::object_path_at(prefix, oid);
+        match Self::inspect_existing_at(store, prefix, &path, oid).await? {
+            ExistingObject::Valid(meta) => {
+                if meta.size == expected_size {
+                    Ok(meta)
+                } else {
+                    Err(LfsError::ObjectCorrupt {
+                        oid: hex_encode(oid),
+                    })
+                }
+            }
+            ExistingObject::Missing => Err(LfsError::ObjectMissing {
+                oid: hex_encode(oid),
+            }),
+            ExistingObject::Corrupt(_) => Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            }),
+        }
+    }
+
+    async fn get_verified_stream_at(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        let verified_meta = Self::verify_size_at(store, prefix, oid, expected_size).await?;
+        Self::record_verification_receipt_with_meta(store, prefix, oid, &verified_meta).await;
+        let path = Self::object_path_at(prefix, oid);
+        let (meta, result_range, stream) = store
+            .get_stream(&path, range)
+            .await
+            .map_err(LfsError::from)?;
+        if meta.size != expected_size
+            || result_range.start > result_range.end
+            || result_range.end > meta.size
+        {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+        let stream = stream.map(|chunk| chunk.map_err(Into::into)).boxed();
+        Ok((meta, result_range, stream))
+    }
+
+    async fn download_from_to_file(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        expected_size: u64,
+        destination: &StdPath,
+    ) -> Result<()> {
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let path = Self::object_path_at(prefix, oid);
+        let (meta, range, mut stream) = match store.get_stream(&path, None).await {
+            Ok(result) => result,
+            Err(StorageError::NotFound { .. }) => {
+                return Err(LfsError::ObjectMissing {
+                    oid: hex_encode(oid),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if range.start != 0 || range.end != meta.size || meta.size != expected_size {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+
+        let mut file = tokio::fs::File::create(destination).await?;
+        let mut hasher = Sha256::new();
+        let mut actual_size = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            actual_size = actual_size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: "LFS object size overflow while downloading".to_owned(),
+                }
+            })?;
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+
+        if actual_size != expected_size || hasher.finalize().as_slice() != oid {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+        Ok(())
+    }
+
     /// Replaces a corrupt same-key object only if the inspected version is
     /// still current, then re-verifies the winning bytes.
     async fn replace_corrupt(
@@ -408,17 +696,80 @@ impl LfsObjectStore {
             // A racing repair is successful only when its winning bytes are
             // valid; otherwise preserve the conditional-write failure.
             if self.verify_at_path(path, oid).await.is_ok() {
+                self.record_verification_receipt(oid).await;
                 return Ok(());
             }
             return Err(update_error.into());
         }
 
-        self.verify_at_path(path, oid).await
+        self.verify_at_path(path, oid).await?;
+        self.record_verification_receipt(oid).await;
+        Ok(())
+    }
+
+    async fn record_verification_receipt(&self, oid: &[u8; 32]) {
+        Self::record_verification_receipt_at(&self.store, &self.prefix, oid).await;
+    }
+
+    async fn record_verification_receipt_at(store: &Store, prefix: &str, oid: &[u8; 32]) {
+        let object_path = Self::object_path_at(prefix, oid);
+        let meta = match store.head(&object_path).await {
+            Ok(meta) => meta,
+            Err(error) => {
+                tracing::debug!(
+                    oid = %hex_encode(oid),
+                    error = %error,
+                    "could not read LFS object metadata for verification receipt"
+                );
+                return;
+            }
+        };
+        Self::record_verification_receipt_with_meta(store, prefix, oid, &meta).await;
+    }
+
+    async fn record_verification_receipt_with_meta(
+        store: &Store,
+        prefix: &str,
+        oid: &[u8; 32],
+        meta: &ObjectMeta,
+    ) {
+        let object_path = Self::object_path_at(prefix, oid);
+        if meta.e_tag.is_none() && meta.version.is_none() {
+            // A receipt without a provider validator cannot prove that the
+            // bytes observed later are the bytes verified here.
+            return;
+        }
+
+        let receipt = VerificationReceipt {
+            oid: *oid,
+            size: meta.size,
+            object_path: object_path.to_string(),
+            e_tag: meta.e_tag.clone(),
+            version: meta.version.clone(),
+            verifier: RECEIPT_VERIFIER.to_owned(),
+        };
+        let Ok(body) = encode_receipt(&receipt) else {
+            tracing::debug!(
+                oid = %hex_encode(oid),
+                "could not encode LFS verification receipt"
+            );
+            return;
+        };
+        let receipt_path = receipt_path_at(prefix, oid);
+        if let Err(error) = store.put_overwrite(&receipt_path, Bytes::from(body)).await {
+            // Receipts accelerate future presence checks; losing one is safe
+            // because the next operation falls back to streamed hashing.
+            tracing::debug!(
+                oid = %hex_encode(oid),
+                error = %error,
+                "could not persist LFS verification receipt"
+            );
+        }
     }
 
     async fn verify_at_path(&self, path: &Path, oid: &[u8; 32]) -> Result<()> {
         match self.inspect_existing(path, oid).await? {
-            ExistingObject::Valid => Ok(()),
+            ExistingObject::Valid(_) => Ok(()),
             ExistingObject::Missing => Err(LfsError::ObjectMissing {
                 oid: hex_encode(oid),
             }),
@@ -429,7 +780,25 @@ impl LfsObjectStore {
     }
 
     async fn inspect_existing(&self, path: &Path, oid: &[u8; 32]) -> Result<ExistingObject> {
-        let (meta, range, mut stream) = match self.store.get_stream(path, None).await {
+        Self::inspect_existing_at(&self.store, &self.prefix, path, oid).await
+    }
+
+    async fn inspect_existing_at(
+        store: &Store,
+        prefix: &str,
+        path: &Path,
+        oid: &[u8; 32],
+    ) -> Result<ExistingObject> {
+        let meta = match store.head(path).await {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
+            Err(error) => return Err(error.into()),
+        };
+        if receipt_matches(store, prefix, path, oid, &meta).await {
+            return Ok(ExistingObject::Valid(meta));
+        }
+
+        let (meta, range, mut stream) = match store.get_stream(path, None).await {
             Ok(result) => result,
             Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
             Err(error) => return Err(error.into()),
@@ -462,11 +831,158 @@ impl LfsObjectStore {
             .into());
         }
         if hasher.finalize().as_slice() == oid {
-            Ok(ExistingObject::Valid)
+            Ok(ExistingObject::Valid(meta))
         } else {
             Ok(ExistingObject::Corrupt(etag))
         }
     }
+}
+
+fn receipt_path_at(prefix: &str, oid: &[u8; 32]) -> Path {
+    let hex = hex_encode(oid);
+    let prefix = prefix.trim_matches('/');
+    let path = if prefix.is_empty() {
+        format!("lfs/receipts/{}/{}/{}.bin", &hex[..2], &hex[2..4], hex)
+    } else {
+        format!(
+            "{prefix}/lfs/receipts/{}/{}/{}.bin",
+            &hex[..2],
+            &hex[2..4],
+            hex
+        )
+    };
+    Path::from(path)
+}
+
+async fn receipt_matches(
+    store: &Store,
+    prefix: &str,
+    object_path: &Path,
+    oid: &[u8; 32],
+    meta: &ObjectMeta,
+) -> bool {
+    if meta.e_tag.is_none() && meta.version.is_none() {
+        return false;
+    }
+    let receipt_path = receipt_path_at(prefix, oid);
+    let (body, _) = match store
+        .get_with_etag_bounded(&receipt_path, MAX_RECEIPT_SIZE)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::debug!(
+                oid = %hex_encode(oid),
+                error = %error,
+                "LFS verification receipt unavailable; hashing object body"
+            );
+            return false;
+        }
+    };
+    let Some(receipt) = decode_receipt(&body) else {
+        tracing::debug!(
+            oid = %hex_encode(oid),
+            "LFS verification receipt malformed; hashing object body"
+        );
+        return false;
+    };
+    receipt.oid == *oid
+        && receipt.size == meta.size
+        && receipt.object_path == object_path.to_string()
+        && receipt.e_tag == meta.e_tag
+        && receipt.version == meta.version
+        && receipt.verifier == RECEIPT_VERIFIER
+}
+
+fn encode_receipt(receipt: &VerificationReceipt) -> Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(256);
+    body.extend_from_slice(RECEIPT_MAGIC);
+    body.extend_from_slice(&receipt.oid);
+    body.extend_from_slice(&receipt.size.to_be_bytes());
+    append_receipt_field(&mut body, receipt.object_path.as_bytes())?;
+    append_receipt_option(&mut body, receipt.e_tag.as_deref())?;
+    append_receipt_option(&mut body, receipt.version.as_deref())?;
+    append_receipt_field(&mut body, receipt.verifier.as_bytes())?;
+    Ok(body)
+}
+
+fn append_receipt_field(body: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+    let length = u32::try_from(value.len()).map_err(|_| LfsError::Storage {
+        source: StorageError::CorruptObject {
+            path: "lfs/receipts".to_owned(),
+            reason: "verification receipt field is too large".to_owned(),
+        },
+    })?;
+    body.extend_from_slice(&length.to_be_bytes());
+    body.extend_from_slice(value);
+    Ok(())
+}
+
+fn append_receipt_option(body: &mut Vec<u8>, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(value) => {
+            body.push(1);
+            append_receipt_field(body, value.as_bytes())?;
+        }
+        None => body.push(0),
+    }
+    Ok(())
+}
+
+fn decode_receipt(body: &[u8]) -> Option<VerificationReceipt> {
+    let mut cursor = 0;
+    take_receipt_bytes(body, &mut cursor, RECEIPT_MAGIC.len())
+        .filter(|magic| *magic == RECEIPT_MAGIC)?;
+    let oid = take_receipt_bytes(body, &mut cursor, 32)?;
+    let mut oid_bytes = [0u8; 32];
+    oid_bytes.copy_from_slice(oid);
+    let size_bytes = take_receipt_bytes(body, &mut cursor, 8)?;
+    let size = u64::from_be_bytes(size_bytes.try_into().ok()?);
+    let object_path = receipt_string(body, &mut cursor)?;
+    let e_tag = receipt_option(body, &mut cursor)?;
+    let version = receipt_option(body, &mut cursor)?;
+    let verifier = receipt_string(body, &mut cursor)?;
+    if cursor != body.len() {
+        return None;
+    }
+    Some(VerificationReceipt {
+        oid: oid_bytes,
+        size,
+        object_path,
+        e_tag,
+        version,
+        verifier,
+    })
+}
+
+fn receipt_string(body: &[u8], cursor: &mut usize) -> Option<String> {
+    let value = receipt_field(body, cursor)?;
+    String::from_utf8(value.to_owned()).ok()
+}
+
+fn receipt_option(body: &[u8], cursor: &mut usize) -> Option<Option<String>> {
+    let present = *take_receipt_bytes(body, cursor, 1)?.first()?;
+    match present {
+        0 => Some(None),
+        1 => receipt_string(body, cursor).map(Some),
+        _ => None,
+    }
+}
+
+fn receipt_field<'a>(body: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+    let length = take_receipt_bytes(body, cursor, 4)?;
+    let length = u32::from_be_bytes(length.try_into().ok()?) as usize;
+    if length > MAX_RECEIPT_FIELD_SIZE {
+        return None;
+    }
+    take_receipt_bytes(body, cursor, length)
+}
+
+fn take_receipt_bytes<'a>(body: &'a [u8], cursor: &mut usize, length: usize) -> Option<&'a [u8]> {
+    let end = cursor.checked_add(length)?;
+    let value = body.get(*cursor..end)?;
+    *cursor = end;
+    Some(value)
 }
 
 fn object_matches(oid: &[u8; 32], bytes: &[u8]) -> bool {
@@ -486,6 +1002,7 @@ async fn stream_file_parts(
     file: &mut tokio::fs::File,
     upload: &mut dyn MultipartUpload,
     expected_oid: &[u8; 32],
+    expected_size: Option<u64>,
     file_path: &StdPath,
     remote_path: &Path,
 ) -> Result<()> {
@@ -570,7 +1087,9 @@ async fn stream_file_parts(
     // surfaces as an aborted multipart — never a live, hash-mismatched
     // object on S3.
     let actual = hasher.finalize();
-    if actual.as_slice() != expected_oid {
+    if expected_size.is_some_and(|expected| expected != total_bytes_read)
+        || actual.as_slice() != expected_oid
+    {
         tracing::warn!(
             path = %remote_path,
             bytes_read = total_bytes_read,
@@ -708,6 +1227,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verification_receipt_round_trip_is_versioned_and_exact() {
+        let oid = [0x42u8; 32];
+        let receipt = VerificationReceipt {
+            oid,
+            size: 17,
+            object_path: "repo/lfs/objects/42/42/object".to_owned(),
+            e_tag: Some("etag-value".to_owned()),
+            version: Some("version-value".to_owned()),
+            verifier: RECEIPT_VERIFIER.to_owned(),
+        };
+
+        let encoded = encode_receipt(&receipt).unwrap();
+        assert_eq!(&encoded[..RECEIPT_MAGIC.len()], RECEIPT_MAGIC);
+        assert_eq!(decode_receipt(&encoded).map(|_| ()), Some(()));
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_receipt(&trailing).is_none());
+    }
+
     #[tokio::test]
     async fn put_get_roundtrip() {
         let store = test_store();
@@ -790,6 +1330,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_stream_uses_primary_fallback_after_selected_remote_corruption() {
+        let selected = test_base_store();
+        let primary = test_base_store();
+        let primary_lfs = LfsObjectStore::new(primary.clone(), "repo");
+        let data = Bytes::from_static(b"primary stream integrity fallback");
+        let oid = sha256_oid(&data);
+        primary_lfs.put(&oid, data.clone()).await.unwrap();
+
+        let selected_lfs = LfsObjectStore::new(selected.clone(), "repo");
+        let selected_path = selected_lfs.object_path_for(&oid);
+        selected
+            .inner()
+            .put(&selected_path, Bytes::from(vec![b'x'; data.len()]).into())
+            .await
+            .unwrap();
+
+        let store = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+        let (_, range, mut stream) = store
+            .get_stream(&oid, data.len() as u64, None)
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            got.extend_from_slice(&chunk.unwrap());
+        }
+
+        assert_eq!(range, 0..data.len() as u64);
+        assert_eq!(got, data);
+    }
+
+    #[tokio::test]
     async fn exists_returns_false_for_missing() {
         let store = test_store();
         let oid = [0x42u8; 32];
@@ -816,6 +1387,86 @@ mod tests {
         store.put(&oid, bytes.clone()).await.unwrap();
         let got = store.verify(&oid).await.unwrap();
         assert_eq!(got, bytes);
+    }
+
+    #[tokio::test]
+    async fn verify_size_backfills_validator_receipt_for_external_object() {
+        let raw_store = test_base_store();
+        let store = LfsObjectStore::new(raw_store.clone(), "repo");
+        let data = Bytes::from_static(b"external object");
+        let oid = sha256_oid(&data);
+        let object_path = store.object_path_for(&oid);
+        raw_store
+            .inner()
+            .put(&object_path, data.clone().into())
+            .await
+            .unwrap();
+
+        store.verify_size(&oid, data.len() as u64).await.unwrap();
+
+        let receipt_path = receipt_path_at("repo", &oid);
+        assert!(raw_store.head(&receipt_path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn download_to_file_streams_and_verifies_object() {
+        let store = test_store();
+        let data = b"stream this object to disk";
+        let oid = sha256_oid(data);
+        store.put(&oid, Bytes::from_static(data)).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("nested").join("object");
+
+        store
+            .download_to_file(&oid, data.len() as u64, &destination)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn download_to_file_rejects_wrong_declared_size() {
+        let store = test_store();
+        let data = b"size matters";
+        let oid = sha256_oid(data);
+        store.put(&oid, Bytes::from_static(data)).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let error = store
+            .download_to_file(&oid, data.len() as u64 + 1, &dir.path().join("object"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LfsError::ObjectCorrupt { .. }));
+    }
+
+    #[tokio::test]
+    async fn download_to_file_falls_back_after_replica_corruption() {
+        let selected = test_base_store();
+        let primary = test_base_store();
+        let primary_lfs = LfsObjectStore::new(primary.clone(), "repo");
+        let data = Bytes::from_static(b"primary streaming fallback");
+        let oid = sha256_oid(&data);
+        primary_lfs.put(&oid, data.clone()).await.unwrap();
+
+        let selected_lfs = LfsObjectStore::new(selected.clone(), "repo");
+        let selected_path = selected_lfs.object_path_for(&oid);
+        selected
+            .inner()
+            .put(&selected_path, Bytes::from_static(b"corrupt").into())
+            .await
+            .unwrap();
+        let store = LfsObjectStore::new_with_primary_fallback(selected, "repo", primary, "repo");
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("object");
+
+        store
+            .download_to_file(&oid, data.len() as u64, &destination)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), data);
     }
 
     #[tokio::test]
@@ -978,6 +1629,24 @@ mod tests {
         // And the content is still what we originally wrote.
         let got = store.get(&oid).await.unwrap();
         assert_eq!(got.as_ref(), data);
+    }
+
+    #[tokio::test]
+    async fn put_stream_rejects_pointer_size_mismatch_on_existing_object() {
+        let store = test_store();
+        let data = b"size-bound existing object";
+        let oid = sha256_oid(data);
+        store.put(&oid, Bytes::from_static(data)).await.unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, data).unwrap();
+        tmp.flush().unwrap();
+
+        let error = store
+            .put_stream_with_size(&oid, Some(data.len() as u64 + 1), tmp.path())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LfsError::ObjectCorrupt { .. }));
     }
 
     #[tokio::test]

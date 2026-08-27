@@ -1,6 +1,6 @@
 //! Git LFS compatibility layer.
 //!
-//! Provides full Git LFS support for Crab's serverless architecture.
+//! Provides Crab-managed Git LFS support for Crab's serverless architecture.
 //! LFS objects are stored directly in cloud object storage alongside xorbs,
 //! with Crab acting as a standalone transfer agent rather than relying on
 //! an HTTP Batch API server.
@@ -20,10 +20,11 @@
 //! - **Object store** (`crab-lfs`): Stores LFS objects in S3/GCS/Azure
 //!   with SHA-256 integrity verification, idempotent puts, and
 //!   two-level fan-out layout.
-//! - **Locks** (`lock`): Advisory file locking compatible with the
-//!   Git LFS File Locking API, backed by CAS in object storage.
-//! - **Lifecycle** (`lifecycle`): Prune unreferenced objects, verify
-//!   integrity with fsck, and generate cloud lifecycle policies.
+//! - **Locks** (`lock`): Advisory file locking for Crab's CLI and pre-push
+//!   checks, backed by CAS in object storage; no HTTP locking endpoint is
+//!   exposed.
+//! - **Lifecycle** (`lifecycle`): Legacy lifecycle helpers; canonical CLI
+//!   prune/fsck paths own user-facing maintenance behavior.
 //!
 //! # LFS/XET Interoperability
 //!
@@ -35,6 +36,7 @@
 pub mod batch;
 pub(crate) mod cache;
 pub mod config;
+pub(crate) mod coordinator;
 pub mod extension;
 pub mod fetch_filter;
 pub mod lifecycle;

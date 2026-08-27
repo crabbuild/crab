@@ -35,7 +35,8 @@ Suppose `models/encoder.safetensors` is an 8 GB LFS file used by developers, CI,
 
 Crab gives that repository two paths:
 
-- **Bridge:** keep the LFS pointer and commit IDs; route LFS transfers through Crab.
+- **Bridge:** keep the LFS pointer and commit IDs; invoke Crab's local
+  standalone transfer agent, which accesses the Crab object store directly.
 - **Convert:** replace selected LFS pointers with native Crab pointers; rewrite affected commits.
 
 These are different migrations. Pick the boundary before picking the command.
@@ -82,7 +83,9 @@ crab lfs checkout
 crab lfs fsck
 ```
 
-`install` configures the transfer agent, LFS filters, and a pre-push gate. Git still commits the standard LFS pointer:
+`install` configures the local transfer agent, LFS filters, and a pre-push
+gate. Crab does not deploy an LFS gateway. Git still commits the standard LFS
+pointer:
 
 ```text
 version https://git-lfs.github.com/spec/v1

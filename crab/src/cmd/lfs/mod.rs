@@ -1000,8 +1000,8 @@ pub fn run_lfs_with_cancel(
                 dry_run: *dry_run,
             })?;
         }
-        LfsCmd::PrePush { .. } => {
-            push::run_lfs_pre_push()?;
+        LfsCmd::PrePush { remote, url } => {
+            push::run_lfs_pre_push(remote.as_deref(), url.as_deref())?;
         }
         LfsCmd::Checkout {
             paths,

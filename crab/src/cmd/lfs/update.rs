@@ -1,8 +1,7 @@
 //! `crab lfs update` — update git hooks and filter configuration for LFS.
 //!
-//! Re-applies the pre-push hook and transfer agent configuration to match
-//! the current crab binary version. Similar to `install` but designed
-//! for upgrades.
+//! Re-applies repository-scoped pre-push hook and transfer-agent
+//! configuration to match the current Crab binary version.
 
 use std::path::Path;
 use std::process::Command;
@@ -28,7 +27,8 @@ pub fn run_lfs_update_in(root: &Path, force: bool, manual: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Update git config entries.
+    // Update only this repository. A version update must not reintroduce the
+    // historical global standalone-agent interception.
     update_config(root, &bin)?;
 
     // Update the pre-push hook.
@@ -42,13 +42,15 @@ pub fn run_lfs_update_in(root: &Path, force: bool, manual: bool) -> Result<()> {
 fn print_manual_instructions(bin: &str) {
     println!("Run the following commands to update LFS configuration:");
     println!();
-    println!("  git config lfs.customtransfer.crab.path \"{bin}\"");
-    println!("  git config lfs.customtransfer.crab.args lfs-transfer-agent");
-    println!("  git config lfs.standalonetransferagent crab");
-    println!("  git config filter.lfs.clean \"{bin} lfs clean -- %f\"");
-    println!("  git config filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
-    println!("  git config filter.lfs.process \"{bin} lfs filter-process\"");
-    println!("  git config filter.lfs.required true");
+    println!("  git config --local lfs.customtransfer.crab.path \"{bin}\"");
+    println!("  git config --local lfs.customtransfer.crab.args lfs-transfer-agent");
+    println!("  git config --local lfs.customtransfer.crab.concurrent true");
+    println!("  git config --local lfs.customtransfer.crab.direction both");
+    println!("  git config --local lfs.standalonetransferagent crab");
+    println!("  git config --local filter.lfs.clean \"{bin} lfs clean -- %f\"");
+    println!("  git config --local filter.lfs.smudge \"{bin} lfs smudge -- %f\"");
+    println!("  git config --local filter.lfs.process \"{bin} lfs filter-process\"");
+    println!("  git config --local filter.lfs.required true");
     println!();
     println!("Replace pre-push in the directory printed by:");
     println!("  git rev-parse --git-path hooks");
@@ -66,6 +68,8 @@ fn update_config(root: &Path, bin: &str) -> Result<()> {
             "lfs.customtransfer.crab.args",
             "lfs-transfer-agent".to_owned(),
         ),
+        ("lfs.customtransfer.crab.concurrent", "true".to_owned()),
+        ("lfs.customtransfer.crab.direction", "both".to_owned()),
         ("lfs.standalonetransferagent", "crab".to_owned()),
         ("filter.lfs.clean", format!("{bin} lfs clean -- %f")),
         ("filter.lfs.smudge", format!("{bin} lfs smudge -- %f")),
@@ -75,7 +79,7 @@ fn update_config(root: &Path, bin: &str) -> Result<()> {
 
     for (key, value) in configs {
         let output = Command::new("git")
-            .args(["config", key, &value])
+            .args(["config", "--local", key, &value])
             .current_dir(root)
             .output()
             .map_err(|e| CrabError::Configuration {
@@ -146,6 +150,12 @@ mod tests {
 
         let args = get_config(dir.path(), "lfs.customtransfer.crab.args");
         assert_eq!(args.as_deref(), Some("lfs-transfer-agent"));
+
+        let concurrent = get_config(dir.path(), "lfs.customtransfer.crab.concurrent");
+        assert_eq!(concurrent.as_deref(), Some("true"));
+
+        let direction = get_config(dir.path(), "lfs.customtransfer.crab.direction");
+        assert_eq!(direction.as_deref(), Some("both"));
 
         let clean = get_config(dir.path(), "filter.lfs.clean");
         assert!(

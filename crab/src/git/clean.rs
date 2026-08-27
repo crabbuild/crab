@@ -23,7 +23,6 @@ use crate::storage::StoreLayout;
 use bytes::Bytes;
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 use crab_git::pointer_detect::{PointerKind, classify};
-use crab_lfs::LfsObjectStore;
 use crab_staging::StagingArea;
 use crab_staging::recipe::{ChunkingPolicyId, FileRecipe, RecipeRecorder};
 use crab_types::pointer::Pointer;
@@ -876,11 +875,12 @@ pub struct CleanSession {
     /// Compiled include/exclude filter for auto-hydrate. `Some` when
     /// `hydrate.auto = true` and patterns compiled successfully.
     hydrate_filter: Option<PatternFilter>,
-    /// LFS object store for staging content when cleaning LFS-tracked files.
-    /// `None` when LFS support is not configured for this session.
-    lfs_store: Option<Arc<LfsObjectStore>>,
     /// Git LFS fetch include/exclude filters used by smudge paths.
     lfs_fetch_filter: Option<crate::lfs::fetch_filter::FetchPathFilter>,
+    /// Preserve Git LFS's explicit skip-download-errors behavior for smudge.
+    lfs_skip_download_errors: bool,
+    /// Resolved local LFS storage for this filter-process session.
+    lfs_storage_dir: Option<PathBuf>,
     /// Repository root directory, used to locate `.gitattributes`.
     /// `None` when the repo root could not be determined.
     repo_root: Option<PathBuf>,
@@ -959,8 +959,9 @@ impl CleanSession {
             chunk_buffer_cap: DEFAULT_CHUNK_BUFFER_CAP,
             fastpath_min_size,
             hydrate_filter,
-            lfs_store: None,
             lfs_fetch_filter: None,
+            lfs_skip_download_errors: false,
+            lfs_storage_dir: None,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1002,8 +1003,9 @@ impl CleanSession {
             chunk_buffer_cap,
             fastpath_min_size,
             hydrate_filter,
-            lfs_store: None,
             lfs_fetch_filter: None,
+            lfs_skip_download_errors: false,
+            lfs_storage_dir: None,
             repo_root: None,
             lfs_patterns: Vec::new(),
             #[cfg(feature = "gix-pathmatch")]
@@ -1190,15 +1192,6 @@ impl CleanSession {
         }
     }
 
-    /// Set the LFS object store for this session.
-    ///
-    /// When set, files with `filter=lfs` in `.gitattributes` will be
-    /// cleaned via the LFS path (SHA-256 + LFS pointer) instead of the
-    /// default crab path (Blake3 + CDC).
-    pub fn set_lfs_store(&mut self, store: Arc<LfsObjectStore>) {
-        self.lfs_store = Some(store);
-    }
-
     /// Set the repository root directory for `.gitattributes` lookup.
     ///
     /// Walks the working tree **once** to collect both LFS patterns
@@ -1208,7 +1201,24 @@ impl CleanSession {
     /// previous two-call approach incurred.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         let (entries, root_mtime) = crate::git::filter_attr_cache::collect_all_entries(&root);
-        self.lfs_fetch_filter = match crate::lfs::config::LfsConfig::resolve(&root)
+        let lfs_config = crate::lfs::config::LfsConfig::resolve(&root);
+        self.lfs_skip_download_errors = lfs_config
+            .as_ref()
+            .is_ok_and(|config| config.skip_download_errors);
+        self.lfs_storage_dir = crate::git::worktree::WorktreeContext::resolve_from_path(&root)
+            .ok()
+            .map(|worktree| match lfs_config.as_ref() {
+                Ok(config) => config.storage_dir(&worktree.common_git_dir),
+                Err(error) => {
+                    tracing::debug!(
+                        root = %root.display(),
+                        error = %error,
+                        "invalid LFS config; using the default local cache path"
+                    );
+                    crate::lfs::config::LfsConfig::default().storage_dir(&worktree.common_git_dir)
+                }
+            });
+        self.lfs_fetch_filter = match lfs_config
             .and_then(|config| crate::lfs::fetch_filter::FetchPathFilter::from_config(&config))
         {
             Ok(filter) => filter,
@@ -1275,12 +1285,24 @@ impl CleanSession {
         self.repo_root.as_deref()
     }
 
+    /// Return the resolved local LFS storage directory for this session.
+    #[must_use]
+    pub fn lfs_storage_dir(&self) -> Option<&Path> {
+        self.lfs_storage_dir.as_deref()
+    }
+
     /// Check whether an LFS-tracked path should be smudged under LFS fetch filters.
     #[must_use]
     pub fn should_lfs_smudge(&self, pathname: &str) -> bool {
         self.lfs_fetch_filter
             .as_ref()
             .is_none_or(|filter| filter.allows(pathname))
+    }
+
+    /// Check whether an explicit Git LFS setting permits pointer fallback.
+    #[must_use]
+    pub fn should_skip_lfs_download_errors(&self) -> bool {
+        self.lfs_skip_download_errors
     }
 
     /// Flush pending hydrated-cache invalidations to disk. Called at
@@ -1566,7 +1588,7 @@ impl CleanSession {
         let oid = *staged.oid();
         let size = staged.size();
         let lfs_dir = self.lfs_dir()?;
-        let local_path = staged.install(&lfs_dir)?;
+        staged.install(&lfs_dir)?;
         let oid_hex = crab_git::lfs_pointer::hex_encode(&oid);
         tracing::debug!(
             oid = %oid_hex,
@@ -1574,11 +1596,6 @@ impl CleanSession {
             size,
             "lfs clean: object verified and installed locally"
         );
-
-        if let Some(store) = self.lfs_store.as_ref() {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(store.put_stream(&oid, &local_path))?;
-        }
 
         Ok(LfsPointer {
             oid,
@@ -1597,7 +1614,11 @@ impl CleanSession {
                 origin: "repository root is unavailable".to_owned(),
             })?;
         let ctx = crate::git::worktree::WorktreeContext::resolve_from_path(root)?;
-        Ok(ctx.common_git_dir.join("lfs"))
+        if let Some(path) = self.lfs_storage_dir() {
+            return Ok(path.to_path_buf());
+        }
+        let config = crate::lfs::config::LfsConfig::resolve(&ctx.current_worktree_root)?;
+        Ok(config.storage_dir(&ctx.common_git_dir))
     }
 
     /// Crab clean path: Blake3 hash + CDC chunk in a single pass, stage, return pointer.
@@ -2322,7 +2343,6 @@ fn frame_as_pktlines(content: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::core::context::AppContext;
-    use sha2::Digest;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3705,11 +3725,9 @@ size 45\n";
         assert_eq!(pointer.file_hash, expected_hash);
     }
 
-    #[tokio::test]
-    async fn lfs_clean_with_store_produces_lfs_pointer_and_stages_content() {
+    #[test]
+    fn lfs_clean_empty_file_produces_empty_pointer() {
         use crab_git::lfs_pointer::LfsPointer;
-        use crab_storage::{RetryPolicy, Store};
-        use object_store::memory::InMemory;
 
         let Some(dir) = git_repo_tempdir() else {
             eprintln!("SKIP: git unavailable or fixture setup failed");
@@ -3721,82 +3739,11 @@ size 45\n";
         )
         .unwrap();
 
-        // Set up an in-memory LFS object store.
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-        let store = Store::with_retry(inner, policy);
-        let lfs_store = Arc::new(LfsObjectStore::new(store, "repo"));
-
         let ctx = AppContext::default();
         let mut session = CleanSession::new(ctx);
         session.set_repo_root(dir.path().to_path_buf());
-        session.set_lfs_store(Arc::clone(&lfs_store));
 
-        let content = b"hello lfs world";
-        let expected_oid: [u8; 32] = {
-            let hash = sha2::Sha256::digest(content);
-            let mut oid = [0u8; 32];
-            oid.copy_from_slice(&hash);
-            oid
-        };
-
-        // Run clean_file inside spawn_blocking since it uses block_on internally.
-        let pointer_bytes = tokio::task::spawn_blocking(move || {
-            session.clean_file("model.bin", content.to_vec()).unwrap()
-        })
-        .await
-        .unwrap();
-
-        // Verify the pointer is a valid LFS pointer.
-        let pointer = LfsPointer::parse(&pointer_bytes).unwrap();
-        assert_eq!(pointer.oid, expected_oid);
-        assert_eq!(pointer.size, content.len() as u64);
-
-        // Verify the content was staged in the LFS object store.
-        let stored = lfs_store.get(&expected_oid).await.unwrap();
-        assert_eq!(stored.as_ref(), content);
-    }
-
-    #[tokio::test]
-    async fn lfs_clean_empty_file_produces_empty_pointer() {
-        use crab_git::lfs_pointer::LfsPointer;
-        use crab_storage::{RetryPolicy, Store};
-        use object_store::memory::InMemory;
-
-        let Some(dir) = git_repo_tempdir() else {
-            eprintln!("SKIP: git unavailable or fixture setup failed");
-            return;
-        };
-        std::fs::write(
-            dir.path().join(".gitattributes"),
-            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
-        )
-        .unwrap();
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-        let store = Store::with_retry(inner, policy);
-        let lfs_store = Arc::new(LfsObjectStore::new(store, "repo"));
-
-        let ctx = AppContext::default();
-        let mut session = CleanSession::new(ctx);
-        session.set_repo_root(dir.path().to_path_buf());
-        session.set_lfs_store(Arc::clone(&lfs_store));
-
-        // Run clean_file inside spawn_blocking since it uses block_on internally.
-        let pointer_bytes = tokio::task::spawn_blocking(move || {
-            session.clean_file("empty.bin", Vec::new()).unwrap()
-        })
-        .await
-        .unwrap();
+        let pointer_bytes = session.clean_file("empty.bin", Vec::new()).unwrap();
 
         // Empty content produces a zero-size LFS pointer (serialized as empty bytes).
         let pointer = LfsPointer::parse(&pointer_bytes).unwrap();

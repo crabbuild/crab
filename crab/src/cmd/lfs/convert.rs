@@ -363,8 +363,7 @@ fn resolve_lfs_content(repo_root: &Path, rel_path: &str, pointer: &LfsPointer) -
         }
     }
 
-    let git_dir = discover_git_dir(repo_root)?;
-    let lfs_dir = git_dir.join("lfs");
+    let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(repo_root)?;
     match crate::lfs::cache::read_pointer(&lfs_dir, pointer) {
         Ok(Some(content)) => return Ok(content),
         Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => {}

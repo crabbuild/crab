@@ -2207,11 +2207,14 @@ dependencies = [
 name = "crab-lfs"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "crab-git",
  "crab-storage",
  "futures-util",
  "object_store",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",

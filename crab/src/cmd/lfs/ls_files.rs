@@ -428,11 +428,10 @@ fn is_downloaded(oid_hex: &str, repo_root: &Path) -> bool {
     if oid_hex.len() < 4 {
         return false;
     }
-    let Ok(git_dir) = crate::git::discover::discover_common_git_dir_from(repo_root) else {
+    let Ok(lfs_dir) = crate::lfs::config::LfsConfig::resolve_storage_dir(repo_root) else {
         return false;
     };
-    let path = git_dir
-        .join("lfs")
+    let path = lfs_dir
         .join("objects")
         .join(&oid_hex[..2])
         .join(&oid_hex[2..4])

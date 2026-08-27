@@ -1,7 +1,7 @@
 # crab — Git LFS Compatibility Deep Dive
 
-**How crab implements full Git LFS feature parity without a server,
-storing LFS objects directly in cloud object storage alongside xorbs.**
+**How crab manages Git LFS pointers without a centralized server, storing
+objects directly in cloud object storage alongside xorbs.**
 
 -----
 
@@ -87,11 +87,25 @@ storing LFS objects directly in cloud object storage alongside xorbs.**
 
 ## 1. Overview
 
-Crab provides full Git LFS compatibility without requiring a centralized
-LFS server. The standard `git-lfs` client uses an HTTP Batch API to
-negotiate upload/download URLs with a server. Crab eliminates this
-server entirely — LFS objects are stored directly in cloud object storage
-(S3/GCS/Azure) alongside the existing xorb and shard data.
+Crab provides a Crab-managed LFS implementation backed directly by cloud
+object storage. The standard `git-lfs` client normally uses an HTTP Batch API,
+but Crab's supported interoperability path is the standalone custom transfer
+agent: Git LFS invokes the Crab CLI over stdin/stdout and Crab accesses the
+configured object store directly. Crab does not expose or require a deployable
+LFS gateway.
+
+The supported profiles are:
+
+| Profile | Contract | Release status |
+|---------|----------|----------------|
+| `crab-native` | Crab filters, porcelain, and direct object storage | Supported |
+| `git-lfs-standalone-direct` | Git LFS custom transfer agent with direct Crab storage access | Supported for qualified providers |
+| `git-lfs-standalone-managed` | Custom agent with short-lived repository grants | Planned; not shipped |
+| `git-lfs-http` | Standard Batch/basic/File Locking HTTPS API | Not supported; use an external LFS server for this profile |
+
+“Compatible” below refers to the named profile. The CLI sections describe the
+standalone-direct profile. Managed, HTTP, SSH, and TUS integrations require
+separate qualification; standard HTTP requires an external LFS server.
 
 Crab operates in two LFS modes simultaneously:
 
@@ -131,13 +145,14 @@ Crab:
 │  Git │────►│  crab                              │────► Object Storage
 │      │     │  (remote helper + filter + LFS agent)│     (direct PUT/GET)
 └──────┘     └──────────────────────────────────────┘
-              No server. No Batch API.
+              No Crab service. No Batch API.
               Direct S3/GCS/Azure access.
 ```
 
 This means:
 
-- **No LFS server to deploy or maintain.** The object store IS the server.
+- **No Crab LFS service to deploy or maintain.** The object store is accessed
+  directly by the local Crab binary.
 - **No signed URL negotiation.** Crab has direct cloud credentials.
 - **No HTTP round-trips for batch resolution.** Existence checks are
   HEAD requests directly to the object store.
@@ -218,7 +233,7 @@ Local LFS objects mirror the remote layout under `.git/lfs/`:
 │   │       └── abcdef0123456789...  (raw file content)
 │   └── ...
 └── tmp/
-    └── ...  (partial transfer state for resume)
+    └── ...  (temporary files handed to Git LFS after download)
 ```
 
 ### Integrity Verification
@@ -230,7 +245,7 @@ Local LFS objects mirror the remote layout under `.git/lfs/`:
 - **Idempotent put:** If an object with the same OID already exists,
   the upload is skipped and reported as success.
 
-**Source:** `crab/src/lfs/object_store.rs`
+**Source:** `crates/crab-lfs/src/object_store.rs`
 
 -----
 
@@ -257,7 +272,7 @@ Working Tree File (e.g. weights.bin, 500 MB)
     ├── filter=lfs path:
     │   ┌─────────────────────────────────────────────────┐
     │   │  SHA-256 hash content (in spawn_blocking)       │
-    │   │  Stage raw bytes → LfsObjectStore               │
+    │   │  Stage raw bytes → local LFS cache              │
     │   │  Emit LFS pointer (~120 bytes) → Git ODB        │
     │   └─────────────────────────────────────────────────┘
     │
@@ -336,16 +351,25 @@ JSON lines on stdin/stdout.
 
 ### Concurrency
 
-The transfer agent processes multiple upload/download events concurrently
-using tokio tasks, bounded by a semaphore sized to `concurrenttransfers`
-from the init event (default 8).
+The installed transfer agent sets `lfs.customtransfer.crab.concurrent=true`,
+so Git LFS distributes object transfers across up to
+`lfs.concurrenttransfers` Crab processes. Each process handles its protocol
+requests serially, as required by the custom-transfer contract, while each
+object uses bounded multipart part concurrency. A configured transfer
+bandwidth cap and per-process byte budget are enforced by the coordinator.
+Setting the custom-agent option to `false` selects one Crab process; standard
+Git LFS still sends that process one object at a time, so this mode is useful
+only when a future transfer implementation owns parallelism inside one
+request.
 
 ### Resume for Large Objects
 
-Objects larger than 64 MB use multipart upload. Partial transfer state
-is persisted in `.git/lfs/tmp/` via the existing `MultipartRegistry`
-SQLite database, enabling resume across process restarts. Downloads
-use range requests to resume from the last received byte.
+Uploads stream through 8 MiB multipart parts with at most four parts in flight,
+and downloads stream into a unique temporary file. Retries are bounded and
+restart the current object transfer; the standalone agent does not persist
+multipart upload IDs or download offsets across process restarts. This keeps
+the direct profile provider-neutral and bounded, while cross-process resume
+remains a production follow-up rather than an implied compatibility guarantee.
 
 **Source:** `crab/src/lfs/transfer_agent.rs`
 
@@ -419,7 +443,8 @@ Path:    {prefix}/lfs/locks/{blake3-hash-of-filepath}
 Payload: { "path": "models/large.bin",
            "owner": "user@example.com",
            "locked_at": 1719849600,
-           "id": "a1b2c3d4-..." }
+           "id": "a1b2c3d4-...",
+           "released_at": null }
 ```
 
 The file path is hashed with Blake3 to produce a fixed-length key that
@@ -442,12 +467,12 @@ crab lfs lock models/large.bin
 ... editing ...
 
 crab lfs unlock models/large.bin
-  DELETE locks/{hash} (CAS: verify owner)
-  ◄── 200 OK ──────────────────►  lock removed
+  UPDATE locks/{hash} (CAS: verify owner and mark tombstone)
+  ◄── 200 OK ──────────────────►  lock released
 
                                                   crab lfs lock models/large.bin
                                   ◄── 200 OK ──────────────────────►
-                                                  lock acquired
+                                                  lock acquired; stale unlocks cannot remove it
 ```
 
 ### Pre-Push Lock Conflict Check
@@ -457,6 +482,12 @@ pushed are locked by another user. If conflicts are found, the push
 warns the user and requires `--force` to proceed.
 
 **Source:** `crab/src/lfs/lock.rs`
+
+These are Crab CLI locks, not the Git LFS File Locking HTTP API. The
+standalone custom-transfer profile handles object upload and download only;
+stock `git lfs lock`, `git lfs unlock`, and `git lfs locks` require an
+external LFS server. Direct repositories should use the corresponding
+`crab lfs` commands.
 
 -----
 
@@ -544,7 +575,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `crab lfs install [--local] [--skip-smudge]` | Configure git to use crab as LFS transfer agent |
 | `crab lfs uninstall` | Remove crab LFS configuration |
 | `crab lfs update [--force] [--manual]` | Update hooks and config to current crab version |
-| `crab lfs env` | Display LFS endpoint, transfer agent, storage path |
+| `crab lfs env` | Display direct-storage remote, transfer agent, storage path |
 | `crab lfs version` | Display crab version and LFS protocol version |
 
 ### Tracking
@@ -623,6 +654,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.fetchexclude` | (none) | Glob pattern for paths to exclude from fetch |
 | `lfs.transfer.maxretries` | 8 | Max retries per object on transient failure |
 | `lfs.transfer.maxretrydelay` | 10s | Max delay between retries |
+| `lfs.transfer.maxbandwidth` | 0 | Aggregate transfer limit in bytes/second; 0 is unlimited |
 | `lfs.skipdownloaderrors` | false | Continue on download errors instead of aborting |
 | `lfs.storage` | `.git/lfs` | Override local LFS storage; relative paths resolve inside the common Git directory |
 | `lfs.lfsdir` | `.git/lfs` | Legacy Crab alias for `lfs.storage` |
@@ -634,14 +666,14 @@ All LFS commands live under `crab lfs <subcommand>`:
 ```
 Highest priority:
   1. Environment variables (GIT_LFS_*)
-  2. .lfsconfig (repository root)
-  3. .gitconfig (local → global → system)
+  2. Git config (local → global → system, including Git-managed includes)
+  3. .lfsconfig (repository root)
   4. Defaults
 Lowest priority
 ```
 
-When a key is set in both `.lfsconfig` and `.gitconfig`, the `.lfsconfig`
-value wins, except tracked `.lfsconfig` files cannot set `lfs.storage` or
+When a key is set in both `.lfsconfig` and Git config, Git config wins,
+except tracked `.lfsconfig` files cannot set `lfs.storage` or
 `lfs.lfsdir`. Repository-controlled configuration must not redirect local
 writes or prune deletion outside the repository's Git directory.
 
@@ -655,6 +687,8 @@ writes or prune deletion outside the repository's Git directory.
 [lfs "customtransfer.crab"]
     path = /path/to/crab
     args = lfs-transfer-agent
+    concurrent = true
+    direction = both
 [lfs]
     standalonetransferagent = crab
 ```
@@ -684,6 +718,9 @@ s3://{bucket}/{prefix}/
 │   │   │       └── abcdef...      ← raw file content, keyed by SHA-256
 │   │   └── ...
 │   │
+│   ├── receipts/                   ← validator-bound verification receipts
+│   │   └── {oid[:2]}/{oid[2:4]}/{oid}.bin
+│   │
 │   └── locks/                      ← advisory file locks
 │       └── {blake3-hash-of-path}   ← JSON lock record
 │
@@ -704,7 +741,8 @@ s3://{bucket}/{prefix}/
 | Object | Mutability | Update Mechanism |
 |--------|------------|------------------|
 | `lfs/objects/*` | Immutable | PUT once, never updated |
-| `lfs/locks/*` | Mutable | CAS create/delete |
+| `lfs/receipts/*` | Rebuildable | Best-effort validator-bound metadata |
+| `lfs/locks/*` | Mutable | CAS create/tombstone |
 | `xorbs/*` | Immutable | PUT once, never updated |
 | `shards/*` | Immutable | PUT once, never updated |
 | `refs/*` | Mutable | CAS (etag-based) |
@@ -747,15 +785,15 @@ before Crab deletes the local copy; missing remote objects are kept locally.
 
 | Aspect | Official git-lfs | crab LFS |
 |--------|-----------------|------------|
-| **Server required** | Yes (LFS server) | No (direct object storage) |
+| **Server required** | Yes for the standard HTTP profile | No for native/direct |
 | **Transport** | HTTP Batch API | Direct S3/GCS/Azure PUT/GET |
-| **Transfer protocol** | HTTP + custom transfer agents | Standalone transfer agent (JSON lines) |
+| **Transfer protocol** | HTTP + custom transfer agents | Standalone JSON lines |
 | **Pointer format** | SHA-256 LFS pointer | SHA-256 LFS pointer (compatible) |
 | **Hashing** | SHA-256 only | SHA-256 (LFS) + Blake3 (crab native) |
 | **Dedup** | None (file-level) | CDC chunking for crab-tracked files |
 | **Locking** | Server-side lock API | CAS on object storage |
-| **Concurrency** | Server-controlled | Client-side semaphore (default 8) |
-| **Resume** | TUS protocol (server-dependent) | Multipart upload + range-request download |
+| **Concurrency** | Server/client negotiated | Git LFS process fan-out; Crab bounds each process to one object |
+| **Resume** | TUS protocol (server-dependent) | Bounded retries; object restart after agent/process failure |
 | **Mixed formats** | LFS only | LFS + crab pointers in same repo |
 | **Migration** | import/export/info | import/export/info + crab↔LFS conversion |
 
@@ -787,6 +825,8 @@ $ crab lfs install
   → sets filter.lfs.required = true
   → sets lfs.customtransfer.crab.path in git config
   → sets lfs.customtransfer.crab.args = lfs-transfer-agent
+  → sets lfs.customtransfer.crab.concurrent = true
+  → sets lfs.customtransfer.crab.direction = both
   → sets lfs.standalonetransferagent = crab
   → installs pre-push hook
 

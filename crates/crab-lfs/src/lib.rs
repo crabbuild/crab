@@ -5,6 +5,8 @@
 //! output, transfer-agent protocol handling, and lifecycle commands stay in
 //! higher crates.
 
+pub mod lock;
 pub mod object_store;
 
-pub use object_store::{LfsError, LfsObjectStore, Result};
+pub use lock::{LfsLockError, LfsLockManager, LockRecord, LockResult};
+pub use object_store::{LfsByteStream, LfsError, LfsObjectStore, Result};

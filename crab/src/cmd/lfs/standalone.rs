@@ -10,18 +10,19 @@ use std::path::{Path, PathBuf};
 use crate::core::error::{CrabError, Result};
 use crate::lfs::config::LfsConfig;
 use crate::lfs::extension::{clean_staged_with_extensions, configured_extensions_sorted};
+use crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE;
 use crab_git::lfs_pointer::hex_encode;
 use crab_git::pointer_detect::{PointerKind, classify};
 
 /// Run `crab lfs clean`: read file content from stdin, produce an LFS
 /// pointer on stdout.
 ///
-/// The original content is staged in the local LFS cache and uploaded
-/// to the remote store if a remote is configured.
+/// The original content is staged in the local LFS cache. Remote publication
+/// is owned by the pre-push path, matching Git LFS's clean-filter contract.
 pub fn run_lfs_clean(path: Option<&str>) -> Result<()> {
     let file_name = path.unwrap_or("<unknown file>");
     let extensions = configured_extensions_sorted()?;
-    let lfs_dir = discover_git_dir()?.join("lfs");
+    let lfs_dir = resolve_lfs_storage_dir()?;
     let mut writer = crate::lfs::cache::ObjectWriter::new(&lfs_dir)?;
     io::copy(&mut io::stdin().lock(), &mut writer).map_err(CrabError::Io)?;
     let staged = writer.finish()?;
@@ -38,25 +39,8 @@ pub fn run_lfs_clean(path: Option<&str>) -> Result<()> {
 
     let oid = *staged.oid();
     let size = staged.size();
-    let local_path = staged.install(&lfs_dir)?;
+    staged.install(&lfs_dir)?;
     let oid_hex = hex_encode(&oid);
-
-    // Upload to remote store if configured.
-    if let Ok(ctx) = super::store_setup::resolve_lfs_remote_sync() {
-        let upload_path = local_path.clone();
-        if let Err(e) = super::block_on_runtime(async move {
-            ctx.store
-                .put_stream(&oid, &upload_path)
-                .await
-                .map_err(CrabError::from)
-        }) {
-            tracing::debug!(
-                oid = %oid_hex,
-                error = %e,
-                "clean: failed to upload to remote (will be pushed later)",
-            );
-        }
-    }
 
     let pointer = crab_git::lfs_pointer::LfsPointer {
         oid,
@@ -77,61 +61,84 @@ fn is_lfs_pointer(content: &[u8]) -> bool {
 ///
 /// With `--skip`, passes the pointer through unchanged (lazy mode).
 pub fn run_lfs_smudge(path: Option<&str>, skip: bool) -> Result<()> {
-    let mut input = Vec::new();
-    io::stdin()
-        .read_to_end(&mut input)
-        .map_err(|e| CrabError::Configuration {
-            key: "stdin".to_owned(),
-            origin: format!("failed to read stdin: {e}"),
-        })?;
-
+    let mut input = io::stdin().lock();
     if skip || git_lfs_skip_smudge() {
-        io::stdout()
-            .write_all(&input)
-            .map_err(|e| CrabError::Configuration {
-                key: "stdout".to_owned(),
-                origin: format!("failed to write to stdout: {e}"),
-            })?;
+        io::copy(&mut input, &mut io::stdout().lock()).map_err(CrabError::Io)?;
+        return Ok(());
+    }
+    let skip_download_errors =
+        resolve_smudge_lfs_config().is_ok_and(|config| config.skip_download_errors);
+
+    let mut prefix = Vec::with_capacity(MAX_LFS_POINTER_SIZE + 1);
+    input
+        .by_ref()
+        .take((MAX_LFS_POINTER_SIZE + 1) as u64)
+        .read_to_end(&mut prefix)
+        .map_err(CrabError::Io)?;
+
+    if prefix.len() > MAX_LFS_POINTER_SIZE {
+        write_smudge_passthrough(&prefix, &mut input)?;
         return Ok(());
     }
 
-    match classify(&input) {
+    match classify(&prefix) {
         PointerKind::Lfs(pointer) => {
             if !smudge_path_allowed(path)? {
-                write_stdout(&input)?;
+                write_smudge_passthrough(&prefix, &mut input)?;
                 return Ok(());
             }
 
-            let lfs_dir = discover_git_dir()?.join("lfs");
+            let lfs_dir = resolve_lfs_storage_dir()?;
 
             // A corrupt cache entry is a miss, never materializable content.
-            match crate::lfs::cache::read_pointer(&lfs_dir, &pointer) {
-                Ok(Some(content)) => {
-                    let content = crate::lfs::extension::smudge_content(
-                        &pointer,
-                        content,
-                        path_for_ext(path),
-                    )?;
-                    write_stdout(&content)?;
-                    return Ok(());
-                }
-                Ok(None) | Err(CrabError::LfsObjectCorrupt { .. }) => {}
-                Err(error) => return Err(error),
+            if crate::lfs::cache::is_valid(&lfs_dir, &pointer.oid, pointer.size)? {
+                let local_path = crate::lfs::cache::object_path(&lfs_dir, &pointer.oid);
+                write_smudged_file(&pointer, &local_path, path_for_ext(path))?;
+                return Ok(());
             }
 
-            let content = resolve_from_remote(&pointer.oid)?;
-            crate::lfs::cache::verify_pointer(&pointer, &content)?;
-            crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content)?;
-            let content =
-                crate::lfs::extension::smudge_content(&pointer, content, path_for_ext(path))?;
-            write_stdout(&content)?;
+            let content_path = match resolve_from_remote(&pointer, &lfs_dir) {
+                Ok(path) => path,
+                Err(error) if skip_download_errors => {
+                    tracing::warn!(
+                        oid = %hex_encode(&pointer.oid),
+                        error = %error,
+                        "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
+                    );
+                    write_smudge_passthrough(&prefix, &mut input)?;
+                    return Ok(());
+                }
+                Err(CrabError::LfsObjectCorrupt { .. }) => {
+                    return Err(CrabError::LfsObjectCorrupt {
+                        oid: hex_encode(&pointer.oid),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            write_smudged_file(&pointer, &content_path, path_for_ext(path))?;
         }
         PointerKind::Crab(_) | PointerKind::NotAPointer => {
-            write_stdout(&input)?;
+            write_smudge_passthrough(&prefix, &mut input)?;
         }
     }
 
     Ok(())
+}
+
+fn write_smudged_file(
+    pointer: &crab_git::lfs_pointer::LfsPointer,
+    path: &Path,
+    file_name: &str,
+) -> Result<()> {
+    if pointer.extensions.is_empty() {
+        let mut file = std::fs::File::open(path).map_err(CrabError::Io)?;
+        io::copy(&mut file, &mut io::stdout().lock()).map_err(CrabError::Io)?;
+        return Ok(());
+    }
+
+    let content = std::fs::read(path).map_err(CrabError::Io)?;
+    let content = crate::lfs::extension::smudge_content(pointer, content, file_name)?;
+    write_stdout(&content)
 }
 
 fn path_for_ext(path: Option<&str>) -> &str {
@@ -160,13 +167,21 @@ fn git_lfs_skip_smudge() -> bool {
         .is_some_and(|value| !value.is_empty() && value != "0" && value != "false")
 }
 
-/// Download from remote LFS store.
-fn resolve_from_remote(oid: &[u8; 32]) -> Result<Vec<u8>> {
+/// Download and atomically install an LFS object without retaining its body.
+fn resolve_from_remote(
+    pointer: &crab_git::lfs_pointer::LfsPointer,
+    lfs_dir: &Path,
+) -> Result<PathBuf> {
     let ctx = super::store_setup::resolve_lfs_remote_for_operation_sync("smudge")?;
+    let temp = crate::lfs::cache::new_temp_path(lfs_dir)?;
+    let temp_path = temp.to_path_buf();
     super::block_on_runtime(async {
-        let content = ctx.store.verify(oid).await?;
-        Ok(content.to_vec())
-    })
+        ctx.store
+            .download_to_file(&pointer.oid, pointer.size, &temp_path)
+            .await
+            .map_err(CrabError::from)
+    })?;
+    crate::lfs::cache::install_verified_temp_path(lfs_dir, &pointer.oid, pointer.size, temp)
 }
 
 fn write_stdout(data: &[u8]) -> Result<()> {
@@ -178,8 +193,16 @@ fn write_stdout(data: &[u8]) -> Result<()> {
         })
 }
 
-fn discover_git_dir() -> Result<PathBuf> {
-    crate::git::discover::discover_common_git_dir()
+fn write_smudge_passthrough<R: Read>(prefix: &[u8], input: &mut R) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(prefix).map_err(CrabError::Io)?;
+    io::copy(input, &mut stdout).map_err(CrabError::Io)?;
+    Ok(())
+}
+
+fn resolve_lfs_storage_dir() -> Result<PathBuf> {
+    let repo_root = discover_repo_root()?;
+    LfsConfig::resolve_storage_dir(&repo_root)
 }
 
 fn discover_repo_root() -> Result<PathBuf> {

@@ -19,6 +19,8 @@ use tracing::debug;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
+const MAX_LOCK_READ_CONCURRENCY: usize = 32;
+
 /// JSON payload stored in the lock file in object storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockRecord {
@@ -34,13 +36,18 @@ pub struct LockRecord {
     /// `None` means the lock never expires.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// Unix timestamp when this record was released through a CAS transition.
+    /// Released records are tombstones and are not returned as active locks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<u64>,
 }
 
 /// Advisory file lock manager backed by object storage.
 ///
 /// Lock records live at `{prefix}/{namespace}/{blake3-hash-of-path}`.
 /// Creation uses `PutMode::Create` (via [`Store::put`]) for atomicity;
-/// deletion reads the record to verify ownership before removing it.
+/// release reads the record and uses an etag-checked CAS tombstone so a
+/// stale unlock cannot delete a newer lock.
 ///
 /// Use [`LockManager::native`] for `crab lock/unlock` (stores at
 /// `locks/files/`) or [`LockManager::lfs`] for LFS compatibility
@@ -123,6 +130,7 @@ impl LockManager {
             locked_at: now,
             id: generate_lock_id(path, owner),
             expires_at,
+            released_at: None,
         };
 
         let body = serde_json::to_vec(&record)
@@ -140,7 +148,7 @@ impl LockManager {
                     .map_err(|e| CrabError::Internal(format!("lock deserialize: {e}")))?;
 
                 // If the existing lock is expired, replace it.
-                if Self::is_expired(&existing) {
+                if Self::is_expired(&existing) || Self::is_released(&existing) {
                     debug!(path = %path, "replacing expired lock held by {}", existing.owner);
                     let new_body = serde_json::to_vec(&record)
                         .map_err(|e| CrabError::Internal(format!("lock serialize: {e}")))?;
@@ -174,31 +182,57 @@ impl LockManager {
     /// a different owner. Returns [`CrabError::NotFound`] if no lock
     /// exists for the path.
     pub async fn unlock(&self, path: &str, owner: &str) -> Result<()> {
+        self.unlock_with_id(path, owner, None).await
+    }
+
+    /// Releases a lock through a holder-checked compare-and-swap transition.
+    ///
+    /// When `lock_id` is supplied it must match the current record as well as
+    /// the owner. The record becomes a tombstone instead of being deleted, so
+    /// a stale unlock cannot erase a newer lock that reused the same key.
+    pub async fn unlock_with_id(
+        &self,
+        path: &str,
+        owner: &str,
+        lock_id: Option<&str>,
+    ) -> Result<()> {
         let key = self.lock_path(path);
         let obj_path = Path::from(key.as_str());
 
-        // Note: there's a narrow TOCTOU window between the ownership check
-        // and the delete. This is acceptable for advisory locks — the worst
-        // case is that a concurrent force_unlock + re-lock by another owner
-        // could have the new lock deleted. CAS-delete would eliminate this
-        // but isn't available on all object store backends.
-        let (body, _etag) = self.store.get_with_etag(&obj_path).await?;
+        let (body, etag) = self.store.get_with_etag(&obj_path).await?;
         let existing: LockRecord = serde_json::from_slice(&body)
             .map_err(|e| CrabError::Internal(format!("lock deserialize: {e}")))?;
 
+        if Self::is_released(&existing) {
+            return Err(CrabError::NotFound {
+                path: format!("LFS lock for {path}"),
+            });
+        }
         if existing.owner != owner {
             return Err(CrabError::LfsLockConflict {
                 path: path.to_string(),
                 owner: existing.owner,
             });
         }
+        if lock_id.is_some_and(|lock_id| lock_id != existing.id) {
+            return Err(CrabError::Configuration {
+                key: "lfs unlock".to_owned(),
+                origin: format!("lock ID does not match the current lock for {path}"),
+            });
+        }
 
-        self.store.delete(&obj_path).await?;
+        let mut released = existing;
+        released.released_at = Some(unix_now());
+        let body = serde_json::to_vec(&released)
+            .map_err(|e| CrabError::Internal(format!("lock serialize: {e}")))?;
+        self.store
+            .update(&obj_path, Bytes::from(body), etag)
+            .await?;
         debug!(path = %path, owner = %owner, "LFS lock released");
         Ok(())
     }
 
-    /// Removes the advisory lock for `path` regardless of owner.
+    /// Releases the advisory lock for `path` regardless of owner.
     ///
     /// # Errors
     ///
@@ -208,17 +242,27 @@ impl LockManager {
         let key = self.lock_path(path);
         let obj_path = Path::from(key.as_str());
 
-        match self.store.delete(&obj_path).await {
-            Ok(()) => {
-                debug!(path = %path, "LFS lock force-released");
-                Ok(())
-            }
+        let (body, etag) = match self.store.get_with_etag(&obj_path).await {
+            Ok(result) => result,
             Err(CrabError::NotFound { .. }) => {
                 debug!(path = %path, "LFS lock already gone on force-unlock");
-                Ok(())
+                return Ok(());
             }
-            Err(e) => Err(e),
+            Err(error) => return Err(error),
+        };
+        let mut released: LockRecord = serde_json::from_slice(&body)
+            .map_err(|e| CrabError::Internal(format!("lock deserialize: {e}")))?;
+        if Self::is_released(&released) {
+            return Ok(());
         }
+        released.released_at = Some(unix_now());
+        let body = serde_json::to_vec(&released)
+            .map_err(|e| CrabError::Internal(format!("lock serialize: {e}")))?;
+        self.store
+            .update(&obj_path, Bytes::from(body), etag)
+            .await?;
+        debug!(path = %path, "LFS lock force-released");
+        Ok(())
     }
 
     /// Lists all active (non-expired) lock records under this prefix.
@@ -257,19 +301,26 @@ impl LockManager {
             })?;
 
         let mut records = Vec::new();
-        for meta in objects {
-            match self.store.get_with_etag(&meta.location).await {
-                Ok((body, _)) => {
-                    if let Ok(record) = serde_json::from_slice::<LockRecord>(&body) {
-                        records.push(record);
-                    } else {
-                        debug!(key = %meta.location, "lock record JSON deserialization failed");
-                    }
-                }
-                Err(CrabError::NotFound { .. }) => {
-                    // Disappeared between list and get — skip.
-                }
-                Err(e) => return Err(e),
+        let mut reads = futures_util::stream::iter(objects.into_iter().map(|meta| async move {
+            let key = meta.location.to_string();
+            let result: Result<Option<LockRecord>> =
+                match self.store.get_with_etag(&meta.location).await {
+                    Ok((body, _)) => match serde_json::from_slice::<LockRecord>(&body) {
+                        Ok(record) if !Self::is_released(&record) => Ok(Some(record)),
+                        Ok(_) | Err(_) => {
+                            debug!(key = %key, "lock record JSON deserialization failed");
+                            Ok(None)
+                        }
+                    },
+                    Err(CrabError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(record) = result? {
+                records.push(record);
             }
         }
 
@@ -300,17 +351,22 @@ impl LockManager {
             })?;
 
         let mut invalid = Vec::new();
-        for meta in objects {
-            match self.store.get_with_etag(&meta.location).await {
-                Ok((body, _)) => {
-                    if serde_json::from_slice::<LockRecord>(&body).is_err() {
-                        invalid.push(meta.location.to_string());
-                    }
-                }
-                Err(CrabError::NotFound { .. }) => {
-                    // Disappeared — skip.
-                }
-                Err(e) => return Err(e),
+        let mut reads = futures_util::stream::iter(objects.into_iter().map(|meta| async move {
+            let key = meta.location.to_string();
+            let result: Result<Option<String>> =
+                match self.store.get_with_etag(&meta.location).await {
+                    Ok((body, _)) => Ok(serde_json::from_slice::<LockRecord>(&body)
+                        .is_err()
+                        .then_some(key)),
+                    Err(CrabError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(key) = result? {
+                invalid.push(key);
             }
         }
 
@@ -325,6 +381,10 @@ impl LockManager {
         }
     }
 
+    fn is_released(record: &LockRecord) -> bool {
+        record.released_at.is_some()
+    }
+
     /// Returns locks held by other owners on the given paths.
     ///
     /// For each path, checks whether a lock exists and is owned by
@@ -336,27 +396,33 @@ impl LockManager {
     /// Propagates storage errors.
     pub async fn check_conflicts(&self, paths: &[String], owner: &str) -> Result<Vec<LockRecord>> {
         let mut conflicts = Vec::new();
-
-        for path in paths {
-            let key = self.lock_path(path);
+        let mut reads = futures_util::stream::iter(paths.iter().cloned().map(|path| async move {
+            let key = self.lock_path(&path);
             let obj_path = Path::from(key.as_str());
 
-            match self.store.get_with_etag(&obj_path).await {
+            let result: Result<Option<LockRecord>> = match self.store.get_with_etag(&obj_path).await
+            {
                 Ok((body, _)) => {
                     let record = serde_json::from_slice::<LockRecord>(&body).map_err(|error| {
                         CrabError::CorruptObject {
-                            path: key,
+                            path: key.clone(),
                             reason: format!("invalid LFS lock record: {error}"),
                         }
                     })?;
-                    if !Self::is_expired(&record) && record.owner != owner {
-                        conflicts.push(record);
-                    }
+                    Ok((!Self::is_expired(&record)
+                        && !Self::is_released(&record)
+                        && record.owner != owner)
+                        .then_some(record))
                 }
-                Err(CrabError::NotFound { .. }) => {
-                    // No lock on this path — no conflict.
-                }
-                Err(e) => return Err(e),
+                Err(CrabError::NotFound { .. }) => Ok(None),
+                Err(error) => Err(error),
+            };
+            result
+        }))
+        .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = reads.next().await {
+            if let Some(record) = result? {
+                conflicts.push(record);
             }
         }
 
@@ -649,5 +715,24 @@ mod tests {
         // Should be able to re-lock after unlock.
         let record = mgr.lock("file.bin", "bob").await.unwrap();
         assert_eq!(record.owner, "bob");
+    }
+
+    #[tokio::test]
+    async fn stale_unlock_id_cannot_release_replacement_lock() {
+        let store = memory_store();
+        let mgr = lock_manager(&store);
+
+        let first = mgr.lock("file.bin", "alice").await.unwrap();
+        mgr.unlock_with_id("file.bin", "alice", Some(&first.id))
+            .await
+            .unwrap();
+        let replacement = mgr.lock("file.bin", "bob").await.unwrap();
+
+        let error = mgr
+            .unlock_with_id("file.bin", "alice", Some(&first.id))
+            .await
+            .expect_err("stale owner and ID must not release replacement");
+        assert!(matches!(error, CrabError::LfsLockConflict { .. }));
+        assert_eq!(mgr.list().await.unwrap(), vec![replacement]);
     }
 }

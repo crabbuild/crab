@@ -1,17 +1,18 @@
 //! LFS configuration resolution.
 //!
-//! Reads LFS settings from environment variables, `.lfsconfig`, and
-//! `.gitconfig` with a defined precedence order. Provides defaults for
+//! Reads LFS settings from environment variables, `.lfsconfig`, and Git's
+//! canonical config resolver with a defined precedence order. Provides defaults for
 //! transfer concurrency, fetch behavior, retry policy, and storage paths.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::core::error::{CrabError, Result};
 
 /// Resolved LFS configuration.
 ///
-/// Built by layering defaults ← `.gitconfig` ← `.lfsconfig` ← env vars.
+/// Built by layering defaults ← `.lfsconfig` ← Git config ← env vars.
 /// Higher-priority sources override lower ones on a per-key basis. Storage
 /// redirection is ignored in tracked `.lfsconfig` files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,12 +70,24 @@ impl LfsConfig {
         }
     }
 
+    /// Resolve the configured local LFS storage directory for a repository.
+    ///
+    /// Git's LFS storage is shared by linked worktrees, so relative storage
+    /// paths are resolved against the common Git directory rather than the
+    /// current worktree's private Git directory.
+    pub(crate) fn resolve_storage_dir(repo_root: &Path) -> Result<PathBuf> {
+        let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
+        let config = Self::resolve(&worktree.current_worktree_root)?;
+        Ok(config.storage_dir(&worktree.common_git_dir))
+    }
+
     /// Resolve LFS configuration from all sources.
     ///
     /// Precedence (highest to lowest):
     /// 1. Environment variables (`GIT_LFS_*`)
-    /// 2. `.lfsconfig` in the repository root, except storage redirection
-    /// 3. `.gitconfig` (local `.git/config` → global `~/.gitconfig` → system `/etc/gitconfig`)
+    /// 2. Git's effective config, including its normal local/global/system
+    ///    precedence, includes, and conditional includes
+    /// 3. `.lfsconfig` in the repository root, except storage redirection
     /// 4. Compiled defaults
     ///
     /// # Errors
@@ -84,27 +97,24 @@ impl LfsConfig {
     pub fn resolve(repo_root: &Path) -> Result<Self> {
         let mut config = Self::default();
 
-        // Layer 3: .gitconfig (system → global → local, each overriding the previous)
-        let gitconfig_paths = gitconfig_paths(repo_root);
-        for path in &gitconfig_paths {
-            if path.is_file() {
-                let values = parse_ini_lfs_section(path)?;
-                config.apply_ini_values(&values, &path.display().to_string())?;
-            }
-        }
-
-        // Layer 2: .lfsconfig (overrides .gitconfig)
+        // `.lfsconfig` is lower precedence than Git config. Do not follow
+        // includes from a tracked file into arbitrary local paths.
         let lfsconfig_path = repo_root.join(".lfsconfig");
         if lfsconfig_path.is_file() {
-            let mut values = parse_ini_lfs_section(&lfsconfig_path)?;
+            let mut values = git_config_values(repo_root, Some(&lfsconfig_path), false)?;
             // A tracked file must not redirect local reads or destructive
             // prune operations outside this repository's Git directory.
             values.remove("storage");
             values.remove("lfsdir");
-            config.apply_ini_values(&values, &lfsconfig_path.display().to_string())?;
+            config.apply_values(&values, &lfsconfig_path.display().to_string())?;
         }
 
-        // Layer 1: environment variables (highest priority)
+        // Delegate precedence, includes, conditional includes, XDG config,
+        // worktree config, and platform-specific locations to Git itself.
+        let values = git_config_values(repo_root, None, true)?;
+        config.apply_values(&values, "git config")?;
+
+        // Environment variables have the highest priority.
         config.apply_env();
 
         // Validate ranges.
@@ -113,8 +123,8 @@ impl LfsConfig {
         Ok(config)
     }
 
-    /// Apply values parsed from an INI-style config file's `[lfs]` section.
-    fn apply_ini_values(&mut self, values: &HashMap<String, String>, origin: &str) -> Result<()> {
+    /// Apply values from Git config's `lfs.*` namespace.
+    fn apply_values(&mut self, values: &HashMap<String, String>, origin: &str) -> Result<()> {
         if let Some(v) = values.get("concurrenttransfers") {
             self.concurrent_transfers = parse_u32(v, "lfs.concurrenttransfers", origin)?;
         }
@@ -252,115 +262,73 @@ fn parse_env_u64(key: &'static str, value: &str) -> Option<u64> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// INI parsing helpers
-// ---------------------------------------------------------------------------
-
-/// Collect the paths to `.gitconfig` files in system → global → local order.
+/// Read `lfs.*` values through Git's config parser.
 ///
-/// Each successive file overrides the previous, so local wins over global
-/// wins over system — matching git's own precedence within the gitconfig layer.
-fn gitconfig_paths(repo_root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(3);
+/// `file` is used for the tracked `.lfsconfig` source. It is intentionally
+/// not loaded with `--includes`; effective repository config uses Git's normal
+/// includes and conditional includes so Crab does not implement a second,
+/// subtly different config language.
+fn git_config_values(
+    repo_root: &Path,
+    file: Option<&Path>,
+    includes: bool,
+) -> Result<HashMap<String, String>> {
+    let mut command = Command::new("git");
+    command.current_dir(repo_root).arg("config").arg("--null");
+    if includes {
+        command.arg("--includes");
+    }
+    if let Some(file) = file {
+        command.arg("--file").arg(file);
+    }
+    let output = command
+        .arg("--get-regexp")
+        .arg(r"^lfs\.")
+        .output()
+        .map_err(|error| CrabError::Configuration {
+            key: "git config".to_owned(),
+            origin: format!("failed to execute Git: {error}"),
+        })?;
 
-    // System: /etc/gitconfig
-    let system = PathBuf::from("/etc/gitconfig");
-    paths.push(system);
-
-    // Global: ~/.gitconfig
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".gitconfig"));
+    // `--get-regexp` exits 1 when no matching key exists. That is a normal
+    // empty configuration, not a failure to resolve the repository config.
+    if !output.status.success() {
+        if output.stdout.is_empty() && output.stderr.is_empty() {
+            return Ok(HashMap::new());
+        }
+        return Err(CrabError::Configuration {
+            key: "git config".to_owned(),
+            origin: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
 
-    // Local: .git/config
-    paths.push(repo_root.join(".git/config"));
-
-    paths
-}
-
-/// Parse an INI-style config file and extract keys from the `[lfs]` section.
-///
-/// Returns a map of lowercased key → value. Supports subsections like
-/// `[lfs "transfer"]` which produce keys prefixed with `transfer.`.
-///
-/// This is intentionally minimal — it handles the subset of git-config
-/// syntax needed for LFS settings without pulling in a full INI parser.
-fn parse_ini_lfs_section(path: &Path) -> Result<HashMap<String, String>> {
-    let content = std::fs::read_to_string(path).map_err(|e| CrabError::Configuration {
-        key: format!("failed to read file: {e}"),
-        origin: path.display().to_string(),
-    })?;
-
-    let mut result = HashMap::new();
-    let mut in_lfs_section = false;
-    let mut subsection_prefix: Option<String> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Skip empty lines and comments.
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+    let mut values = HashMap::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
             continue;
         }
-
-        // Section header.
-        if trimmed.starts_with('[') {
-            let (is_lfs, prefix) = parse_section_header(trimmed);
-            in_lfs_section = is_lfs;
-            subsection_prefix = prefix;
+        let Some(separator) = record.iter().position(|byte| *byte == b'\n') else {
+            return Err(CrabError::Configuration {
+                key: "git config".to_owned(),
+                origin: "Git returned a malformed NUL-delimited LFS config record".to_owned(),
+            });
+        };
+        let (key, value) = record.split_at(separator);
+        let value = &value[1..];
+        let key = std::str::from_utf8(key).map_err(|error| CrabError::Configuration {
+            key: "git config".to_owned(),
+            origin: format!("Git returned a non-UTF-8 LFS config key: {error}"),
+        })?;
+        let value = std::str::from_utf8(value).map_err(|error| CrabError::Configuration {
+            key: key.to_owned(),
+            origin: format!("Git returned a non-UTF-8 LFS config value: {error}"),
+        })?;
+        let Some(key) = key.strip_prefix("lfs.") else {
             continue;
-        }
-
-        if !in_lfs_section {
-            continue;
-        }
-
-        // Key = value line.
-        if let Some((key, value)) = parse_key_value(trimmed) {
-            let full_key = match &subsection_prefix {
-                Some(prefix) => format!("{prefix}.{key}"),
-                None => key,
-            };
-            result.insert(full_key, value);
-        }
+        };
+        values.insert(key.to_owned(), value.to_owned());
     }
-
-    Ok(result)
-}
-
-/// Parse a section header line like `[lfs]` or `[lfs "transfer"]`.
-///
-/// Returns `(is_lfs_section, optional_subsection_prefix)`.
-fn parse_section_header(line: &str) -> (bool, Option<String>) {
-    // Strip brackets.
-    let inner = line.trim_start_matches('[').trim_end_matches(']').trim();
-
-    // Check for subsection: [lfs "transfer"]
-    if let Some((section, subsection)) = inner.split_once('"') {
-        let section = section.trim().to_lowercase();
-        let subsection = subsection.trim_end_matches('"').trim();
-        if section == "lfs" {
-            return (true, Some(subsection.to_lowercase()));
-        }
-        return (false, None);
-    }
-
-    let section = inner.to_lowercase();
-    if section == "lfs" {
-        (true, None)
-    } else {
-        (false, None)
-    }
-}
-
-/// Parse a `key = value` or `key=value` line.
-///
-/// Returns `(lowercased_key, trimmed_value)`.
-fn parse_key_value(line: &str) -> Option<(String, String)> {
-    let (key, value) = line.split_once('=')?;
-    let key = key.trim().to_lowercase();
-    let value = value.trim().to_string();
-    Some((key, value))
+    Ok(values)
 }
 
 /// Parse a string as `u32`, returning a config error on failure.
@@ -399,6 +367,24 @@ fn parse_bool(s: &str, key: &str, origin: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::process::Command;
+
+    fn init_repo(dir: &Path) -> crate::test::git_repo::CleanGitEnvGuard {
+        // Git environment overrides are process-global and other unit tests
+        // temporarily set them while running shell-based repository checks.
+        // Keep the guard alive through config writes and resolution so this
+        // test always operates on the repository passed to it.
+        let git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        assert!(
+            Command::new("git")
+                .current_dir(dir)
+                .args(["init", "--quiet"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        git_env
+    }
 
     #[test]
     fn defaults_are_correct() {
@@ -443,11 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn gitconfig_overridden_by_lfsconfig() {
+    fn gitconfig_overrides_lfsconfig() {
         let dir = tempfile::tempdir().unwrap();
+        let _git_env = init_repo(dir.path());
 
         // Create .git/config with one value.
-        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         let gitconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&gitconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -455,7 +441,7 @@ mod tests {
         writeln!(f, "    pruneoffsetdays = 10").unwrap();
         drop(f);
 
-        // Create .lfsconfig overriding concurrent_transfers.
+        // `.lfsconfig` has lower precedence than the effective Git config.
         let lfsconfig = dir.path().join(".lfsconfig");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -463,9 +449,7 @@ mod tests {
         drop(f);
 
         let config = LfsConfig::resolve(dir.path()).unwrap();
-        // .lfsconfig wins for concurrent_transfers.
-        assert_eq!(config.concurrent_transfers, 16);
-        // .gitconfig value preserved for pruneoffsetdays.
+        assert_eq!(config.concurrent_transfers, 2);
         assert_eq!(config.prune_offset_days, 10);
     }
 
@@ -529,7 +513,7 @@ mod tests {
     #[test]
     fn lfs_dir_override() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let _git_env = init_repo(dir.path());
         let lfsconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -543,7 +527,7 @@ mod tests {
     #[test]
     fn standard_lfs_storage_override() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let _git_env = init_repo(dir.path());
         let lfsconfig = dir.path().join(".git/config");
         let mut f = std::fs::File::create(&lfsconfig).unwrap();
         writeln!(f, "[lfs]").unwrap();
@@ -556,6 +540,27 @@ mod tests {
         assert_eq!(
             config.storage_dir(Path::new("/repo/.git")),
             PathBuf::from("/repo/.git/relative-lfs-cache")
+        );
+    }
+
+    #[test]
+    fn resolve_storage_dir_uses_repository_lfs_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let _git_env = init_repo(dir.path());
+        let gitconfig = dir.path().join(".git/config");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(gitconfig)
+            .unwrap();
+        writeln!(file, "[lfs]").unwrap();
+        writeln!(file, "    storage = custom-lfs-cache").unwrap();
+
+        assert_eq!(
+            LfsConfig::resolve_storage_dir(dir.path()).unwrap(),
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join(".git/custom-lfs-cache")
         );
     }
 
@@ -605,18 +610,6 @@ mod tests {
 
         let config = LfsConfig::resolve(dir.path()).unwrap();
         assert_eq!(config.concurrent_transfers, 3);
-    }
-
-    #[test]
-    fn parse_section_header_variants() {
-        assert_eq!(parse_section_header("[lfs]"), (true, None));
-        assert_eq!(parse_section_header("[LFS]"), (true, None));
-        assert_eq!(
-            parse_section_header("[lfs \"transfer\"]"),
-            (true, Some("transfer".to_string()))
-        );
-        assert_eq!(parse_section_header("[core]"), (false, None));
-        assert_eq!(parse_section_header("[remote \"origin\"]"), (false, None));
     }
 
     #[test]

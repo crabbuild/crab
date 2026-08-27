@@ -109,7 +109,7 @@ examples, and related commands.
 
 | Command | Description |
 |---------|-------------|
-| [`crab lfs`](crab-lfs.md) | Full Git LFS-compatible command set |
+| [`crab lfs`](crab-lfs.md) | Crab-managed LFS operations and standalone-agent integration |
 
 ## Internal (not for direct use)
 

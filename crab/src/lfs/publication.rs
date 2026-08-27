@@ -2,11 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::core::error::{CrabError, Result};
+use crate::lfs::config::LfsConfig;
+use crate::lfs::coordinator::{
+    TransferCoordinator, TransferDirection, TransferOutcome, TransferRequest,
+};
 use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use crab_lfs::{LfsError, LfsObjectStore};
+use tokio::sync::Mutex;
 
 /// Publishes and verifies each LFS dependency introduced after `remote_tips`.
 ///
@@ -26,11 +32,29 @@ pub(crate) async fn publish_reachable(
 
     let scan_dir = git_dir.clone();
     let scan_tips = tips.clone();
-    let entries = tokio::task::spawn_blocking(move || {
-        crate::cmd::lfs::push::collect_pointers_from_range_in(&scan_dir, &scan_tips, &remote_tips)
+    let scan_remote_tips = remote_tips.clone();
+    // A partial clone can advertise remote refs whose tips are absent from
+    // this local ODB. Such tips cannot be passed as `^<tip>` boundaries to
+    // `git rev-list`; Git rejects the whole scan with "bad object". Only
+    // locally resolvable remote tips are valid exclusion boundaries here.
+    let (scan_remote_tips, entries) = tokio::task::spawn_blocking(move || {
+        let scan_remote_tips = locally_available_remote_tips(&scan_dir, &scan_remote_tips);
+        let entries = crate::cmd::lfs::push::collect_pointers_from_range_in(
+            &scan_dir,
+            &scan_tips,
+            &scan_remote_tips,
+        )?;
+        Ok::<_, CrabError>((scan_remote_tips, entries))
     })
     .await
     .map_err(|error| CrabError::Internal(format!("LFS dependency scan failed: {error}")))??;
+    if scan_remote_tips.len() != remote_tips.len() {
+        tracing::debug!(
+            remote_tips = remote_tips.len(),
+            local_remote_tips = scan_remote_tips.len(),
+            "omitting unavailable remote tips from LFS dependency scan"
+        );
+    }
 
     if entries.is_empty() {
         return Ok(());
@@ -53,32 +77,147 @@ pub(crate) async fn publish_reachable(
         }
     }
 
-    let remote = LfsObjectStore::new(store, &prefix);
-    let local_lfs_dir = git_dir.join("lfs");
-    for pointer in pointers.into_values() {
-        match remote.verify(&pointer.oid).await {
-            Ok(bytes) => {
-                crate::lfs::cache::verify_pointer(&pointer, &bytes)?;
-                continue;
-            }
-            Err(LfsError::ObjectMissing { .. } | LfsError::ObjectCorrupt { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
+    let config = LfsConfig::resolve(&lfs_config_root(&git_dir))?;
+    let remote = Arc::new(LfsObjectStore::new(store, &prefix));
+    let local_lfs_dir = config.storage_dir(&git_dir);
+    let pointers = Arc::new(pointers);
+    let requests = pointers.values().map(transfer_request).collect::<Vec<_>>();
 
-        let local =
-            crate::lfs::cache::read_pointer(&local_lfs_dir, &pointer)?.ok_or_else(|| {
-                CrabError::LfsObjectMissing {
-                    oid: hex_encode(&pointer.oid),
+    // Presence checks are bounded too. This prevents a large push from
+    // creating an unbounded set of HEAD/body-verification futures before the
+    // upload phase starts, while still refusing to trust a corrupt object.
+    let missing = Arc::new(Mutex::new(Vec::<TransferRequest>::new()));
+    let missing_for_operation = Arc::clone(&missing);
+    let remote_for_operation = Arc::clone(&remote);
+    TransferCoordinator::new((&config).into())
+        .execute(
+            TransferDirection::Upload,
+            requests,
+            move |request, cancel| {
+                let missing = Arc::clone(&missing_for_operation);
+                let remote = Arc::clone(&remote_for_operation);
+                async move {
+                    if cancel.is_cancelled() {
+                        return Err(CrabError::Cancelled);
+                    }
+                    match remote.verify_size(&request.oid, request.size).await {
+                        Ok(()) => Ok(TransferOutcome::AlreadyValid),
+                        Err(LfsError::ObjectMissing { .. } | LfsError::ObjectCorrupt { .. }) => {
+                            missing.lock().await.push(request);
+                            Ok(TransferOutcome::Skipped)
+                        }
+                        Err(error) => Err(CrabError::from(error)),
+                    }
                 }
-            })?;
-        crate::lfs::cache::verify_pointer(&pointer, &local)?;
-        let local_path = crate::lfs::cache::object_path(&local_lfs_dir, &pointer.oid);
-        remote.put_stream(&pointer.oid, &local_path).await?;
-        let published = remote.verify(&pointer.oid).await?;
-        crate::lfs::cache::verify_pointer(&pointer, &published)?;
+            },
+        )
+        .await?;
+
+    let missing = std::mem::take(&mut *missing.lock().await);
+    if missing.is_empty() {
+        return Ok(());
     }
 
+    // The upload operation validates the local cache bytes, streams them to
+    // the remote, and performs a final remote verification before publication
+    // can continue. A single coordinator owns retries and cancellation for
+    // this phase, matching porcelain and custom-agent transfers.
+    let remote_for_operation = Arc::clone(&remote);
+    let pointers_for_operation = Arc::clone(&pointers);
+    TransferCoordinator::new((&config).into())
+        .execute(
+            TransferDirection::Upload,
+            missing,
+            move |request, cancel| {
+                let remote = Arc::clone(&remote_for_operation);
+                let pointers = Arc::clone(&pointers_for_operation);
+                let local_path = crate::lfs::cache::object_path(&local_lfs_dir, &request.oid);
+                async move {
+                    if cancel.is_cancelled() {
+                        return Err(CrabError::Cancelled);
+                    }
+                    let metadata = tokio::fs::metadata(&local_path).await.map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            CrabError::LfsObjectMissing {
+                                oid: hex_encode(&request.oid),
+                            }
+                        } else {
+                            CrabError::Io(error)
+                        }
+                    })?;
+                    if metadata.len() != request.size {
+                        return Err(CrabError::LfsObjectCorrupt {
+                            oid: hex_encode(&request.oid),
+                        });
+                    }
+                    let pointer = pointers.get(&request.oid).ok_or_else(|| {
+                        CrabError::Internal("LFS publication request lost its pointer".to_owned())
+                    })?;
+                    if pointer.size != request.size {
+                        return Err(CrabError::LfsObjectCorrupt {
+                            oid: hex_encode(&request.oid),
+                        });
+                    }
+                    remote
+                        .put_stream_with_size(&request.oid, Some(request.size), &local_path)
+                        .await
+                        .map_err(CrabError::from)?;
+                    remote
+                        .verify_size(&request.oid, request.size)
+                        .await
+                        .map_err(CrabError::from)?;
+                    Ok(TransferOutcome::Transferred)
+                }
+            },
+        )
+        .await?;
+
     Ok(())
+}
+
+fn locally_available_remote_tips(git_dir: &std::path::Path, remote_tips: &[String]) -> Vec<String> {
+    use gix_object::Exists;
+
+    let objects_dir = crate::git::discover::resolve_common_dir(git_dir).join("objects");
+    let Ok(odb) = gix_odb::at(&objects_dir) else {
+        return Vec::new();
+    };
+
+    remote_tips
+        .iter()
+        .filter_map(|tip| {
+            let oid = gix_hash::ObjectId::from_hex(tip.as_bytes()).ok()?;
+            odb.exists(&oid).then(|| tip.clone())
+        })
+        .collect()
+}
+
+fn transfer_request(pointer: &LfsPointer) -> TransferRequest {
+    TransferRequest {
+        oid: pointer.oid,
+        size: pointer.size,
+    }
+}
+
+fn lfs_config_root(git_dir: &std::path::Path) -> PathBuf {
+    let common_dir = crate::git::discover::resolve_common_dir(git_dir);
+    if let Some(current_root) = crab_git::discover::current_worktree_root() {
+        let discovered_common =
+            crab_git::discover::resolve_common_dir(&crab_git::discover::discover_git_dir());
+        if same_path(&common_dir, &discovered_common) {
+            return current_root;
+        }
+    }
+    git_dir
+        .parent()
+        .map_or_else(|| git_dir.to_path_buf(), PathBuf::from)
+}
+
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 async fn check_locks(
@@ -183,13 +322,8 @@ mod tests {
     async fn publication_uploads_and_verifies_reachable_lfs_objects() {
         let (repo, pointer, content, head) = fixture();
         let git_dir = repo.path().join(".git");
-        crate::lfs::cache::install_bytes(
-            &git_dir.join("lfs"),
-            &pointer.oid,
-            pointer.size,
-            &content,
-        )
-        .unwrap();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
         let store = crab_storage::Store::new(Arc::new(InMemory::new()));
 
         publish_reachable(
@@ -228,6 +362,30 @@ mod tests {
             error,
             CrabError::LfsObjectMissing { ref oid } if oid == &hex_encode(&pointer.oid)
         ));
+    }
+
+    #[tokio::test]
+    async fn publication_ignores_remote_tips_missing_from_local_odb() {
+        let (repo, pointer, content, head) = fixture();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+
+        publish_reachable(
+            store.clone(),
+            "repo".to_owned(),
+            repo.path().join(".git"),
+            vec![head],
+            vec!["f".repeat(40)],
+        )
+        .await
+        .unwrap();
+
+        let remote = LfsObjectStore::new(store, "repo");
+        assert_eq!(
+            remote.verify(&pointer.oid).await.unwrap(),
+            Bytes::from(content)
+        );
     }
 
     #[tokio::test]

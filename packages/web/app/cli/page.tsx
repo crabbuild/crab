@@ -75,9 +75,9 @@ const features = [
   },
   {
     icon: Link2,
-    title: "Git LFS Compatible",
+    title: "Git LFS Integration",
     description:
-      "LFS-tracked files stored alongside xorbs. Drop-in replacement for existing LFS workflows with zero migration friction.",
+      "LFS-tracked files stored alongside xorbs through Crab's repository-scoped standalone transfer agent.",
   },
 ]
 

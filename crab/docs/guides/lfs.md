@@ -10,14 +10,25 @@ crab lfs <subcommand> [OPTIONS]
 
 ## Description
 
-`crab lfs` provides a full set of Git LFS-compatible subcommands that operate
-against cloud object storage without a centralized LFS server. This allows
-crab to serve as a drop-in replacement for `git-lfs` in existing workflows,
-while storing LFS objects alongside crab xorbs in the same bucket.
+`crab lfs` provides Crab-managed LFS operations against cloud object storage
+without a centralized LFS server. The CLI supports the repository-scoped
+standalone transfer-agent profile, which requires Git LFS to be configured to
+invoke Crab and requires Crab to have access to the selected object store.
+Crab does not provide or require a deployable Git LFS HTTP gateway. An
+unmodified `git-lfs` installation can still use Crab's standalone custom
+transfer agent: `crab lfs install` configures Git LFS to invoke the local Crab
+binary, and Crab accesses the configured object store directly.
 
-The core transfer flow mirrors Git LFS: clean/smudge, custom transfer-agent,
+The core transfer flow mirrors the supported standalone Git LFS profile:
+clean/smudge, custom transfer-agent,
 push, fetch, pull, checkout, pointer inspection, status, local fsck, local
 pruning, direct LFS/Crab conversion, and safe local deduplication.
+
+Crab honors the standard `lfs.storage` local cache control consistently across
+filters and LFS commands. Relative paths are resolved from the repository's
+common Git directory, so linked worktrees share the same cache. Crab also
+accepts the legacy `lfs.lfsdir` and `GIT_LFS_DIR` aliases; use `lfs.storage`
+when sharing a cache with an unmodified Git LFS client.
 
 ## Subcommands Overview
 
@@ -98,6 +109,8 @@ transfer-agent entry point:
 [lfs "customtransfer.crab"]
     path = /path/to/crab
     args = lfs-transfer-agent
+    concurrent = true
+    direction = both
 [lfs]
     standalonetransferagent = crab
 ```
@@ -123,9 +136,9 @@ crab lfs uninstall [--local|--worktree|--system] [--skip-repo]
 | `--system` | Remove configuration from the system Git config |
 | `--skip-repo` | Skip removing Crab's repository pre-push hook |
 
-Without a scope flag, uninstall removes Crab's LFS filter configuration from
-the global Git config and removes the repository pre-push hook only when it is
-the hook written by `crab lfs install`.
+Without a scope flag, install and uninstall operate on the current
+repository's local Git config. Use `--system` only when intentionally managing
+an explicit system-wide installation; it can affect unrelated repositories.
 
 ---
 
@@ -300,6 +313,10 @@ crab lfs push [OPTIONS] [REMOTE] [REF...]
 | `--stdin` | Read refs or object IDs from stdin |
 | `--dry-run`, `-d` | Report what would be pushed without uploading |
 
+With `--object-id`, Crab reads the object size from the standard local LFS
+cache before uploading and reports a missing cached object without contacting
+the remote.
+
 ---
 
 ## crab lfs pre-push
@@ -378,6 +395,10 @@ identity with `O`, and marks stale local cache records missing from the remote
 with `X`/`broken`; JSON output includes `ours`, `local`, and `broken` fields.
 `--id`, `--path`, and `--limit` also filter verified output.
 `unlock --force` skips the working-tree existence and clean-status checks.
+
+These are Crab's direct object-storage lock commands. They do not implement
+the Git LFS File Locking HTTP API, so stock `git lfs lock`, `git lfs unlock`,
+and `git lfs locks` require an external LFS server.
 
 ---
 
@@ -661,6 +682,9 @@ These are invoked by git's filter driver, not typically by users directly.
 `lfs.fetchexclude`. When a path does not pass the include/exclude filters, the
 pointer is copied to stdout unchanged instead of reading the local cache or
 downloading from the remote store.
+The clean filter only writes the verified object to the local LFS cache;
+remote publication is performed by `crab lfs pre-push` or `crab lfs push`, so
+`git add` remains usable without remote access.
 
 ---
 
@@ -726,7 +750,9 @@ compatibility and uses the same transfer protocol implementation.
 
 ## crab lfs env
 
-Print LFS diagnostic environment information.
+Print LFS diagnostic environment information, including the direct Crab
+object-storage remote and local transfer-agent configuration. Crab does not
+report or require an HTTP LFS endpoint.
 
 ```bash
 crab lfs env

@@ -87,6 +87,13 @@ impl UrlObjectStore {
         self.store.as_ref()
     }
 
+    /// Clones the shared object-store backend for a higher-level composition
+    /// boundary that needs to build a domain-specific store handle.
+    #[must_use]
+    pub fn store_arc(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.store)
+    }
+
     /// Returns the URL path prefix applied to store operations.
     #[must_use]
     pub fn prefix(&self) -> &Path {
