@@ -276,12 +276,50 @@ host, not production SLO proof. An independent current-head repeatability run,
 valid isolated growth comparison, and the remaining team-load, fault,
 provider, failover, canary, and rollout gates remain open below.
 
-The subsequent stale-pack membership-index change (`ad2554fa`, with the
-deterministic delta-base regression in `b9859f28`) is now represented in the
-current-head 1,000-push report above. Its final sweep reports only stale
-membership rows and does not scan the retained OID catalog; the exact refs,
-fsck, and byte-equivalence checks still pass. Repeated isolated runs and the
-full interruption/maintenance matrix remain required.
+### Current-head owner-locator qualification after bounded maintenance hardening
+
+Run profile: `codex-5ea595f6-k8s-20260827-current-full`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, and the
+release binary built from `5ea595f6`. The standalone verifier returned
+`status=ok`, `profile=full`, and `replay_count=1000`; all 1,001 pushes and
+23/23 checks passed. Advertised refs, full and incremental clone tips, full
+and incremental fsck, and a deterministic 1,000-object sample matched the
+source; the source checkout was unchanged and both local worktrees and the
+run-owned remote prefix were cleaned. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The generation-1,000 owner checkpoint fell from 976,987 ms on the prior
+  `d8de9d12` current-head run to 409,251 ms here (2.39x faster, a 58% local
+  single-host reduction). The owner repacked 902 active packs to 2, then the
+  indexed stale sweep scanned and deleted 901 pack-membership rows while
+  deleting zero canonical object rows. The routine sweep loaded 1,643,211
+  existing ordinals in 2,598 ms; the pre-repack locator pass downloaded 900
+  remote pack-evidence records in 1,754 ms and did not rebuild the catalog.
+- Pushes remained bounded after the seed import: median/p95/p99 were
+  1,610/2,782/3,242 ms across 1,001 pushes. Incremental fetches after
+  1/10/100/1,000 commits took 363/505/1,024/2,369 ms of server operation
+  time and transferred 22,589/454,861/5,805,626/39,894,943 response bytes.
+- The remaining dominant read-path cost is response-pack construction. Cold
+  full-clone pack generation took 106,674 ms for 1,241,023,010 response
+  bytes; blobless, depth-1, depth-10, depth-100, and depth-1,000 generation
+  took 65,962/6,657/10,412/98,258/101,290 ms. The warm full clone was a
+  3,988 ms verified cache hit. These are measured local RustFS results, not
+  production SLO proof; reusable filtered response packs, pack reuse, and
+  sustained cache/fanout behavior remain open optimization work.
+
+This run is the first current-head qualification after the bounded remote
+evidence and in-memory ordinal-map changes. It strengthens the owner and
+correctness evidence but does not close independent repeatability, valid
+growth differentials, the 10,000-push/ancestry matrices, interruption and
+provider faults, large-team concurrency, owner failover, or rollout gates.
+
+The stale-pack membership-index change (`ad2554fa`, with the deterministic
+delta-base regression in `b9859f28`) and the bounded owner-locator follow-up
+(`5ea595f6`) are represented in the current-head 1,000-push report above. Its
+final sweep reports only stale membership rows and does not scan the retained
+OID catalog; the exact refs, fsck, and byte-equivalence checks still pass.
+Repeated isolated runs and the full interruption/maintenance matrix remain
+required.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
