@@ -283,7 +283,7 @@ struct RemoteChunkRefKey {
     uncompressed_size: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommittedManifestAnchor {
     pub(crate) generation: u64,
     pub(crate) shard_index_hash: MerkleHash,

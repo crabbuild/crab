@@ -788,6 +788,19 @@ async fn maintain_object_catalog(
             async {
                 // Plan under the publication lock. An unlocked snapshot could
                 // miss a concurrent push and incorrectly skip compaction.
+                // Recheck the anchor first so a push that won the race before
+                // lock acquisition cannot trigger a repository-sized stale plan.
+                let (current_manifest, _) =
+                    crate::metadata::manifest::read_manifest(store, router).await?;
+                let current_anchor =
+                    crate::git::push::committed_manifest_anchor(&current_manifest)?;
+                if current_anchor != anchor {
+                    return Ok((
+                        false,
+                        crab_metadata::git_object_locator::GitObjectCatalogStats::default(),
+                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                    ));
+                }
                 let (coverage, bindings) = {
                     let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
                         Arc::clone(store.inner()),
@@ -4084,6 +4097,57 @@ mod tests {
         assert_eq!(
             snapshot.manifest.refs.get("refs/heads/main"),
             Some(&"a".repeat(40))
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_skips_locator_planning_for_superseded_manifest_snapshot() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+
+        let mut initial = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        initial.generation = 1;
+        initial.shard_index_hash = "a".repeat(64);
+        initial.pack_index_hash = "b".repeat(64);
+        initial.seal_git_validation();
+        crate::metadata::manifest::create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+        let anchor = crate::git::push::committed_manifest_anchor(&initial)
+            .expect("parse initial manifest anchor");
+
+        let (mut newer, etag) = crate::metadata::manifest::read_manifest(&store, &router)
+            .await
+            .expect("read initial manifest");
+        newer.generation += 1;
+        newer.shard_index_hash = "c".repeat(64);
+        newer.pack_index_hash = "d".repeat(64);
+        newer.seal_git_validation();
+        crate::metadata::manifest::write_manifest_cas(&store, &router, &newer, &etag)
+            .await
+            .expect("advance manifest");
+
+        let missing_pack_id = "e".repeat(64);
+        let result = maintain_object_catalog(
+            &store,
+            &router,
+            anchor,
+            &[crab_metadata::manifests::PackManifestEntry {
+                pack_id: missing_pack_id.clone(),
+                size: 1,
+                content_hash: missing_pack_id,
+                ref_tips: Vec::new(),
+                object_count: 1,
+            }],
+            std::time::Duration::from_secs(60),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "stale owner snapshot must not plan missing packs"
         );
     }
 
