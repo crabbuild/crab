@@ -278,6 +278,7 @@ def check_release_workflow(root: Path) -> list[str]:
         "--fail-on-no-commits",
         '--notes-file "$notes_file"',
         "cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked",
+        '--source-sha "${{ needs.prepare.outputs.source_sha }}"',
         'if ! aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null 2>&1; then',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api create-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
@@ -320,6 +321,7 @@ def check_release_workflow(root: Path) -> list[str]:
         "CRAB_RELEASE_GITHUB_TOKEN",
         "crabbuild/crab-release",
         "--clobber",
+        "GITHUB_SHA: ${{ needs.prepare.outputs.source_sha }}",
     ):
         if forbidden in text:
             errors.append(f"release.yml: unexpected {forbidden!r}")
@@ -361,6 +363,15 @@ def check_homebrew_script(
 
 def checks(root: Path) -> list[TextCheck]:
     return [
+        TextCheck(
+            "workflow smoke accepts an explicit release source SHA",
+            root / "crab" / "scripts" / "e2e" / "run_dvc_workflow_smoke.py",
+            contains=(
+                'source_sha=args.source_sha',
+                'parser.add_argument("--source-sha", default=os.environ.get("GITHUB_SHA", "unknown"))',
+            ),
+            excludes=(),
+        ),
         TextCheck(
             "version bump keeps all shipped product manifests aligned",
             root / "crab" / "scripts" / "release" / "bump-version.sh",

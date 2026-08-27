@@ -113,7 +113,7 @@ class Smoke:
             remote=self.remote,
             root=str(self.run_root),
             endpoint_url=args.endpoint_url,
-            source_sha=os.environ.get("GITHUB_SHA", "unknown"),
+            source_sha=args.source_sha,
             workflow_run_id=os.environ.get("GITHUB_RUN_ID", "local"),
             workflow_run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
             crab_version="unknown",
@@ -1211,6 +1211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--access-key", default="crab")
     parser.add_argument("--secret-key", default="crab")
     parser.add_argument("--run-id")
+    parser.add_argument("--source-sha", default=os.environ.get("GITHUB_SHA", "unknown"))
     parser.add_argument(
         "--min-free-bytes",
         type=int,
