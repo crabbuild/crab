@@ -797,6 +797,7 @@ mod tests {
         pack_bytes: Vec<u8>,
         ref_tip: String,
         object_count: u64,
+        source_git_dir: &Path,
     ) -> Result<(String, Vec<StagedWrite>)> {
         let pack = pack_entry_for_bytes(&pack_bytes, vec![ref_tip.clone()], object_count);
         let segment =
@@ -804,6 +805,48 @@ mod tests {
                 .ok_or_else(|| invalid("test pack segment missing"))?;
         let index = segmented::append_segment(SegmentIndex::default(), segment.reference.clone());
         let index_object = segmented::build_index_object(SegmentKind::Pack, index)?;
+
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source.pack");
+        std::fs::write(&source, &pack_bytes)?;
+        let installed = crab_git::pack::install_pack_file_from_path(
+            &temp.path().join("objects/pack"),
+            &source,
+            &pack.pack_id,
+            0,
+            true,
+        )?;
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &installed.idx_path,
+            &installed.rev_path,
+            pack.size,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        let object_ids = locations
+            .by_ref()
+            .map(|location| {
+                location
+                    .map(|location| location.oid)
+                    .map_err(crab_git::pack::PackError::from)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuthServerError::from)?;
+        let kinds = crab_git::object_kinds_from_git_dir(source_git_dir, &object_ids)
+            .map_err(AuthServerError::from)?;
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| {
+                kinds
+                    .get(oid)
+                    .copied()
+                    .ok_or_else(|| invalid("test pack kind metadata omitted an object"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
+            locations.pack_checksum(),
+            &ordered_kinds,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
 
         let pack_key = format!("org/repo/packs/pack-{}.pack", pack.pack_id);
         let pack_object = staged_object(pack_key, &pack_bytes);
@@ -819,6 +862,10 @@ mod tests {
         let metadata_key = format!("org/repo/packs/pack-{}.meta", pack.pack_id);
         let metadata_object = staged_object(metadata_key, &metadata_bytes);
         put_staged(ctx, &metadata_object, metadata_bytes).await?;
+
+        let kind_metadata_key = format!("org/repo/packs/pack-{}.kinds", pack.pack_id);
+        let kind_metadata_object = staged_object(kind_metadata_key, &kind_metadata);
+        put_staged(ctx, &kind_metadata_object, kind_metadata).await?;
 
         let segment_key = ctx
             .router()
@@ -846,6 +893,7 @@ mod tests {
                 index_object_staged,
                 pack_object,
                 metadata_object,
+                kind_metadata_object,
             ],
         ))
     }
@@ -1030,6 +1078,7 @@ mod tests {
             view_pack_bytes,
             view_new.clone(),
             view_object_count,
+            &view_repo.join(".git"),
         )
         .await?;
 
@@ -1129,6 +1178,11 @@ mod tests {
                 .head(&ctx.router().pack_reverse_index_path(&pack.pack_id))
                 .await?
                 .size;
+            let kind_metadata_size = ctx
+                .store()
+                .head(&ctx.router().pack_kind_metadata_path(&pack.pack_id))
+                .await?
+                .size;
             let read_bytes = Arc::new(AtomicU64::new(0));
             let observer = Arc::clone(&read_bytes);
             let observed_store = Store::new(Arc::clone(ctx.store().inner()))
@@ -1149,7 +1203,7 @@ mod tests {
 
             assert_eq!(
                 read_bytes.load(Ordering::Relaxed),
-                20 + idx_size + rev_size,
+                20 + idx_size + rev_size + kind_metadata_size,
                 "verified locator publication must not stream the pack body",
             );
         }

@@ -2,7 +2,7 @@
 //!
 //! Exercise four behaviours:
 //!   * An aggregate closure over the limit is atomically split into bounded
-//!     packs and published with complete SlateDB locators.
+//!     packs; derived locator acceleration remains repairable by the owner/read path.
 //!   * A pack that exceeds `receive.maxInputSize` is rejected quickly,
 //!     well under the 5-minute `INDEX_PACK_TIMEOUT`, and surfaces as
 //!     `RefPushOutcome::Rejected(PushRejectReason::PackTooLarge)`.
@@ -11,7 +11,6 @@
 
 #![recursion_limit = "256"]
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -201,42 +200,6 @@ async fn oversized_aggregate_is_atomically_published_as_bounded_packs() {
             .all(|pack| pack.size <= config.receive_max_input_size),
         "every committed pack must respect receive.maxInputSize"
     );
-
-    let locator_session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
-        Arc::clone(&inner),
-        router.repo_prefix(),
-    )
-    .await
-    .expect("open committed locator database");
-    assert_eq!(
-        locator_session.coverage(),
-        Some(crab_metadata::git_object_locator::GitLocatorCoverage {
-            generation: 1,
-            pack_index_hash: crab_xet::hash::MerkleHash::from_hex(&manifest.pack_index_hash)
-                .expect("committed pack-index hash"),
-        })
-    );
-    let bindings = locator_session
-        .pack_bindings()
-        .await
-        .expect("read committed pack bindings")
-        .into_iter()
-        .map(|binding| (binding.record.pack_id, binding.record))
-        .collect::<HashMap<_, _>>();
-    for pack in &packs {
-        let pack_id =
-            crab_xet::hash::MerkleHash::from_hex(&pack.pack_id).expect("committed pack id");
-        assert!(
-            bindings.get(&pack_id).is_some_and(|record| {
-                record.object_count == pack.object_count && record.pack_size == pack.size
-            }),
-            "every pack must be published through the locator batch"
-        );
-    }
-    locator_session
-        .close()
-        .await
-        .expect("close committed locator database");
 
     let reconstructed = tempfile::tempdir().expect("reconstructed tempdir");
     run_git(reconstructed.path(), &["init", "--bare"]);

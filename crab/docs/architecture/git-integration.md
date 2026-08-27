@@ -298,6 +298,23 @@ slot, byte offset, entry length, and CRC32. Reverse ordinal rows provide the
 canonical object order used by visibility bitmaps and response-pack planning;
 there is no second runtime OID dictionary.
 
+The catalog also writes an additive fixed-width ordinal metadata family. Its
+key is the same dense ordinal and its value carries the proven kind, logical
+size, and delta-base facts already embedded in the OID locator row. The
+metadata family is published, replaced, and swept in the same write batches as
+the object and reverse-ordinal rows; the existing 20-byte reverse row is not
+reinterpreted. A catalog without a complete sidecar remains valid for ordinary
+reads, while kind-only filtered planning falls back to bounded canonical
+traversal until the sidecar is rebuilt.
+
+The writer also maintains a derived `(pack_slot, oid)` membership family. It is
+used only to remove rows for stale immutable packs, so a routine repack sweep
+does not scan the complete OID catalog. The membership completion marker is
+written with the catalog stream; if it is absent on an older or interrupted
+catalog, the next repository-owned sweep rebuilds the index once and then
+returns to stale-slot-only cleanup. The canonical OID row remains authoritative
+and readers do not require the derived family.
+
 Exact coverage records the manifest generation, pack-index hash, object count,
 and catalog digest whose complete inventory was published. A digest-named
 SlateDB checkpoint pins that exact catalog while the mutable database advances.
@@ -306,6 +323,26 @@ canonical `.idx` files. Ordinary pushes append rows only for uncovered packs.
 Pack removal or explicit migration rebuilds a dense universe before publishing
 new visibility closures, so mixed-generation catalog/bitmap tuples fail
 closed.
+
+When a ref-journal compaction has a catalog-bound base proof, it records the
+small ordinal visibility delta before advancing the manifest. The generation
+owner resolves only the changed tips and evidence objects after publishing the
+new catalog checkpoint, then writes the target proof. The pending delta is
+immutable and rooted by the current manifest until that handoff completes; if
+the base checkpoint or evidence is unavailable, the owner uses the complete
+proof rebuild path instead. Catalog kind metadata is optional: owner catalog
+publication scans only new or rebound pack bodies once to populate it and does
+not download covered stable packs. When the sidecar is complete, fresh
+kind-only filters select ordinals and resolve only the retained OIDs; an old or
+incomplete sidecar uses the bounded canonical traversal path.
+
+The same owner maintains the complete split commit graph incrementally. When
+the previous generation has a validated graph, it opens a generation-pinned
+remote-Git history operation, resolves the current ref closure in bounded OID
+batches, and writes only the new graph layer plus descriptor. A missing or
+invalid predecessor takes the existing complete-pack rebuild path; the owner
+reports that distinction as `commit_graph_incremental` versus
+`commit_graph_rebuild` so qualification can measure pack-read avoidance.
 
 `crab metadb rebuild` is the repository-scoped migration and repair boundary.
 It ignores the retired `git_locator_db/` namespace, reconstructs the catalog

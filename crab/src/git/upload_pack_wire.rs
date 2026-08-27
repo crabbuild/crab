@@ -7,34 +7,42 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_metadata::manifest_store::read_manifest;
+#[cfg(test)]
+use crab_read::plan_upload_pack;
 use crab_read::{
     FetchAdmissionPolicy, UploadPackFilter, UploadPackRequest, combine_upload_pack_filters,
-    parse_upload_pack_filter, plan_upload_pack,
+    parse_upload_pack_filter, plan_upload_pack_catalog,
 };
 use crab_remote_git::{
-    Error as RemoteGitError, ObjectLimits, OperationLimits, RemoteGitRepository, RemoteGitRuntime,
-    RepositoryIdentity, RepositoryOptions,
+    Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits, OperationLimits,
+    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
+use rand::Rng as _;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result};
+use crate::storage::retry::{RetryClass, retry_class};
 
 const MAX_PACKET_BYTES: usize = 65_520;
 const MAX_REQUEST_PACKETS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
-const LOCATOR_READ_RETRY_LIMIT: usize = 5;
+const LOCATOR_READ_RETRY_LIMIT: usize = 120;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
-const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(1);
+const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(2);
+const READ_ADMISSION_WAIT: Duration = Duration::from_secs(5 * 60);
+const READ_ADMISSION_RETRY_BASE: Duration = Duration::from_millis(50);
+const READ_ADMISSION_RETRY_CAP: Duration = Duration::from_secs(2);
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
@@ -45,6 +53,62 @@ struct ObjectStoreGeneratedPackLeaseProvider {
 
 struct ObjectStoreGeneratedPackLease {
     lock: crab_coordination::PushLock,
+}
+
+enum VisibilityRequirement {
+    #[cfg(test)]
+    Materialized,
+    Catalog,
+}
+
+enum UploadPackVisibilityProof {
+    #[cfg(test)]
+    Materialized(GitVisibilityIndex),
+    Catalog(GitCatalogVisibilityIndex),
+}
+
+impl UploadPackVisibilityProof {
+    fn as_catalog(&self) -> Option<&GitCatalogVisibilityIndex> {
+        match self {
+            Self::Catalog(visibility) => Some(visibility),
+            #[cfg(test)]
+            Self::Materialized(_) => None,
+        }
+    }
+
+    fn into_catalog(self) -> Result<GitCatalogVisibilityIndex> {
+        match self {
+            Self::Catalog(visibility) => Ok(visibility),
+            #[cfg(test)]
+            Self::Materialized(_) => Err(CrabError::Internal(
+                "catalog upload-pack proof was not returned".to_owned(),
+            )),
+        }
+    }
+
+    fn object_count_for_refs(&self, refs: &[String]) -> usize {
+        match self {
+            #[cfg(test)]
+            Self::Materialized(visibility) => {
+                visibility.object_count_for_refs(refs.iter().map(String::as_str))
+            }
+            Self::Catalog(visibility) => {
+                visibility.object_count_for_refs(refs.iter().map(String::as_str))
+            }
+        }
+    }
+
+    fn authorization_digest_for_refs(&self, refs: &[String]) -> [u8; 32] {
+        match self {
+            #[cfg(test)]
+            Self::Materialized(visibility) => {
+                visibility.authorization_digest_for_refs(refs.iter().map(String::as_str))
+            }
+            Self::Catalog(visibility) => {
+                visibility.authorization_digest_for_refs(refs.iter().map(String::as_str))
+            }
+        }
+    }
 }
 
 impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLeaseProvider {
@@ -60,13 +124,11 @@ impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLea
         >,
     > {
         Box::pin(async move {
-            match crab_coordination::PushLock::acquire_internal(
-                &self.store,
-                &self.prefix,
-                resource,
-                ttl,
-            )
-            .await
+            let mut context =
+                crab_coordination::PushLockAcquireContext::new(Arc::clone(&self.store));
+            match context
+                .try_acquire_internal(&self.prefix, resource, ttl)
+                .await
             {
                 Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
                     Box::new(ObjectStoreGeneratedPackLease { lock }),
@@ -228,10 +290,205 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    // Catalog-bound admission materializes the large visibility dictionary;
-    // retain that proof instead of reopening SlateDB for the same helper.
-    let (repository, visibility) =
-        open_repository_with_visibility(store, prefix, cancellation).await?;
+    let mut read_admission = acquire_read_admission(store, prefix, cancellation).await?;
+    let result = serve_with_read_admission(
+        &mut read_admission,
+        reader,
+        writer,
+        store,
+        prefix,
+        hidden_ref_patterns,
+        fetch_policy,
+        progress,
+        cancellation,
+    )
+    .await;
+    let release = read_admission.release().await.map_err(CrabError::from);
+    match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after session failure"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn acquire_read_admission(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> Result<crab_coordination::ReadAdmissionTicket> {
+    let mut ticket = crab_coordination::ReadAdmissionTicket::new(
+        store.inner(),
+        prefix,
+        crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+        crab_coordination::DEFAULT_READ_ADMISSION_TTL,
+    )
+    .map_err(CrabError::from)?;
+    let deadline = Instant::now() + READ_ADMISSION_WAIT;
+    let started = Instant::now();
+    let mut attempt = 0;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CrabError::Throttled {
+                retry_after: Some(READ_ADMISSION_RETRY_CAP),
+            });
+        }
+
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = tokio::time::timeout(remaining, ticket.try_admit()) => match result {
+                Ok(result) => result.map_err(CrabError::from),
+                Err(_) => Err(CrabError::Throttled {
+                    retry_after: Some(READ_ADMISSION_RETRY_CAP),
+                }),
+            },
+        };
+        match result {
+            Ok(true) => {
+                let waited_ms = started.elapsed().as_millis();
+                tracing::debug!(
+                    waited_ms,
+                    capacity = crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+                    "upload-pack read admission acquired"
+                );
+                return Ok(ticket);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let retry_after = match retry_class(&error) {
+                    RetryClass::Transient => None,
+                    RetryClass::Throttled { retry_after } => retry_after,
+                    _ => return Err(error),
+                };
+                tracing::debug!(
+                    error = %error,
+                    attempt,
+                    "upload-pack read admission probe will retry"
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                let delay = read_admission_retry_delay(attempt, retry_after).min(remaining);
+                attempt = attempt.saturating_add(1);
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                }
+                continue;
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CrabError::Throttled {
+                retry_after: Some(READ_ADMISSION_RETRY_CAP),
+            });
+        }
+        let delay = read_admission_retry_delay(attempt, None).min(remaining);
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+        }
+    }
+}
+
+fn read_admission_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
+    let multiplier = 1_u32.checked_shl(attempt.min(6) as u32).unwrap_or(u32::MAX);
+    let bound = READ_ADMISSION_RETRY_BASE
+        .saturating_mul(multiplier)
+        .min(READ_ADMISSION_RETRY_CAP);
+    let bound_nanos = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX);
+    retry_after
+        .unwrap_or_default()
+        .saturating_add(Duration::from_nanos(
+            rand::rng().random_range(0..=bound_nanos),
+        ))
+}
+
+async fn serve_with_read_admission<R, W>(
+    read_admission: &mut crab_coordination::ReadAdmissionTicket,
+    reader: &mut R,
+    writer: &mut W,
+    store: &crab_storage::Store,
+    prefix: &str,
+    hidden_ref_patterns: &[String],
+    fetch_policy: &FetchAdmissionPolicy,
+    progress: bool,
+    cancellation: &CancellationToken,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let renewal_interval = (read_admission.ttl() / 3).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.tick().await;
+    let operation = serve_admitted(
+        reader,
+        writer,
+        store,
+        prefix,
+        hidden_ref_patterns,
+        fetch_policy,
+        progress,
+        cancellation,
+    );
+    tokio::pin!(operation);
+    let mut renewal_error = None;
+    loop {
+        tokio::select! {
+            result = &mut operation => {
+                return match result {
+                    Err(error) => Err(error),
+                    Ok(()) => match renewal_error {
+                        Some(error) => Err(CrabError::from(error)),
+                        None => Ok(()),
+                    },
+                };
+            }
+            _ = ticker.tick(), if renewal_error.is_none() => {
+                if let Err(error) = read_admission.renew().await {
+                    cancellation.cancel();
+                    renewal_error = Some(error);
+                }
+            }
+        }
+    }
+}
+
+async fn serve_admitted<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    store: &crab_storage::Store,
+    prefix: &str,
+    hidden_ref_patterns: &[String],
+    fetch_policy: &FetchAdmissionPolicy,
+    progress: bool,
+    cancellation: &CancellationToken,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let (repository, proof) = open_repository_with_visibility_requirement(
+        store,
+        prefix,
+        cancellation,
+        VisibilityRequirement::Catalog,
+    )
+    .await?;
     let visible_ref_names = visible_ref_names(&repository, hidden_ref_patterns)?;
 
     // The remote-helper positive response is one raw blank line. Only after
@@ -283,24 +540,40 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
-                if let Err(error) = validate_fetch_admission(
+                if let Err(error) = validate_fetch_admission_catalog(
                     &repository,
-                    &visibility,
+                    proof.as_catalog().ok_or_else(|| {
+                        CrabError::Internal("upload-pack did not retain catalog proof".to_owned())
+                    })?,
                     &visible_ref_names,
                     &fetch,
                     fetch_policy,
-                ) {
+                    cancellation,
+                )
+                .await
+                {
                     return reject_protocol_request(writer, error, cancellation).await;
                 }
                 if !fetch.done {
-                    let common_haves = common_haves(&fetch, &visibility, &visible_ref_names);
+                    let common_haves = common_haves_catalog(
+                        &repository,
+                        proof.as_catalog().ok_or_else(|| {
+                            CrabError::Internal(
+                                "upload-pack did not retain catalog proof".to_owned(),
+                            )
+                        })?,
+                        &fetch,
+                        &visible_ref_names,
+                        cancellation,
+                    )
+                    .await?;
                     if common_haves.is_empty() {
                         write_acknowledgments(writer, cancellation).await?;
                     } else {
                         write_fetch_response(
                             writer,
                             &repository,
-                            &visibility,
+                            &proof,
                             &visible_ref_names,
                             &fetch,
                             negotiation_rounds,
@@ -315,7 +588,7 @@ where
                 write_fetch_response(
                     writer,
                     &repository,
-                    &visibility,
+                    &proof,
                     &visible_ref_names,
                     &fetch,
                     negotiation_rounds,
@@ -340,30 +613,7 @@ where
     }
 }
 
-fn validate_fetch_admission(
-    repository: &RemoteGitRepository,
-    visibility: &GitVisibilityIndex,
-    visible_ref_names: &[String],
-    request: &FetchRequest,
-    policy: &FetchAdmissionPolicy,
-) -> Result<()> {
-    let advertised_tips = repository
-        .refs()
-        .entries
-        .iter()
-        .filter(|reference| visible_ref_names.contains(&reference.name))
-        .flat_map(|reference| [Some(reference.target), reference.peeled])
-        .flatten()
-        .collect::<HashSet<_>>();
-    validate_fetch_wants(
-        &advertised_tips,
-        visibility,
-        visible_ref_names,
-        request,
-        policy,
-    )
-}
-
+#[cfg(test)]
 fn validate_fetch_wants(
     advertised_tips: &HashSet<ObjectId>,
     visibility: &GitVisibilityIndex,
@@ -388,15 +638,75 @@ fn validate_fetch_wants(
     Ok(())
 }
 
-pub(crate) async fn open_repository_with_visibility(
+async fn validate_fetch_admission_catalog(
+    repository: &RemoteGitRepository,
+    visibility: &GitCatalogVisibilityIndex,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    policy: &FetchAdmissionPolicy,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let advertised_tips = repository
+        .refs()
+        .entries
+        .iter()
+        .filter(|reference| visible_ref_names.contains(&reference.name))
+        .flat_map(|reference| [Some(reference.target), reference.peeled])
+        .flatten()
+        .collect::<HashSet<_>>();
+    let reachable = if policy.allow_reachable_sha_in_want {
+        let operation = repository
+            .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
+            .await
+            .map_err(remote_error)?;
+        let result = operation
+            .catalog_object_ordinals(&request.wants)
+            .await
+            .map(|ordinals| {
+                ordinals
+                    .into_iter()
+                    .map(|ordinal| {
+                        ordinal.is_some_and(|ordinal| {
+                            visibility.contains_ordinal_for_refs(
+                                visible_ref_names.iter().map(String::as_str),
+                                ordinal,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+        operation.finish(result).await.map_err(remote_error)?
+    } else {
+        vec![false; request.wants.len()]
+    };
+    for (index, want) in request.wants.iter().enumerate() {
+        if policy.allow_any_sha_in_want
+            || (policy.allow_tip_sha_in_want && advertised_tips.contains(want))
+            || reachable.get(index).copied().unwrap_or(false)
+        {
+            continue;
+        }
+        return Err(protocol(format!(
+            "want {want} is denied by upload-pack policy"
+        )));
+    }
+    Ok(())
+}
+
+async fn open_repository_with_visibility_requirement(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
-) -> Result<(RemoteGitRepository, GitVisibilityIndex)> {
+    requirement: VisibilityRequirement,
+) -> Result<(RemoteGitRepository, UploadPackVisibilityProof)> {
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
+    let deadline = Instant::now() + READ_ADMISSION_WAIT;
     for attempt in 0..=LOCATOR_READ_RETRY_LIMIT {
+        if Instant::now() >= deadline {
+            break;
+        }
         let (manifest, _) =
             crate::metadata::manifest::read_manifest(&repair_store, &repair_layout).await?;
         let active_transactions = crate::metadata::manifest::list_active_ref_journal_transactions(
@@ -406,12 +716,24 @@ pub(crate) async fn open_repository_with_visibility(
         .await?;
         if !active_transactions.is_empty() {
             if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
-                return Err(remote_error(RemoteGitError::RepositoryIndexing {
-                    observed: Some(manifest.generation),
-                    required: manifest.generation.saturating_add(1),
-                }));
+                last_indexing = Some((
+                    Some(manifest.generation),
+                    manifest.generation.saturating_add(1),
+                ));
+                if !wait_for_locator_read_retry(
+                    attempt,
+                    deadline,
+                    Some(manifest.generation),
+                    manifest.generation.saturating_add(1),
+                    cancellation,
+                )
+                .await?
+                {
+                    break;
+                }
+                continue;
             }
-            if super::push::compact_ref_journal_for_owner(
+            if super::push::compact_ref_journal_for_reader(
                 &repair_store,
                 &repair_layout,
                 LOCATOR_READ_REPAIR_LOCK_TTL,
@@ -430,13 +752,16 @@ pub(crate) async fn open_repository_with_visibility(
                 Some(manifest.generation),
                 manifest.generation.saturating_add(1),
             ));
-            if attempt == LOCATOR_READ_RETRY_LIMIT {
+            if !wait_for_locator_read_retry(
+                attempt,
+                deadline,
+                Some(manifest.generation),
+                manifest.generation.saturating_add(1),
+                cancellation,
+            )
+            .await?
+            {
                 break;
-            }
-            let delay = locator_read_retry_delay(attempt);
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
             }
             continue;
         }
@@ -444,15 +769,28 @@ pub(crate) async fn open_repository_with_visibility(
         let open = open_repository_snapshot(store, prefix, cancellation).await;
         let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
-            Ok(repository) => match repository.visibility_index(cancellation).await {
-                Ok(visibility) => return Ok((repository, visibility)),
-                Err(error) if visibility_index_needs_repair(&error) => {
-                    let generation = repository.generation();
-                    visibility_error = Some(error);
-                    (Some(generation), generation)
+            Ok(repository) => {
+                let visibility = match requirement {
+                    #[cfg(test)]
+                    VisibilityRequirement::Materialized => repository
+                        .visibility_index(cancellation)
+                        .await
+                        .map(UploadPackVisibilityProof::Materialized),
+                    VisibilityRequirement::Catalog => repository
+                        .catalog_visibility_index(cancellation)
+                        .await
+                        .map(UploadPackVisibilityProof::Catalog),
+                };
+                match visibility {
+                    Ok(visibility) => return Ok((repository, visibility)),
+                    Err(error) if visibility_index_needs_repair(&error) => {
+                        let generation = repository.generation();
+                        visibility_error = Some(error);
+                        (Some(generation), generation)
+                    }
+                    Err(error) => return Err(remote_error(error)),
                 }
-                Err(error) => return Err(remote_error(error)),
-            },
+            }
             Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
             Err(error) => return Err(remote_error(error)),
         };
@@ -461,12 +799,20 @@ pub(crate) async fn open_repository_with_visibility(
         // Once journal transactions are drained, generation checks distinguish
         // derived publication lag from a concurrent owner update.
         if super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await? {
-            return Err(remote_error(RemoteGitError::RepositoryIndexing {
-                observed: observed_generation,
-                required: required_generation,
-            }));
+            if !wait_for_locator_read_retry(
+                attempt,
+                deadline,
+                observed_generation,
+                required_generation,
+                cancellation,
+            )
+            .await?
+            {
+                break;
+            }
+            continue;
         }
-        let repaired = super::push::repair_git_object_locator_if_current(
+        let repaired = super::push::repair_git_object_locator_if_current_for_reader(
             &repair_store,
             &repair_layout,
             required_generation,
@@ -483,7 +829,7 @@ pub(crate) async fn open_repository_with_visibility(
         }
         if repaired || visibility_error.is_some() {
             let publication =
-                super::push::repair_git_visibility_after_locator_if_current_with_limit(
+                super::push::repair_git_visibility_after_locator_if_current_with_limit_for_reader(
                     &repair_store,
                     &repair_layout,
                     required_generation,
@@ -506,21 +852,16 @@ pub(crate) async fn open_repository_with_visibility(
                 return Err(remote_error(error));
             }
         }
-        if attempt == LOCATOR_READ_RETRY_LIMIT {
-            break;
-        }
-
-        let delay = locator_read_retry_delay(attempt);
-        tracing::debug!(
-            attempt = attempt + 1,
-            ?delay,
+        if !wait_for_locator_read_retry(
+            attempt,
+            deadline,
             observed_generation,
             required_generation,
-            "waiting for current Git locator publication before upload-pack admission"
-        );
-        tokio::select! {
-            () = tokio::time::sleep(delay) => {}
-            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            cancellation,
+        )
+        .await?
+        {
+            break;
         }
     }
 
@@ -533,6 +874,42 @@ pub(crate) async fn open_repository_with_visibility(
         observed,
         required,
     }))
+}
+
+pub(crate) async fn open_repository_with_catalog_visibility(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> Result<(RemoteGitRepository, GitCatalogVisibilityIndex)> {
+    let (repository, proof) = open_repository_with_visibility_requirement(
+        store,
+        prefix,
+        cancellation,
+        VisibilityRequirement::Catalog,
+    )
+    .await?;
+    Ok((repository, proof.into_catalog()?))
+}
+
+#[cfg(test)]
+pub(crate) async fn open_repository_with_visibility(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> Result<(RemoteGitRepository, GitVisibilityIndex)> {
+    let (repository, proof) = open_repository_with_visibility_requirement(
+        store,
+        prefix,
+        cancellation,
+        VisibilityRequirement::Materialized,
+    )
+    .await?;
+    let UploadPackVisibilityProof::Materialized(visibility) = proof else {
+        return Err(CrabError::Internal(
+            "materialized upload-pack proof was not returned".to_owned(),
+        ));
+    };
+    Ok((repository, visibility))
 }
 
 async fn open_repository_snapshot(
@@ -588,6 +965,34 @@ fn locator_read_retry_delay(attempt: usize) -> Duration {
     LOCATOR_READ_RETRY_BASE
         .saturating_mul(multiplier)
         .min(LOCATOR_READ_RETRY_CAP)
+}
+
+async fn wait_for_locator_read_retry(
+    attempt: usize,
+    deadline: Instant,
+    observed_generation: Option<u64>,
+    required_generation: u64,
+    cancellation: &CancellationToken,
+) -> Result<bool> {
+    if attempt >= LOCATOR_READ_RETRY_LIMIT {
+        return Ok(false);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(false);
+    }
+    let delay = locator_read_retry_delay(attempt).min(remaining);
+    tracing::debug!(
+        attempt = attempt + 1,
+        ?delay,
+        ?observed_generation,
+        required_generation,
+        "waiting for current Git locator publication before upload-pack admission"
+    );
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Ok(true),
+        () = cancellation.cancelled() => Err(CrabError::Cancelled),
+    }
 }
 
 pub(crate) fn visible_ref_names(
@@ -917,21 +1322,42 @@ async fn write_ls_refs<W: AsyncWrite + Unpin>(
     write_response_end(writer, cancellation).await
 }
 
-fn common_haves(
+async fn common_haves_catalog(
+    repository: &RemoteGitRepository,
+    visibility: &GitCatalogVisibilityIndex,
     request: &FetchRequest,
-    visibility: &GitVisibilityIndex,
     visible_ref_names: &[String],
-) -> Vec<ObjectId> {
-    request
-        .haves
-        .iter()
-        .filter(|have| {
-            have.as_bytes().try_into().ok().is_some_and(|oid| {
-                visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
-            })
-        })
-        .copied()
-        .collect()
+    cancellation: &CancellationToken,
+) -> Result<Vec<ObjectId>> {
+    if request.haves.is_empty() {
+        return Ok(Vec::new());
+    }
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
+        .await
+        .map_err(remote_error)?;
+    let result = operation
+        .catalog_object_ordinals(&request.haves)
+        .await
+        .map(|ordinals| {
+            request
+                .haves
+                .iter()
+                .copied()
+                .zip(ordinals)
+                .filter_map(|(have, ordinal)| {
+                    ordinal
+                        .filter(|ordinal| {
+                            visibility.contains_ordinal_for_refs(
+                                visible_ref_names.iter().map(String::as_str),
+                                *ordinal,
+                            )
+                        })
+                        .map(|_| have)
+                })
+                .collect::<Vec<_>>()
+        });
+    operation.finish(result).await.map_err(remote_error)
 }
 
 async fn write_acknowledgments<W: AsyncWrite + Unpin>(
@@ -951,7 +1377,7 @@ async fn write_acknowledgments<W: AsyncWrite + Unpin>(
 async fn write_fetch_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
     repository: &RemoteGitRepository,
-    visibility: &GitVisibilityIndex,
+    proof: &UploadPackVisibilityProof,
     visible_ref_names: &[String],
     request: &FetchRequest,
     negotiation_rounds: u32,
@@ -974,15 +1400,29 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         include_tags: request.include_tags,
         filter: request.filter.clone(),
     };
-    let plan = match plan_upload_pack(
-        repository,
-        visibility,
-        visible_ref_names,
-        &semantic_request,
-        cancellation,
-    )
-    .await
-    {
+    let plan = match match proof {
+        #[cfg(test)]
+        UploadPackVisibilityProof::Materialized(visibility) => {
+            plan_upload_pack(
+                repository,
+                visibility,
+                visible_ref_names,
+                &semantic_request,
+                cancellation,
+            )
+            .await
+        }
+        UploadPackVisibilityProof::Catalog(visibility) => {
+            plan_upload_pack_catalog(
+                repository,
+                visibility,
+                visible_ref_names,
+                &semantic_request,
+                cancellation,
+            )
+            .await
+        }
+    } {
         Ok(plan) => plan,
         Err(error) => {
             let authorization_rejected = matches!(&error, crab_read::ReadError::UnauthorizedObject);
@@ -1003,8 +1443,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         }
     };
 
-    let visible_object_count =
-        visibility.object_count_for_refs(visible_ref_names.iter().map(String::as_str));
+    let visible_object_count = proof.object_count_for_refs(visible_ref_names);
     let filter = request.filter.canonical_spec();
     tracing::info!(
         protocol_version = 2,
@@ -1054,8 +1493,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
     let generated = if request.haves.is_empty() {
-        let authorization_digest =
-            visibility.authorization_digest_for_refs(visible_ref_names.iter().map(String::as_str));
+        let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
         let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
         let cache_key = repository.generated_pack_cache_key(
             authorization_digest,
@@ -1063,9 +1501,19 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
             &plan.object_ids,
             !thin_bases.is_empty(),
         );
-        repository
-            .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
-            .await
+        if dense_selected_response(&request) {
+            repository
+                .generate_pack_cached_with_dense_selection(
+                    &plan.object_ids,
+                    cache_key,
+                    cancellation,
+                )
+                .await
+        } else {
+            repository
+                .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
+                .await
+        }
     } else {
         repository
             .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
@@ -1140,6 +1588,13 @@ fn generated_pack_request_digest(
         }
     }
     *hash.finalize().as_bytes()
+}
+
+fn dense_selected_response(request: &FetchRequest) -> bool {
+    request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+        && request.filter.is_catalog_exact()
 }
 
 fn is_likely_lazy_fetch(repository: &RemoteGitRepository, request: &FetchRequest) -> bool {
@@ -1403,6 +1858,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dense_selected_response_requires_a_catalog_filter_without_shallow_state() {
+        let mut request = FetchRequest {
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        assert!(dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::ObjectType(crab_read::UploadPackObjectType::Tree);
+        assert!(dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::TreeDepth(1);
+        assert!(!dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::BlobNone;
+        request.deepen = Some(100);
+        assert!(!dense_selected_response(&request));
+    }
+
     #[tokio::test]
     async fn generated_pack_lease_provider_serializes_one_repository_resource() {
         let store: Arc<dyn object_store::ObjectStore> =
@@ -1468,6 +1942,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_admission_retry_delay_honors_provider_hint() {
+        let hint = Duration::from_secs(2);
+
+        let delay = read_admission_retry_delay(0, Some(hint));
+
+        assert!(delay >= hint);
+        assert!(delay <= hint.saturating_add(READ_ADMISSION_RETRY_BASE));
+    }
+
+    #[test]
+    fn read_admission_retry_delay_is_capped_without_provider_hint() {
+        let delay = read_admission_retry_delay(usize::MAX, None);
+
+        assert!(delay <= READ_ADMISSION_RETRY_CAP);
+    }
+
     #[tokio::test]
     async fn capability_snapshot_short_circuits_empty_repositories() {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
@@ -1498,8 +1989,9 @@ mod tests {
     fn locator_read_retry_delay_is_bounded() {
         assert_eq!(locator_read_retry_delay(0), Duration::from_millis(100));
         assert_eq!(locator_read_retry_delay(3), Duration::from_millis(800));
-        assert_eq!(locator_read_retry_delay(4), Duration::from_secs(1));
-        assert_eq!(locator_read_retry_delay(usize::MAX), Duration::from_secs(1));
+        assert_eq!(locator_read_retry_delay(4), Duration::from_millis(1600));
+        assert_eq!(locator_read_retry_delay(5), Duration::from_secs(2));
+        assert_eq!(locator_read_retry_delay(usize::MAX), Duration::from_secs(2));
     }
 
     #[test]

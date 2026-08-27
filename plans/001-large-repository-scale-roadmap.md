@@ -23,12 +23,13 @@
 - **Category**: performance, correctness, architecture, operations
 - **Planned at**: commit `aa150868`, 2026-08-23
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
-- **Current draft PR**: https://github.com/crabbuild/crab-oss/pull/75
+- **Implementation PR**: https://github.com/crabbuild/crab-oss/pull/75 (merged)
+- **Large-repository follow-up**: https://github.com/crabbuild/crab-oss/pull/87
 
 ### 2026-08-25 execution update
 
-The current branch includes two additional bounded fixes that must be
-qualified before this roadmap can claim acceptance:
+The current branch includes the following bounded large-repository hardening
+that must be qualified before this roadmap can claim acceptance:
 
 - `crates/crab-metadata/src/git_visibility.rs` now uses the immutable
   post-checkpoint marker for readiness, so a healthy catalog check does not
@@ -36,29 +37,33 @@ qualified before this roadmap can claim acceptance:
   backfills that marker before publication, and the marker is bound to the
   catalog generation and validation digest.
 - `crab/src/git/upload_pack_wire.rs` now admits one repository together with
-  its catalog-bound `GitVisibilityIndex`. Upload-pack, exact shallow fetch,
-  and promisor fetch reuse that proof instead of reopening and materializing
-  the same visibility dictionary. Catalog ordinal scans use bounded read-ahead
-  and parallel fetch tasks to avoid one object-store round trip per block.
+  its catalog-bound ordinal proof. Protocol-v2 upload-pack, exact shallow fetch,
+  and promisor fetch reuse that proof without materializing the complete OID
+  dictionary. Selected ordinals are resolved through the operation's pinned
+  catalog session.
+- `crates/crab-metadata/src/git_object_locator/reader.rs` uses bounded
+  read-ahead and parallel fetch tasks for dense ordinal selections, while
+  retaining exact point reads for sparse selections.
 
 The c412 baseline qualification
 `local-k8s-marker-c412-1-20260825` was run against Kubernetes revision
-`b3bc2ac5` and external local RustFS before the final handoff change. Its
+`b3bc2ac5` and external local RustFS before the lazy-catalog follow-up. Its
 server-side incremental fetch was bounded (zero-millisecond visibility
 planning, 72 ms response operation, and 4 ms pack generation), but the full
 clone helper still spent roughly 90 seconds before its first request because
-the old path opened the visibility dictionary twice. That report is useful
-diagnostic evidence only; the post-handoff binary now produced the final
-current-binary report below. The remaining O(N) operation is one full immutable
-OID dictionary materialization per helper, which is still a large-team SLO
-gate even after the duplicate load is removed.
+the old path opened the visibility dictionary twice. That report remains
+diagnostic evidence; the full-profile report below is the pre-lazy baseline,
+and the post-`cbe848f4` run below proves the lazy startup path. The latency
+comparison remains open because the first post-lazy run was not isolated
+enough for a valid differential result.
 
 ### Current execution state
 
-The implementation work for Phases 1 through 5 is assembled on one draft
-integration branch so reviewers can inspect the complete generation-binding
-contract across push, read, maintenance, and GC. A current-binary full-profile
-qualification now exists, but the branch remains draft because repeatability,
+The implementation work for Phases 1 through 5 is assembled on one integration
+branch so reviewers can inspect the complete generation-binding contract across
+push, read, maintenance, and GC. The post-lazy full-profile qualification is
+now complete for an older baseline and the current branch head on K8s/RustFS;
+each current binary still has only one full-profile run. Repeatability, the
 10,000-push differential, fault, provider, concurrency, and rollout gates are
 still open.
 
@@ -73,9 +78,313 @@ RustFS prefix was cleaned. Correctness fingerprint:
 `7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
 
 The earlier 100-push smoke and pre-rebase 1,000-push reports remain useful
-historical baselines; the current-binary result above is now the primary
-qualification evidence. Repeatability and the remaining large-team rollout
-gates are still open.
+historical baselines. The post-lazy run below is the current correctness
+baseline for this branch, but its push/clone comparison is explicitly invalid
+for performance promotion. Repeatability and the remaining large-team
+rollout gates are still open.
+
+The earlier 2026-08-26 follow-up is committed as `c57ee1f4`. The anchored
+visibility continuation is committed as `ba7aa84b`, with the exact-visible-tip
+correction in `cdc2335e`:
+
+- `GitObjectLocatorWriter` keeps exact OID point reads for sparse batches but
+  switches to one validated object-family scan once accumulated candidates
+  cover at least 1/64 of the current ordinal universe. New rows remain in the
+  same in-memory map, so the scan is amortized across the writer lifetime.
+- Suffix consolidation asks Git to reuse existing objects and deltas, and the
+  catalog writer keeps the dense ordinal universe across pure repacks. A full
+  ordinal rebuild is still required only after object rows are actually lost.
+- Ref-journal compaction can stage an immutable, target-digest-bound ordinal
+  visibility handoff. The owner resolves only changed tips/evidence after the
+  target catalog checkpoint, validates sequential edits for the same ref, and
+  publishes the V5 proof; the current manifest roots the pending object for
+  repository-scoped GC.
+- Owner publication verifies pack indexes and reads an immutable `.kinds`
+  sidecar for each new or rebound pack, avoiding pack-body downloads during
+  normal generation handoff. Direct pushes, protected receives, and
+  synthesized packs publish the sidecar; legacy missing sidecars remain
+  repairable through the bounded full-pack path. Filtered reads retain the
+  canonical bounded traversal path when kind metadata is unavailable.
+- `repair_required` no longer treats incomplete bucket-wide discovery as
+  repository-local repair failure. The bucket-wide state remains visible in
+  diagnostics and destructive bucket GC remains disabled until its separate
+  completeness gate is proven.
+
+- A new destination ref at a large existing commit tip emits bounded
+  first-parent visibility evidence instead of attempting to walk the complete
+  history. Materialized and catalog compaction reuse that base closure only
+  when the parent is an exact visible ref tip in the target manifest; otherwise
+  the handoff defers conservatively. This closes the `ls-remote`/catalog-proof
+  failure found by the current Kubernetes qualification while preserving the
+  bounded-walk guard for tags, unrelated bases, and missing history.
+- A new destination ref whose tip already equals an existing visible ref tip
+  reuses that exact tip as the visibility base, producing an empty delta rather
+  than anchoring to its non-visible first parent. The source-side tip set is
+  captured from the manifest snapshot used by the ref journal, so catalog
+  handoff remains bound to a real target-manifest ref and still defers
+  conservatively when no reusable base exists.
+
+- Locator stale-pack cleanup now uses a derived `(pack_slot, oid)` membership
+  index. Canonical OID rows remain authoritative; routine sweeps read only
+  stale-slot memberships and point-validate their canonical rows, while a
+  marker-less or interrupted catalog performs one idempotent rebuild before
+  returning to the bounded path. Rebuilds use an explicit in-progress marker
+  and verified retained-pack object counts, so coverage cannot advance over a
+  partial reverse index. Pure repacks remove old memberships as they rebind
+  OIDs, so they do not trigger a complete object-catalog scan.
+
+The next owner hardening keeps the documented one-action-per-cycle contract
+literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
+from running in the same poll. Owner JSONL samples also expose a stable
+`maintenance_reason` and `next_eligibility_secs`, with immediate rechecks
+represented as zero after supersession. This makes maintenance backlog and
+lease occupancy observable without adding public configuration knobs.
+
+The owner compaction budget is now bounded to the uncovered portion of the
+current pack inventory (`4a8fc34e`). Before opening SlateDB, the owner reads the
+published pack bindings and counts only packs whose physical facts are not
+already covered. A same-inventory pass uses a metadata-only writer, while a
+delayed pass no longer starts a repository-sized compactor merely because the
+historical catalog is large. The current-head full-profile run below now
+proves this budget through 1,000 replay pushes on a real Kubernetes repository;
+sustained and repeated owner-budget gates remain open.
+
+The regular post-CAS locator publication now uses the same uncovered-pack
+budget (`88deb4e0`). Its snapshot is taken while holding the repository locator
+lock, so stable historical packs do not make an ordinary small push start a
+repository-sized SlateDB compactor. Publication and repair regressions pass,
+and the current full-profile qualification below uses a binary built from
+`d8de9d12`, which includes this path and the stale-snapshot guard.
+
+The generation owner now re-reads the committed manifest after acquiring the
+locator publication lock (`5465031e`). If the pre-lock owner snapshot is already
+superseded, it exits before opening the locator session or planning pack rows;
+the existing final manifest check still protects the smaller race where a push
+wins during the bounded publication itself. The regression passes with a
+missing stale-snapshot pack, proving the stale path cannot turn into an object
+read or a failed repository-sized plan.
+
+The locator writer now keeps small catalogs on bounded OID point reads and
+selects the full object-family scan only when the pinned catalog has at least
+4,096 objects and the accumulated batch covers at least 1/64 of that catalog
+(`62d35c14`). The policy regression passes, and the current release-binary
+RustFS same-ref smoke completed four integrated pushes at 288 locator requests
+per successful push, below the 500-request budget that exposed the prior
+small-catalog scan amplification.
+
+The workflow scheduler lock now retains its lock inode across handoffs
+(`d9c93263`). This prevents a releasing holder from unlinking the pathname
+after a waiter has acquired the same inode, and the focused scheduler-lock
+suite covers the handoff. The change is part of the large-team concurrency
+hardening because a path-disappearing lock can strand or misdiagnose workers
+under contention.
+
+Focused source proof for this follow-up passes formatting, `cargo check -p
+crab`, the complete Crab library suite, the complete metadata suite, strict
+metadata clippy, and the targeted exact-tip visibility regressions. The
+release binary embeds `d8de9d12` and is the binary used by the current-head
+Kubernetes/RustFS qualification below.
+
+The current release-binary qualification
+`crabbuild-team-load-anchored-cdc2335e-k8s-20260826` used Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, the external local RustFS
+endpoint, `replay_count=100`, and the team-load harness with one client per
+fanout. It completed with `status=ok`, 27/27 checks passed, the source
+checkout was unchanged, all sampled objects were byte-identical, full and
+incremental fsck passed, and both local worktrees and the remote qualification
+prefix were cleaned. The run saw the full 140,054-commit source history and
+1,643,211 Git objects; the binary provenance and report are retained with the
+run artifacts.
+
+- Generation maintenance reduced the active generated-pack inventory from 92
+  packs to 2 and swept 91 obsolete locator-pack rows.
+- Cold full clone completed in 254 seconds end to end. Its two-pack response
+  was 1,241,817,145 bytes, generated from 1,264,940,590 source bytes in
+  174 seconds of server-side response-pack work.
+- Warm full clone hit the generated response-pack cache and completed in 138
+  seconds end to end; server-side response-pack work was 83 seconds.
+- Blobless planning used `catalog_filter`, planned 1,102,159 objects, and
+  omitted 541,052 blobs. Depth-100 planning used the shallow-closure index in
+  240 ms; depth-1,000 planning used it in 424 ms.
+- The one-client incremental fetch completed in 674 ms. One independent ref
+  push completed in 10,076 ms and one same-ref push completed in 6,309 ms;
+  both were accepted with zero unexpected failures. The exact-tip seed push
+  emitted `added_objects=0`, `deferred_updates=0`, and the later advertised
+  refs check passed, reproducing the failure boundary fixed by `cdc2335e`.
+
+This is a current-binary single-host qualification, not production SLO proof:
+the 100-client synthetic fanout, repeated isolated runs, 1,000/10,000-push
+differentials, fault/provider/failover/canary evidence, and default-on rollout
+gates remain open below.
+
+The exact post-budget Kubernetes/RustFS smoke
+`crabbuild-f2a941ce-k8s-20260827-smoke` used the release binary whose embedded
+source revision is `f2a941ce`, the same Kubernetes revision, and 100 replay
+commits. The standalone verifier returned `status=ok`; 101 pushes and 21/21
+checks passed, including full, blobless, depth-1/10/100/1,000, and incremental
+fetch correctness, exact object sampling, fsck, source immutability, and
+remote cleanup. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Physical pack objects grew from 1 at seed to 2/12/103 at checkpoints
+  1/10/100; physical pack bytes grew from 1,254,754,431 to 1,297,738,866.
+  This is retained immutable history, not a claim that active serving packs
+  should grow without bound.
+- Owner totals were 83.8/77.8/224.8/244.7 seconds at seed/1/10/100. After
+  the geometric repack, the bounded follow-up catalog passes scanned and
+  deleted 10 and 91 stale pack rows, reading 14.4 MB and 37.2 MB respectively.
+  The earlier pre-repack catalog advance remains an intentional O(N) rebuild
+  path, so the 1,000-push owner latency, memory, and interruption budgets are
+  still open.
+- Cold full-clone response generation took 110.0 seconds for 1.24 GB; the
+  warm clone reused the verified response-pack cache with 4.0 seconds of
+  server operation. Depth-1/10/100/1,000 clone generation took
+  10.0/11.7/101.0/116.9 seconds. These measurements establish the response
+  pack and fanout bottleneck but do not satisfy the final SLO.
+
+This smoke is current release-binary evidence for the compaction budget and
+large-batch read path, not the full 1,000-push qualification. The independent
+full-profile repeatability run, differential, concurrency, fault/provider,
+owner-failover, and rollout gates remain open. The later regular post-CAS
+budget change is release-built and covered by focused publication tests; the
+current-head full-profile run below now covers it on the full replay path.
+
+The current-head full-profile qualification
+`codex-d8de9d12-k8s-20260827-current-full` used the release binary whose
+embedded source revision is `d8de9d12`, the same Kubernetes revision, and
+`replay_count=1000`. The standalone verifier returned `status=ok`; all 1,001
+pushes and 23/23 checks passed. Advertised refs, full and incremental clone
+tips, full and incremental fsck, and a deterministic 1,000-object sample
+matched the source; the source checkout was unchanged and both local
+worktrees and the run-owned remote prefix were cleaned. The correctness
+fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The 1,000-push summary was 1.806 seconds median, 2.778 seconds p95, and
+  3.433 seconds p99; the 259.613-second maximum was the initial import.
+- The 1,000-push owner checkpoint took 976.987 seconds, reduced 902 active
+  packs to 2, swept 901 stale pack-membership rows, and scanned/deleted zero
+  canonical object rows. This confirms the intended O(N) initial catalog
+  advance and indexed post-repack cleanup, but is not a sustained owner SLO.
+- Cold and warm full clones completed in 160.5 and 57.4 seconds; blobless and
+  depth-1/10/100/1,000 clones completed in 93.5/16.5/22.4/146.2/160.7
+  seconds. Incremental fetches at 1/10/100/1,000 commits completed in
+  1.860/2.093/3.002/6.685 seconds.
+
+This is current-head full-profile correctness and bottleneck evidence on one
+host, not production SLO proof. An independent current-head repeatability run,
+valid isolated growth comparison, and the remaining team-load, fault,
+provider, failover, canary, and rollout gates remain open below.
+
+### Current-head owner-locator qualification after bounded maintenance hardening
+
+Run profile: `codex-5ea595f6-k8s-20260827-current-full`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, and the
+release binary built from `5ea595f6`. The standalone verifier returned
+`status=ok`, `profile=full`, and `replay_count=1000`; all 1,001 pushes and
+23/23 checks passed. Advertised refs, full and incremental clone tips, full
+and incremental fsck, and a deterministic 1,000-object sample matched the
+source; the source checkout was unchanged and both local worktrees and the
+run-owned remote prefix were cleaned. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The generation-1,000 owner checkpoint fell from 976,987 ms on the prior
+  `d8de9d12` current-head run to 409,251 ms here (2.39x faster, a 58% local
+  single-host reduction). The owner repacked 902 active packs to 2, then the
+  indexed stale sweep scanned and deleted 901 pack-membership rows while
+  deleting zero canonical object rows. The routine sweep loaded 1,643,211
+  existing ordinals in 2,598 ms; the pre-repack locator pass downloaded 900
+  remote pack-evidence records in 1,754 ms and did not rebuild the catalog.
+- Pushes remained bounded after the seed import: median/p95/p99 were
+  1,610/2,782/3,242 ms across 1,001 pushes. Incremental fetches after
+  1/10/100/1,000 commits took 363/505/1,024/2,369 ms of server operation
+  time and transferred 22,589/454,861/5,805,626/39,894,943 response bytes.
+- The remaining dominant read-path cost is response-pack construction. Cold
+  full-clone pack generation took 106,674 ms for 1,241,023,010 response
+  bytes; blobless, depth-1, depth-10, depth-100, and depth-1,000 generation
+  took 65,962/6,657/10,412/98,258/101,290 ms. The warm full clone was a
+  3,988 ms verified cache hit. These are measured local RustFS results, not
+  production SLO proof; reusable filtered response packs, pack reuse, and
+  sustained cache/fanout behavior remain open optimization work.
+
+This run is the first current-head qualification after the bounded remote
+evidence and in-memory ordinal-map changes. It strengthens the owner and
+correctness evidence but does not close independent repeatability, valid
+growth differentials, the 10,000-push/ancestry matrices, interruption and
+provider faults, large-team concurrency, owner failover, or rollout gates.
+
+The stale-pack membership-index change (`ad2554fa`, with the deterministic
+delta-base regression in `b9859f28`) and the bounded owner-locator follow-up
+(`5ea595f6`) are represented in the current-head 1,000-push report above. Its
+final sweep reports only stale membership rows and does not scan the retained
+OID catalog; the exact refs, fsck, and byte-equivalence checks still pass.
+Repeated isolated runs and the full interruption/maintenance matrix remain
+required.
+
+### Current-head dense response-pack qualification
+
+The dense response-pack follow-up is committed as `b69ecb47`. It centralizes
+the catalog-exact filter predicate in `UploadPackFilter::is_catalog_exact()`
+and routes only no-have, non-shallow `blob:none`, `object:type`, or their
+kind-only combinations to the verified packed-entry assembler. The assembler
+keeps REF_DELTA payloads when the base is selected, rewrites OFS_DELTA to
+REF_DELTA, materializes a base only when it is outside the selected set, and
+retains the existing full-pack consolidation and selected-object repack paths
+for full, shallow, depth, path-context, and negotiated requests.
+
+The live RustFS smoke `codex-dense-pack-final-k8s-20260827-smoke` used
+Kubernetes revision `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, Git 2.50.1,
+and the release binary built from the implementation worktree at
+`113fce69`. The shared filter-policy change was already present in that build;
+the subsequent `b69ecb47` diff only renamed the internal selection parameter
+and added the final strict-pack regression. Its standalone report has
+`status=ok`, 17/17 checks passed, full and incremental fsck passed,
+the deterministic 1,000-object sample remained byte-identical, the source
+checkout was unchanged, and the run-owned remote prefix was cleaned. The
+correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The unfiltered cold clone used the existing `complete_pack_consolidation`
+  strategy: 2 origin reads, 1,244,177,064 response bytes, and 117,295 ms of
+  server-side pack generation. Depth-100 and depth-1,000 also stayed on the
+  existing selected-repack/complete-consolidation paths with 2 origin reads.
+- The `blob:none` clone used `selected_packed_entries`: 1,102,159 selected
+  objects, 211,026,080 response bytes, 6,322 ms of pack generation, zero
+  inflated bytes, 3,082 bounded range reads, and 444,376,175 fetched bytes.
+  Its client-side clone and fsck checks passed. Compared with the prior
+  selected-object repack measurement (65,962 ms and 198,749,524 response
+  bytes), this is a large CPU reduction with a measured response-size and
+  range-read trade-off that still needs provider/SLO qualification.
+- A ranked experiment rejected broad direct assembly for full clones: the
+  same two-pack snapshot produced a correct 1,263,644,281-byte response but
+  needed 155,695 range reads and 8,270,537,029 fetched bytes at essentially
+  the same 106-second generation cost. That candidate was removed before the
+  final smoke, so full clones retain the low-request consolidation path.
+
+Focused proof after the final source change passes 19 `crab-remote-git` pack
+tests, including strict forward REF_DELTA and OFS_DELTA rewriting, 24
+`crab-read` upload-pack tests, and 27 Crab upload-pack-wire tests. The smoke
+report is correctness evidence rather than a full Phase 2 performance gate:
+repeatability, full-profile response-pack SLOs, provider range-request
+behavior, and the remaining roadmap phases are still open.
+
+The generated-pack cache follow-up is committed as `fd7e6121`. Cache descriptor
+loads now use the storage layer's bounded single GET, which checks the provider
+advertised size before consuming the body and preserves the existing 4 KiB
+corruption boundary. This removes the separate descriptor HEAD from both cache
+hits and misses; the remote-repository regression asserts one descriptor GET
+for a warm lookup, while the artifact checksum, response limit, and corruption
+tests remain unchanged. It is a request-amplification fix, not a substitute
+for the still-required response-pack SLO and provider-range qualification.
+
+The assembled-pack follow-up is committed as `d50cbd89`. `PackWriter` already
+updates the Git SHA-1 and content hash on every bounded write, so its finish
+path no longer rereads the complete temporary response solely to recompute
+those values. The new checksum regression recomputes both digests in the test
+and strict-pack coverage remains in place; externally sourced repack and cache
+artifacts continue to use independent full-file verification. This removes a
+second full disk pass from sparse/dense response assembly without weakening
+the response-size, cancellation, or downstream Git integrity boundaries.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
@@ -89,6 +398,40 @@ visibility proof before serving filtered fetches. Owner-probe and admission
 errors fail closed. This closes the capability-to-admission crash recovery gap
 found by the released-shape RustFS lifecycle while preserving the push
 acknowledgement boundary.
+
+The reader-fanout follow-up is committed as `fd95e8fd`. Protocol-v2
+upload-pack sessions now hold one of 16 repository-scoped object-store read
+leases for the session lifetime, renew the lease, cancel on renewal failure,
+and release it on every terminal path. Contended readers rotate and jitter a
+single slot per attempt, so admission is bounded by repository lease capacity
+instead of creating a metadata storm. Reader-side locator, visibility, and
+ref-journal repairs use non-blocking writer-lock probes; the owner path keeps
+the existing blocking serialization. The lease is deliberately internal and
+fixed-size: normal completion/error/cancellation releases it, while a crashed
+helper leaves only a bounded TTL lease for backend-clock reclaim.
+
+The exact post-commit RustFS team-load smoke
+`crabbuild-team-load-smoke-fd95` used the 100-commit synthetic fixture and the
+release binary whose embedded source revision is `fd95e8fd`. The standalone
+report verifier returned `status=ok` with 27 checks and 909 recorded commands:
+
+- 100/100 seed clones succeeded; total 26,853 ms, median client 20,949 ms,
+  p95 25,384 ms, p99 26,366 ms;
+- 100/100 concurrent incremental fetches succeeded; total 13,580 ms, median
+  client 6,933 ms, p95 11,913 ms, p99 12,924 ms;
+- 20/20 independent-ref pushes succeeded; total 5,323 ms, median client
+  2,034 ms, p95 3,623 ms, p99 5,303 ms;
+- same-ref contention produced exactly 1 success and 19 typed lock rejections;
+  total 785 ms, median client 378 ms, p95 617 ms, p99 773 ms, with zero
+  unexpected failures.
+
+This is current-binary smoke evidence, not completion of the full Kubernetes
+gate. The full Crab suite passed (3,745 library tests, 49 binary tests, and
+all enabled integration suites) with the documented 32 MiB macOS test-stack
+workaround; coordination passed 93/93 and the release build passed. Full
+Kubernetes repeatability, the 1,000-push differential, 10,000 ancestry and
+shallow differential proof, provider/fault/failover/canary evidence, and the
+remaining owner O(N) budgets remain open below.
 
 The active-marker recovery path is now complete for the discovered crash
 boundary: compaction promotes any prepared ref heads after the manifest CAS,
@@ -104,11 +447,14 @@ grows and adds a regression that binds the repaired index. The fresh
 passed the real-Git lifecycle, response-loss/crash-recovery lifecycle, and all
 Git 2.30/2.40/2.45/current compatibility jobs on that fix.
 
-Implemented on the current branch (qualification evidence at `04655f3b`; latest
-admission hardening at `0ba86693`; qualification-contract fix at `0a8e4aa8`;
-capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
-`be27f458`; active-marker recovery fix at `73ef4035`; transition-bitmap fix at
-`01d588ea`):
+Implemented on the current branch (pre-lazy qualification evidence at
+`04655f3b`; latest admission hardening at `0ba86693`; qualification-contract
+fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
+recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
+transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
+reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
+`4a8fc34e`; regular locator budgeting at `88deb4e0`; stale owner-plan guard at
+`5465031e`; small-catalog point-read policy at `62d35c14`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -125,8 +471,9 @@ capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
 - cold/warm clone fanout controls in the qualification harness.
 - SlateDB 0.15.0 cancellation-safe reader behavior and explicit initialization
   of temporary bare Git repositories before pack/index operations;
-- selected-object response repacking for dense type-only filters, with exact
-  generated-object-set verification;
+- catalog-exact dense-filter response assembly from verified packed entries for
+  `blob:none`/`object:type`, with exact generated-object-set verification and
+  conservative repack fallback for contextual requests;
 - safe OID deduplication for initial absolute-depth traversal, preserving
   context-sensitive behavior for relative deepening and existing shallow
   boundaries;
@@ -137,13 +484,32 @@ capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
   already-shallow requests;
 - generated-pack cache descriptors that distinguish requested object count
   from the larger self-contained pack count required by delta bases.
+- repository GC now resolves recent generated-pack descriptors with bounded
+  list-concurrency and streams validated descriptor/artifact roots without
+  accumulating the cache namespace in memory.
 - an immutable catalog-readiness marker that makes healthy admission checks
   metadata-only while preserving generation and validation-digest binding;
-- one catalog-bound visibility-index handoff across upload-pack, exact
-  shallow-fetch, and promisor-fetch paths, removing duplicate full catalog
-  materialization per helper;
-- catalog ordinal scan read-ahead and bounded fetch parallelism for the one
-  remaining immutable dictionary load.
+- one catalog-bound ordinal-proof handoff across protocol-v2 upload-pack, exact
+  shallow-fetch, promisor-fetch, and legacy remote-helper paths, removing the
+  full OID dictionary materialization from normal helper admission;
+- catalog ordinal scan read-ahead and bounded fetch parallelism for dense
+  selected-object resolution;
+- a large-batch locator scan policy that replaces tens of thousands of exact
+  OID point reads with one bounded, read-ahead scan while retaining the exact
+  lookup path for sparse or small requests.
+- owner locator planning serialized under the repository publication lock,
+  with uncovered-pack budgeting and a metadata-only writer for unchanged
+  inventories.
+- regular post-CAS locator publication reuses the same lock-scoped uncovered
+  pack budget, so stable inventory does not inflate push-side compaction.
+- owner locator planning rechecks its manifest anchor after lock acquisition,
+  skipping stale repository snapshots before locator session or pack planning
+  work begins.
+- small locator catalogs retain bounded OID point reads; full ordinal scans are
+  reserved for large dense batches on catalogs with at least 4,096 objects.
+- generated response-pack cache publication trusts the private verified-pack
+  invariant, avoiding a second repository-sized hash scan before multipart
+  upload on every cold cache miss.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;
@@ -170,12 +536,78 @@ capability-admission fix at `3bd7a02b`; filtered-fetch recovery fix at
   retained transitions together whenever the shared object dictionary grows,
   so validation cannot observe a shorter transition bitmap after an unrelated
   ref update.
+- generation-owner cycles execute at most one derived-state action, and owner
+  samples identify the action reason and next eligibility for operational
+  scheduling.
+- protocol-v2 upload-pack sessions use bounded repository-scoped read
+  admission with renewal, cancellation, crash-reclaimable TTL leases, and
+  non-blocking reader-side repair probes.
+- stale locator-pack cleanup uses an atomic derived pack-slot membership index;
+  marker-less or interrupted catalogs rebuild it once, while routine sweeps
+  avoid scanning retained OID rows. Rebuild completion is count-checked before
+  coverage can advance.
+- the workflow scheduler lock retains its diagnostic inode across handoffs,
+  preventing an earlier holder from unlinking the pathname after a waiter has
+  acquired it; the focused handoff regression is committed as `d9c93263`.
+
+### PR #87 push-admission follow-up
+
+The released-shape PR workflow `gha-33086829129-1-concurrent` failed only the
+`same-branch-locator-request-budget` check. Reproducing the exact four-agent
+same-ref workload locally recorded 2,028 locator-catalog requests for four
+successful pushes, including 1,443 compacted catalog reads. The request spike
+was in the short-lived push process: post-CAS locator publication and its
+catalog-bound readiness check reopened the repository-sized SlateDB catalog on
+each incremental push.
+
+The follow-up moves that work to the existing generation-owner boundary:
+
+- ref-journal admission publishes only an immutable digest-bound V4 visibility
+  proof and uses the catalog identity/checkpoint marker for a metadata-only
+  readiness check;
+- once that V4 proof exists, later admission probes only its bounded immutable
+  object with a HEAD request, avoiding another remote-pack walk while the
+  generation owner upgrades the state to V5; the regression also proves the
+  repeated admission path performs no pack reads;
+- a normal committed push no longer opens the locator catalog, publishes
+  locator rows, or writes a generation receipt after the active marker;
+- the generation owner retains compaction-aware locator publication and
+  catalog-bound V5 visibility repair, while reader repair remains bounded and
+  uses the existing complete-pack fallback for oversized repositories;
+- the initial bounded-pack E2E test now asserts the authoritative pack/index
+  publication, and focused owner/repair tests prove that deferred locator
+  coverage remains repairable.
+
+The released Crab binary passed the exact RustFS lifecycle locally as
+`codex-pr87-owner-deferred-20260827`: 1,001 pushes, 23/23 checks, all crash,
+marker-fault, branch-fanout, same-ref integration, and FSCK checks passed. The
+four same-ref pushes observed 483.75 locator requests per successful push
+against the 500-request budget, and the final protocol-v2 clone saw all four
+same-ref files. Focused and broad proof also passed: Crab library tests
+`3752 passed, 0 failed, 2 ignored`, `crab-remote-git` tests `89 + 61 passed`,
+`crab-metadata` remote-index/storage tests `258 passed, 0 failed, 1 ignored`,
+and the qualification verifier/smoke harness tests `35 passed`.
+
+This closes the observed PR admission regression, but it does not close the
+remaining roadmap gates below: independent Kubernetes repeatability, valid
+1,000-push and 10,000-ancestry differentials, sustained owner/rebuild and
+response-pack SLOs, provider/fault/failover/canary evidence, and the final
+catalog/readiness handoff proof.
 
 Still required before the roadmap is DONE:
 
-- an independent repeatability full-profile report from the current binary;
-- 1,000-push growth and latency comparison across multiple runs, not only the
-  completed current-binary report;
+- an independent repeatability full-profile report from the current binary
+  after the stale-owner and small-catalog changes. The current
+  `codex-d8de9d12-k8s-20260827-current-full` is the first current-head
+  full-profile run; the older `f12e2d9e` run is not a repeat of this source;
+- sustained owner-budget, interruption, and memory evidence after `4a8fc34e`,
+  `88deb4e0`, and the current locator hardening. The current full run proves
+  the 902-to-2 pack transition and 901-row indexed sweep once, but the
+  intentional O(N) rebuild path and repeated owner behavior still need bounded
+  multi-run evidence;
+- a valid 1,000-push growth and latency comparison across isolated runs; the
+  current post-lazy comparison is invalid because push and clone medians drifted
+  by roughly 41% on the shared host;
 - 10,000 deterministic Kubernetes ancestry pairs and depth-1/10/100/1,000
   shallow differential proof;
 - full shallow differential proof and the final response-pack SLO report. The
@@ -188,15 +620,30 @@ Still required before the roadmap is DONE:
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.
-- the current owner report's `repair_required` state must be explained and
-  cleared: the current generation receipt is valid, but bucket-registry
-  discovery remains incomplete and destructive bucket GC remains disabled.
-  This diagnostic cannot be treated as harmless while claiming production
-  readiness.
-- a persisted compact catalog/sidecar or lazy ordinal lookup path is still
-  required to remove the remaining O(N) visibility dictionary materialization
-  from every upload-pack process; the current change only removes the second
-  copy and makes the one scan bounded;
+- the owner report's remaining `repair_required` state must be explained and
+  cleared for repository-local acceleration: generation receipts, repository
+  registry coverage, and derived-index coverage still need valid evidence.
+  Bucket-wide registry discovery is now a separate diagnostic state and does
+  not by itself require repo-scoped repair; destructive bucket GC remains
+  disabled until its independent completeness gate is proven.
+- the post-`cbe848f4` Kubernetes qualification proves that normal protocol-v2
+  and legacy helper admission emits no `catalog_materialization` event. The
+  owner publication path now reads the immutable `.kinds` sidecar instead of
+  downloading new pack bodies when only locator rows are needed, but
+  intentional O(N) owner repair/rebuild, legacy/invalid sidecar repair,
+  migration/compaction, graph, and repack paths still have latency and memory
+  budgets open;
+- the post-lazy depth-1/10 planner measured 11,659/15,553 ms before the
+  large-batch scan change. The current full run shows depth-1/10 planner
+  visibility in 9/13 ms and zero locator ordinal scans for those depth clones;
+  rerun the differential with the current source and require lookup-mode
+  telemetry to prove the change without increasing full-clone or
+  incremental-fetch latency;
+- catalog-filter planning now reads the additive ordinal-keyed metadata
+  sidecar, filters ordinals, and resolves only retained OIDs. Existing or
+  incomplete sidecars still use the bounded canonical fallback; the current
+  full run supplies fresh current-binary evidence, but the large-closure
+  request/latency SLO still needs differential and sustained proof;
 - cold and warm full-clone response-pack SLOs remain open: the Kubernetes
   repository still generates a roughly 1.2 GB response pack, so cache hits and
   pack-count bounds alone do not prove large-team clone fanout is affordable;
@@ -777,6 +1224,10 @@ as authoritative.
 2. Store a complete graph as immutable split layers. Push appends new commits;
    the owner geometrically compacts layers without rewriting stable history on
    every push.
+   The owner now resolves a missing current graph from the validated previous
+   generation through bounded remote-Git commit batches and appends the new
+   layer; it falls back to complete pack materialization when that predecessor
+   proof is unavailable.
 3. Replace string parent maps in hot ancestry and shallow-boundary paths with
    positional reads.
 4. Validate graph closure, parent ordering, generation monotonicity, duplicate
@@ -1042,13 +1493,13 @@ environment dumps, or credentials.
 
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
-| 0 | CURRENT-BINARY FULL PROFILE PASS; REPEATABILITY PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` (prefix cleaned) | `04655f3b` / binary `git_sha=04655f3b` | Full profile, 1,001 pushes, 22/22 checks, exact refs/fsck/sample/cleanup all pass. Repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
-| 1 | IMPLEMENTED; RELEASE LIFECYCLE PASS; SLO/PROVIDER PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `04655f3b`; `01d588ea` | Full-closure visibility planning is 70 ms; blobless planning is 2,203 ms. The transition-bitmap growth regression is fixed and the released-shape/compatibility matrix passes. The one remaining O(N) immutable dictionary load and provider/fault SLOs remain open |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Final inventory is 2 active packs with 1,263,723,813 bytes; cold/warm clones are 184,248/56,788 ms, blobless is 78,162 ms, and depth-1/10/100/1,000 are 32,842/43,552/145,423/201,211 ms. Reference-pack SLO, fanout, and provider evidence remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Owner convergence at checkpoints 1/10/100/1,000 was 100.821/209.100/403.914/1,993.181 s; the 1,000 checkpoint used six passes, ended at 2 packs, and peaked at 1.846 GB RSS. Artifact shape is bounded, but maintenance latency and memory remain large-team bottlenecks |
-| 4 | IMPLEMENTED; DIFFERENTIAL/ROLLOUT EVIDENCE PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Current depth-1/10/100/1,000 visibility planning was 12/17/316/502 ms, with 6,178/7,281/3/3 storage requests; incremental fetch at push 1/10/100/1,000 remained exact. 10,000-pair differential, sustained response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | All acceleration checkpoints have valid generation receipts and current locator/visibility/graph artifacts; `repair_required` remains because bucket-registry discovery is incomplete. Interruption, 10,000-push, and GC matrix remain pending |
-| 6 | PARTIAL | PR #75 | `local-k8s-final-04655f3b-1000-20260825` | `04655f3b` | Current single-client correctness and warm-cache checks pass; shallow/large-team concurrency, fault, cache-server, provider, and canary gates remain pending |
+| 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
+| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86` | The earlier full run ended with 2 active packs; the current smoke retained 103 immutable physical pack objects after 100 replays and measured cold/warm full clones at 173,603/61,513 ms, blobless at 88,798 ms, and depth-1/10/100/1,000 at 18,442/23,523/145,678/184,035 ms. Cache publication now avoids a duplicate full-artifact hash scan on cold misses; response-pack egress, fanout, and provider SLOs remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0` | The current smoke owner totals at seed/1/10/100 were 83.8/77.8/224.8/244.7 s. Post-repack catalog passes scanned/deleted 10/10 and 91/91 stale pack rows with 14.4/37.2 MB maintenance reads; both owner and regular post-CAS publication now use the uncovered-pack budget, while the pre-repack O(N) advance and 1,000-push latency, memory, and interruption budgets remain open |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | The current 100-replay smoke passes incremental and depth-1/10/100/1,000 correctness with clone generation at 10.0/11.7/101.0/116.9 s; the full 1,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; stale locator cleanup avoids retained-catalog scans and marker-less migration is idempotent. Interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0` | Current single-client correctness and the 100-replay owner-budget smoke pass. The scheduler lock now retains its inode across handoffs with 11 focused tests passing, and regular post-CAS locator budgeting is source-tested/release-built; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -1071,15 +1522,17 @@ The earlier broad proof was run with the roadmap target directory:
   `crab-metadata`, `crab-git`, `crab-remote-git`, and `crab-read` also passed.
 
 The repository-wide `make clippy` gate is not recorded as passing: it reaches
-pre-existing warnings in untouched `crab-vfs` code. The current full
-Kubernetes/RustFS qualification is green, while Phase 6 rollout evidence and
-the remaining SLO/differential/fault/provider gates are not complete.
+pre-existing warnings in untouched `crab-vfs` code. The post-lazy full
+Kubernetes/RustFS qualification is green for correctness, but its performance
+comparison is invalid and the Phase 6 rollout evidence plus the remaining
+SLO/differential/fault/provider gates are not complete.
 
 The current committed tree additionally passes the focused remote-helper
-transcript suite (`42` tests), architecture gates, split-crate behavior gates,
-strict split-crate clippy checks, metadata tests, and remote-Git tests. The
-full workspace test/clippy gates are not claimed green here; unrelated baseline
-failures/warnings outside the touched surfaces remain separate cleanup work.
+transcript suite (`42` tests with `RUST_MIN_STACK=33554432`), architecture
+gates, split-crate behavior gates, strict split-crate clippy checks, metadata
+tests, and remote-Git tests. The full workspace test/clippy gates are not
+claimed green here; unrelated baseline failures/warnings outside the touched
+surfaces remain separate cleanup work.
 
 The latest qualification-contract follow-up (`0a8e4aa8`) additionally passes
 the Python E2E harness suite (`30` tests). Its post-push terminal fetch proves
@@ -1087,6 +1540,11 @@ that the generation-owner admission path completes the expected locator and
 visibility repair before the filter matrix, so later filtered reads are
 measured against a stable canonical remote rather than conflating repair with
 steady-state read behavior.
+
+The current owner JSONL/report contract also carries per-pass locator sweep
+counters. Future full-profile qualifications now fail if this evidence is
+missing, and can distinguish bounded stale-pack membership cleanup from a
+repository-sized canonical catalog rebuild.
 
 The focused proof for committed `04655f3b` is:
 
@@ -1104,7 +1562,43 @@ All Cargo commands used the required isolated target directory on the
 workspace volume. This is focused source proof, not a substitute for the
 open full-suite, latest-binary, provider, fault, or team-concurrency gates.
 
-### Current Kubernetes/RustFS evidence from committed `04655f3b`
+The lazy-catalog follow-up (`cbe848f4`) additionally passes focused source
+proof with the isolated target directory:
+
+- `cargo fmt --all -- --check`;
+- `cargo check -p crab --locked` with no warnings from the touched production
+  crate;
+- `cargo test -p crab-metadata --features remote-index,storage --locked git_visibility -- --nocapture`:
+  27 passed;
+- `cargo test -p crab-metadata --features remote-index,storage --locked git_object_locator -- --nocapture`:
+  39 passed, 1 ignored;
+- `cargo test -p crab-read --locked upload_pack -- --nocapture`: 23 passed;
+- `cargo test -p crab --locked upload_pack_wire -- --nocapture`: 24 passed;
+- `RUST_MIN_STACK=33554432 cargo test -p crab --locked --test
+  remote_helper_transcript -- --nocapture`: 42 passed.
+
+The large-batch locator follow-up additionally passes the same metadata
+locator suite (`39` passed, `1` ignored). It keeps exact point reads for small
+or sparse requests and selects a bounded 16 MiB read-ahead scan when a large
+request covers at least one sixty-fourth of the pinned catalog. The K8s run
+below predates this follow-up, so its depth-1/10 planning numbers remain the
+before-change measurement.
+
+The stale-pack follow-up (`ad2554fa`) additionally passes strict metadata
+clippy, the complete metadata suite (`256` passed, `1` ignored), and locator
+regressions proving that pure repacks remove old membership rows without
+scanning the object catalog, while a marker-less catalog rebuilds the derived
+index once. The remote-Git test follow-up (`b9859f28`) passes the complete
+`crab-remote-git` suite (`84` unit tests and `61` repository tests) and makes
+the shared delta-base coalescing assertion independent of scheduler timing.
+
+The last command needs the explicit larger test stack for
+`protocol_edges::eof_mid_fetch_batch_finalizes_without_blank_line`; the exact
+test also fails on the pre-change `68ddf2fc` baseline with the default macOS
+stack, so this is tracked as baseline harness debt rather than attributed to
+the lazy-catalog change.
+
+### Pre-lazy Kubernetes/RustFS baseline from committed `04655f3b`
 
 Run profile: `local-k8s-final-04655f3b-1000-20260825`, Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, external local RustFS, and the
@@ -1128,10 +1622,63 @@ passed and cleanup removed the isolated remote prefix.
   source checkout was unchanged. Fingerprint:
   `7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
 
-This closes current-binary single-client correctness and qualification
-evidence. It does not close the owner-latency/memory SLO, roughly 1.2 GB cold
-response-pack egress, blobless planning, differential, fault, provider,
-concurrency, or rollout gates listed above.
+This closes pre-lazy single-client correctness and qualification evidence. It
+does not prove the post-`cbe848f4` lazy-admission behavior and does not close
+the owner-latency/memory SLO, roughly 1.2 GB cold response-pack egress,
+blobless kind-lookup cost, differential, fault, provider, concurrency, or
+rollout gates listed above.
+
+### Post-lazy Kubernetes/RustFS qualification
+
+Run profile: `lazy-cbe848f4-1000-20260825`, the same Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, 1,000
+first-parent replay pushes, and the release binary whose provenance reports
+`git_sha=7ff92545`. The standalone verifier reports `status=ok`,
+`profile=full`, and 22/22 checks passed. Advertised refs and full/incremental
+clone tips matched the source, both fsck checks passed, 1,000 sampled objects
+were byte-identical, the source checkout was unchanged, and the run-owned
+remote prefix was cleaned. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Normal seed, full, warm, blobless, and depth-1/10/100/1,000 helper logs
+  emitted no `catalog_materialization` event. The owner repair/rebuild path
+  intentionally emitted that event, so the result proves lazy admission but
+  not an O(N)-free maintenance cycle.
+- Replay-only pushes had 671/2,543/8,193/19,731/57,809 ms for
+  min/median/p95/p99/max. Active packs stayed at 2 after the seed and through
+  checkpoint 1,000, with 1,263,705,690 active bytes; the store retained 1,004
+  immutable historical pack objects, which is the physical-retention versus
+  active-inventory distinction the GC/repack work must continue to enforce.
+- Incremental fetch server planning/response remained bounded: visibility
+  planning at pushes 1/10/100/1,000 was 51/60/74/662 ms, with
+  37/420/4,810/38,745 logical objects and 2/6/33/226 storage requests.
+- Before the large-batch locator follow-up, the indexed shallow planner took
+  11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 and selected
+  30,031/44,026/1,001,853/1,643,211 objects. The depth-1/10 cost was traced to
+  tens of thousands of exact OID authorization reads; the follow-up adds a
+  bounded full scan for large requests and retains exact reads for sparse
+  requests. A fresh release run must prove the improvement.
+- Clone wall times were 199,311 ms cold full, 72,101 ms warm full, 110,384 ms
+  blobless, and 45,570/58,702/174,452/191,898 ms for depth 1/10/100/1,000.
+  The cold and deep responses still reach roughly 1.2 GB, so response-pack
+  egress and fanout remain open SLOs.
+- Owner convergence took 146,947/244,227/373,872/2,729,094 ms at checkpoints
+  seed/1/10/100/1,000. Checkpoint 1,000 used six passes, peaked at
+  1,837,449,216 bytes of child RSS, and read 1,478,153,950 bytes. Every
+  acceleration receipt was current and valid, but `repair_required=true`
+  remained because bucket-registry discovery is incomplete and destructive
+  bucket GC remains disabled.
+- The verifier comparison against the pre-lazy baseline is intentionally
+  invalid: push median drifted +40.7% and clone median +41.2%, exceeding the
+  20% limit, while fetch median improved 12.0%. Repeat the comparison on an
+  idle isolated host before treating any latency change as a regression or
+  improvement.
+
+This run closes post-lazy single-client correctness and proves that normal
+read admission no longer materializes the complete OID dictionary. It does not
+close the large-batch shallow SLO, owner latency/memory, catalog-filter kind
+lookup, response-pack, 10,000-push, differential, interruption/GC, provider,
+concurrency, owner-failover, or rollout gates.
 
 ### Historical pre-handoff diagnostic
 

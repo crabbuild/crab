@@ -30,7 +30,9 @@ pub use pack::{
     object_kinds_from_git_dir, verify_pack_sha1,
 };
 pub use pack_locator::{
-    PackLocationIter, PackLocatorError, PackObjectLocation, write_pack_reverse_index,
+    PackKindMetadataIter, PackLocationIter, PackLocatorError, PackObjectLocation,
+    decode_pack_kind_metadata, decode_pack_kind_metadata_iter, encode_pack_kind_metadata,
+    validate_pack_kind_metadata, write_pack_reverse_index,
 };
 pub use pointer_detect::{PointerKind, classify};
 pub use pointer_ref::{PointerRefError, resolve_pointer_commit, resolve_pointer_ref};

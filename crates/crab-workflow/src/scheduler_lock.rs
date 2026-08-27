@@ -22,11 +22,10 @@
 //! # Drop behavior
 //!
 //! On drop the `File` handle is closed; the kernel releases the
-//! advisory flock automatically. We then best-effort delete the
-//! lockfile so a subsequent run doesn't see a stale PID belonging
-//! to an already-exited process. Two concurrent drops racing on the
-//! same path is benign — whoever loses the `remove_file` call sees
-//! `NotFound` and moves on.
+//! advisory flock automatically. The lockfile is deliberately
+//! retained so a waiter cannot acquire the inode and then have its
+//! pathname unlinked by the previous holder. The next holder
+//! overwrites the diagnostic PID before returning.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -61,7 +60,7 @@ const POLL_MULTIPLIER: u32 = 2;
 /// Holding this value means the current process is the sole
 /// scheduler running against the target `workflow_root`. Dropping
 /// it releases the advisory lock (via closing the file descriptor)
-/// and best-effort removes the lockfile.
+/// while retaining the lockfile for the next holder to reuse.
 ///
 /// Does NOT implement `Clone` or `Copy` — the lock is exclusive by
 /// construction.
@@ -196,20 +195,10 @@ impl Drop for SchedulerLock {
         #[cfg(windows)]
         remove_pid_sidecar(&pid_path, &self.path);
 
-        // Close the fd so the kernel drops the flock before removing
-        // the lockfile itself.
+        // Close the fd so the kernel drops the flock. Keep the
+        // lockfile in place: removing it after release can unlink a
+        // new holder's pathname.
         self.file.take();
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                debug!(
-                    path = %self.path.display(),
-                    error = %e,
-                    "best-effort lockfile removal failed"
-                );
-            }
-        }
     }
 }
 
@@ -348,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_releases_lock_and_removes_file() {
+    fn drop_releases_lock_and_retains_diagnostic_file() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("workflow");
         let path = {
@@ -356,7 +345,7 @@ mod tests {
             assert!(guard.path().exists());
             guard.path().to_path_buf()
         };
-        assert!(!path.exists(), "lockfile should be removed after drop");
+        assert!(path.exists(), "lockfile should remain for the next holder");
         #[cfg(windows)]
         assert!(
             !pid_path(&path).exists(),

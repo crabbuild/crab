@@ -232,6 +232,21 @@ impl PushLockAcquireContext {
         self.acquire_path(resource, path, ttl).await
     }
 
+    /// Attempts to acquire an internal lease without waiting behind a holder.
+    ///
+    /// A live lease is conservatively reported as held without probing backend
+    /// time. If the diagnostic expiry says that reclamation may be necessary,
+    /// the normal backend-authored expiry check is used once before returning.
+    pub async fn try_acquire_internal(
+        &mut self,
+        prefix: &str,
+        resource: &str,
+        ttl: Duration,
+    ) -> Result<PushLock> {
+        let path = internal_lock_path(prefix, resource)?;
+        self.try_acquire_path(resource, path, ttl).await
+    }
+
     async fn acquire_path(
         &mut self,
         target: &str,
@@ -252,6 +267,64 @@ impl PushLockAcquireContext {
             &mut self.backend_clock,
         )
         .await?;
+        Ok(PushLock {
+            store: Arc::clone(&self.store),
+            path,
+            ttl,
+            holder,
+            etag: Some(etag),
+            released: false,
+        })
+    }
+
+    async fn try_acquire_path(
+        &mut self,
+        target: &str,
+        path: String,
+        ttl: Duration,
+    ) -> Result<PushLock> {
+        let holder = generate_holder_id();
+        let expires_at = unix_now() + ttl.as_secs();
+        let body = serialize_payload(
+            &path,
+            &PushLockPayload::new(&holder, expires_at, ttl.as_secs()),
+        )?;
+        let known_existing = !self.known_paths.insert(path.clone());
+        let created = if known_existing {
+            None
+        } else {
+            match create_strict(&self.store, &Path::from(path.as_str()), body.clone()).await {
+                Ok(etag) => Some(etag),
+                Err(object_store::Error::AlreadyExists { .. })
+                | Err(object_store::Error::Precondition { .. }) => None,
+                Err(source) => return Err(store_error(&path, source)),
+            }
+        };
+        let etag = match created {
+            Some(etag) => etag,
+            None => match try_acquire_contended(
+                &self.store,
+                &Path::from(path.as_str()),
+                target,
+                body,
+                &mut self.backend_clock,
+            )
+            .await?
+            {
+                ContendedAcquire::Acquired(etag) => etag,
+                ContendedAcquire::Held {
+                    holder,
+                    expires_at_unix,
+                } => {
+                    return Err(CoordinationError::PushLockHeld {
+                        ref_name: target.to_owned(),
+                        holder,
+                        expires_at_unix,
+                    });
+                }
+            },
+        };
+        debug!(lock_path = %path, holder, ttl_secs = ttl.as_secs(), "push lock acquired without waiting");
         Ok(PushLock {
             store: Arc::clone(&self.store),
             path,
@@ -679,6 +752,44 @@ async fn acquire_contended(
         }
         Err(source) => Err(store_error(object_path.as_ref(), source)),
     }
+}
+
+async fn try_acquire_contended(
+    store: &Arc<dyn ObjectStore>,
+    object_path: &Path,
+    ref_name: &str,
+    body: Bytes,
+    backend_clock: &mut BackendClock,
+) -> Result<ContendedAcquire> {
+    let (existing_body, _, last_modified) =
+        match get_with_version_and_modified(store, object_path).await {
+            Ok(existing) => existing,
+            Err(object_store::Error::NotFound { .. }) => {
+                return acquire_contended(store, object_path, ref_name, body, backend_clock).await;
+            }
+            Err(source) => return Err(store_error(object_path.as_ref(), source)),
+        };
+
+    let existing = match serde_json::from_slice::<PushLockPayload>(&existing_body) {
+        Ok(existing) => existing,
+        Err(_) => {
+            return Ok(ContendedAcquire::Held {
+                holder: String::new(),
+                expires_at_unix: None,
+            });
+        }
+    };
+    if !existing.is_released() && !existing.is_expired_at(unix_now()) {
+        let expires_at_unix = authoritative_expiry(&existing, last_modified);
+        return Ok(ContendedAcquire::Held {
+            holder: existing.holder,
+            expires_at_unix,
+        });
+    }
+
+    // A diagnostic expiry is only a hint. Reuse the normal acquisition path so
+    // reclaim still requires an authoritative backend clock and CAS.
+    acquire_contended(store, object_path, ref_name, body, backend_clock).await
 }
 
 fn has_cas_token(etag: &UpdateVersion) -> bool {
@@ -1127,6 +1238,42 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn try_internal_contention_skips_backend_clock_for_live_holder() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store: Arc<dyn ObjectStore> = inner.clone();
+        let blocker = PushLock::acquire_internal(
+            &setup_store,
+            "org/repo",
+            GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+        });
+        let mut context = PushLockAcquireContext::new(metered_store);
+
+        let blocked = context
+            .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+            .await;
+        assert!(matches!(
+            blocked,
+            Err(CoordinationError::PushLockHeld { .. })
+        ));
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+
+        let clock_path = Path::from(format!("{}/clock", blocker.path()));
+        assert!(matches!(
+            setup_store.head(&clock_path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        blocker.release().await.unwrap();
     }
 
     #[tokio::test]

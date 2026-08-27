@@ -140,9 +140,11 @@ Paths are relative to `repo_prefix`.
 | `metadata/generation-receipts/{generation20}.json` | committed metadata-index coverage for one manifest generation | Immutable, idempotent create |
 | `packs/pack-{pack-id}.{pack,idx,rev}` | canonical Git pack body and indexes | Immutable |
 | `packs/pack-{pack-id}.meta` | pack metadata sidecar | Derived, replaceable |
+| `packs/pack-{pack-id}.kinds` | compact object-kind proof ordered by pack offset and bound to the Git pack checksum and object count | Immutable, idempotent create |
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
 | `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
 | `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
+| `metadata/git-visibility-pending/v1/{validation-digest}.json` | `crab-metadata`: catalog-ordinal visibility delta awaiting owner catalog publication | Immutable, current-manifest recovery root |
 | `manifests/commit-graph-{blake3}` | complete split commit-graph descriptor pinned by `manifest` | Immutable |
 | `metadata/commit-graph/layers/{blake3}.bin` | positional commit records and parent ordinals | Immutable |
 | `locks/` | coordination namespaces described below | Mutable |
@@ -155,6 +157,17 @@ The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`, or
 `shard-list` objects are compatibility or feature-owned surfaces, not an
 alternate source of truth. Commit-graph layers are trusted only through the
 descriptor hash pinned by that manifest.
+
+The opaque `git_object_catalog_db/` also contains a derived pack-slot
+membership keyspace used only by the exclusive locator writer. It maps each
+canonical OID row to its current immutable pack slot, so stale-pack cleanup is
+proportional to stale membership rows rather than the complete object catalog.
+The writer marks the index complete in the same SlateDB publication stream;
+rebuilds first publish an in-progress marker and only mark it complete after
+every retained pack's verified object count has replayed. A restart seeing an
+in-progress or marker-less historical catalog performs one idempotent rebuild
+before normal incremental cleanup. Readers use the canonical OID, ordinal, and
+pack rows and do not depend on this derived keyspace.
 
 An optional feature that adds a repository-local namespace must document its
 owner, relative grammar, mutability, reachability, and cleanup policy. The

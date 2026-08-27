@@ -12,6 +12,10 @@ const MIN_PACK_LEN: u64 = PACK_HEADER_LEN + SHA1_LEN as u64;
 const REVERSE_HEADER_LEN: usize = 12;
 const REVERSE_ENTRY_LEN: usize = 4;
 const REVERSE_TRAILER_LEN: usize = SHA1_LEN * 2;
+const KIND_METADATA_MAGIC: &[u8; 8] = b"CRBKIND1";
+const KIND_METADATA_VERSION: u32 = 1;
+const KIND_METADATA_HEADER_LEN: usize = KIND_METADATA_MAGIC.len() + 4 + 8 + SHA1_LEN;
+const KIND_METADATA_TRAILER_LEN: usize = 32;
 
 /// A Git object and its complete packed-entry range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +101,10 @@ pub enum PackLocatorError {
     /// The reverse-index checksum did not match its contents.
     #[error("git reverse-index checksum mismatch for {path}")]
     ReverseIndexChecksum { path: PathBuf },
+
+    /// A kind sidecar did not match its immutable pack index.
+    #[error("invalid git pack kind metadata: {reason}")]
+    InvalidKindMetadata { reason: String },
 }
 
 /// Iterator over verified locations in increasing pack-offset order.
@@ -213,6 +221,205 @@ impl Iterator for PackLocationIter {
 }
 
 impl ExactSizeIterator for PackLocationIter {}
+
+/// Encode one compact, checksummed object-kind sidecar.
+///
+/// Entries are ordered by increasing pack offset, matching
+/// [`PackLocationIter`]. The sidecar is deliberately separate from the JSON
+/// pack metadata so normal fetches never download a repository-sized kind
+/// table; generation owners read it only when they must rebuild locator rows.
+pub fn encode_pack_kind_metadata(
+    pack_checksum: gix_hash::ObjectId,
+    kinds: &[gix_object::Kind],
+) -> Result<Vec<u8>, PackLocatorError> {
+    if pack_checksum.as_bytes().len() != SHA1_LEN {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "kind metadata supports only SHA-1 pack checksums".to_owned(),
+        });
+    }
+    let object_count = u64::try_from(kinds.len()).map_err(|_| PackLocatorError::Overflow {
+        path: PathBuf::from("pack kind metadata"),
+    })?;
+    let capacity = KIND_METADATA_HEADER_LEN
+        .checked_add(kinds.len())
+        .and_then(|size| size.checked_add(KIND_METADATA_TRAILER_LEN))
+        .ok_or_else(|| PackLocatorError::Overflow {
+            path: PathBuf::from("pack kind metadata"),
+        })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    bytes.extend_from_slice(KIND_METADATA_MAGIC);
+    bytes.extend_from_slice(&KIND_METADATA_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&object_count.to_le_bytes());
+    bytes.extend_from_slice(pack_checksum.as_bytes());
+    for kind in kinds {
+        bytes.push(kind_code(*kind));
+    }
+    let digest = blake3::hash(&bytes);
+    bytes.extend_from_slice(digest.as_bytes());
+    Ok(bytes)
+}
+
+/// Decode and bind one kind sidecar to its verified pack locations.
+///
+/// The returned pairs retain pack-offset order. The sidecar checksum, object
+/// count, and Git pack checksum must all agree with the supplied index pair.
+pub fn decode_pack_kind_metadata(
+    bytes: &[u8],
+    locations: PackLocationIter,
+) -> Result<Vec<(gix_hash::ObjectId, gix_object::Kind)>, PackLocatorError> {
+    decode_pack_kind_metadata_iter(bytes, locations)?.collect()
+}
+
+/// Decode a kind sidecar into a bounded-memory pack-offset iterator.
+pub fn decode_pack_kind_metadata_iter(
+    bytes: &[u8],
+    locations: PackLocationIter,
+) -> Result<PackKindMetadataIter, PackLocatorError> {
+    let pack_checksum = locations.pack_checksum();
+    let object_count = locations.object_count();
+    let kinds = decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count)?;
+    Ok(PackKindMetadataIter {
+        locations,
+        kinds: kinds.into_iter(),
+    })
+}
+
+/// Validate one kind sidecar against a pack checksum and object count.
+pub fn validate_pack_kind_metadata(
+    bytes: &[u8],
+    pack_checksum: gix_hash::ObjectId,
+    object_count: u64,
+) -> Result<(), PackLocatorError> {
+    decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count).map(|_| ())
+}
+
+fn decode_pack_kind_metadata_payload(
+    bytes: &[u8],
+    pack_checksum: gix_hash::ObjectId,
+    object_count: u64,
+) -> Result<Vec<gix_object::Kind>, PackLocatorError> {
+    let expected_len = KIND_METADATA_HEADER_LEN
+        .checked_add(usize::try_from(object_count).map_err(|_| {
+            PackLocatorError::InvalidKindMetadata {
+                reason: "object count does not fit in usize".to_owned(),
+            }
+        })?)
+        .and_then(|size| size.checked_add(KIND_METADATA_TRAILER_LEN))
+        .ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+            reason: "sidecar length overflowed".to_owned(),
+        })?;
+    if bytes.len() != expected_len {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: format!(
+                "length {} does not match expected {expected_len}",
+                bytes.len()
+            ),
+        });
+    }
+    if bytes.get(..KIND_METADATA_MAGIC.len()) != Some(KIND_METADATA_MAGIC) {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "missing signature".to_owned(),
+        });
+    }
+    let version_start = KIND_METADATA_MAGIC.len();
+    let version =
+        read_u32_le(bytes, version_start).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+            reason: "truncated version".to_owned(),
+        })?;
+    if version != KIND_METADATA_VERSION {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: format!("unsupported version {version}"),
+        });
+    }
+    let count_start = version_start + 4;
+    let encoded_object_count =
+        read_u64_le(bytes, count_start).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+            reason: "truncated object count".to_owned(),
+        })?;
+    if encoded_object_count != object_count {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: format!(
+                "object count {} does not match expected {object_count}",
+                encoded_object_count
+            ),
+        });
+    }
+    let checksum_start = count_start + 8;
+    let checksum_end = checksum_start + SHA1_LEN;
+    if bytes.get(checksum_start..checksum_end) != Some(pack_checksum.as_bytes()) {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "pack checksum does not match expected checksum".to_owned(),
+        });
+    }
+    let digest_start = bytes.len() - KIND_METADATA_TRAILER_LEN;
+    if blake3::hash(&bytes[..digest_start]).as_bytes() != &bytes[digest_start..] {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "sidecar checksum mismatch".to_owned(),
+        });
+    }
+    let kind_start = checksum_end;
+    bytes[kind_start..digest_start]
+        .iter()
+        .map(|code| decode_kind_code(*code))
+        .collect()
+}
+
+/// Iterator over object IDs and kinds in increasing pack-offset order.
+pub struct PackKindMetadataIter {
+    locations: PackLocationIter,
+    kinds: std::vec::IntoIter<gix_object::Kind>,
+}
+
+impl Iterator for PackKindMetadataIter {
+    type Item = Result<(gix_hash::ObjectId, gix_object::Kind), PackLocatorError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let kind = self.kinds.next()?;
+        let location = self.locations.next()?;
+        Some(location.map(|location| (location.oid, kind)))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.kinds.size_hint()
+    }
+}
+
+impl ExactSizeIterator for PackKindMetadataIter {}
+
+fn kind_code(kind: gix_object::Kind) -> u8 {
+    match kind {
+        gix_object::Kind::Commit => 1,
+        gix_object::Kind::Tree => 2,
+        gix_object::Kind::Blob => 3,
+        gix_object::Kind::Tag => 4,
+    }
+}
+
+fn decode_kind_code(code: u8) -> Result<gix_object::Kind, PackLocatorError> {
+    match code {
+        1 => Ok(gix_object::Kind::Commit),
+        2 => Ok(gix_object::Kind::Tree),
+        3 => Ok(gix_object::Kind::Blob),
+        4 => Ok(gix_object::Kind::Tag),
+        other => Err(PackLocatorError::InvalidKindMetadata {
+            reason: format!("unsupported object kind code {other}"),
+        }),
+    }
+}
+
+fn read_u32_le(bytes: &[u8], start: usize) -> Option<u32> {
+    bytes
+        .get(start..start.checked_add(4)?)
+        .and_then(|value| value.try_into().ok())
+        .map(u32::from_le_bytes)
+}
+
+fn read_u64_le(bytes: &[u8], start: usize) -> Option<u64> {
+    bytes
+        .get(start..start.checked_add(8)?)
+        .and_then(|value| value.try_into().ok())
+        .map(u64::from_le_bytes)
+}
 
 /// Write a standard Git reverse index using only one `u32` per object.
 pub fn write_pack_reverse_index(idx_path: &Path, rev_path: &Path) -> Result<(), PackLocatorError> {
@@ -480,7 +687,10 @@ mod tests {
 
     use sha1::{Digest, Sha1};
 
-    use super::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
+    use super::{
+        PackLocationIter, PackLocatorError, decode_pack_kind_metadata, encode_pack_kind_metadata,
+        write_pack_reverse_index,
+    };
 
     struct PackFixture {
         _temp: tempfile::TempDir,
@@ -620,6 +830,49 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("stream git locations");
         assert_eq!(generated_locations, git_locations);
+    }
+
+    #[test]
+    fn pack_kind_metadata_round_trips_in_pack_offset_order() {
+        let fixture = PackFixture::new();
+        let locations = PackLocationIter::open(&fixture.idx, &fixture.rev, fixture.pack_len())
+            .expect("open locations");
+        let bytes = encode_pack_kind_metadata(
+            locations.pack_checksum(),
+            &[
+                gix_object::Kind::Blob,
+                gix_object::Kind::Tree,
+                gix_object::Kind::Commit,
+            ],
+        )
+        .expect("encode kind metadata");
+
+        let decoded = decode_pack_kind_metadata(&bytes, locations).expect("decode kind metadata");
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].1, gix_object::Kind::Blob);
+        assert_eq!(decoded[1].1, gix_object::Kind::Tree);
+        assert_eq!(decoded[2].1, gix_object::Kind::Commit);
+    }
+
+    #[test]
+    fn pack_kind_metadata_rejects_tampering() {
+        let fixture = PackFixture::new();
+        let locations = PackLocationIter::open(&fixture.idx, &fixture.rev, fixture.pack_len())
+            .expect("open locations");
+        let mut bytes =
+            encode_pack_kind_metadata(locations.pack_checksum(), &[gix_object::Kind::Blob; 3])
+                .expect("encode kind metadata");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+
+        let error = decode_pack_kind_metadata(&bytes, locations)
+            .expect_err("tampered kind metadata must fail");
+
+        assert!(matches!(
+            error,
+            PackLocatorError::InvalidKindMetadata { .. }
+        ));
     }
 
     #[test]

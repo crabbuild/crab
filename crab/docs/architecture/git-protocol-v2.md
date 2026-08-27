@@ -73,6 +73,13 @@ requested SHA-1 range. The scan abandons itself and returns to exact reads if
 stale rows would make it examine more than twice the requested object count,
 so sparse and stale-heavy repositories remain bounded.
 
+For fresh `blob:none` and `object:type` requests, the catalog visibility
+bitmap is consumed as ordinals. Crab reads the additive ordinal metadata
+sidecar, filters by the published object kinds, and resolves only retained
+ordinals back to OIDs. This removes the large-closure OID-to-kind lookup wave;
+catalogs from before the sidecar or with incomplete metadata use the bounded
+canonical traversal path instead.
+
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
 keeps request rejections distinguishable from truncated pack generation.
@@ -117,6 +124,15 @@ evidence after an exact base proof exists.
 The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.
+
+Upload-pack admission is repository-scoped and distributed: each helper
+process must hold one of the fixed object-store read leases for the duration
+of its session. A rotated, jittered retry probes one slot at a time, leases
+renew while the session is active, and normal completion or cancellation
+releases the slot through the existing holder-checked lock path. A crashed
+helper leaves a bounded TTL lease for reclamation. This bounds aggregate
+provider pressure across helpers while retaining the per-process remote-Git
+object and range-read budgets.
 
 Git owns the local promisor lifecycle: the Git version in use records the
 remote's promisor/filter configuration and marks received promisor packs with

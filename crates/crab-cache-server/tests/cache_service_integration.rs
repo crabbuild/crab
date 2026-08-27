@@ -2203,28 +2203,28 @@ async fn test_invalid_psk_returns_401() {
 #[tokio::test]
 async fn test_valid_psk_succeeds() {
     let server = start_test_server().await;
-    let client = test_client(server.addr);
 
     // GET a canonical but non-existent object — should pass auth but may
     // return an origin/cache miss. The route parser requires the two-character
     // partition and the full 64-character content hash even for misses.
     let hash = format!("de{}", "00".repeat(31));
     let path = global_path("xorbs", &hash);
-    let result = client.get(&path).await;
+    let url = format!("http://{}/v1/objects/{path}", server.addr);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("x-cache-psk", TEST_PSK)
+        .send()
+        .await
+        .unwrap();
 
     // The key assertion: we should NOT get a 401. The request passes auth.
     // It may succeed (200) if the object exists, or fail with a non-auth
     // error (404/502/504) if it doesn't. Any of those proves auth worked.
-    match &result {
-        Ok(_) => {} // 200 — auth passed, object found
-        Err(e) => {
-            let err_msg = format!("{e:?}");
-            assert!(
-                !err_msg.contains("401"),
-                "valid PSK should not produce a 401 error, got: {err_msg}"
-            );
-        }
-    }
+    assert_ne!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "valid PSK should not produce a 401 response"
+    );
 
     let _ = server.shutdown.send(());
 }

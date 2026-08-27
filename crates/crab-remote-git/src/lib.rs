@@ -21,7 +21,7 @@ mod traversal;
 mod visibility;
 
 pub use budget::BudgetDimension;
-pub use crab_metadata::git_visibility::GitVisibilityIndex;
+pub use crab_metadata::git_visibility::{GitCatalogVisibilityIndex, GitVisibilityIndex};
 pub use error::{
     BlameUnsupportedReason, CorruptionStage, CursorError, DeltaCorruption, Error,
     InflatedEntryError, PathError, RepositoryDiagnostic, RepositoryStateError, Result,

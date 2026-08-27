@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
@@ -10,9 +10,10 @@ use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
-    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, PACK_FAMILY, decode_metadata, decode_object_key,
-    decode_object_location, decode_ordinal_key, decode_pack_key, decode_pack_record, object_key,
-    ordinal_key, validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
+    decode_metadata, decode_object_key, decode_object_location, decode_object_metadata,
+    decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_key, decode_pack_record,
+    object_key, ordinal_key, ordinal_metadata_key, validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocation, GitObjectLocator,
@@ -27,6 +28,17 @@ const LOOKUP_CONCURRENCY: usize = 256;
 // rows per requested object before the exact-key path becomes cheaper.
 const MIN_SCAN_LOOKUP_OBJECTS: usize = LOOKUP_CONCURRENCY;
 const MAX_SCAN_AMPLIFICATION: usize = 2;
+// Large shallow closures are cheaper to resolve with one bounded sequential
+// scan than with tens of thousands of independent OID point reads.
+const FULL_SCAN_MIN_LOOKUP_OBJECTS: usize = MIN_SCAN_LOOKUP_OBJECTS * 16;
+const FULL_SCAN_REQUEST_RATIO: u64 = 64;
+// Git SHA-1 object IDs are uniformly distributed in their key space. A
+// min/max range spanning most of that space turns a scan into a catalog-wide
+// read, even when the request contains only a small shallow closure.
+const MAX_SCAN_KEYSPAN_DIVISOR: u64 = 16;
+// A request this close to the complete catalog is cheaper to serve with one
+// sequential pass regardless of the requested IDs' key span.
+const FULL_SCAN_MIN_COVERAGE_DIVISOR: u64 = 8;
 const SCAN_READ_AHEAD_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_FETCH_TASKS: usize = 4;
 // Catalog reads materialize one immutable dense dictionary. A larger
@@ -34,6 +46,8 @@ const SCAN_FETCH_TASKS: usize = 4;
 // degenerating into one object-store round trip per SlateDB block.
 const CATALOG_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
 const CATALOG_SCAN_FETCH_TASKS: usize = 8;
+const ORDINAL_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
+const ORDINAL_SCAN_FETCH_TASKS: usize = 8;
 // One cache is private to one short-lived reader process. This keeps 32
 // concurrent fetchers at a 512 MiB aggregate ceiling instead of SlateDB's
 // 20 GiB default while still coalescing repeated SST metadata/block reads.
@@ -44,6 +58,13 @@ const SESSION_CACHE_SHARDS: usize = 8;
 enum LookupStrategy {
     Exact,
     Scan { row_limit: usize },
+    FullScan { row_limit: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OidKeySpan {
+    Narrow,
+    Broad,
 }
 
 /// Result of validating one compact row against a pinned pack inventory.
@@ -241,14 +262,27 @@ impl GitObjectLocatorSession {
             .values()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let mut unique_objects = object_ids.len();
-        let mut strategy = lookup_strategy(unique_objects, inventory_objects);
-        if matches!(strategy, LookupStrategy::Scan { .. }) {
+        let key_span = oid_key_span(object_ids);
+        let mut strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
+        if !matches!(strategy, LookupStrategy::Exact) {
             unique_objects = object_ids.iter().collect::<HashSet<_>>().len();
-            strategy = lookup_strategy(unique_objects, inventory_objects);
+            strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
         }
-        if let LookupStrategy::Scan { row_limit } = strategy {
+        let scan = match strategy {
+            LookupStrategy::Exact => None,
+            LookupStrategy::Scan { row_limit } => {
+                Some((row_limit, SCAN_READ_AHEAD_BYTES, SCAN_FETCH_TASKS, "scan"))
+            }
+            LookupStrategy::FullScan { row_limit } => Some((
+                row_limit,
+                CATALOG_SCAN_READ_AHEAD_BYTES,
+                CATALOG_SCAN_FETCH_TASKS,
+                "full_scan",
+            )),
+        };
+        if let Some((row_limit, read_ahead_bytes, fetch_tasks, mode)) = scan {
             tracing::debug!(
-                locator_lookup_mode = "scan",
+                locator_lookup_mode = mode,
                 requested_objects = object_ids.len(),
                 unique_objects,
                 inventory_objects,
@@ -256,7 +290,15 @@ impl GitObjectLocatorSession {
                 "compact Git locator lookup selected"
             );
             if let Some(lookups) = self
-                .lookup_batch_by_scan(reader, object_ids, inventory, row_limit)
+                .lookup_batch_by_scan(
+                    reader,
+                    object_ids,
+                    inventory,
+                    row_limit,
+                    read_ahead_bytes,
+                    fetch_tasks,
+                    mode,
+                )
                 .await?
             {
                 return Ok(lookups);
@@ -271,6 +313,16 @@ impl GitObjectLocatorSession {
             );
         }
 
+        if object_ids.len() >= FULL_SCAN_MIN_LOOKUP_OBJECTS {
+            tracing::debug!(
+                locator_lookup_mode = "exact",
+                requested_objects = object_ids.len(),
+                unique_objects,
+                inventory_objects,
+                oid_key_span = ?key_span,
+                "compact Git locator lookup selected"
+            );
+        }
         self.lookup_batch_exact(reader, object_ids, inventory).await
     }
 
@@ -309,6 +361,9 @@ impl GitObjectLocatorSession {
         object_ids: &[[u8; 20]],
         inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
         row_limit: usize,
+        read_ahead_bytes: usize,
+        fetch_tasks: usize,
+        mode: &'static str,
     ) -> Result<Option<Vec<GitObjectLookup>>> {
         let mut requested = object_ids
             .iter()
@@ -325,8 +380,8 @@ impl GitObjectLocatorSession {
             .map(|(oid, _)| oid)
             .ok_or_else(|| MetadataError::Internal("locator scan lost its request".to_owned()))?;
         let options = ScanOptions::default()
-            .with_read_ahead_bytes(SCAN_READ_AHEAD_BYTES)
-            .with_max_fetch_tasks(SCAN_FETCH_TASKS);
+            .with_read_ahead_bytes(read_ahead_bytes)
+            .with_max_fetch_tasks(fetch_tasks);
         let mut rows = reader
             .scan_prefix_with_options(
                 [OBJECT_FAMILY],
@@ -364,7 +419,7 @@ impl GitObjectLocatorSession {
             }
         }
         tracing::debug!(
-            locator_lookup_mode = "scan",
+            locator_lookup_mode = mode,
             requested_objects = object_ids.len(),
             rows_scanned,
             "compact Git locator lookup completed"
@@ -394,6 +449,12 @@ impl GitObjectLocatorSession {
         let Some(reader) = &self.reader else {
             return Ok(vec![None; ordinals.len()]);
         };
+        if ordinals.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(objects) = self.object_ids_by_ordinal_scan(reader, ordinals).await? {
+            return Ok(objects);
+        }
         let fetched = stream::iter(
             ordinals
                 .iter()
@@ -424,11 +485,237 @@ impl GitObjectLocatorSession {
         Ok(objects)
     }
 
+    /// Return complete per-object metadata for the requested dense ordinals.
+    ///
+    /// `None` means this catalog predates the ordinal metadata sidecar or has
+    /// an incomplete sidecar. Callers must use their bounded canonical
+    /// traversal path in that case; a present sidecar row with unknown fields
+    /// is represented by the corresponding default metadata value.
+    pub async fn metadata_by_ordinal(
+        &self,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<super::GitObjectMetadata>>> {
+        let Some(reader) = &self.reader else {
+            return Ok(None);
+        };
+        if ordinals.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        if let Some(metadata) = self.metadata_by_ordinal_scan(reader, ordinals).await? {
+            return Ok(metadata.into_iter().collect());
+        }
+
+        let fetched = stream::iter(
+            ordinals
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, ordinal)| {
+                    let reader = Arc::clone(reader);
+                    async move {
+                        let value = reader
+                            .get(ordinal_metadata_key(ordinal))
+                            .await
+                            .map_err(read_error)?;
+                        let metadata = value
+                            .map(|value| {
+                                decode_object_metadata(&value).ok_or_else(|| {
+                                    corrupt(
+                                        "ordinal_metadata",
+                                        "invalid Git catalog ordinal metadata",
+                                    )
+                                })
+                            })
+                            .transpose()?;
+                        Ok::<_, MetadataError>((index, metadata))
+                    }
+                }),
+        )
+        .buffer_unordered(LOOKUP_CONCURRENCY.min(ordinals.len()).max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+        let mut metadata = vec![None; ordinals.len()];
+        for (index, value) in fetched {
+            metadata[index] = value;
+        }
+        Ok(metadata.into_iter().collect())
+    }
+
+    async fn metadata_by_ordinal_scan(
+        &self,
+        reader: &slatedb::DbReader,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<Option<super::GitObjectMetadata>>>> {
+        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
+        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS {
+            return Ok(None);
+        }
+        let first = *ordinals
+            .iter()
+            .min()
+            .ok_or_else(|| corrupt("ordinal_metadata", "metadata scan lost its request"))?;
+        let last = *ordinals
+            .iter()
+            .max()
+            .ok_or_else(|| corrupt("ordinal_metadata", "metadata scan lost its request"))?;
+        let span = u64::from(last)
+            .saturating_sub(u64::from(first))
+            .saturating_add(1);
+        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
+            return Ok(None);
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_metadata_scan",
+            requested_objects = ordinals.len(),
+            ordinal_span = span,
+            "compact Git ordinal metadata lookup selected"
+        );
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(ORDINAL_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(ORDINAL_SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options(
+                [ORDINAL_METADATA_FAMILY],
+                first.to_be_bytes().as_slice()..=last.to_be_bytes().as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut requested = ordinals.iter().copied().enumerate().collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        let mut request_index = 0usize;
+        let mut rows_scanned = 0u64;
+        let mut metadata = vec![None; ordinals.len()];
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > span {
+                return Err(corrupt(
+                    "ordinal_metadata",
+                    "Git catalog ordinal metadata scan returned too many rows",
+                ));
+            }
+            let ordinal = decode_ordinal_metadata_key(&row.key).ok_or_else(|| {
+                corrupt(
+                    "ordinal_metadata",
+                    "invalid Git catalog ordinal metadata key",
+                )
+            })?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal < ordinal)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal == ordinal)
+            {
+                let (output_index, _) = requested[request_index];
+                metadata[output_index] =
+                    Some(decode_object_metadata(&row.value).ok_or_else(|| {
+                        corrupt("ordinal_metadata", "invalid Git catalog ordinal metadata")
+                    })?);
+                request_index += 1;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_metadata_scan",
+            requested_objects = ordinals.len(),
+            rows_scanned,
+            "compact Git ordinal metadata lookup completed"
+        );
+        Ok(Some(metadata))
+    }
+
+    async fn object_ids_by_ordinal_scan(
+        &self,
+        reader: &slatedb::DbReader,
+        ordinals: &[GitObjectOrdinal],
+    ) -> Result<Option<Vec<Option<[u8; 20]>>>> {
+        let expected = self.identity.map_or(0, |identity| identity.object_count);
+        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
+        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS || expected == 0 {
+            return Ok(None);
+        }
+        let first = *ordinals
+            .iter()
+            .min()
+            .ok_or_else(|| corrupt("ordinal", "ordinal scan lost its request"))?;
+        let last = *ordinals
+            .iter()
+            .max()
+            .ok_or_else(|| corrupt("ordinal", "ordinal scan lost its request"))?;
+        let span = u64::from(last)
+            .saturating_sub(u64::from(first))
+            .saturating_add(1);
+        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
+            return Ok(None);
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_scan",
+            requested_objects = ordinals.len(),
+            ordinal_span = span,
+            "compact Git ordinal lookup selected"
+        );
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(ORDINAL_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(ORDINAL_SCAN_FETCH_TASKS);
+        let mut rows = reader
+            .scan_prefix_with_options(
+                [ORDINAL_FAMILY],
+                first.to_be_bytes().as_slice()..=last.to_be_bytes().as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut requested = ordinals.iter().copied().enumerate().collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        let mut request_index = 0usize;
+        let mut rows_scanned = 0u64;
+        let mut objects = vec![None; ordinals.len()];
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > span {
+                return Err(corrupt(
+                    "ordinal",
+                    "Git catalog ordinal scan returned too many rows",
+                ));
+            }
+            let ordinal = decode_ordinal_key(&row.key)
+                .ok_or_else(|| corrupt("ordinal", "invalid Git catalog ordinal key"))?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal < ordinal)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(_, requested_ordinal)| *requested_ordinal == ordinal)
+            {
+                let (output_index, _) = requested[request_index];
+                objects[output_index] =
+                    Some(row.value.as_ref().try_into().map_err(|_| {
+                        corrupt("ordinal", "invalid Git catalog ordinal object ID")
+                    })?);
+                request_index += 1;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_scan",
+            requested_objects = ordinals.len(),
+            rows_scanned,
+            "compact Git ordinal lookup completed"
+        );
+        Ok(Some(objects))
+    }
+
     /// Read the complete dense OID order from this immutable catalog checkpoint.
     pub async fn all_object_ids(&self) -> Result<Vec<[u8; 20]>> {
         let Some(reader) = &self.reader else {
             return Ok(Vec::new());
         };
+        let started = Instant::now();
         let expected = self.identity.map_or(0, |identity| identity.object_count);
         let capacity = usize::try_from(expected)
             .map_err(|_| corrupt("metadata", "catalog object count cannot be represented"))?;
@@ -462,6 +749,12 @@ impl GitObjectLocatorSession {
                 "Git catalog ordinal count does not match metadata",
             ));
         }
+        tracing::info!(
+            telemetry_event = "catalog_materialization",
+            catalog_objects = objects.len(),
+            catalog_materialization_ms = started.elapsed().as_millis() as u64,
+            "materialized Git catalog OID dictionary"
+        );
         Ok(objects)
     }
 
@@ -496,16 +789,51 @@ impl GitObjectLocatorSession {
     }
 }
 
-fn lookup_strategy(requested_objects: usize, inventory_objects: u64) -> LookupStrategy {
+fn lookup_strategy(
+    requested_objects: usize,
+    inventory_objects: u64,
+    key_span: OidKeySpan,
+) -> LookupStrategy {
     let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
-    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS
-        || inventory_objects == 0
+    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS || inventory_objects == 0 {
+        return LookupStrategy::Exact;
+    }
+    let near_complete =
+        requested.saturating_mul(FULL_SCAN_MIN_COVERAGE_DIVISOR) >= inventory_objects;
+    if requested_objects >= FULL_SCAN_MIN_LOOKUP_OBJECTS
+        && requested.saturating_mul(FULL_SCAN_REQUEST_RATIO) >= inventory_objects
+        && (key_span == OidKeySpan::Narrow || near_complete)
+    {
+        return LookupStrategy::FullScan {
+            row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
+        };
+    }
+    if key_span == OidKeySpan::Broad
         || requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) < inventory_objects
     {
         return LookupStrategy::Exact;
     }
     LookupStrategy::Scan {
         row_limit: requested_objects.saturating_mul(MAX_SCAN_AMPLIFICATION),
+    }
+}
+
+fn oid_key_span(object_ids: &[[u8; 20]]) -> OidKeySpan {
+    let Some(first) = object_ids.first() else {
+        return OidKeySpan::Narrow;
+    };
+    let mut minimum = u64::from_be_bytes(first[..8].try_into().unwrap_or([0; 8]));
+    let mut maximum = minimum;
+    for oid in &object_ids[1..] {
+        let prefix = u64::from_be_bytes(oid[..8].try_into().unwrap_or([0; 8]));
+        minimum = minimum.min(prefix);
+        maximum = maximum.max(prefix);
+    }
+    let span = maximum.saturating_sub(minimum).saturating_add(1);
+    if span <= u64::MAX / MAX_SCAN_KEYSPAN_DIVISOR {
+        OidKeySpan::Narrow
+    } else {
+        OidKeySpan::Broad
     }
 }
 
@@ -792,7 +1120,11 @@ mod tests {
     #[test]
     fn dense_lookup_requires_a_full_exact_wave_and_bounded_scan_amplification() {
         assert_eq!(
-            lookup_strategy(MIN_SCAN_LOOKUP_OBJECTS, MIN_SCAN_LOOKUP_OBJECTS as u64),
+            lookup_strategy(
+                MIN_SCAN_LOOKUP_OBJECTS,
+                MIN_SCAN_LOOKUP_OBJECTS as u64,
+                OidKeySpan::Narrow,
+            ),
             LookupStrategy::Scan {
                 row_limit: MIN_SCAN_LOOKUP_OBJECTS * 2,
             }
@@ -800,17 +1132,53 @@ mod tests {
         assert_eq!(
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS - 1,
-                (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64
+                (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64,
+                OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
         );
         assert_eq!(
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS,
-                (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64
+                (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64,
+                OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
         );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                OidKeySpan::Narrow,
+            ),
+            LookupStrategy::FullScan {
+                row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * FULL_SCAN_REQUEST_RATIO as usize,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                OidKeySpan::Broad,
+            ),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(
+                FULL_SCAN_MIN_LOOKUP_OBJECTS,
+                (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * 4,
+                OidKeySpan::Broad,
+            ),
+            LookupStrategy::FullScan {
+                row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * 4,
+            }
+        );
+    }
+
+    #[test]
+    fn broad_sha1_ranges_use_exact_lookup_for_sparse_batches() {
+        assert_eq!(oid_key_span(&[[0; 20], [0xff; 20]]), OidKeySpan::Broad);
+        assert_eq!(oid_key_span(&[oid(1), oid(2)]), OidKeySpan::Narrow);
     }
 
     async fn publish(
@@ -967,6 +1335,17 @@ mod tests {
             [GitObjectLookup::Hit(locator)]
                 if locator.metadata.kind == Some(GitObjectKind::Blob)
         ));
+        assert_eq!(
+            session
+                .metadata_by_ordinal(&[0])
+                .await
+                .expect("lookup ordinal metadata")
+                .expect("metadata sidecar"),
+            vec![GitObjectMetadata {
+                kind: Some(GitObjectKind::Blob),
+                ..Default::default()
+            }]
+        );
         session.close().await.expect("close reader");
     }
 
@@ -1108,7 +1487,7 @@ mod tests {
     async fn dense_scan_preserves_request_order_and_reports_missing_ids() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (mut object_ids, inventory) =
-            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+            publish_many(Arc::clone(&store), FULL_SCAN_MIN_LOOKUP_OBJECTS).await;
         object_ids.reverse();
         let missing_index = MIN_SCAN_LOOKUP_OBJECTS / 2;
         object_ids[missing_index] = [0xff; 20];
@@ -1129,6 +1508,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dense_ordinal_scan_preserves_request_order() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (object_ids, _inventory) =
+            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+        let ordinals = (0..object_ids.len() as u32)
+            .rev()
+            .collect::<Vec<GitObjectOrdinal>>();
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let resolved = session
+            .object_ids_by_ordinal(&ordinals)
+            .await
+            .expect("dense ordinal lookup");
+        let expected = ordinals
+            .iter()
+            .map(|ordinal| Some(object_ids[*ordinal as usize]))
+            .collect::<Vec<_>>();
+        assert_eq!(resolved, expected);
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn dense_ordinal_metadata_scan_preserves_request_order() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (object_ids, _inventory) =
+            publish_many(Arc::clone(&store), MIN_SCAN_LOOKUP_OBJECTS).await;
+        let ordinals = (0..object_ids.len() as u32)
+            .rev()
+            .collect::<Vec<GitObjectOrdinal>>();
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let metadata = session
+            .metadata_by_ordinal(&ordinals)
+            .await
+            .expect("dense ordinal metadata lookup")
+            .expect("metadata sidecar");
+        assert_eq!(metadata, vec![GitObjectMetadata::default(); ordinals.len()]);
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
     async fn dense_scan_abandons_work_beyond_its_row_limit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (object_ids, inventory) = publish_many(Arc::clone(&store), 3).await;
@@ -1139,7 +1563,15 @@ mod tests {
 
         assert_eq!(
             session
-                .lookup_batch_by_scan(reader, &[object_ids[0], object_ids[2]], &inventory, 1)
+                .lookup_batch_by_scan(
+                    reader,
+                    &[object_ids[0], object_ids[2]],
+                    &inventory,
+                    1,
+                    SCAN_READ_AHEAD_BYTES,
+                    SCAN_FETCH_TASKS,
+                    "scan",
+                )
                 .await
                 .expect("bounded scan"),
             None

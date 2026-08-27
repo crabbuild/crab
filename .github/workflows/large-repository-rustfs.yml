@@ -9,9 +9,21 @@ on:
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-metadata/src/git_object_locator/**"
+      - "crates/crab-metadata/src/split_commit_graph.rs"
+      - "crab/src/cmd/metadb.rs"
       - "crates/crab-remote-git/src/budget.rs"
       - "crates/crab-remote-git/src/operation.rs"
       - "crates/crab-remote-git/src/pack.rs"
+      - "crab/docs/architecture/git-integration.md"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/guides/metadb.md"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/upload_pack_wire.rs"
+      - "crates/crab-coordination/src/lib.rs"
+      - "crates/crab-coordination/src/push_lock.rs"
+      - "crates/crab-coordination/src/read_admission.rs"
+      - "plans/001-large-repository-scale-roadmap.md"
   push:
     branches: [main]
     paths:
@@ -21,9 +33,21 @@ on:
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
+      - "crates/crab-metadata/src/git_object_locator/**"
+      - "crates/crab-metadata/src/split_commit_graph.rs"
+      - "crab/src/cmd/metadb.rs"
       - "crates/crab-remote-git/src/budget.rs"
       - "crates/crab-remote-git/src/operation.rs"
       - "crates/crab-remote-git/src/pack.rs"
+      - "crab/docs/architecture/git-integration.md"
+      - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/guides/metadb.md"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/upload_pack_wire.rs"
+      - "crates/crab-coordination/src/lib.rs"
+      - "crates/crab-coordination/src/push_lock.rs"
+      - "crates/crab-coordination/src/read_admission.rs"
+      - "plans/001-large-repository-scale-roadmap.md"
   schedule:
     - cron: "31 7 * * 0"
   workflow_dispatch:
@@ -123,17 +147,21 @@ jobs:
             --object-store-version "$RUSTFS_IMAGE"
             --cold-clone-fanout 50
             --warm-clone-fanout 100
+            --team-load
             --cleanup-remote
           )
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$first/artifacts/report.json"
+            "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
+            --require-team-load
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
-            "$QUALIFICATION_ROOT/$second/artifacts/report.json"
+            "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
+            --require-team-load
           python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
             "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
             "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
+            --require-team-load \
             --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
 
       - name: Capture RustFS logs

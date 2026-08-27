@@ -53,6 +53,12 @@ def telemetry() -> dict[str, int]:
         "upload_pack_duration_ms": 1,
         "visibility_plan_ms": 1,
         "pack_generation_ms": 1,
+        "locator_scan": 0,
+        "locator_full_scan": 0,
+        "locator_exact_fallback": 0,
+        "locator_ordinal_scan": 0,
+        "locator_ordinal_metadata": 1,
+        "locator_ordinal_metadata_scan": 0,
     }
 
 
@@ -134,7 +140,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.0",
+        "version": "1.1",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -251,6 +257,82 @@ def valid_report() -> dict[str, Any]:
     }
 
 
+def team_summary() -> dict[str, int]:
+    return {
+        "duration_ms": 100,
+        "median_client_ms": 10,
+        "p95_client_ms": 20,
+        "p99_client_ms": 30,
+    }
+
+
+def team_results(count: int, categories: list[str], *, fetch: bool = False) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for ordinal in range(1, count + 1):
+        result: dict[str, Any] = {
+            "ordinal": ordinal,
+            "duration_ms": 10,
+            "exit_code": 0 if categories[ordinal - 1] in {"accepted", "ok"} else 1,
+            "failure_category": categories[ordinal - 1],
+        }
+        if fetch:
+            result.update(
+                {
+                    "fetch_exit_code": 0,
+                    "fsck_exit_code": 0,
+                    "tip_matches": True,
+                }
+            )
+        else:
+            result["commit"] = OID
+        results.append(result)
+    return results
+
+
+def valid_team_load() -> dict[str, Any]:
+    fetch_count = 100
+    independent_count = 20
+    contended_count = 20
+    return {
+        "enabled": True,
+        "fetch_fanout": fetch_count,
+        "independent_pushes": independent_count,
+        "contended_pushes": contended_count,
+        "fetch_seed": {
+            "clients": fetch_count,
+            "successful_clones": fetch_count,
+            **team_summary(),
+            "results": team_results(fetch_count, ["ok"] * fetch_count),
+        },
+        "concurrent_incremental_fetches": {
+            "clients": fetch_count,
+            "successful": fetch_count,
+            "failed": 0,
+            **team_summary(),
+            "results": team_results(fetch_count, ["ok"] * fetch_count, fetch=True),
+        },
+        "independent_ref_pushes": {
+            "clients": independent_count,
+            "successful": independent_count,
+            "rejected": 0,
+            "unexpected_failures": 0,
+            **team_summary(),
+            "results": team_results(independent_count, ["accepted"] * independent_count),
+        },
+        "same_ref_pushes": {
+            "clients": contended_count,
+            "successful": 1,
+            "rejected": contended_count - 1,
+            "unexpected_failures": 0,
+            **team_summary(),
+            "results": team_results(
+                contended_count,
+                ["accepted", *(["non_fast_forward"] * (contended_count - 1))],
+            ),
+        },
+    }
+
+
 class ReportVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -268,11 +350,34 @@ class ReportVerificationTests(unittest.TestCase):
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)
         self.assertEqual(result.replay_count, 3)
 
+    def test_release_team_load_contract_requires_all_scenarios(self) -> None:
+        VERIFY.verify_team_load(valid_team_load(), require_release_counts=True)
+
+    def test_team_load_missing_latency_field_is_rejected(self) -> None:
+        report = valid_team_load()
+        del report["same_ref_pushes"]["p95_client_ms"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "p95_client_ms"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_failure_is_visible_in_result_contract(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["results"] = team_results(
+            100,
+            ["clone_failed", *(["ok"] * 99)],
+        )
+        with self.assertRaisesRegex(VERIFY.VerificationError, "clone_failed"):
+            VERIFY.verify_team_load(report)
+
     def test_prevalidated_owner_path_allows_no_remote_visibility_build(self) -> None:
         VERIFY.verify_full_visibility_telemetry(
             {
                 "visibility_owner_seed": {
-                    "actions": ["catalog_advance", "commit_graph_rebuild", "none"],
+                    "actions": [
+                        "catalog_advance",
+                        "commit_graph_incremental",
+                        "commit_graph_rebuild",
+                        "none",
+                    ],
                     "telemetry": {
                         "visibility_duration_ms": 0,
                         "storage_requests": 0,
@@ -296,6 +401,31 @@ class ReportVerificationTests(unittest.TestCase):
                     }
                 }
             )
+
+    def test_blobless_catalog_filter_requires_ordinal_metadata_telemetry(self) -> None:
+        report = valid_report()
+        report["stages"]["blob_none_clone"]["telemetry"]["locator_ordinal_metadata"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "ordinal metadata"):
+            VERIFY.verify_catalog_filter_telemetry(report["stages"])
+
+    def test_full_owner_report_requires_locator_sweep_telemetry(self) -> None:
+        stages = {
+            "visibility_owner_seed": {
+                "locator_sweep": [
+                    {
+                        "action": "none",
+                        "object_rows_scanned": 0,
+                        "object_rows_deleted": 0,
+                        "pack_rows_scanned": 0,
+                        "pack_rows_deleted": 0,
+                    }
+                ]
+            }
+        }
+        VERIFY.verify_locator_sweep_telemetry(stages)
+        del stages["visibility_owner_seed"]["locator_sweep"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "locator sweep telemetry"):
+            VERIFY.verify_locator_sweep_telemetry(stages)
 
     def test_abbreviated_binary_revision_is_accepted(self) -> None:
         report = valid_report()

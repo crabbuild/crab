@@ -9,13 +9,24 @@ pub(crate) const METADATA_KEY: [u8; 1] = [0x00];
 pub(crate) const OBJECT_FAMILY: u8 = 0x01;
 pub(crate) const PACK_FAMILY: u8 = 0x02;
 pub(crate) const ORDINAL_FAMILY: u8 = 0x03;
+pub(crate) const ORDINAL_METADATA_FAMILY: u8 = 0x04;
+// Derived reverse membership rows let the writer sweep stale packs without
+// scanning the canonical OID catalog; readers never use this family.
+pub(crate) const PACK_OBJECT_FAMILY: u8 = 0x05;
 pub(crate) const FORMAT_FINGERPRINT: [u8; 8] = *b"CRABGCAT";
 pub(crate) const OBJECT_KEY_LEN: usize = 21;
 pub(crate) const OBJECT_VALUE_LEN: usize = 64;
 pub(crate) const PACK_KEY_LEN: usize = 9;
 pub(crate) const PACK_VALUE_LEN: usize = 88;
 pub(crate) const ORDINAL_KEY_LEN: usize = 5;
+pub(crate) const ORDINAL_METADATA_VALUE_LEN: usize = 32;
 pub(crate) const METADATA_VALUE_LEN: usize = 101;
+pub(crate) const PACK_OBJECT_KEY_LEN: usize = 29;
+pub(crate) const PACK_OBJECT_PREFIX_LEN: usize = 9;
+pub(crate) const PACK_OBJECT_VALUE_LEN: usize = 4;
+pub(crate) const PACK_OBJECT_INDEX_MARKER_KEY: [u8; 2] = [PACK_OBJECT_FAMILY, 0xff];
+pub(crate) const PACK_OBJECT_INDEX_REBUILDING_VALUE: [u8; 1] = [0];
+pub(crate) const PACK_OBJECT_INDEX_MARKER_VALUE: [u8; 1] = [1];
 
 const PACK_HEADER_LEN: u64 = 12;
 const PACK_TRAILER_LEN: u64 = 20;
@@ -86,12 +97,66 @@ pub(crate) fn decode_ordinal_key(bytes: &[u8]) -> Option<GitObjectOrdinal> {
     Some(u32::from_be_bytes(array(bytes, 1)?))
 }
 
+pub(crate) fn ordinal_metadata_key(ordinal: GitObjectOrdinal) -> [u8; ORDINAL_KEY_LEN] {
+    let mut key = [0; ORDINAL_KEY_LEN];
+    key[0] = ORDINAL_METADATA_FAMILY;
+    key[1..].copy_from_slice(&ordinal.to_be_bytes());
+    key
+}
+
+pub(crate) fn decode_ordinal_metadata_key(bytes: &[u8]) -> Option<GitObjectOrdinal> {
+    if bytes.len() != ORDINAL_KEY_LEN || bytes[0] != ORDINAL_METADATA_FAMILY {
+        return None;
+    }
+    Some(u32::from_be_bytes(array(bytes, 1)?))
+}
+
 pub(crate) fn decode_pack_key(bytes: &[u8]) -> Option<u64> {
     if bytes.len() != PACK_KEY_LEN || bytes[0] != PACK_FAMILY {
         return None;
     }
     let pack_slot = u64::from_be_bytes(array(bytes, 1)?);
     (pack_slot != 0).then_some(pack_slot)
+}
+
+pub(crate) fn pack_object_prefix(pack_slot: u64) -> Option<[u8; PACK_OBJECT_PREFIX_LEN]> {
+    if pack_slot == 0 {
+        return None;
+    }
+    let mut key = [0; PACK_OBJECT_PREFIX_LEN];
+    key[0] = PACK_OBJECT_FAMILY;
+    key[1..].copy_from_slice(&pack_slot.to_be_bytes());
+    Some(key)
+}
+
+pub(crate) fn pack_object_key(pack_slot: u64, oid: &[u8; 20]) -> Option<[u8; PACK_OBJECT_KEY_LEN]> {
+    let prefix = pack_object_prefix(pack_slot)?;
+    let mut key = [0; PACK_OBJECT_KEY_LEN];
+    key[..PACK_OBJECT_PREFIX_LEN].copy_from_slice(&prefix);
+    key[PACK_OBJECT_PREFIX_LEN..].copy_from_slice(oid);
+    Some(key)
+}
+
+pub(crate) fn decode_pack_object_key(bytes: &[u8]) -> Option<(u64, [u8; 20])> {
+    if bytes.len() != PACK_OBJECT_KEY_LEN || bytes[0] != PACK_OBJECT_FAMILY {
+        return None;
+    }
+    let pack_slot = u64::from_be_bytes(array(bytes, 1)?);
+    if pack_slot == 0 {
+        return None;
+    }
+    Some((pack_slot, array(bytes, PACK_OBJECT_PREFIX_LEN)?))
+}
+
+pub(crate) fn encode_pack_object_ordinal(ordinal: GitObjectOrdinal) -> [u8; PACK_OBJECT_VALUE_LEN] {
+    ordinal.to_be_bytes()
+}
+
+pub(crate) fn decode_pack_object_ordinal(bytes: &[u8]) -> Option<GitObjectOrdinal> {
+    if bytes.len() != PACK_OBJECT_VALUE_LEN {
+        return None;
+    }
+    Some(u32::from_be_bytes(array(bytes, 0)?))
 }
 
 pub(crate) fn encode_object_location(location: StoredObjectLocation) -> [u8; OBJECT_VALUE_LEN] {
@@ -101,46 +166,48 @@ pub(crate) fn encode_object_location(location: StoredObjectLocation) -> [u8; OBJ
     bytes[12..20].copy_from_slice(&location.pack_offset.to_be_bytes());
     bytes[20..28].copy_from_slice(&location.entry_len.to_be_bytes());
     bytes[28..32].copy_from_slice(&location.crc32.to_be_bytes());
+    bytes[32..].copy_from_slice(&encode_object_metadata(location.metadata));
+    bytes
+}
+
+pub(crate) fn encode_object_metadata(
+    metadata: GitObjectMetadata,
+) -> [u8; ORDINAL_METADATA_VALUE_LEN] {
+    let mut bytes = [0; ORDINAL_METADATA_VALUE_LEN];
     let mut flags = 0_u8;
-    if location.metadata.kind.is_some() {
+    if metadata.kind.is_some() {
         flags |= 1;
     }
-    if location.metadata.logical_size.is_some() {
+    if metadata.logical_size.is_some() {
         flags |= 1 << 1;
     }
-    if location.metadata.delta_base_oid.is_some() {
+    if metadata.delta_base_oid.is_some() {
         flags |= 1 << 2;
     }
-    bytes[32] = flags;
-    bytes[33] = match location.metadata.kind {
+    bytes[0] = flags;
+    bytes[1] = match metadata.kind {
         None => 0,
         Some(GitObjectKind::Commit) => 1,
         Some(GitObjectKind::Tree) => 2,
         Some(GitObjectKind::Blob) => 3,
         Some(GitObjectKind::Tag) => 4,
     };
-    bytes[34..42].copy_from_slice(
-        &location
-            .metadata
-            .logical_size
-            .unwrap_or_default()
-            .to_be_bytes(),
-    );
-    if let Some(base) = location.metadata.delta_base_oid {
-        bytes[42..62].copy_from_slice(&base);
+    bytes[2..10].copy_from_slice(&metadata.logical_size.unwrap_or_default().to_be_bytes());
+    if let Some(base) = metadata.delta_base_oid {
+        bytes[10..30].copy_from_slice(&base);
     }
     bytes
 }
 
-pub(crate) fn decode_object_location(bytes: &[u8]) -> Option<StoredObjectLocation> {
-    if bytes.len() != OBJECT_VALUE_LEN {
+pub(crate) fn decode_object_metadata(bytes: &[u8]) -> Option<GitObjectMetadata> {
+    if bytes.len() != ORDINAL_METADATA_VALUE_LEN {
         return None;
     }
-    let flags = bytes[32];
-    if flags & !0b111 != 0 || bytes[62..].iter().any(|byte| *byte != 0) {
+    let flags = bytes[0];
+    if flags & !0b111 != 0 || bytes[30..].iter().any(|byte| *byte != 0) {
         return None;
     }
-    let kind = match (flags & 1 != 0, bytes[33]) {
+    let kind = match (flags & 1 != 0, bytes[1]) {
         (false, 0) => None,
         (true, 1) => Some(GitObjectKind::Commit),
         (true, 2) => Some(GitObjectKind::Tree),
@@ -149,30 +216,38 @@ pub(crate) fn decode_object_location(bytes: &[u8]) -> Option<StoredObjectLocatio
         _ => return None,
     };
     let logical_size = if flags & (1 << 1) != 0 {
-        Some(u64::from_be_bytes(array(bytes, 34)?))
-    } else if bytes[34..42].iter().all(|byte| *byte == 0) {
+        Some(u64::from_be_bytes(array(bytes, 2)?))
+    } else if bytes[2..10].iter().all(|byte| *byte == 0) {
         None
     } else {
         return None;
     };
     let delta_base_oid = if flags & (1 << 2) != 0 {
-        Some(array(bytes, 42)?)
-    } else if bytes[42..62].iter().all(|byte| *byte == 0) {
+        Some(array(bytes, 10)?)
+    } else if bytes[10..30].iter().all(|byte| *byte == 0) {
         None
     } else {
         return None;
     };
+    Some(GitObjectMetadata {
+        kind,
+        logical_size,
+        delta_base_oid,
+    })
+}
+
+pub(crate) fn decode_object_location(bytes: &[u8]) -> Option<StoredObjectLocation> {
+    if bytes.len() != OBJECT_VALUE_LEN {
+        return None;
+    }
+    let metadata = decode_object_metadata(&bytes[32..])?;
     let location = StoredObjectLocation {
         ordinal: u32::from_be_bytes(array(bytes, 0)?),
         pack_slot: u64::from_be_bytes(array(bytes, 4)?),
         pack_offset: u64::from_be_bytes(array(bytes, 12)?),
         entry_len: u64::from_be_bytes(array(bytes, 20)?),
         crc32: u32::from_be_bytes(array(bytes, 28)?),
-        metadata: GitObjectMetadata {
-            kind,
-            logical_size,
-            delta_base_oid,
-        },
+        metadata,
     };
     if location.pack_slot == 0
         || location.entry_len == 0
@@ -346,6 +421,52 @@ mod tests {
             decode_ordinal_key(&ordinal_key(location.ordinal)),
             Some(location.ordinal)
         );
+    }
+
+    #[test]
+    fn ordinal_metadata_row_round_trips_without_reinterpreting_ordinal_rows() {
+        let metadata = GitObjectMetadata {
+            kind: Some(GitObjectKind::Tag),
+            logical_size: Some(0x0102_0304_0506_0708),
+            delta_base_oid: Some([0x51; 20]),
+        };
+        let key = ordinal_metadata_key(0x0102_0304);
+        let value = encode_object_metadata(metadata);
+
+        assert_eq!(key[0], ORDINAL_METADATA_FAMILY);
+        assert_eq!(&key[1..], &0x0102_0304_u32.to_be_bytes());
+        assert_eq!(value.len(), ORDINAL_METADATA_VALUE_LEN);
+        assert_eq!(value[0], 0b111);
+        assert_eq!(value[1], 4);
+        assert_eq!(&value[2..10], &0x0102_0304_0506_0708_u64.to_be_bytes());
+        assert_eq!(&value[10..30], &[0x51; 20]);
+        assert_eq!(decode_ordinal_metadata_key(&key), Some(0x0102_0304));
+        assert_eq!(decode_object_metadata(&value), Some(metadata));
+        assert_eq!(
+            decode_object_metadata(&[0; ORDINAL_METADATA_VALUE_LEN]),
+            Some(Default::default())
+        );
+        assert_eq!(ordinal_key(0x0102_0304)[0], ORDINAL_FAMILY);
+    }
+
+    #[test]
+    fn pack_membership_key_binds_one_oid_to_one_pack_slot_and_ordinal() {
+        let oid = [0x61; 20];
+        let pack_slot = 0x0102_0304_0506_0708;
+        let ordinal = 0x0102_0304;
+        let key = pack_object_key(pack_slot, &oid).expect("valid pack slot");
+
+        assert_eq!(key.len(), PACK_OBJECT_KEY_LEN);
+        assert_eq!(key[0], PACK_OBJECT_FAMILY);
+        assert_eq!(decode_pack_object_key(&key), Some((pack_slot, oid)));
+        assert_eq!(
+            decode_pack_object_ordinal(&encode_pack_object_ordinal(ordinal)),
+            Some(ordinal)
+        );
+        assert_eq!(pack_object_key(0, &oid), None);
+        assert_eq!(decode_pack_object_key(&PACK_OBJECT_INDEX_MARKER_KEY), None);
+        assert_eq!(PACK_OBJECT_INDEX_REBUILDING_VALUE, [0]);
+        assert_eq!(PACK_OBJECT_INDEX_MARKER_VALUE, [1]);
     }
 
     #[test]

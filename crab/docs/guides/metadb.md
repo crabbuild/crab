@@ -101,12 +101,14 @@ command.
 
 Run one durable derived-state owner for a repository. Each cycle pins one
 manifest snapshot and performs at most one bounded action: advance the object
-catalog, repair visibility, rebuild or compact the split commit graph, or roll
-up the smallest non-geometric pack suffix. The locator writer and its lease are
-opened only for catalog work and are closed before repository-sized graph or
-pack work begins. Push and upload-pack clients detect the repository owner and
-leave repair to it; complete-pack fetch remains the safe fallback while a new
-generation is being indexed.
+catalog, repair visibility, rebuild or compact the split commit graph, rebuild
+the shallow-closure index, or roll up the smallest non-geometric pack suffix.
+Graph maintenance never shares a cycle with shallow-closure rebuilding, so a
+large repository cannot let one poll monopolize the owner lease. The locator
+writer and its lease are opened only for catalog work and are closed before
+repository-sized graph or pack work begins. Push and upload-pack clients detect
+the repository owner and leave repair to it; complete-pack fetch remains the
+safe fallback while a new generation is being indexed.
 
 ```bash
 crab metadb owner
@@ -129,11 +131,42 @@ SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
 a shorter interval only when lower repair or maintenance lag justifies the
 additional metadata requests.
 
+For large existing packs, owner catalog publication verifies the pack indexes
+and locator ranges without downloading covered stable pack bodies. New or
+rebound packs are scanned once to fill optional object-kind metadata. New
+publications write the ordinal-keyed kind sidecar together with the object and
+reverse-ordinal rows. A complete sidecar lets fresh kind-only filters select
+ordinals without a second OID-family lookup; a filtered request whose selected
+rows lack kind metadata falls back to the bounded canonical planner. Direct
+pushes continue to publish kinds for newly introduced objects when the local
+Git source is available.
+
+The locator writer also maintains a derived pack-slot membership index for
+stale-pack cleanup. It scans only memberships for slots absent from the
+current manifest, then validates and removes their canonical OID, ordinal, and
+metadata rows. If the completion marker is absent on a historical catalog, the
+owner rebuilds this derived index once. An interrupted rebuild leaves an
+explicit in-progress marker and cannot advance catalog coverage until every
+retained pack has replayed; readers and the manifest never depend on it.
+
+When a current generation is missing its split commit graph but the immediately
+previous generation has a validated graph, the owner reads only the new commit
+closure through the pinned remote-Git operation and appends one immutable graph
+layer. The JSONL action is `commit_graph_incremental` and its maintenance byte
+counters cover the remote commit payloads and newly written graph objects. If a
+valid predecessor is unavailable, the owner uses the complete pack-materializing
+rebuild once; later generations can return to the incremental path.
+
 `--once` executes one decision, not the entire backlog. Repeat it until
 `action` is `none`, or run the continuous owner. `--jsonl` emits one record per
-sample with the selected action, active pack count/bytes, geometric roll-up
-size, catalog and commit-graph layer count/bytes, maintenance bytes read and
-written, visibility state, supersession, and elapsed time.
+sample with the selected action, stable `maintenance_reason`,
+`next_eligibility_secs` (`0` when the owner immediately rechecks a superseded
+generation), active pack count/bytes, geometric roll-up size, catalog and
+commit-graph layer count/bytes, maintenance bytes read and written, visibility
+state, supersession, and elapsed time. The reason values are operational
+labels, not user-controlled repository names: for example,
+`catalog_coverage_stale`, `commit_graph_layers_due`,
+`shallow_closure_missing`, and `geometric_pack_threshold`.
 
 ### `crab metadb compact`
 

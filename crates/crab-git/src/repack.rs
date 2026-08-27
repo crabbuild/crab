@@ -365,6 +365,8 @@ pub fn consolidate_pack_suffix(
             .arg(format!("--git-dir={}", source_git.display()))
             .arg("pack-objects")
             .arg("--quiet")
+            .arg("--reuse-delta")
+            .arg("--reuse-object")
             .arg("--delta-base-offset")
             .arg("--depth=64")
             .arg(&output_prefix)

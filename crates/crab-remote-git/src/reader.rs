@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_metadata::git_object_locator::{
-    GitObjectLocator, GitObjectLocatorSession, GitObjectLookup, GitPackInventoryEntry,
+    GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
+    GitPackInventoryEntry,
 };
 use crab_storage::{Store, repo_pack_index_path, repo_pack_path};
 use crab_xet::hash::MerkleHash;
@@ -92,6 +93,11 @@ const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_COALESCED_GAP_BYTES: u64 = 32 * 1024;
 const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
 const MATERIALIZE_CHUNK_SIZE: usize = 256;
+// Large object batches are cheaper to resolve from the immutable pack indexes
+// than from one metadata point read per OID. Small reads retain the catalog
+// path because loading an index would cost more than the lookup it replaces.
+const PACK_INDEX_LOOKUP_MIN_OBJECTS: usize = 256;
+const PACK_INDEX_LOAD_CONCURRENCY: usize = 4;
 
 struct CoalescedRange {
     pack_id: MerkleHash,
@@ -304,6 +310,117 @@ impl RemoteGitReader {
         .await
     }
 
+    async fn lookup_batch_for_read(
+        &self,
+        session: &GitObjectLocatorSession,
+        requested: &[[u8; 20]],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLookup>> {
+        if requested.len() < PACK_INDEX_LOOKUP_MIN_OBJECTS || self.inventory.is_empty() {
+            return self
+                .lookup_batch_from_catalog(session, requested, budget, cancellation)
+                .await;
+        }
+
+        let mut lookups = self
+            .lookup_batch_from_pack_indexes(requested, budget, cancellation)
+            .await?;
+        let missing = lookups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, lookup)| {
+                matches!(lookup, GitObjectLookup::Miss).then_some((index, requested[index]))
+            })
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return Ok(lookups);
+        }
+
+        let missing_ids = missing.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let fallback = self
+            .lookup_batch_from_catalog(session, &missing_ids, budget, cancellation)
+            .await?;
+        for ((index, _), lookup) in missing.into_iter().zip(fallback) {
+            lookups[index] = lookup;
+        }
+        Ok(lookups)
+    }
+
+    async fn lookup_batch_from_catalog(
+        &self,
+        session: &GitObjectLocatorSession,
+        requested: &[[u8; 20]],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLookup>> {
+        budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        tracing::debug!(
+            storage_request = "locator_lookup",
+            storage_bytes = 0u64,
+            object_count = requested.len(),
+            "remote Git object-store request"
+        );
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Error::Cancelled),
+            lookups = session.lookup_batch(requested, &self.inventory) => Ok(lookups?),
+        }
+    }
+
+    async fn lookup_batch_from_pack_indexes(
+        &self,
+        requested: &[[u8; 20]],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLookup>> {
+        let mut pack_ids = self.inventory.keys().copied().collect::<Vec<_>>();
+        pack_ids.sort_unstable();
+        let pack_count = pack_ids.len();
+        // Do not retain every index for a repository-wide batch: pack count is
+        // unbounded, while the stream keeps only the configured in-flight set.
+        let mut indexes = stream::iter(pack_ids.into_iter().map(|pack_id| async move {
+            let index = self.load_pack_index(pack_id, budget, cancellation).await?;
+            Ok::<_, Error>((pack_id, index))
+        }))
+        .buffer_unordered(PACK_INDEX_LOAD_CONCURRENCY.min(pack_count).max(1));
+
+        let mut lookups = vec![GitObjectLookup::Miss; requested.len()];
+        let mut remaining = requested.len();
+        while let Some(result) = indexes.next().await {
+            let (pack_id, index) = result?;
+            for (position, oid) in requested.iter().enumerate() {
+                if !matches!(lookups[position], GitObjectLookup::Miss) {
+                    continue;
+                }
+                let object_id = gix_hash::ObjectId::from(*oid);
+                if let Some(location) = index.location_for(&object_id)? {
+                    lookups[position] = GitObjectLookup::Hit(GitObjectLocator {
+                        // Pack indexes provide a complete immutable location but
+                        // not the catalog's dense ordinal. Batch object reads use
+                        // only the location; catalog APIs continue to use the
+                        // authoritative locator session.
+                        ordinal: 0,
+                        pack_id,
+                        location,
+                        metadata: Default::default(),
+                    });
+                    remaining = remaining.saturating_sub(1);
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        tracing::debug!(
+            locator_lookup_mode = "pack_index",
+            requested_objects = requested.len(),
+            pack_count,
+            "immutable Git pack indexes resolved a large object batch"
+        );
+        Ok(lookups)
+    }
+
     pub(crate) async fn read_many_with_session(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
@@ -349,17 +466,9 @@ impl RemoteGitReader {
                     .map_err(|_| Error::UnsupportedObjectFormat)
             })
             .collect::<Result<Vec<[u8; 20]>>>()?;
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        tracing::debug!(
-            storage_request = "locator_lookup",
-            storage_bytes = 0u64,
-            "remote Git object-store request"
-        );
-        let lookups = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            lookups = session.lookup_batch(&oid_bytes, &self.inventory) => lookups?,
-        };
+        let lookups = self
+            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+            .await?;
         if lookups.len() != missing.len() {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Locator,
@@ -497,12 +606,9 @@ impl RemoteGitReader {
                     .map_err(|_| Error::UnsupportedObjectFormat)
             })
             .collect::<Result<Vec<[u8; 20]>>>()?;
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        let lookups = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            lookups = session.lookup_batch(&oid_bytes, &self.inventory) => lookups?,
-        };
+        let lookups = self
+            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+            .await?;
         if lookups.len() != requested.len() {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Locator,
@@ -1245,9 +1351,7 @@ impl RemoteGitReader {
     ) -> Result<gix_hash::ObjectId> {
         let index = self.load_pack_index(pack_id, budget, cancellation).await?;
         index
-            .by_offset
-            .get(&pack_offset)
-            .copied()
+            .oid_at_offset(pack_offset)
             .ok_or(Error::DeltaBaseNotFound {
                 pack_id,
                 pack_offset,
@@ -1744,26 +1848,88 @@ enum EntryDescriptor {
 }
 
 pub(crate) struct PackIndex {
-    pub(crate) by_offset: HashMap<u64, gix_hash::ObjectId>,
     pub(crate) object_ids: Vec<gix_hash::ObjectId>,
+    pub(crate) pack_offsets: Vec<u64>,
+    pub(crate) crc32: Vec<u32>,
+    pub(crate) offset_order: Vec<u32>,
+    pub(crate) pack_data_end: u64,
     pub(crate) pack_checksum: [u8; 20],
     pub(crate) source_bytes: u64,
 }
 
 impl PackIndex {
+    fn location_for(&self, oid: &gix_hash::ObjectId) -> Result<Option<GitObjectLocation>> {
+        let Some(position) = self.object_ids.binary_search(oid).ok() else {
+            return Ok(None);
+        };
+        let pack_offset = *self.pack_offsets.get(position).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+        let sorted_position = self
+            .offset_order
+            .binary_search_by_key(&pack_offset, |entry_position| {
+                self.pack_offsets
+                    .get(*entry_position as usize)
+                    .copied()
+                    .unwrap_or(u64::MAX)
+            })
+            .map_err(|_| Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+        let next_offset = self
+            .offset_order
+            .get(sorted_position.saturating_add(1))
+            .and_then(|entry_position| self.pack_offsets.get(*entry_position as usize))
+            .copied()
+            .unwrap_or(self.pack_data_end);
+        let entry_len = next_offset.checked_sub(pack_offset).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+        let crc32 = *self.crc32.get(position).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+        Ok(Some(GitObjectLocation {
+            pack_offset,
+            entry_len,
+            crc32,
+        }))
+    }
+
+    fn oid_at_offset(&self, pack_offset: u64) -> Option<gix_hash::ObjectId> {
+        let sorted_position = self
+            .offset_order
+            .binary_search_by_key(&pack_offset, |entry_position| {
+                self.pack_offsets
+                    .get(*entry_position as usize)
+                    .copied()
+                    .unwrap_or(u64::MAX)
+            })
+            .ok()?;
+        let position = *self.offset_order.get(sorted_position)? as usize;
+        self.object_ids.get(position).copied()
+    }
+
     pub(crate) fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
-            .saturating_add(
-                self.by_offset.capacity().saturating_mul(
-                    std::mem::size_of::<u64>()
-                        .saturating_add(std::mem::size_of::<gix_hash::ObjectId>())
-                        .saturating_add(1),
-                ),
-            )
             .saturating_add(
                 self.object_ids
                     .capacity()
                     .saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+            )
+            .saturating_add(
+                self.pack_offsets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u64>()),
+            )
+            .saturating_add(
+                self.crc32
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                self.offset_order
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
             )
     }
 }
@@ -1963,18 +2129,25 @@ fn parse_pack_index(
         stage: CorruptionStage::Inventory,
     })?;
     let capacity = index.num_objects() as usize;
-    let mut by_offset = HashMap::new();
-    by_offset
-        .try_reserve(capacity)
-        .map_err(|source| Error::Allocation {
-            requested: capacity.saturating_mul(std::mem::size_of::<(u64, gix_hash::ObjectId)>()),
-            source,
-        })?;
     let mut object_ids = Vec::new();
     object_ids
         .try_reserve_exact(capacity)
         .map_err(|source| Error::Allocation {
             requested: capacity.saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+            source,
+        })?;
+    let mut pack_offsets = Vec::new();
+    pack_offsets
+        .try_reserve_exact(capacity)
+        .map_err(|source| Error::Allocation {
+            requested: capacity.saturating_mul(std::mem::size_of::<u64>()),
+            source,
+        })?;
+    let mut crc32 = Vec::new();
+    crc32
+        .try_reserve_exact(capacity)
+        .map_err(|source| Error::Allocation {
+            requested: capacity.saturating_mul(std::mem::size_of::<u32>()),
             source,
         })?;
     let mut previous = None;
@@ -1987,11 +2160,6 @@ fn parse_pack_index(
                 stage: CorruptionStage::PackIndex,
             });
         }
-        if by_offset.insert(entry.pack_offset, entry.oid).is_some() {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackIndex,
-            });
-        }
         if previous.is_some_and(|previous| previous >= entry.oid) {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::PackIndex,
@@ -1999,10 +2167,54 @@ fn parse_pack_index(
         }
         previous = Some(entry.oid);
         object_ids.push(entry.oid);
+        pack_offsets.push(entry.pack_offset);
+        crc32.push(entry.crc32.ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?);
+    }
+    let mut offset_order = Vec::new();
+    offset_order
+        .try_reserve_exact(capacity)
+        .map_err(|source| Error::Allocation {
+            requested: capacity.saturating_mul(std::mem::size_of::<u32>()),
+            source,
+        })?;
+    for position in 0..capacity {
+        offset_order.push(u32::try_from(position).map_err(|_| Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?);
+    }
+    offset_order.sort_unstable_by_key(|position| {
+        pack_offsets
+            .get(*position as usize)
+            .copied()
+            .unwrap_or(u64::MAX)
+    });
+    for window in offset_order.windows(2) {
+        let current = pack_offsets
+            .get(window[0] as usize)
+            .copied()
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+        let next = pack_offsets
+            .get(window[1] as usize)
+            .copied()
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+        if next <= current {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            });
+        }
     }
     Ok(PackIndex {
-        by_offset,
         object_ids,
+        pack_offsets,
+        crc32,
+        offset_order,
+        pack_data_end,
         pack_checksum,
         source_bytes,
     })
@@ -2169,6 +2381,87 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn pack_index_resolves_oid_locations_and_ofs_bases_without_a_map() {
+        let oid = |value: u8| gix_hash::ObjectId::from([value; 20]);
+        let index = PackIndex {
+            object_ids: vec![oid(1), oid(2), oid(3)],
+            pack_offsets: vec![100, 300, 200],
+            crc32: vec![11, 33, 22],
+            offset_order: vec![0, 2, 1],
+            pack_data_end: 400,
+            pack_checksum: [0; 20],
+            source_bytes: 1,
+        };
+
+        assert_eq!(
+            index.location_for(&oid(1)).expect("location"),
+            Some(GitObjectLocation {
+                pack_offset: 100,
+                entry_len: 100,
+                crc32: 11,
+            })
+        );
+        assert_eq!(index.oid_at_offset(200), Some(oid(3)));
+        assert_eq!(index.oid_at_offset(250), None);
+        assert_eq!(index.location_for(&oid(9)).expect("missing lookup"), None);
+    }
+
+    #[tokio::test]
+    async fn large_batch_lookup_uses_cached_pack_index_locations() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let oid = |value: u8| gix_hash::ObjectId::from([value; 20]);
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                Arc::new(PackIndex {
+                    object_ids: vec![oid(1)],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [0; 20],
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let store = Store::new(Arc::new(InMemory::new()));
+        let reader = RemoteGitReader::from_pinned(
+            store,
+            "repository",
+            [GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity.clone(),
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime, 1);
+        let lookups = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20]], &budget, &CancellationToken::new())
+            .await
+            .expect("pack-index lookup");
+
+        assert!(matches!(
+            lookups.as_slice(),
+            [GitObjectLookup::Hit(GitObjectLocator {
+                pack_id: actual_pack,
+                location: GitObjectLocation {
+                    pack_offset: 100,
+                    entry_len: 100,
+                    crc32: 11,
+                },
+                ..
+            })] if *actual_pack == pack_id
+        ));
     }
 
     #[test]

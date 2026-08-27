@@ -27,8 +27,8 @@ pub use identity::{BucketIdentity, StorageProviderKind};
 pub use layout::{
     GLOBAL_CONTENT_FANOUT_WIDTH, GLOBAL_PREFIX, ObjectType, StorageScopeProvider, StoreLayout,
     canonical_global_content_path, content_hash_from_path, global_content_partition_prefix,
-    global_content_path, global_content_prefix, repo_pack_index_path, repo_pack_metadata_path,
-    repo_pack_path, repo_pack_reverse_index_path,
+    global_content_path, global_content_prefix, repo_pack_index_path, repo_pack_kind_metadata_path,
+    repo_pack_metadata_path, repo_pack_path, repo_pack_reverse_index_path,
 };
 pub use provider_options::{
     apply_s3_env_overrides, default_client_options, parse_sas_query_pairs, s3_endpoint_from_env,

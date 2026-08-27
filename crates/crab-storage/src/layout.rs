@@ -176,6 +176,12 @@ impl<S> StoreLayout<S> {
         self.repo_path("manifests/history")
     }
 
+    /// Prefix containing immutable historical manifests for one generation.
+    #[must_use]
+    pub fn manifest_history_generation_prefix(&self, generation: u64) -> ObjectPath {
+        self.repo_path(&format!("manifests/history/{generation:020}-"))
+    }
+
     /// Path to one immutable historical manifest root.
     #[must_use]
     pub fn manifest_history_path(&self, generation: u64, digest: &str) -> ObjectPath {
@@ -254,6 +260,12 @@ impl<S> StoreLayout<S> {
         repo_pack_metadata_path(&self.repo_prefix, pack_id)
     }
 
+    /// Path to compact Git object-kind metadata: `{repo}/packs/pack-{id}.kinds`.
+    #[must_use]
+    pub fn pack_kind_metadata_path(&self, pack_id: &(impl Display + ?Sized)) -> ObjectPath {
+        repo_pack_kind_metadata_path(&self.repo_prefix, pack_id)
+    }
+
     /// Path to the version-bound integrity receipt for a Git pack body.
     #[must_use]
     pub fn pack_origin_receipt_path(&self, pack_id: &(impl Display + ?Sized)) -> ObjectPath {
@@ -295,6 +307,14 @@ impl<S> StoreLayout<S> {
     pub fn git_visibility_catalog_path(&self, git_validation_digest: &str) -> ObjectPath {
         self.repo_path(&format!(
             "metadata/git-visibility/v3/{git_validation_digest}.json"
+        ))
+    }
+
+    /// Path to a pending catalog-bound visibility compaction.
+    #[must_use]
+    pub fn git_visibility_pending_path(&self, git_validation_digest: &str) -> ObjectPath {
+        self.repo_path(&format!(
+            "metadata/git-visibility-pending/v1/{git_validation_digest}.json"
         ))
     }
 
@@ -383,6 +403,19 @@ pub fn repo_pack_metadata_path(repo_prefix: &str, pack_id: &(impl Display + ?Siz
     ))
 }
 
+/// Build a repo-local Git pack object-kind metadata path for callers that
+/// have only a prefix.
+#[must_use]
+pub fn repo_pack_kind_metadata_path(
+    repo_prefix: &str,
+    pack_id: &(impl Display + ?Sized),
+) -> ObjectPath {
+    ObjectPath::from(format!(
+        "{repo_prefix}/{}",
+        pack_kind_metadata_relative_path(pack_id)
+    ))
+}
+
 fn pack_relative_path(pack_id: &(impl Display + ?Sized)) -> String {
     format!("packs/pack-{pack_id}.pack")
 }
@@ -397,6 +430,10 @@ fn pack_reverse_index_relative_path(pack_id: &(impl Display + ?Sized)) -> String
 
 fn pack_metadata_relative_path(pack_id: &(impl Display + ?Sized)) -> String {
     format!("packs/pack-{pack_id}.meta")
+}
+
+fn pack_kind_metadata_relative_path(pack_id: &(impl Display + ?Sized)) -> String {
+    format!("packs/pack-{pack_id}.kinds")
 }
 
 #[cfg(test)]
@@ -511,6 +548,10 @@ mod tests {
             "org/models/manifests/history"
         );
         assert_eq!(
+            layout.manifest_history_generation_prefix(42).as_ref(),
+            "org/models/manifests/history/00000000000000000042-"
+        );
+        assert_eq!(
             layout.manifest_history_path(42, &digest).as_ref(),
             format!("org/models/manifests/history/00000000000000000042-{digest}.json")
         );
@@ -555,6 +596,10 @@ mod tests {
             format!("org/models/packs/pack-{pack_id}.meta")
         );
         assert_eq!(
+            layout.pack_kind_metadata_path(&pack_id).as_ref(),
+            format!("org/models/packs/pack-{pack_id}.kinds")
+        );
+        assert_eq!(
             layout.pack_origin_receipt_path(&pack_id).as_ref(),
             format!("org/models/metadata/pack-origin/{pack_id}.json")
         );
@@ -595,6 +640,10 @@ mod tests {
         assert_eq!(
             repo_pack_metadata_path("org/models", &pack_id).as_ref(),
             format!("org/models/packs/pack-{pack_id}.meta")
+        );
+        assert_eq!(
+            repo_pack_kind_metadata_path("org/models", &pack_id).as_ref(),
+            format!("org/models/packs/pack-{pack_id}.kinds")
         );
     }
 

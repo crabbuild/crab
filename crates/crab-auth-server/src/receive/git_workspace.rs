@@ -426,9 +426,59 @@ impl<'a> GitReceiveWorkspace<'a> {
             Some(git_dir),
         )?;
 
+        let idx_path = verify_path.with_extension("idx");
+        let rev_path = verify_path.with_extension("rev");
+        crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+            .map_err(crab_git::pack::PackError::from)?;
+        let mut locations =
+            crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack.size)
+                .map_err(crab_git::pack::PackError::from)?;
+        let object_ids = locations
+            .by_ref()
+            .map(|location| {
+                location
+                    .map(|location| location.oid)
+                    .map_err(crab_git::pack::PackError::from)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(AuthServerError::from)?;
+        if u64::try_from(object_ids.len())
+            .map_err(|_| invalid("synthesized Git pack object count overflows u64"))?
+            != object_count
+        {
+            return Err(invalid(
+                "synthesized Git pack object count does not match its index",
+            ));
+        }
+        let kinds = crab_git::object_kinds_from_git_dir(git_dir, &object_ids)
+            .map_err(AuthServerError::from)?;
+        if kinds.len() != object_ids.len() {
+            return Err(invalid("synthesized Git pack kind metadata is incomplete"));
+        }
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| {
+                kinds
+                    .get(oid)
+                    .copied()
+                    .ok_or_else(|| invalid("synthesized Git pack kind metadata omitted an object"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
+            locations.pack_checksum(),
+            &ordered_kinds,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+
         let pack_path = self.router.pack_path(&pack_id);
         self.store
             .put_exact(&pack_path, bytes::Bytes::from(pack_bytes))
+            .await?;
+        self.store
+            .put(
+                &self.router.pack_kind_metadata_path(&pack_id),
+                bytes::Bytes::from(kind_metadata),
+            )
             .await?;
         let metadata = PackMetadata {
             pack_id: pack_id.clone(),
@@ -447,8 +497,6 @@ impl<'a> GitReceiveWorkspace<'a> {
             &pack,
         )
         .await?;
-        let idx_path = verify_path.with_extension("idx");
-        let rev_path = verify_path.with_extension("rev");
         self.publish_pack_locator_evidence(&InstalledPackLocatorEvidence {
             pack_id: pack_id.clone(),
             idx_path,

@@ -30,4 +30,5 @@ pub use term_resolver::TermResolver;
 pub use upload_pack::{
     PackPlan, UploadPackFilter, UploadPackFilterError, UploadPackObjectType, UploadPackRequest,
     combine_upload_pack_filters, parse_upload_pack_filter, plan_upload_pack,
+    plan_upload_pack_catalog,
 };

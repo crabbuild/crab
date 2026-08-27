@@ -371,6 +371,24 @@ pub fn compact_split_commit_graph(graph: SplitCommitGraph) -> Result<Option<Comm
     )
 }
 
+/// Return whether the newest graph layers meet the geometric merge rule.
+#[must_use]
+pub fn split_commit_graph_compaction_due(descriptor: &CommitGraphDescriptor) -> bool {
+    if descriptor.layers.len() < 2 {
+        return false;
+    }
+    let Some(newer) = descriptor.layers.last() else {
+        return false;
+    };
+    let Some(older) = descriptor
+        .layers
+        .get(descriptor.layers.len().saturating_sub(2))
+    else {
+        return false;
+    };
+    newer.commit_count >= older.commit_count
+}
+
 /// Rebind unchanged graph layers to a new manifest pack identity.
 pub fn rebind_split_commit_graph(
     graph: &SplitCommitGraph,
@@ -728,22 +746,9 @@ pub async fn load_split_commit_graph(
     descriptor_hash: &str,
     max_bytes: u64,
 ) -> Result<SplitCommitGraph> {
-    validate_content_hash(
-        descriptor_hash,
-        "commit graph descriptor hash",
-        "commit graph",
-    )?;
+    let (descriptor, mut fetched_bytes) =
+        read_split_commit_graph_descriptor(store, router, descriptor_hash, max_bytes).await?;
     let descriptor_path = router.bulk_manifest_path("commit-graph", descriptor_hash);
-    let expected = decode_hash(descriptor_hash, descriptor_path.as_ref())?;
-    let descriptor_bytes = store.verify(&descriptor_path, &expected).await?;
-    let mut fetched_bytes = descriptor_bytes.len() as u64;
-    if fetched_bytes > max_bytes {
-        return Err(MetadataError::CorruptObject {
-            path: descriptor_path.to_string(),
-            reason: format!("commit graph exceeds {max_bytes} byte limit"),
-        });
-    }
-    let descriptor = decode_commit_graph_descriptor(&descriptor_bytes, descriptor_path.as_ref())?;
     let mut layers = Vec::with_capacity(descriptor.layers.len());
     for reference in &descriptor.layers {
         fetched_bytes = fetched_bytes.checked_add(reference.bytes).ok_or_else(|| {
@@ -770,6 +775,45 @@ pub async fn load_split_commit_graph(
         layers.push(decode_commit_graph_layer(&bytes, path.as_ref())?);
     }
     SplitCommitGraph::new(descriptor, layers)
+}
+
+/// Load and content-verify only the small split-graph descriptor.
+#[cfg(feature = "storage")]
+pub async fn load_split_commit_graph_descriptor(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    descriptor_hash: &str,
+    max_bytes: u64,
+) -> Result<CommitGraphDescriptor> {
+    read_split_commit_graph_descriptor(store, router, descriptor_hash, max_bytes)
+        .await
+        .map(|(descriptor, _)| descriptor)
+}
+
+#[cfg(feature = "storage")]
+async fn read_split_commit_graph_descriptor(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    descriptor_hash: &str,
+    max_bytes: u64,
+) -> Result<(CommitGraphDescriptor, u64)> {
+    validate_content_hash(
+        descriptor_hash,
+        "commit graph descriptor hash",
+        "commit graph",
+    )?;
+    let descriptor_path = router.bulk_manifest_path("commit-graph", descriptor_hash);
+    let expected = decode_hash(descriptor_hash, descriptor_path.as_ref())?;
+    let descriptor_bytes = store.verify(&descriptor_path, &expected).await?;
+    let fetched_bytes = descriptor_bytes.len() as u64;
+    if fetched_bytes > max_bytes {
+        return Err(MetadataError::CorruptObject {
+            path: descriptor_path.to_string(),
+            reason: format!("commit graph exceeds {max_bytes} byte limit"),
+        });
+    }
+    let descriptor = decode_commit_graph_descriptor(&descriptor_bytes, descriptor_path.as_ref())?;
+    Ok((descriptor, fetched_bytes))
 }
 
 /// Upload changed layers before the immutable descriptor object.
@@ -1121,6 +1165,34 @@ mod tests {
         assert_eq!(graph.descriptor.commit_count, 64);
         assert_eq!(graph.layers.len(), 1);
         assert_eq!(graph.is_ancestor(&oid(1), &oid(64)), Some(true));
+    }
+
+    #[test]
+    fn descriptor_compaction_due_only_when_newest_layer_reaches_older_layer() {
+        let descriptor = |counts: &[u32]| CommitGraphDescriptor {
+            version: 1,
+            generation: 1,
+            pack_index_hash: hash(1),
+            git_validation_digest: hash(2),
+            commit_count: counts.iter().sum(),
+            layers: counts
+                .iter()
+                .enumerate()
+                .map(|(index, count)| CommitGraphLayerRef {
+                    hash: hash(index as u8 + 3),
+                    path: String::new(),
+                    base_ordinal: 0,
+                    commit_count: *count,
+                    bytes: 1,
+                })
+                .collect(),
+        };
+
+        assert!(!split_commit_graph_compaction_due(&descriptor(&[])));
+        assert!(!split_commit_graph_compaction_due(&descriptor(&[8])));
+        assert!(!split_commit_graph_compaction_due(&descriptor(&[8, 4])));
+        assert!(split_commit_graph_compaction_due(&descriptor(&[8, 8])));
+        assert!(split_commit_graph_compaction_due(&descriptor(&[2, 4, 4])));
     }
 
     #[test]
