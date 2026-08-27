@@ -1016,20 +1016,17 @@ async fn load_cached_pack(
         .state
         .layout
         .generated_pack_descriptor_path(&request_hash);
-    let metadata = match repository.state.store.head(&descriptor_path).await {
-        Ok(metadata) => metadata,
-        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.size > GENERATED_PACK_DESCRIPTOR_MAX_BYTES {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    let (bytes, _) = tokio::select! {
+    let (bytes, _) = match tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(Error::Cancelled),
-        result = repository.state.store.get_with_etag(&descriptor_path) => result?,
+        result = repository.state.store.get_with_etag_bounded(
+            &descriptor_path,
+            GENERATED_PACK_DESCRIPTOR_MAX_BYTES,
+        ) => result,
+    } {
+        Ok(value) => value,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
     let Some(descriptor) = decode_generated_pack_descriptor(&bytes)? else {
         return Ok(None);

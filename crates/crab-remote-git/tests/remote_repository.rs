@@ -77,6 +77,7 @@ struct PackFixture {
 struct CountingStore {
     inner: Arc<InMemory>,
     pack_gets: AtomicUsize,
+    generated_pack_descriptor_gets: AtomicUsize,
     generated_pack_descriptor_puts: AtomicUsize,
     block_next_pack_get: AtomicBool,
     block_pack_offset: AtomicU64,
@@ -92,6 +93,7 @@ impl CountingStore {
         Self {
             inner: Arc::new(InMemory::new()),
             pack_gets: AtomicUsize::new(0),
+            generated_pack_descriptor_gets: AtomicUsize::new(0),
             generated_pack_descriptor_puts: AtomicUsize::new(0),
             block_next_pack_get: AtomicBool::new(false),
             block_pack_offset: AtomicU64::new(u64::MAX),
@@ -118,6 +120,15 @@ impl CountingStore {
 
     fn generated_pack_descriptor_puts(&self) -> usize {
         self.generated_pack_descriptor_puts.load(Ordering::SeqCst)
+    }
+
+    fn reset_generated_pack_descriptor_gets(&self) {
+        self.generated_pack_descriptor_gets
+            .store(0, Ordering::SeqCst);
+    }
+
+    fn generated_pack_descriptor_gets(&self) -> usize {
+        self.generated_pack_descriptor_gets.load(Ordering::SeqCst)
     }
 
     fn block_next_pack_get(&self) {
@@ -184,6 +195,10 @@ impl ObjectStore for CountingStore {
         location: &ObjectPath,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if location.as_ref().contains("/generated-packs/v1/requests/") {
+            self.generated_pack_descriptor_gets
+                .fetch_add(1, Ordering::SeqCst);
+        }
         if !options.head && location.as_ref().ends_with(".pack") {
             self.pack_gets.fetch_add(1, Ordering::SeqCst);
             let active = self.active_pack_gets.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1467,6 +1482,7 @@ async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
         .await
         .expect("generate and publish cached pack");
     fixture.backend.reset_pack_gets();
+    fixture.backend.reset_generated_pack_descriptor_gets();
     let warm = fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1475,6 +1491,7 @@ async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
 
     assert_eq!(fixture.backend.generated_pack_descriptor_puts(), 1);
     assert_eq!(fixture.backend.pack_gets(), 1);
+    assert_eq!(fixture.backend.generated_pack_descriptor_gets(), 1);
     assert_eq!(
         fs::read(cold.path()).expect("read cold pack"),
         fs::read(warm.path()).expect("read warm pack")
