@@ -321,6 +321,53 @@ OID catalog; the exact refs, fsck, and byte-equivalence checks still pass.
 Repeated isolated runs and the full interruption/maintenance matrix remain
 required.
 
+### Current-head dense response-pack qualification
+
+The dense response-pack follow-up is committed as `b69ecb47`. It centralizes
+the catalog-exact filter predicate in `UploadPackFilter::is_catalog_exact()`
+and routes only no-have, non-shallow `blob:none`, `object:type`, or their
+kind-only combinations to the verified packed-entry assembler. The assembler
+keeps REF_DELTA payloads when the base is selected, rewrites OFS_DELTA to
+REF_DELTA, materializes a base only when it is outside the selected set, and
+retains the existing full-pack consolidation and selected-object repack paths
+for full, shallow, depth, path-context, and negotiated requests.
+
+The live RustFS smoke `codex-dense-pack-final-k8s-20260827-smoke` used
+Kubernetes revision `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, Git 2.50.1,
+and the release binary built from the implementation worktree at
+`113fce69`. The shared filter-policy change was already present in that build;
+the subsequent `b69ecb47` diff only renamed the internal selection parameter
+and added the final strict-pack regression. Its standalone report has
+`status=ok`, 17/17 checks passed, full and incremental fsck passed,
+the deterministic 1,000-object sample remained byte-identical, the source
+checkout was unchanged, and the run-owned remote prefix was cleaned. The
+correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The unfiltered cold clone used the existing `complete_pack_consolidation`
+  strategy: 2 origin reads, 1,244,177,064 response bytes, and 117,295 ms of
+  server-side pack generation. Depth-100 and depth-1,000 also stayed on the
+  existing selected-repack/complete-consolidation paths with 2 origin reads.
+- The `blob:none` clone used `selected_packed_entries`: 1,102,159 selected
+  objects, 211,026,080 response bytes, 6,322 ms of pack generation, zero
+  inflated bytes, 3,082 bounded range reads, and 444,376,175 fetched bytes.
+  Its client-side clone and fsck checks passed. Compared with the prior
+  selected-object repack measurement (65,962 ms and 198,749,524 response
+  bytes), this is a large CPU reduction with a measured response-size and
+  range-read trade-off that still needs provider/SLO qualification.
+- A ranked experiment rejected broad direct assembly for full clones: the
+  same two-pack snapshot produced a correct 1,263,644,281-byte response but
+  needed 155,695 range reads and 8,270,537,029 fetched bytes at essentially
+  the same 106-second generation cost. That candidate was removed before the
+  final smoke, so full clones retain the low-request consolidation path.
+
+Focused proof after the final source change passes 19 `crab-remote-git` pack
+tests, including strict forward REF_DELTA and OFS_DELTA rewriting, 24
+`crab-read` upload-pack tests, and 27 Crab upload-pack-wire tests. The smoke
+report is correctness evidence rather than a full Phase 2 performance gate:
+repeatability, full-profile response-pack SLOs, provider range-request
+behavior, and the remaining roadmap phases are still open.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is
@@ -406,8 +453,9 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - cold/warm clone fanout controls in the qualification harness.
 - SlateDB 0.15.0 cancellation-safe reader behavior and explicit initialization
   of temporary bare Git repositories before pack/index operations;
-- selected-object response repacking for dense type-only filters, with exact
-  generated-object-set verification;
+- catalog-exact dense-filter response assembly from verified packed entries for
+  `blob:none`/`object:type`, with exact generated-object-set verification and
+  conservative repack fallback for contextual requests;
 - safe OID deduplication for initial absolute-depth traversal, preserving
   context-sensitive behavior for relative deepening and existing shallow
   boundaries;
