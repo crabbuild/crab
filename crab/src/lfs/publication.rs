@@ -32,11 +32,29 @@ pub(crate) async fn publish_reachable(
 
     let scan_dir = git_dir.clone();
     let scan_tips = tips.clone();
-    let entries = tokio::task::spawn_blocking(move || {
-        crate::cmd::lfs::push::collect_pointers_from_range_in(&scan_dir, &scan_tips, &remote_tips)
+    let scan_remote_tips = remote_tips.clone();
+    // A partial clone can advertise remote refs whose tips are absent from
+    // this local ODB. Such tips cannot be passed as `^<tip>` boundaries to
+    // `git rev-list`; Git rejects the whole scan with "bad object". Only
+    // locally resolvable remote tips are valid exclusion boundaries here.
+    let (scan_remote_tips, entries) = tokio::task::spawn_blocking(move || {
+        let scan_remote_tips = locally_available_remote_tips(&scan_dir, &scan_remote_tips);
+        let entries = crate::cmd::lfs::push::collect_pointers_from_range_in(
+            &scan_dir,
+            &scan_tips,
+            &scan_remote_tips,
+        )?;
+        Ok::<_, CrabError>((scan_remote_tips, entries))
     })
     .await
     .map_err(|error| CrabError::Internal(format!("LFS dependency scan failed: {error}")))??;
+    if scan_remote_tips.len() != remote_tips.len() {
+        tracing::debug!(
+            remote_tips = remote_tips.len(),
+            local_remote_tips = scan_remote_tips.len(),
+            "omitting unavailable remote tips from LFS dependency scan"
+        );
+    }
 
     if entries.is_empty() {
         return Ok(());
@@ -155,6 +173,23 @@ pub(crate) async fn publish_reachable(
         .await?;
 
     Ok(())
+}
+
+fn locally_available_remote_tips(git_dir: &std::path::Path, remote_tips: &[String]) -> Vec<String> {
+    use gix_object::Exists;
+
+    let objects_dir = crate::git::discover::resolve_common_dir(git_dir).join("objects");
+    let Ok(odb) = gix_odb::at(&objects_dir) else {
+        return Vec::new();
+    };
+
+    remote_tips
+        .iter()
+        .filter_map(|tip| {
+            let oid = gix_hash::ObjectId::from_hex(tip.as_bytes()).ok()?;
+            odb.exists(&oid).then(|| tip.clone())
+        })
+        .collect()
 }
 
 fn transfer_request(pointer: &LfsPointer) -> TransferRequest {
@@ -327,6 +362,30 @@ mod tests {
             error,
             CrabError::LfsObjectMissing { ref oid } if oid == &hex_encode(&pointer.oid)
         ));
+    }
+
+    #[tokio::test]
+    async fn publication_ignores_remote_tips_missing_from_local_odb() {
+        let (repo, pointer, content, head) = fixture();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+
+        publish_reachable(
+            store.clone(),
+            "repo".to_owned(),
+            repo.path().join(".git"),
+            vec![head],
+            vec!["f".repeat(40)],
+        )
+        .await
+        .unwrap();
+
+        let remote = LfsObjectStore::new(store, "repo");
+        assert_eq!(
+            remote.verify(&pointer.oid).await.unwrap(),
+            Bytes::from(content)
+        );
     }
 
     #[tokio::test]

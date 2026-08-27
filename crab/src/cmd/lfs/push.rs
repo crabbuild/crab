@@ -409,7 +409,6 @@ pub(crate) fn collect_pointers_from_range_in(
     let mut args = vec![
         "rev-list".to_owned(),
         "--objects".to_owned(),
-        "-z".to_owned(),
         format!("--filter=blob:limit={}", MAX_LFS_POINTER_SIZE + 1),
     ];
     for sha in local_shas {
@@ -419,10 +418,16 @@ pub(crate) fn collect_pointers_from_range_in(
         args.push(format!("^{sha}"));
     }
     let mut entries = Vec::new();
-    visit_lfs_blobs_in_git_command(repo_dir, &args, parse_rev_list_record, |path, pointer| {
-        entries.push((path, pointer));
-        Ok(())
-    })?;
+    visit_lfs_blobs_in_git_command(
+        repo_dir,
+        &args,
+        b'\n',
+        parse_rev_list_record,
+        |path, pointer| {
+            entries.push((path, pointer));
+            Ok(())
+        },
+    )?;
     Ok(entries)
 }
 
@@ -438,17 +443,24 @@ fn visit_lfs_pointers_in_tree(
         ref_name.to_owned(),
     ];
     let mut seen = HashSet::new();
-    visit_lfs_blobs_in_git_command(repo_dir, &args, parse_ls_tree_record, |path, pointer| {
-        if seen.insert(pointer.oid) {
-            visitor(path, pointer)?;
-        }
-        Ok(())
-    })
+    visit_lfs_blobs_in_git_command(
+        repo_dir,
+        &args,
+        b'\0',
+        parse_ls_tree_record,
+        |path, pointer| {
+            if seen.insert(pointer.oid) {
+                visitor(path, pointer)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 fn visit_lfs_blobs_in_git_command(
     repo_dir: &Path,
     args: &[String],
+    record_terminator: u8,
     parse_record: fn(&[u8], &mut Option<String>) -> Result<Option<(String, String)>>,
     mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
 ) -> Result<()> {
@@ -488,14 +500,14 @@ fn visit_lfs_blobs_in_git_command(
         loop {
             record.clear();
             let read = producer_stdout
-                .read_until(0, &mut record)
+                .read_until(record_terminator, &mut record)
                 .map_err(|error| {
                     CrabError::Internal(format!("failed to read git discovery: {error}"))
                 })?;
             if read == 0 {
                 break;
             }
-            let terminated = record.last() == Some(&0);
+            let terminated = record.last() == Some(&record_terminator);
             if terminated {
                 record.pop();
             }
@@ -641,7 +653,12 @@ fn parse_rev_list_record(
         return Ok(Some((oid, String::from_utf8_lossy(path).into_owned())));
     }
 
-    let oid = std::str::from_utf8(record).map_err(|_| {
+    let separator = record.iter().position(|byte| byte.is_ascii_whitespace());
+    let (oid_bytes, path) = match separator {
+        Some(index) => (&record[..index], &record[index + 1..]),
+        None => (record, &record[0..0]),
+    };
+    let oid = std::str::from_utf8(oid_bytes).map_err(|_| {
         CrabError::Internal("git rev-list returned a malformed object record".to_owned())
     })?;
     if !is_git_object_id(oid) {
@@ -649,10 +666,18 @@ fn parse_rev_list_record(
             "git rev-list returned a malformed object record".to_owned(),
         ));
     }
-    // `rev-list --objects -z` emits an object ID record followed by a
-    // `path=...` record only for objects that have a name. Commits and trees
-    // therefore leave a pending ID that is deliberately discarded by the
-    // next ID or at EOF.
+
+    if !path.is_empty() {
+        *pending_oid = None;
+        return Ok(Some((
+            oid.to_owned(),
+            String::from_utf8_lossy(path).into_owned(),
+        )));
+    }
+
+    // Commits and trees have no object name. Keep the most recent unnamed
+    // object for Git versions that emit a separate `path=...` record; normal
+    // line-delimited output replaces it on each row.
     *pending_oid = Some(oid.to_owned());
     Ok(None)
 }
@@ -831,6 +856,24 @@ mod tests {
     }
 
     #[test]
+    fn rev_list_parser_accepts_line_delimited_named_objects() {
+        let mut pending = None;
+        let unnamed = git_oid(4);
+        assert!(
+            parse_rev_list_record(unnamed.as_bytes(), &mut pending)
+                .unwrap()
+                .is_none()
+        );
+
+        let named = git_oid(5);
+        let record = format!("{named} path with spaces");
+        assert_eq!(
+            parse_rev_list_record(record.as_bytes(), &mut pending).unwrap(),
+            Some((named, "path with spaces".to_owned()))
+        );
+    }
+
+    #[test]
     fn range_scan_does_not_fall_back_when_rev_list_fails() {
         let dir = tempfile::tempdir().unwrap();
         let status = Command::new("git")
@@ -848,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn range_scan_streams_zipped_rev_list_and_cat_file_records() {
+    fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
         let dir = tempfile::tempdir().unwrap();
         for args in [
             vec!["init", "--quiet"],
