@@ -368,6 +368,15 @@ report is correctness evidence rather than a full Phase 2 performance gate:
 repeatability, full-profile response-pack SLOs, provider range-request
 behavior, and the remaining roadmap phases are still open.
 
+The generated-pack cache follow-up is committed as `fd7e6121`. Cache descriptor
+loads now use the storage layer's bounded single GET, which checks the provider
+advertised size before consuming the body and preserves the existing 4 KiB
+corruption boundary. This removes the separate descriptor HEAD from both cache
+hits and misses; the remote-repository regression asserts one descriptor GET
+for a warm lookup, while the artifact checksum, response limit, and corruption
+tests remain unchanged. It is a request-amplification fix, not a substitute
+for the still-required response-pack SLO and provider-range qualification.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is
