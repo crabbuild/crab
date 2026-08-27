@@ -62,9 +62,10 @@ enough for a valid differential result.
 The implementation work for Phases 1 through 5 is assembled on one integration
 branch so reviewers can inspect the complete generation-binding contract across
 push, read, maintenance, and GC. The post-lazy full-profile qualification is
-now complete for one K8s/RustFS run and remains a single-run result; repeatability,
-the 10,000-push differential, fault, provider, concurrency, and rollout gates
-are still open.
+now complete for an older baseline and the current branch head on K8s/RustFS;
+each current binary still has only one full-profile run. Repeatability, the
+10,000-push differential, fault, provider, concurrency, and rollout gates are
+still open.
 
 `local-k8s-final-04655f3b-1000-20260825` used Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated external RustFS, and the
@@ -144,16 +145,32 @@ current pack inventory (`4a8fc34e`). Before opening SlateDB, the owner reads the
 published pack bindings and counts only packs whose physical facts are not
 already covered. A same-inventory pass uses a metadata-only writer, while a
 delayed pass no longer starts a repository-sized compactor merely because the
-historical catalog is large. This source fix still needs fresh release-binary
-RustFS evidence at the 1,000-pack scale. The exact release-binary smoke below
-now proves the budget on a real Kubernetes repository; the 1,000-push and
-sustained owner-budget gates remain open.
+historical catalog is large. The current-head full-profile run below now
+proves this budget through 1,000 replay pushes on a real Kubernetes repository;
+sustained and repeated owner-budget gates remain open.
 
 The regular post-CAS locator publication now uses the same uncovered-pack
 budget (`88deb4e0`). Its snapshot is taken while holding the repository locator
 lock, so stable historical packs do not make an ordinary small push start a
 repository-sized SlateDB compactor. Publication and repair regressions pass,
-and the current PR-head release build embeds `88deb4e0`.
+and the current full-profile qualification below uses a binary built from
+`d8de9d12`, which includes this path and the stale-snapshot guard.
+
+The generation owner now re-reads the committed manifest after acquiring the
+locator publication lock (`5465031e`). If the pre-lock owner snapshot is already
+superseded, it exits before opening the locator session or planning pack rows;
+the existing final manifest check still protects the smaller race where a push
+wins during the bounded publication itself. The regression passes with a
+missing stale-snapshot pack, proving the stale path cannot turn into an object
+read or a failed repository-sized plan.
+
+The locator writer now keeps small catalogs on bounded OID point reads and
+selects the full object-family scan only when the pinned catalog has at least
+4,096 objects and the accumulated batch covers at least 1/64 of that catalog
+(`62d35c14`). The policy regression passes, and the current release-binary
+RustFS same-ref smoke completed four integrated pushes at 288 locator requests
+per successful push, below the 500-request budget that exposed the prior
+small-catalog scan amplification.
 
 The workflow scheduler lock now retains its lock inode across handoffs
 (`d9c93263`). This prevents a releasing holder from unlinking the pathname
@@ -165,7 +182,7 @@ under contention.
 Focused source proof for this follow-up passes formatting, `cargo check -p
 crab`, the complete Crab library suite, the complete metadata suite, strict
 metadata clippy, and the targeted exact-tip visibility regressions. The
-release binary embeds `cdc2335e` and is the binary used by the current
+release binary embeds `d8de9d12` and is the binary used by the current-head
 Kubernetes/RustFS qualification below.
 
 The current release-binary qualification
@@ -229,17 +246,42 @@ This smoke is current release-binary evidence for the compaction budget and
 large-batch read path, not the full 1,000-push qualification. The independent
 full-profile repeatability run, differential, concurrency, fault/provider,
 owner-failover, and rollout gates remain open. The later regular post-CAS
-budget change is release-built and covered by focused publication tests, but
-has not yet been rerun through a full Kubernetes smoke.
+budget change is release-built and covered by focused publication tests; the
+current-head full-profile run below now covers it on the full replay path.
+
+The current-head full-profile qualification
+`codex-d8de9d12-k8s-20260827-current-full` used the release binary whose
+embedded source revision is `d8de9d12`, the same Kubernetes revision, and
+`replay_count=1000`. The standalone verifier returned `status=ok`; all 1,001
+pushes and 23/23 checks passed. Advertised refs, full and incremental clone
+tips, full and incremental fsck, and a deterministic 1,000-object sample
+matched the source; the source checkout was unchanged and both local
+worktrees and the run-owned remote prefix were cleaned. The correctness
+fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- The 1,000-push summary was 1.806 seconds median, 2.778 seconds p95, and
+  3.433 seconds p99; the 259.613-second maximum was the initial import.
+- The 1,000-push owner checkpoint took 976.987 seconds, reduced 902 active
+  packs to 2, swept 901 stale pack-membership rows, and scanned/deleted zero
+  canonical object rows. This confirms the intended O(N) initial catalog
+  advance and indexed post-repack cleanup, but is not a sustained owner SLO.
+- Cold and warm full clones completed in 160.5 and 57.4 seconds; blobless and
+  depth-1/10/100/1,000 clones completed in 93.5/16.5/22.4/146.2/160.7
+  seconds. Incremental fetches at 1/10/100/1,000 commits completed in
+  1.860/2.093/3.002/6.685 seconds.
+
+This is current-head full-profile correctness and bottleneck evidence on one
+host, not production SLO proof. An independent current-head repeatability run,
+valid isolated growth comparison, and the remaining team-load, fault,
+provider, failover, canary, and rollout gates remain open below.
 
 The subsequent stale-pack membership-index change (`ad2554fa`, with the
-deterministic delta-base regression in `b9859f28`) is source-tested but not yet
-represented in a fresh 1,000-push release-binary Kubernetes report. The smoke
-above does represent the current stale-row and owner-budget path at 100
-replays: repeated post-repack sweeps report only stale membership rows and do
-not scan the retained OID catalog. The 1,000-push report must still preserve
-the exact refs, fsck, and byte-equivalence checks while measuring the full
-rebuild path.
+deterministic delta-base regression in `b9859f28`) is now represented in the
+current-head 1,000-push report above. Its final sweep reports only stale
+membership rows and does not scan the retained OID catalog; the exact refs,
+fsck, and byte-equivalence checks still pass. Repeated isolated runs and the
+full interruption/maintenance matrix remain required.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
@@ -308,7 +350,8 @@ fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
 recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
 transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
 reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
-`4a8fc34e`; regular locator budgeting at `88deb4e0`):
+`4a8fc34e`; regular locator budgeting at `88deb4e0`; stale owner-plan guard at
+`5465031e`; small-catalog point-read policy at `62d35c14`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -355,6 +398,11 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
   inventories.
 - regular post-CAS locator publication reuses the same lock-scoped uncovered
   pack budget, so stable inventory does not inflate push-side compaction.
+- owner locator planning rechecks its manifest anchor after lock acquisition,
+  skipping stale repository snapshots before locator session or pack planning
+  work begins.
+- small locator catalogs retain bounded OID point reads; full ordinal scans are
+  reserved for large dense batches on catalogs with at least 4,096 objects.
 - generated response-pack cache publication trusts the private verified-pack
   invariant, avoiding a second repository-sized hash scan before multipart
   upload on every cold cache miss.
@@ -400,16 +448,15 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 
 Still required before the roadmap is DONE:
 
-- an independent repeatability full-profile report from the current lazy binary
-  after the large-batch locator scan change. The current
-  `crabbuild-f2a941ce-k8s-20260827-smoke` is an exact 100-replay release smoke,
-  not the required full-profile repeatability gate;
-- a 1,000-push release-binary owner-budget qualification after `4a8fc34e`.
-  The current smoke proves that post-repack sweeps are bounded to 10 and 91
-  stale pack rows at checkpoints 10 and 100, while the prior `b637edfe`
-  Kubernetes replay exposed a 902-pack `catalog_advance` that took 814,991 ms.
-  The full run must prove the same bound through 1,000 pushes and measure the
-  intentional O(N) rebuild path rather than treating it as solved;
+- an independent repeatability full-profile report from the current binary
+  after the stale-owner and small-catalog changes. The current
+  `codex-d8de9d12-k8s-20260827-current-full` is the first current-head
+  full-profile run; the older `f12e2d9e` run is not a repeat of this source;
+- sustained owner-budget, interruption, and memory evidence after `4a8fc34e`,
+  `88deb4e0`, and the current locator hardening. The current full run proves
+  the 902-to-2 pack transition and 901-row indexed sweep once, but the
+  intentional O(N) rebuild path and repeated owner behavior still need bounded
+  multi-run evidence;
 - a valid 1,000-push growth and latency comparison across isolated runs; the
   current post-lazy comparison is invalid because push and clone medians drifted
   by roughly 41% on the shared host;
@@ -439,14 +486,16 @@ Still required before the roadmap is DONE:
   migration/compaction, graph, and repack paths still have latency and memory
   budgets open;
 - the post-lazy depth-1/10 planner measured 11,659/15,553 ms before the
-  large-batch scan change. Re-run those depths with `c57ee1f4` and require
-  locator lookup-mode telemetry to prove the bounded scan removes the
-  point-read wave without increasing full-clone or incremental-fetch latency;
+  large-batch scan change. The current full run shows depth-1/10 planner
+  visibility in 9/13 ms and zero locator ordinal scans for those depth clones;
+  rerun the differential with the current source and require lookup-mode
+  telemetry to prove the change without increasing full-clone or
+  incremental-fetch latency;
 - catalog-filter planning now reads the additive ordinal-keyed metadata
   sidecar, filters ordinals, and resolves only retained OIDs. Existing or
-  incomplete sidecars still use the bounded canonical fallback, so the
-  implementation gap is closed but the large-closure request/latency SLO still
-  needs fresh current-binary evidence;
+  incomplete sidecars still use the bounded canonical fallback; the current
+  full run supplies fresh current-binary evidence, but the large-closure
+  request/latency SLO still needs differential and sustained proof;
 - cold and warm full-clone response-pack SLOs remain open: the Kubernetes
   repository still generates a roughly 1.2 GB response pack, so cache hits and
   pack-count bounds alone do not prove large-team clone fanout is affordable;
