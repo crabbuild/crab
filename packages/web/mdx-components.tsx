@@ -55,6 +55,7 @@ import {
   LfsRehearsalConsole,
   LfsRewriteMap,
 } from "@/components/blog/lfs-compatibility-visuals"
+import { CrabLfsDirectStorageLab } from "@/components/library/crab-lfs-direct-storage-lab"
 import {
   PushDataLanesDiagram,
   PushPipelineBoard,
@@ -195,6 +196,7 @@ export function getMDXComponents(components?: MDXComponents) {
     LfsIdentityLab,
     LfsRehearsalConsole,
     LfsRewriteMap,
+    CrabLfsDirectStorageLab,
     PushDataLanesDiagram,
     PushPipelineBoard,
     PushVisibilityLab,
