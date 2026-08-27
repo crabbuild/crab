@@ -149,6 +149,16 @@ historical catalog is large. The current-head full-profile run below now
 proves this budget through 1,000 replay pushes on a real Kubernetes repository;
 sustained and repeated owner-budget gates remain open.
 
+The generation-owner geometric repack now applies an explicit source-pack,
+source-byte, source-request, and phase-deadline budget. When the full
+geometric suffix exceeds those limits, the owner compacts the largest suffix
+that fits and reports `geometric_repack_bounded`; if even two source packs do
+not fit, it reports `geometric_repack_deferred` and retries on the next
+eligibility interval. Explicit `crab repack` remains the unbounded operator
+path, while automatic owner work cannot monopolize one repository's
+maintenance lease. The bounded selector has unit coverage; sustained
+10,000-push owner convergence and interruption evidence remain open.
+
 The regular post-CAS locator publication now uses the same uncovered-pack
 budget (`88deb4e0`). Its snapshot is taken while holding the repository locator
 lock, so stable historical packs do not make an ordinary small push start a
@@ -542,6 +552,15 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - generated response-pack cache publication trusts the private verified-pack
   invariant, avoiding a second repository-sized hash scan before multipart
   upload on every cold cache miss.
+- generated response-pack cache selection identity is canonicalized by sorted
+  OIDs, so equivalent large-team dense requests coalesce despite traversal
+  order differences.
+- LFS pre-push range scans exclude every compacted manifest ref tip, not only
+  refs listed in the current stdin batch, so multi-branch pushes do not
+  rescan already-published pointer history.
+- full-clone qualification explicitly fetches all advertised namespaces into
+  a verification ref namespace and compares every resulting ref to the
+  remote advertisement, including annotated-tag peeled values.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;

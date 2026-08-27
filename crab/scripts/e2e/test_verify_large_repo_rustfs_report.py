@@ -140,7 +140,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.1",
+        "version": "1.2",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -238,6 +238,7 @@ def valid_report() -> dict[str, Any]:
             "incremental_fsck": True,
             "sample_size": 3,
             "advertised_refs": {"refs/heads/main": OID},
+            "clone_refs": {"refs/heads/main": OID},
         },
         "metrics": {
             "replay_pushes": replay_count,
@@ -514,6 +515,18 @@ class ReportVerificationTests(unittest.TestCase):
         report = valid_report()
         report["correctness"]["advertised_refs"]["refs/heads/main"] = BASE
         with self.assertRaisesRegex(VERIFY.VerificationError, "advertised main ref mismatch"):
+            VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+
+    def test_missing_clone_ref_evidence_is_rejected(self) -> None:
+        report = valid_report()
+        del report["correctness"]["clone_refs"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "clone_refs"):
+            VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+
+    def test_clone_ref_drift_is_rejected(self) -> None:
+        report = valid_report()
+        report["correctness"]["clone_refs"]["refs/heads/main"] = BASE
+        with self.assertRaisesRegex(VERIFY.VerificationError, "clone advertised refs"):
             VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
 
 

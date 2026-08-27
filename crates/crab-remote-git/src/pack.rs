@@ -818,7 +818,13 @@ fn selected_object_digest(object_ids: &[ObjectId]) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(b"crab.generated-pack.selection.v1\0");
     hash.update(&(object_ids.len() as u64).to_be_bytes());
-    for oid in object_ids {
+    // The response bytes are order-independent for cache identity. Sorting
+    // only this digest lets concurrent clients with the same dense selection
+    // share one immutable artifact even when their catalog traversal order
+    // differs.
+    let mut sorted = object_ids.to_vec();
+    sorted.sort_unstable();
+    for oid in sorted {
         hash.update(oid.as_bytes());
     }
     *hash.finalize().as_bytes()
@@ -1889,6 +1895,19 @@ mod tests {
         let base = key(&identity, "validation-a");
         assert_ne!(base, key(&moved_identity, "validation-a"));
         assert_ne!(base, key(&identity, "validation-b"));
+    }
+
+    #[test]
+    fn generated_pack_selection_digest_is_order_independent() {
+        let identity =
+            crate::RepositoryIdentity::new("memory", "org/repo", 1).expect("repository identity");
+        let first = ObjectId::from([1; 20]);
+        let second = ObjectId::from([2; 20]);
+        let key = |objects: &[ObjectId]| {
+            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], objects, false)
+        };
+
+        assert_eq!(key(&[first, second]), key(&[second, first]));
     }
 
     #[test]

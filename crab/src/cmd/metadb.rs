@@ -716,20 +716,44 @@ async fn generation_owner_sample(
             config,
             "generation-owner geometric repack",
         )?;
-        let outcome = crate::cmd::repack::run_repack(
+        let repack_config = crate::cmd::repack::RepackConfig {
+            lock_ttl,
+            ..Default::default()
+        };
+        let repack = crate::cmd::repack::run_bounded_repack(
             store,
             router.repo_prefix(),
-            &crate::cmd::repack::RepackConfig {
-                lock_ttl,
-                ..Default::default()
-            },
+            &repack_config,
+            crate::cmd::repack::RepackBudget::generation_owner(),
             cancel,
         )
         .await?;
-        graph.action = "geometric_repack";
-        graph.bytes_read = outcome.bytes_read;
-        graph.bytes_written = outcome.bytes_written;
-        superseded = true;
+        match repack {
+            crate::cmd::repack::RepackRunResult::Completed { outcome, bounded } => {
+                graph.action = if bounded {
+                    "geometric_repack_bounded"
+                } else {
+                    "geometric_repack"
+                };
+                graph.bytes_read = outcome.bytes_read;
+                graph.bytes_written = outcome.bytes_written;
+                superseded = true;
+            }
+            crate::cmd::repack::RepackRunResult::Deferred {
+                resource,
+                actual,
+                maximum,
+            } => {
+                graph.action = "geometric_repack_deferred";
+                info!(
+                    generation,
+                    resource,
+                    actual,
+                    maximum,
+                    "generation-owner geometric repack deferred by maintenance budget"
+                );
+            }
+        }
     }
     Ok(GenerationOwnerSample {
         generation,
@@ -763,6 +787,8 @@ fn generation_owner_reason(action: &str) -> &'static str {
         "commit_graph_compaction" => "commit_graph_layers_due",
         "shallow_closure_rebuild" => "shallow_closure_missing",
         "geometric_repack" => "geometric_pack_threshold",
+        "geometric_repack_bounded" => "geometric_pack_budget",
+        "geometric_repack_deferred" => "maintenance_budget",
         "superseded" => "manifest_superseded",
         _ => "no_maintenance_due",
     }
@@ -3945,6 +3971,8 @@ mod tests {
             ("commit_graph_compaction", "commit_graph_layers_due"),
             ("shallow_closure_rebuild", "shallow_closure_missing"),
             ("geometric_repack", "geometric_pack_threshold"),
+            ("geometric_repack_bounded", "geometric_pack_budget"),
+            ("geometric_repack_deferred", "maintenance_budget"),
             ("superseded", "manifest_superseded"),
             ("none", "no_maintenance_due"),
         ];

@@ -263,8 +263,15 @@ pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    // Ref updates contain only the refs Git is changing. Excluding the
+    // compacted manifest's complete ref-tip set prevents a multi-branch push
+    // from rescanning pointers that are already reachable from another remote
+    // branch or tag.
+    let base_manifest_refs = load_remote_manifest_ref_tips(&ctx)?;
+
     // Collect LFS pointers from the commits being pushed.
-    let pointers = collect_pointers_from_range(&local_shas, &remote_shas)?;
+    let pointers =
+        collect_pointers_from_range_with_base_refs(&local_shas, &remote_shas, &base_manifest_refs)?;
 
     if pointers.is_empty() {
         return Ok(());
@@ -375,11 +382,31 @@ fn collect_push_pointers(all: bool, refs: &[String]) -> Result<Vec<LfsPointer>> 
 }
 
 /// Collect `(path, LfsPointer)` pairs from a commit range being pushed.
-fn collect_pointers_from_range(
+fn collect_pointers_from_range_with_base_refs(
     local_shas: &[String],
     remote_shas: &[String],
+    base_manifest_refs: &[String],
 ) -> Result<Vec<(String, LfsPointer)>> {
-    collect_pointers_from_range_in(Path::new("."), local_shas, remote_shas)
+    collect_pointers_from_range_in_with_base_refs(
+        Path::new("."),
+        local_shas,
+        remote_shas,
+        base_manifest_refs,
+    )
+}
+
+fn load_remote_manifest_ref_tips(
+    ctx: &super::store_setup::LfsRemoteContext,
+) -> Result<Vec<String>> {
+    let store = crate::storage::Store::from_storage(ctx.store.store().clone());
+    let router = crate::storage::StoreLayout::new(store.clone(), ctx.prefix.clone());
+    super::block_on_runtime(async move {
+        match crate::metadata::manifest::read_manifest(&store, &router).await {
+            Ok((manifest, _)) => Ok(manifest.refs.into_values().collect()),
+            Err(CrabError::NotFound { .. }) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    })
 }
 
 pub(crate) fn collect_lfs_object_ids_from_range_in(
@@ -402,6 +429,15 @@ pub(crate) fn collect_pointers_from_range_in(
     local_shas: &[String],
     remote_shas: &[String],
 ) -> Result<Vec<(String, LfsPointer)>> {
+    collect_pointers_from_range_in_with_base_refs(repo_dir, local_shas, remote_shas, &[])
+}
+
+fn collect_pointers_from_range_in_with_base_refs(
+    repo_dir: &Path,
+    local_shas: &[String],
+    remote_shas: &[String],
+    base_manifest_refs: &[String],
+) -> Result<Vec<(String, LfsPointer)>> {
     // Build rev-list args: local_sha ^remote_sha ...
     // Git's blob:limit filter omits blobs at least the given size. LFS
     // pointers are bounded, so the scan never streams ordinary large blobs
@@ -414,7 +450,12 @@ pub(crate) fn collect_pointers_from_range_in(
     for sha in local_shas {
         args.push(sha.clone());
     }
-    for sha in remote_shas {
+    let mut exclusions = HashSet::with_capacity(remote_shas.len() + base_manifest_refs.len());
+    exclusions.extend(remote_shas.iter().cloned());
+    exclusions.extend(base_manifest_refs.iter().cloned());
+    let mut exclusions = exclusions.into_iter().collect::<Vec<_>>();
+    exclusions.sort_unstable();
+    for sha in exclusions {
         args.push(format!("^{sha}"));
     }
     let mut entries = Vec::new();
@@ -891,6 +932,23 @@ mod tests {
     }
 
     #[test]
+    fn missing_remote_manifest_is_an_empty_base_tip_set() {
+        let store =
+            crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let context = crate::cmd::lfs::store_setup::LfsRemoteContext {
+            store: std::sync::Arc::new(crab_lfs::LfsObjectStore::new(
+                store.into(),
+                "org/lfs-pre-push",
+            )),
+            local_lfs_dir: std::path::PathBuf::new(),
+            config: crate::lfs::config::LfsConfig::default(),
+            prefix: "org/lfs-pre-push".to_owned(),
+        };
+
+        assert!(load_remote_manifest_ref_tips(&context).unwrap().is_empty());
+    }
+
+    #[test]
     fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
         let dir = tempfile::tempdir().unwrap();
         for args in [
@@ -952,6 +1010,100 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "asset.bin");
         assert_eq!(entries[0].1, pointer);
+    }
+
+    #[test]
+    fn range_scan_excludes_all_base_manifest_ref_tips() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(dir.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        let base_content = b"base lfs object";
+        let base_pointer = LfsPointer {
+            oid: sha2::Sha256::digest(base_content).into(),
+            size: base_content.len() as u64,
+            extensions: Vec::new(),
+        };
+        std::fs::write(dir.path().join("base.bin"), base_pointer.serialize()).unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["add", "base.bin"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["commit", "--quiet", "-m", "base"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let base = String::from_utf8(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+
+        let new_content = b"new lfs object";
+        let new_pointer = LfsPointer {
+            oid: sha2::Sha256::digest(new_content).into(),
+            size: new_content.len() as u64,
+            extensions: Vec::new(),
+        };
+        std::fs::write(dir.path().join("new.bin"), new_pointer.serialize()).unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["add", "new.bin"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["commit", "--quiet", "-m", "new"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let head = String::from_utf8(
+            Command::new("git")
+                .current_dir(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+
+        let entries =
+            collect_pointers_from_range_in_with_base_refs(dir.path(), &[head], &[], &[base])
+                .unwrap();
+        assert_eq!(entries, vec![("new.bin".to_owned(), new_pointer)]);
     }
 
     #[test]

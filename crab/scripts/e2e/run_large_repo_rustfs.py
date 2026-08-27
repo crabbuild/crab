@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.1"
+VERSION = "1.2"
 DEFAULT_SOURCE = Path("/Volumes/Workspace/Github/kubernetes/kubernetes")
 DEFAULT_ROOT = Path("/Volumes/Workspace/CrabBuild/crabbuild-qualification")
 DEFAULT_BUCKET = "crab"
@@ -1491,11 +1491,11 @@ class LargeRepositoryQualification:
         depth_ten = self.clone_root / "depth-10"
         depth_hundred = self.clone_root / "depth-100"
         depth_thousand = self.clone_root / "depth-1000"
-        self.clone("full_clone_cold", cold, ["--single-branch", "--branch", "main"], fsck=True)
+        self.clone("full_clone_cold", cold, ["--branch", "main"], fsck=True)
         self.clone(
             "full_clone_warm",
             warm,
-            ["--single-branch", "--branch", "main"],
+            ["--branch", "main"],
             fsck=True,
             remove_after=True,
         )
@@ -1605,14 +1605,76 @@ class LargeRepositoryQualification:
         )
         return [line for line in self.stdout(record).splitlines() if line]
 
+    def clone_advertised_refs(
+        self, clone: Path, advertised: dict[str, str]
+    ) -> dict[str, str | None]:
+        record = self.run_git(
+            clone,
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objectname) %(*objectname)",
+                "refs/remotes/origin",
+                "refs/tags",
+            ],
+            "clone advertised refs",
+        )
+        refs: dict[str, str] = {}
+        peeled: dict[str, str] = {}
+        for line in self.stdout(record).splitlines():
+            fields = line.split(maxsplit=2)
+            if len(fields) < 2 or not OID_RE.fullmatch(fields[1]):
+                raise QualificationError(f"invalid clone ref line: {line!r}")
+            local_ref, oid = fields[0], fields[1]
+            refs[local_ref] = oid
+            if len(fields) == 3 and OID_RE.fullmatch(fields[2]):
+                peeled[local_ref] = fields[2]
+
+        mapped: dict[str, str] = {}
+        for local_ref, oid in refs.items():
+            if local_ref.startswith("refs/remotes/origin/"):
+                suffix = local_ref.removeprefix("refs/remotes/origin/")
+                if suffix != "HEAD":
+                    mapped[f"refs/heads/{suffix}"] = oid
+            elif local_ref.startswith("refs/crab-verify/"):
+                suffix = local_ref.removeprefix("refs/crab-verify/")
+                mapped[f"refs/{suffix}"] = oid
+                if local_ref in peeled:
+                    mapped[f"refs/{suffix}^{{}}"] = peeled[local_ref]
+            elif local_ref.startswith("refs/tags/"):
+                mapped[local_ref] = oid
+                if local_ref in peeled:
+                    mapped[f"{local_ref}^{{}}"] = peeled[local_ref]
+
+        head = self.git_value(clone, ["rev-parse", "HEAD"], "clone advertised HEAD")
+        return {
+            name: head if name == "HEAD" else mapped.get(name)
+            for name in advertised
+        }
+
     def verify_correctness(self, source_head: str, full_clone: Path) -> None:
         refs = self.remote_refs()
         main = refs.get("refs/heads/main")
         head = refs.get("HEAD")
+        self.run_git(
+            full_clone,
+            ["fetch", "origin", "+refs/*:refs/crab-verify/*"],
+            "clone all advertised refs",
+            timeout=self.args.clone_timeout,
+            extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
+        )
+        clone_refs = self.clone_advertised_refs(full_clone, refs)
         self.check(
             "advertised-refs-match-source",
-            main == source_head and head in {None, source_head},
-            {"expected_main": source_head, "actual_main": main, "head": head},
+            main == source_head
+            and head in {None, source_head}
+            and clone_refs == refs,
+            {
+                "expected_main": source_head,
+                "actual_main": main,
+                "head": head,
+                "advertised_refs": refs,
+                "clone_refs": clone_refs,
+            },
         )
         full_tip = self.git_value(full_clone, ["rev-parse", "HEAD"], "full clone HEAD")
         incremental_tip = self.git_value(
@@ -1651,6 +1713,7 @@ class LargeRepositoryQualification:
         self.report["artifacts"]["object_sample"] = str(sample_path)
         self.report["correctness"] = {
             "advertised_refs": refs,
+            "clone_refs": clone_refs,
             "source_head": source_head,
             "full_clone_head": full_tip,
             "incremental_clone_head": incremental_tip,

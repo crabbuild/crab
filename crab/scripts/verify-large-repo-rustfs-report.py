@@ -14,7 +14,7 @@ from typing import Any
 
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.1"
+VERSION = "1.2"
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
@@ -628,6 +628,19 @@ def verify_report(
     refs = correctness.get("advertised_refs")
     require(isinstance(refs, dict), "advertised_refs must be an object")
     require(refs.get("refs/heads/main") == source_revision, "advertised main ref mismatch")
+    for name, oid in refs.items():
+        require(
+            isinstance(name, str)
+            and (name == "HEAD" or name.startswith("refs/")),
+            f"invalid advertised ref name: {name!r}",
+        )
+        require(
+            isinstance(oid, str) and OID_RE.fullmatch(oid),
+            f"invalid advertised ref oid for {name}",
+        )
+    clone_refs = correctness.get("clone_refs")
+    require(isinstance(clone_refs, dict), "clone_refs must be an object")
+    require(clone_refs == refs, "clone advertised refs do not match remote advertisement")
 
     metrics = report.get("metrics")
     require(isinstance(metrics, dict), "metrics must be an object")
