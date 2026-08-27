@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -36,8 +36,8 @@ use gix_pack::data::entry::Header;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use sha1::{Digest as _, Sha1};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
@@ -67,6 +67,7 @@ struct PackFixture {
     target_path: String,
     expected: Vec<u8>,
     base_path: String,
+    base_offset: u64,
     base_expected: Vec<u8>,
     blob_paths: Vec<(String, Vec<u8>)>,
     shared_paths: Option<[(String, Vec<u8>); 2]>,
@@ -78,6 +79,7 @@ struct CountingStore {
     pack_gets: AtomicUsize,
     generated_pack_descriptor_puts: AtomicUsize,
     block_next_pack_get: AtomicBool,
+    block_pack_offset: AtomicU64,
     pack_get_entered: Semaphore,
     release_pack_get: Notify,
     slow_pack_gets: AtomicBool,
@@ -92,6 +94,7 @@ impl CountingStore {
             pack_gets: AtomicUsize::new(0),
             generated_pack_descriptor_puts: AtomicUsize::new(0),
             block_next_pack_get: AtomicBool::new(false),
+            block_pack_offset: AtomicU64::new(u64::MAX),
             pack_get_entered: Semaphore::new(0),
             release_pack_get: Notify::new(),
             slow_pack_gets: AtomicBool::new(false),
@@ -119,6 +122,10 @@ impl CountingStore {
 
     fn block_next_pack_get(&self) {
         self.block_next_pack_get.store(true, Ordering::SeqCst);
+    }
+
+    fn block_pack_get_at(&self, pack_offset: u64) {
+        self.block_pack_offset.store(pack_offset, Ordering::SeqCst);
     }
 
     async fn wait_for_blocked_pack_get(&self) {
@@ -182,7 +189,25 @@ impl ObjectStore for CountingStore {
             let active = self.active_pack_gets.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active_pack_gets
                 .fetch_max(active, Ordering::SeqCst);
-            if self.block_next_pack_get.swap(false, Ordering::SeqCst) {
+            let range_start = options.range.as_ref().and_then(|range| match range {
+                GetRange::Bounded(range) => Some(range.start),
+                GetRange::Offset(offset) => Some(*offset),
+                GetRange::Suffix(_) => None,
+            });
+            let block_pack_offset = self.block_pack_offset.load(Ordering::SeqCst);
+            let block_base = range_start.is_some_and(|offset| {
+                offset == block_pack_offset
+                    && self
+                        .block_pack_offset
+                        .compare_exchange(
+                            block_pack_offset,
+                            u64::MAX,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+            });
+            if self.block_next_pack_get.swap(false, Ordering::SeqCst) || block_base {
                 self.pack_get_entered.add_permits(1);
                 self.release_pack_get.notified().await;
             }
@@ -518,7 +543,7 @@ impl PackFixture {
                 requested.then_some(location.oid)
             })
             .expect("fixture must contain the requested delta kind");
-        let base = PackLocationIter::open(
+        let (base, base_offset) = PackLocationIter::open(
             &index,
             &reverse,
             fs::metadata(&pack).expect("pack metadata").len(),
@@ -537,7 +562,7 @@ impl PackFixture {
                 20,
             )
             .ok()?;
-            matches!(entry.header, Header::Blob).then_some(location.oid)
+            matches!(entry.header, Header::Blob).then_some((location.oid, location.pack_offset))
         })
         .expect("fixture must contain a base blob");
         let (target_path, _, expected) = blobs
@@ -617,6 +642,7 @@ impl PackFixture {
             target_path,
             expected,
             base_path,
+            base_offset,
             base_expected,
             blob_paths,
             shared_paths,
@@ -636,6 +662,7 @@ struct PublishedFixture {
     target_path: GitPath,
     expected: Vec<u8>,
     base_path: GitPath,
+    base_offset: u64,
     base_expected: Vec<u8>,
     root_commit: gix_hash::ObjectId,
     side_commit: gix_hash::ObjectId,
@@ -871,6 +898,7 @@ async fn publish_with_runtime_and_summary(
         target_path: GitPath::new(Bytes::from(fixture.target_path)).expect("target path"),
         expected: fixture.expected,
         base_path: GitPath::new(Bytes::from(fixture.base_path)).expect("base path"),
+        base_offset: fixture.base_offset,
         base_expected: fixture.base_expected,
         root_commit: fixture.root_commit,
         side_commit: fixture.side_commit,
@@ -2332,9 +2360,20 @@ async fn distinct_delta_objects_share_one_cold_base_fetch() {
         .await
         .expect("second operation");
     fixture.backend.reset_pack_gets();
+    fixture.backend.block_pack_get_at(fixture.base_offset);
     let first_read = snapshot.read_blob(&first_path, &first_operation);
     let second_read = snapshot.read_blob(&second_path, &second_operation);
-    let (first, second) = tokio::join!(first_read, second_read);
+    let (first, second) = {
+        let reads = async { tokio::join!(first_read, second_read) };
+        tokio::pin!(reads);
+        tokio::select! {
+            _ = fixture.backend.wait_for_blocked_pack_get() => {}
+            _ = &mut reads => panic!("first delta read completed before the shared base was blocked"),
+        }
+        tokio::task::yield_now().await;
+        fixture.backend.release_blocked_pack_get();
+        reads.as_mut().await
+    };
     assert_eq!(first.expect("first blob").bytes.as_ref(), first_expected);
     assert_eq!(second.expect("second blob").bytes.as_ref(), second_expected);
     first_operation.finish(Ok(())).await.expect("finish first");
