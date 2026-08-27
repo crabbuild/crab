@@ -1595,9 +1595,6 @@ struct PreparedGitPack {
 struct UploadedGitPack {
     entry: PackManifestEntry,
     idx_path: PathBuf,
-    rev_path: PathBuf,
-    git_sha1: String,
-    kind_by_oid: Option<GitObjectKindMap>,
     kind_metadata_published: bool,
 }
 
@@ -4190,12 +4187,6 @@ pub struct PushPipeline {
     manifest_etag: tokio::sync::Mutex<Option<String>>,
     /// Generation and shard-index hash returned by a successful manifest CAS.
     committed_manifest_anchor: tokio::sync::Mutex<Option<CommittedManifestAnchor>>,
-    /// Exact pack inventory already materialized by this pipeline's journal compaction.
-    /// Publication reuses it instead of downloading the immutable segments again.
-    committed_pack_inventory: tokio::sync::Mutex<Option<Vec<PackManifestEntry>>>,
-    /// A same-ref successor owns the next mutation, so it also owns publishing
-    /// the next useful locator generation.
-    locator_publication_deferred: std::sync::atomic::AtomicBool,
     /// Whether this generation has the complete bounded visibility proof that
     /// protocol-v2 admission requires alongside exact locator coverage.
     git_visibility_published: std::sync::atomic::AtomicBool,
@@ -6319,6 +6310,7 @@ async fn publish_pack_locator_inventory(
     anchor: CommittedManifestAnchor,
     current_packs: &[PackManifestEntry],
     populate_kind_metadata: bool,
+    allow_catalog_rebuild: bool,
     cancel: &CancellationToken,
 ) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
     let mut pack_records = Vec::with_capacity(current_packs.len());
@@ -6371,6 +6363,15 @@ async fn publish_pack_locator_inventory(
 
     let sweep = writer.sweep_unreferenced(&retained_slots).await?;
     if sweep.object_rows_deleted != 0 {
+        if !allow_catalog_rebuild {
+            // A normal push may leave stale rows after a repack, but rebuilding
+            // the dense catalog is owner work and must not extend the ack path.
+            debug!(
+                object_rows_deleted = sweep.object_rows_deleted,
+                "deferred stale Git locator catalog rebuild to generation owner"
+            );
+            return Ok((false, sweep));
+        }
         // Only deleting an object proves that the dense ordinal universe
         // changed. Rebuild then replay every current pack, including packs
         // that were covered before the sweep.
@@ -6517,6 +6518,7 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
         // OID. New OIDs without local push evidence use the documented
         // canonical filtered-read fallback instead of a repository-sized scan.
         false,
+        true,
         cancel,
     )
     .await?;
@@ -6631,10 +6633,9 @@ async fn publish_committed_pack_locators_with_mode(
             &loaded_inventory
         };
 
-        // The locator lock also serializes this budget snapshot with the
-        // owner. Count only packs whose rows are not already covered; using
-        // the whole inventory here can start a repository-sized compactor on
-        // an ordinary push that introduces only a small pack.
+        // Locator publication is an owner/repair action. The caller has
+        // already released the push boundary, so this path may use the
+        // compaction-aware writer and its uncovered-pack budget.
         let planned_object_rows = planned_locator_object_rows(store, router, current_packs).await?;
         let mut writer =
             crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
@@ -6651,6 +6652,7 @@ async fn publish_committed_pack_locators_with_mode(
             anchor,
             current_packs,
             false,
+            true,
             cancel,
         )
         .await;
@@ -6773,45 +6775,6 @@ pub(crate) async fn git_generation_owner_is_active(
     .map_err(CrabError::from)
 }
 
-pub(crate) async fn repair_git_visibility_if_current(
-    store: &Store,
-    router: &StoreLayout,
-    required_generation: u64,
-    lock_ttl: Duration,
-    cancel: &CancellationToken,
-) -> Result<Option<GitVisibilityPublication>> {
-    Box::pin(repair_git_visibility_if_current_with_limit(
-        store,
-        router,
-        required_generation,
-        crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
-        lock_ttl,
-        cancel,
-    ))
-    .await
-}
-
-pub(crate) async fn repair_git_visibility_if_current_with_limit(
-    store: &Store,
-    router: &StoreLayout,
-    required_generation: u64,
-    maximum_logical_objects: u64,
-    lock_ttl: Duration,
-    cancel: &CancellationToken,
-) -> Result<Option<GitVisibilityPublication>> {
-    Box::pin(repair_git_visibility_if_current_with_options(
-        store,
-        router,
-        required_generation,
-        maximum_logical_objects,
-        true,
-        lock_ttl,
-        cancel,
-        true,
-    ))
-    .await
-}
-
 pub(crate) async fn repair_git_visibility_after_locator_if_current_with_limit(
     store: &Store,
     router: &StoreLayout,
@@ -6828,6 +6791,7 @@ pub(crate) async fn repair_git_visibility_after_locator_if_current_with_limit(
         false,
         lock_ttl,
         cancel,
+        true,
         true,
     ))
     .await
@@ -6849,6 +6813,7 @@ pub(crate) async fn repair_git_visibility_after_locator_if_current_with_limit_fo
         false,
         lock_ttl,
         cancel,
+        true,
         false,
     ))
     .await
@@ -6862,6 +6827,7 @@ async fn repair_git_visibility_if_current_with_options(
     repair_locator: bool,
     lock_ttl: Duration,
     cancel: &CancellationToken,
+    allow_catalog_materialization: bool,
     wait_for_lock: bool,
 ) -> Result<Option<GitVisibilityPublication>> {
     if maximum_logical_objects == 0
@@ -6958,9 +6924,19 @@ async fn repair_git_visibility_if_current_with_options(
         {
             return Ok(None);
         }
-        crab_metadata::git_visibility::upload_if_absent(&storage, &storage_router, &index)
+        if allow_catalog_materialization {
+            crab_metadata::git_visibility::upload_if_absent(&storage, &storage_router, &index)
+                .await
+                .map_err(CrabError::from)?;
+        } else {
+            crab_metadata::git_visibility::upload_digest_bound_if_absent(
+                &storage,
+                &storage_router,
+                &index,
+            )
             .await
             .map_err(CrabError::from)?;
+        }
         let (after_upload, _) = read_manifest(store, router).await?;
         if after_upload.generation != required_generation
             || after_upload.pack_index_hash != current.pack_index_hash
@@ -6995,9 +6971,22 @@ async fn ensure_current_git_visibility(
     for _ in 0..max_retries.max(1) {
         check_cancelled(cancel)?;
         let (current, _) = read_manifest(store, router).await?;
-        let Some(publication) =
-            repair_git_visibility_if_current(store, router, current.generation, lock_ttl, cancel)
-                .await?
+        // Ref-journal admission only needs the immutable visibility proof. The
+        // generation owner publishes exact locator coverage independently; doing
+        // that repair here would reopen and scan the repository-sized catalog
+        // before every incremental push.
+        let Some(publication) = repair_git_visibility_if_current_with_options(
+            store,
+            router,
+            current.generation,
+            crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
+            false,
+            lock_ttl,
+            cancel,
+            false,
+            true,
+        )
+        .await?
         else {
             continue;
         };
@@ -7101,40 +7090,15 @@ pub(crate) async fn git_visibility_index_exists_for_manifest(
     let storage = store.as_storage();
     let storage_router =
         crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-    crab_metadata::git_visibility::ensure_catalog_bound(storage, &storage_router, manifest)
-        .await
-        .map_err(CrabError::from)
-}
-
-async fn publish_uploaded_pack_locators(
-    store: &Store,
-    router: &StoreLayout,
-    packs: &[UploadedGitPack],
-    anchor: CommittedManifestAnchor,
-    pinned_inventory: Option<&[PackManifestEntry]>,
-    lock_ttl: Duration,
-    cancel: &CancellationToken,
-) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
-    let committed = packs
-        .iter()
-        .map(|uploaded| CommittedPackIndex {
-            pack: &uploaded.entry,
-            idx_path: &uploaded.idx_path,
-            rev_path: &uploaded.rev_path,
-            git_sha1: &uploaded.git_sha1,
-            kind_by_oid: uploaded.kind_by_oid.as_ref(),
-        })
-        .collect::<Vec<_>>();
-    publish_committed_pack_locators(
-        store,
-        router,
-        &committed,
-        anchor,
-        pinned_inventory,
-        lock_ttl,
-        cancel,
+    crab_metadata::git_visibility::catalog_bound_available(
+        storage,
+        &storage_router,
+        manifest.generation,
+        &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
     )
     .await
+    .map_err(CrabError::from)
 }
 
 /// Pre-computed pointer walk produced by the native push orchestrator.
@@ -7239,8 +7203,6 @@ impl PushPipeline {
             base_commit_graph_loaded: tokio::sync::Mutex::new(false),
             manifest_etag: tokio::sync::Mutex::new(None),
             committed_manifest_anchor: tokio::sync::Mutex::new(None),
-            committed_pack_inventory: tokio::sync::Mutex::new(None),
-            locator_publication_deferred: std::sync::atomic::AtomicBool::new(false),
             git_visibility_published: std::sync::atomic::AtomicBool::new(false),
             failure_stage: std::sync::OnceLock::new(),
             push_commit_receipt: tokio::sync::Mutex::new(None),
@@ -8800,11 +8762,9 @@ impl PushPipeline {
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
-        // The common post-CAS path publishes exact locator coverage now that
-        // the manifest is durable, so a fresh repository is clone-ready
-        // without requiring the first reader to perform repair.
-        self.locator_publication_deferred
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // Locator rows are repairable acceleration state; keeping their
+        // publication with the generation owner prevents a large first import
+        // from reopening a repository-sized catalog on the push ack path.
         if let Some(signal) = admission_commit.take() {
             let _ = signal.send(());
         }
@@ -9188,17 +9148,6 @@ impl PushPipeline {
         store: &crate::storage::store::Store,
     ) -> Result<bool> {
         git_visibility_index_exists_for_manifest(store, &self.router, manifest).await
-    }
-
-    async fn record_current_git_visibility(
-        &self,
-        store: &crate::storage::store::Store,
-    ) -> Result<bool> {
-        let (current, _) = read_manifest(store, &self.router).await?;
-        let published = self.git_visibility_index_exists(&current, store).await?;
-        self.git_visibility_published
-            .store(published, std::sync::atomic::Ordering::Relaxed);
-        Ok(published)
     }
 
     async fn publish_split_commit_graph(&self, manifest: &Manifest) -> Result<Option<String>> {
@@ -13086,9 +13035,6 @@ impl PushPipeline {
                 uploaded.push(UploadedGitPack {
                     entry,
                     idx_path: installed.idx_path,
-                    rev_path: installed.rev_path,
-                    git_sha1: installed.git_sha1,
-                    kind_by_oid,
                     kind_metadata_published: kind_metadata.is_some(),
                 });
             }
@@ -15056,68 +15002,6 @@ impl PushPipeline {
         .hash())
     }
 
-    async fn write_generation_index_receipt(&self, anchor: CommittedManifestAnchor) -> Result<()> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            CrabError::Internal("generation-index receipt requires a store".to_owned())
-        })?;
-        let receipt = crab_metadata::receipts::GenerationIndexReceipt {
-            schema_version: crab_metadata::receipts::RECEIPT_SCHEMA_VERSION,
-            generation: anchor.generation,
-            shard_index_hash: anchor.shard_index_hash.into(),
-            pack_index_hash: anchor.pack_index_hash.into(),
-            file_index_digest: crab_metadata::receipts::generation_file_index_digest(
-                anchor.shard_index_hash.into(),
-            ),
-            git_object_locator_digest:
-                crab_metadata::receipts::generation_git_object_locator_digest(
-                    anchor.pack_index_hash.into(),
-                ),
-        };
-        receipt
-            .validate(
-                anchor.generation,
-                anchor.shard_index_hash.into(),
-                anchor.pack_index_hash.into(),
-            )
-            .map_err(CrabError::from)?;
-        let path = self.router.repo_path(&format!(
-            "metadata/generation-receipts/{:020}.json",
-            anchor.generation
-        ));
-        let body = serde_json::to_vec(&receipt)
-            .map_err(|error| CrabError::Internal(format!("receipt serialize: {error}")))?;
-        match store.put(&path, Bytes::from(body.clone())).await {
-            Ok(()) => Ok(()),
-            Err(CrabError::CasConflict { .. }) => {
-                let (existing, _) = store.get_with_etag(&path).await?;
-                let existing: crab_metadata::receipts::GenerationIndexReceipt =
-                    serde_json::from_slice(&existing).map_err(|error| {
-                        CrabError::CorruptObject {
-                            path: path.to_string(),
-                            reason: format!("generation-index receipt decode failed: {error}"),
-                        }
-                    })?;
-                existing
-                    .validate(
-                        anchor.generation,
-                        anchor.shard_index_hash.into(),
-                        anchor.pack_index_hash.into(),
-                    )
-                    .map_err(CrabError::from)?;
-                if existing != receipt {
-                    return Err(CrabError::CorruptObject {
-                        path: path.to_string(),
-                        reason:
-                            "generation-index receipt conflicts with the committed index digest"
-                                .to_owned(),
-                    });
-                }
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     /// Warm the local chunk-index cache tiers for every shard this
     /// push uploaded.
     ///
@@ -16303,10 +16187,6 @@ impl PushPipeline {
             let file_index_plan = self.pending_file_index_plan.lock().await.clone();
             let shard_hashes = self.uploaded_shard_hashes.lock().await.clone();
             let anchor = *self.committed_manifest_anchor.lock().await;
-            let pack_inventory = self.committed_pack_inventory.lock().await.clone();
-            let locator_deferred = self
-                .locator_publication_deferred
-                .load(std::sync::atomic::Ordering::Relaxed);
             let needs_metadb_write = !file_index_plan.is_empty()
                 || !self.pending_legacy_chunk_tombstones.lock().await.is_empty()
                 || !self
@@ -16337,128 +16217,22 @@ impl PushPipeline {
                 }
             };
             self.emit_perf_phase(metadb_phase.finish(0, 0, file_index_plan.len() as u64));
-            let file_indexed = match indexing {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "post-CAS MetaDb indexing failed; refs are committed and repair will rebuild acceleration records"
-                    );
-                    false
-                }
-            };
-
-            let uploaded_packs = self.uploaded_packs.lock().await.clone();
-            let mut git_indexed = true;
-            let visibility_published = self
-                .git_visibility_published
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if !visibility_published {
-                git_indexed = false;
-                info!(
-                    "Git visibility proof requires repair; publishing exact locators independently"
+            if let Err(error) = indexing {
+                warn!(
+                    error = %error,
+                    "post-CAS MetaDb indexing failed; refs are committed and repair will rebuild acceleration records"
                 );
             }
-            if locator_deferred {
-                git_indexed = false;
-            } else if let (Some(anchor), Some(store)) = (anchor, self.store.as_ref()) {
-                let locator_phase = PhaseTimer::start("push", "post_cas_git_locator");
-                let locator_result = publish_uploaded_pack_locators(
-                    store,
-                    &self.router,
-                    &uploaded_packs,
-                    anchor,
-                    pack_inventory.as_deref(),
-                    self.config.lock_ttl,
-                    &self.cancel,
-                )
-                .await;
-                self.emit_perf_phase(locator_phase.finish(0, 0, uploaded_packs.len() as u64));
-                match locator_result {
-                    Ok(stats) if stats.coverage_updated => {
-                        info!(
-                            generation = anchor.generation,
-                            pack_count = uploaded_packs.len(),
-                            object_rows = stats.object_rows_written,
-                            logical_bytes = stats.logical_bytes_written,
-                            flushes = stats.flushes,
-                            "post-CAS Git locator publication completed"
-                        );
-                        match self.record_current_git_visibility(store).await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                git_indexed = false;
-                                warn!(
-                                    generation = anchor.generation,
-                                    "post-CAS catalog visibility proof was not published"
-                                );
-                            }
-                            Err(error) => {
-                                git_indexed = false;
-                                warn!(
-                                    error = %error,
-                                    generation = anchor.generation,
-                                    "post-CAS catalog visibility publication requires repair"
-                                );
-                            }
-                        }
-                    }
-                    Ok(stats) => {
-                        git_indexed = false;
-                        let superseded = match read_manifest(store, &self.router).await {
-                            Ok((current, _)) => {
-                                current.generation != anchor.generation
-                                    || current.pack_index_hash != anchor.pack_index_hash.hex()
-                            }
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    generation = anchor.generation,
-                                    "could not verify whether incomplete Git locator publication was superseded"
-                                );
-                                false
-                            }
-                        };
-                        if superseded {
-                            debug!(
-                                generation = anchor.generation,
-                                pack_count = uploaded_packs.len(),
-                                object_rows = stats.object_rows_written,
-                                "Git locator publication was superseded by a newer manifest"
-                            );
-                        } else {
-                            warn!(
-                                generation = anchor.generation,
-                                pack_count = uploaded_packs.len(),
-                                object_rows = stats.object_rows_written,
-                                "post-CAS Git locator rows published without exact coverage; repair is required"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        git_indexed = false;
-                        warn!(
-                            error = %error,
-                            pack_count = uploaded_packs.len(),
-                            "post-CAS Git locator publication failed; committed packs remain canonical"
-                        );
-                    }
-                }
-            }
-            if file_indexed
-                && git_indexed
-                && let Some(anchor) = anchor
-            {
-                let receipt_phase = PhaseTimer::start("push", "post_cas_receipt");
-                let receipt_result = self.write_generation_index_receipt(anchor).await;
-                self.emit_perf_phase(receipt_phase.finish(0, 0, 1));
-                if let Err(error) = receipt_result {
-                    warn!(
-                        error = %error,
-                        generation = anchor.generation,
-                        "post-CAS generation-index receipt write failed; manifest-scoped repair remains available"
-                    );
-                }
+
+            // The active marker is the durable ref-update boundary. Locator
+            // rows and their generation receipt are derived acceleration state;
+            // publishing them here would reopen a repository-sized SlateDB
+            // catalog in every short-lived push process.
+            if anchor.is_some() {
+                info!(
+                    generation = anchor.map(|value| value.generation),
+                    "post-CAS Git locator publication deferred to generation owner"
+                );
             }
         }
 
@@ -16491,7 +16265,6 @@ impl PushPipeline {
         })
     }
 }
-
 /// Run the push pipeline for a batch of push specs.
 ///
 /// This is the main entry point called by the remote helper when Git
@@ -18435,6 +18208,122 @@ mod tests {
         let (temp, _pack_path, idx_path, rev_path, git_sha1, oid, pack_size) =
             locator_pack_fixture_for(b"locator fixture object\n");
         (temp, idx_path, rev_path, git_sha1, oid, pack_size)
+    }
+
+    fn visibility_pack_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        String,
+        String,
+        u64,
+        u64,
+    ) {
+        fn run_git(git_dir: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+            let mut child = Command::new("git")
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Crab Test")
+                .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Crab Test")
+                .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+                .env("GIT_AUTHOR_DATE", "@1 +0000")
+                .env("GIT_COMMITTER_DATE", "@1 +0000")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn visibility fixture git");
+            child
+                .stdin
+                .take()
+                .expect("visibility fixture stdin")
+                .write_all(input)
+                .expect("write visibility fixture git input");
+            let output = child
+                .wait_with_output()
+                .expect("wait for visibility fixture git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        }
+
+        let temp = tempfile::tempdir().expect("visibility fixture tempdir");
+        let git_dir = temp.path().join("repo.git");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&git_dir)
+            .output()
+            .expect("initialize visibility fixture");
+        assert!(init.status.success());
+
+        let blob = String::from_utf8(run_git(
+            &git_dir,
+            &["hash-object", "-w", "--stdin"],
+            b"visibility fixture\n",
+        ))
+        .expect("visibility fixture blob oid")
+        .trim()
+        .to_owned();
+        let tree = String::from_utf8(run_git(
+            &git_dir,
+            &["mktree"],
+            format!("100644 blob {blob}\tfile.txt\n").as_bytes(),
+        ))
+        .expect("visibility fixture tree oid")
+        .trim()
+        .to_owned();
+        let commit = String::from_utf8(run_git(
+            &git_dir,
+            &["commit-tree", &tree, "-m", "visibility fixture"],
+            &[],
+        ))
+        .expect("visibility fixture commit oid")
+        .trim()
+        .to_owned();
+        let pack_base = temp.path().join("visibility");
+        let pack_hash = String::from_utf8(run_git(
+            &git_dir,
+            &[
+                "pack-objects",
+                "--index-version=2",
+                pack_base.to_str().expect("visibility pack base UTF-8"),
+            ],
+            format!("{commit}\n{tree}\n{blob}\n").as_bytes(),
+        ))
+        .expect("visibility fixture pack hash")
+        .trim()
+        .to_owned();
+        let pack_path = temp.path().join(format!("visibility-{pack_hash}.pack"));
+        let idx_path = temp.path().join("visibility.idx");
+        let index_output = Command::new("git")
+            .args(["index-pack", "-o"])
+            .arg(&idx_path)
+            .arg(&pack_path)
+            .output()
+            .expect("index visibility fixture pack");
+        assert!(index_output.status.success());
+        let rev_path = temp.path().join("visibility.rev");
+        crab_git::pack_locator::write_pack_reverse_index(&idx_path, &rev_path)
+            .expect("write visibility fixture reverse index");
+        let pack_bytes = std::fs::read(&pack_path).expect("read visibility fixture pack");
+        let index = gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1)
+            .expect("open visibility fixture index");
+        (
+            temp,
+            pack_path,
+            idx_path,
+            rev_path,
+            commit,
+            blake3::hash(&pack_bytes).to_hex().to_string(),
+            pack_bytes.len() as u64,
+            u64::from(index.num_objects()),
+        )
     }
 
     #[test]
@@ -20797,7 +20686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_v1_visibility_is_backfilled_but_not_authoritative_without_catalog() {
+    async fn matching_v1_visibility_is_not_authoritative_without_catalog() {
         let (store, router) = test_store_router("visibility-v1-backfill");
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest.generation = 3;
@@ -20840,7 +20729,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             current.format,
-            crab_metadata::git_visibility::GitVisibilityFormat::V4
+            crab_metadata::git_visibility::GitVisibilityFormat::V1
         );
     }
 
@@ -22109,6 +21998,136 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn ref_journal_visibility_admission_does_not_wait_for_locator_maintenance() {
+        let _guard = GitDirGuard::new();
+        let (_fixture, pack_path, idx_path, rev_path, commit, pack_id, pack_size, object_count) =
+            visibility_pack_fixture();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(RecordingReadStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(inner);
+        let router = StoreLayout::new(
+            store.clone(),
+            "journal-visibility-locator-boundary".to_owned(),
+        );
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_size,
+            content_hash: pack_id.clone(),
+            ref_tips: vec![commit.clone()],
+            object_count,
+        };
+        let (pack_index_hash, _, pack_index) =
+            crate::metadata::manifest::compact_pack_index(1, &[pack.clone()])
+                .expect("build visibility admission pack index");
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index,
+            },
+        )
+        .await
+        .expect("upload visibility admission pack index");
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack_path).expect("read visibility admission pack")),
+            )
+            .await
+            .expect("upload visibility admission pack");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read visibility admission index")),
+            )
+            .await
+            .expect("upload visibility admission index");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(
+                    std::fs::read(&rev_path).expect("read visibility admission reverse index"),
+                ),
+            )
+            .await
+            .expect("upload visibility admission reverse index");
+
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), commit.clone());
+        manifest.pack_index_hash = pack_index_hash;
+        manifest.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("publish visibility admission manifest");
+
+        let blocker = PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("hold locator maintenance lock");
+        let publication = tokio::time::timeout(
+            Duration::from_secs(3),
+            ensure_current_git_visibility(
+                &store,
+                &router,
+                Duration::from_secs(2),
+                1,
+                &CancellationToken::new(),
+            ),
+        )
+        .await;
+        blocker
+            .release()
+            .await
+            .expect("release locator maintenance lock");
+        assert!(
+            matches!(
+                publication.expect("visibility admission must not wait for locator"),
+                Ok(GitVisibilityPublication::Published)
+            ),
+            "visibility proof should be admitted from remote packs without locator repair"
+        );
+        let visibility = crab_metadata::git_visibility::read_with_format(
+            store.as_storage(),
+            &crab_storage::StoreLayout::new(
+                store.as_storage().clone(),
+                router.repo_prefix().to_owned(),
+            ),
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+        )
+        .await
+        .expect("read published visibility proof");
+        assert_eq!(
+            visibility.format,
+            crab_metadata::git_visibility::GitVisibilityFormat::V4
+        );
+        assert!(
+            visibility
+                .index
+                .contains_hex_in_ref("refs/heads/main", &commit)
+        );
+        let reads = reads.lock().expect("read log lock");
+        assert!(
+            reads
+                .iter()
+                .all(|path| !path.contains("git_object_catalog_db/")),
+            "visibility admission opened the remote catalog: {reads:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn compactor_defers_locator_publication_to_claimed_same_ref_successor() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-locator-successor");
@@ -22637,6 +22656,54 @@ mod tests {
         assert!(admitted.manifest.generation > initial.generation);
         assert!(admitted.manifest.refs.contains_key("refs/heads/main"));
         assert_eq!(repository.generation(), admitted.manifest.generation);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_does_not_open_locator_catalog_after_ref_commit() {
+        let _guard = GitDirGuard::new();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(RecordingReadStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "push-locator-owner-boundary".to_owned());
+        create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
+            .await
+            .expect("create initial manifest");
+
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/main")],
+                Some(store),
+                None,
+                None,
+                router.repo_prefix().to_owned(),
+                router,
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
+        )
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/main"),
+            Some(&RefPushOutcome::Ok)
+        );
+
+        let catalog_reads = reads
+            .lock()
+            .expect("read log lock")
+            .iter()
+            .filter(|path| path.contains("git_object_catalog_db/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            catalog_reads.is_empty(),
+            "synchronous push reopened derived locator catalog: {catalog_reads:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -24639,7 +24706,7 @@ mod tests {
         stale_writer.flush_objects().await.expect("flush stale row");
         stale_writer.close().await.expect("close stale writer");
 
-        let repaired = publish_uploaded_pack_locators(
+        let repaired = publish_committed_pack_locators(
             &store,
             &router,
             &[],
@@ -32866,9 +32933,6 @@ mod tests {
                     object_count: 7,
                 },
                 idx_path: PathBuf::from("pack_abc.idx"),
-                rev_path: PathBuf::from("pack_abc.rev"),
-                git_sha1: "a".repeat(40),
-                kind_by_oid: None,
                 kind_metadata_published: false,
             },
             UploadedGitPack {
@@ -32880,9 +32944,6 @@ mod tests {
                     object_count: 11,
                 },
                 idx_path: PathBuf::from("pack_def.idx"),
-                rev_path: PathBuf::from("pack_def.rev"),
-                git_sha1: "b".repeat(40),
-                kind_by_oid: None,
                 kind_metadata_published: false,
             },
         ]);

@@ -3099,6 +3099,19 @@ mod storage {
             }
             session.close().await?;
         }
+        upload_digest_bound_if_absent(store, router, index).await
+    }
+
+    /// Upload a digest-bound visibility proof without opening the remote catalog.
+    ///
+    /// This preserves the immutable V4 proof contract for acknowledgement paths
+    /// that defer repository-wide catalog maintenance to the generation owner.
+    pub async fn upload_digest_bound_if_absent(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        index: &GitVisibilityIndex,
+    ) -> Result<()> {
+        index.validate()?;
         let stored = GitVisibilityIndexV4::from_index(index)?;
         let body = serde_json::to_vec(&stored).map_err(|error| {
             crate::error::MetadataError::Internal(format!("visibility index serialize: {error}"))
@@ -3880,7 +3893,7 @@ mod storage {
 pub use storage::{
     GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound,
     prepare_catalog_journal_edits, read, read_edit, read_for_manifest, read_with_format,
-    upload_edit, upload_if_absent,
+    upload_digest_bound_if_absent, upload_edit, upload_if_absent,
 };
 
 #[cfg(all(feature = "remote-index", feature = "storage"))]
