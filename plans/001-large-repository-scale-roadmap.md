@@ -145,7 +145,16 @@ published pack bindings and counts only packs whose physical facts are not
 already covered. A same-inventory pass uses a metadata-only writer, while a
 delayed pass no longer starts a repository-sized compactor merely because the
 historical catalog is large. This source fix still needs fresh release-binary
-RustFS evidence at the 1,000-pack scale.
+RustFS evidence at the 1,000-pack scale. The exact release-binary smoke below
+now proves the budget on a real Kubernetes repository; the 1,000-push and
+sustained owner-budget gates remain open.
+
+The workflow scheduler lock now retains its lock inode across handoffs
+(`d9c93263`). This prevents a releasing holder from unlinking the pathname
+after a waiter has acquired the same inode, and the focused scheduler-lock
+suite covers the handoff. The change is part of the large-team concurrency
+hardening because a path-disappearing lock can strand or misdiagnose workers
+under contention.
 
 Focused source proof for this follow-up passes formatting, `cargo check -p
 crab`, the complete Crab library suite, the complete metadata suite, strict
@@ -185,12 +194,44 @@ the 100-client synthetic fanout, repeated isolated runs, 1,000/10,000-push
 differentials, fault/provider/failover/canary evidence, and default-on rollout
 gates remain open below.
 
+The exact post-budget Kubernetes/RustFS smoke
+`crabbuild-f2a941ce-k8s-20260827-smoke` used the release binary whose embedded
+source revision is `f2a941ce`, the same Kubernetes revision, and 100 replay
+commits. The standalone verifier returned `status=ok`; 101 pushes and 21/21
+checks passed, including full, blobless, depth-1/10/100/1,000, and incremental
+fetch correctness, exact object sampling, fsck, source immutability, and
+remote cleanup. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Physical pack objects grew from 1 at seed to 2/12/103 at checkpoints
+  1/10/100; physical pack bytes grew from 1,254,754,431 to 1,297,738,866.
+  This is retained immutable history, not a claim that active serving packs
+  should grow without bound.
+- Owner totals were 83.8/77.8/224.8/244.7 seconds at seed/1/10/100. After
+  the geometric repack, the bounded follow-up catalog passes scanned and
+  deleted 10 and 91 stale pack rows, reading 14.4 MB and 37.2 MB respectively.
+  The earlier pre-repack catalog advance remains an intentional O(N) rebuild
+  path, so the 1,000-push owner latency, memory, and interruption budgets are
+  still open.
+- Cold full-clone response generation took 110.0 seconds for 1.24 GB; the
+  warm clone reused the verified response-pack cache with 4.0 seconds of
+  server operation. Depth-1/10/100/1,000 clone generation took
+  10.0/11.7/101.0/116.9 seconds. These measurements establish the response
+  pack and fanout bottleneck but do not satisfy the final SLO.
+
+This smoke is current release-binary evidence for the compaction budget and
+large-batch read path, not the full 1,000-push qualification. The independent
+full-profile repeatability run, differential, concurrency, fault/provider,
+owner-failover, and rollout gates remain open.
+
 The subsequent stale-pack membership-index change (`ad2554fa`, with the
 deterministic delta-base regression in `b9859f28`) is source-tested but not yet
-represented in a fresh release-binary Kubernetes report. Its live acceptance
-gate is to show that repeated owner sweeps report stale-row work without
-reading the retained OID catalog, while preserving the existing exact refs,
-fsck, and byte-equivalence checks.
+represented in a fresh 1,000-push release-binary Kubernetes report. The smoke
+above does represent the current stale-row and owner-budget path at 100
+replays: repeated post-repack sweeps report only stale membership rows and do
+not scan the retained OID catalog. The 1,000-push report must still preserve
+the exact refs, fsck, and byte-equivalence checks while measuring the full
+rebuild path.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
@@ -301,6 +342,9 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - a large-batch locator scan policy that replaces tens of thousands of exact
   OID point reads with one bounded, read-ahead scan while retaining the exact
   lookup path for sparse or small requests.
+- owner locator planning serialized under the repository publication lock,
+  with uncovered-pack budgeting and a metadata-only writer for unchanged
+  inventories.
 - long fast-forward visibility history retained across a bounded 1,000-edit
   window, so incremental planning does not lose old haves after 64 cumulative
   transitions;
@@ -337,15 +381,22 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
   marker-less or interrupted catalogs rebuild it once, while routine sweeps
   avoid scanning retained OID rows. Rebuild completion is count-checked before
   coverage can advance.
+- the workflow scheduler lock retains its diagnostic inode across handoffs,
+  preventing an earlier holder from unlinking the pathname after a waiter has
+  acquired it; the focused handoff regression is committed as `d9c93263`.
 
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current lazy binary
-  after the large-batch locator scan change;
-- the fresh release-binary owner-budget qualification after `4a8fc34e`. The
-  prior `b637edfe` Kubernetes replay exposed a 902-pack `catalog_advance` that
-  took 814,991 ms; that run proves the bottleneck and correctness, but it uses
-  the pre-fix binary and cannot serve as a post-fix performance result;
+  after the large-batch locator scan change. The current
+  `crabbuild-f2a941ce-k8s-20260827-smoke` is an exact 100-replay release smoke,
+  not the required full-profile repeatability gate;
+- a 1,000-push release-binary owner-budget qualification after `4a8fc34e`.
+  The current smoke proves that post-repack sweeps are bounded to 10 and 91
+  stale pack rows at checkpoints 10 and 100, while the prior `b637edfe`
+  Kubernetes replay exposed a 902-pack `catalog_advance` that took 814,991 ms.
+  The full run must prove the same bound through 1,000 pushes and measure the
+  intentional O(N) rebuild path rather than treating it as solved;
 - a valid 1,000-push growth and latency comparison across isolated runs; the
   current post-lazy comparison is invalid because push and clone medians drifted
   by roughly 41% on the shared host;
@@ -1233,12 +1284,12 @@ environment dumps, or credentials.
 | Phase | Status | Implementation PR | Report artifact | Verification commit | Notes |
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
-| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4` | Normal seed/full/warm/blobless/shallow helper logs contain no `catalog_materialization`; owner maintenance intentionally does. Dense ordinal resolution has bounded read-ahead, and the large-batch locator scan is source-verified but needs a fresh release run |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Final inventory is 2 active packs with 1,263,705,690 bytes; cold/warm full clones are 199,311/72,101 ms, blobless is 110,384 ms, and depth-1/10/100/1,000 are 45,570/58,702/174,452/191,898 ms. Physical history has 1,004 immutable pack objects, while the active inventory remains 2; suffix reuse is covered by focused repack tests, but response-pack egress, fanout, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3` | Owner convergence at checkpoints 1/10/100/1,000 was 146.947/244.227/373.872/2,729.094 s; checkpoint 1,000 used six passes, ended at 2 active packs, peaked at 1.837 GB RSS, and read 1,478,153,950 bytes. Owner publication now skips stable pack-body downloads for optional kinds, locator stale cleanup is bounded by stale membership rows, and JSONL/report evidence exposes per-pass sweep counters; fresh maintenance latency, memory, and full rebuild-path evidence remain open |
-| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `cbe848f4`; `c57ee1f4` | Incremental fetch at pushes 1/10/100/1,000 used 51/60/74/662 ms of visibility planning and 2/6/33/226 requests; shallow planner times were 11,659/15,553/2,405/2,634 ms for depth 1/10/100/1,000 before the large-batch scan policy. The ordinal handoff covers sequential same-ref edits in focused tests; 10,000-pair differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce` | The earlier full run ended with 2 active packs; the current smoke retained 103 immutable physical pack objects after 100 replays and measured cold/warm full clones at 173,603/61,513 ms, blobless at 88,798 ms, and depth-1/10/100/1,000 at 18,442/23,523/145,678/184,035 ms. Response-pack egress, fanout, and provider SLOs remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce` | The current smoke owner totals at seed/1/10/100 were 83.8/77.8/224.8/244.7 s. Post-repack catalog passes scanned/deleted 10/10 and 91/91 stale pack rows with 14.4/37.2 MB maintenance reads; the pre-repack O(N) advance and 1,000-push latency, memory, and interruption budgets remain open |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | The current 100-replay smoke passes incremental and depth-1/10/100/1,000 correctness with clone generation at 10.0/11.7/101.0/116.9 s; the full 1,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; stale locator cleanup avoids retained-catalog scans and marker-less migration is idempotent. Interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4` | Current single-client correctness and warm-cache checks pass; fresh post-follow-up K8s evidence, shallow planner optimization, large-team concurrency, fault, cache-server, provider, owner-failover, and canary gates remain pending |
+| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263` | Current single-client correctness and the 100-replay owner-budget smoke pass. The scheduler lock now retains its inode across handoffs with 11 focused tests passing; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
