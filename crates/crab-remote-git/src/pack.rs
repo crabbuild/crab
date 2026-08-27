@@ -285,7 +285,7 @@ impl RemoteGitRepository {
         object_ids: &[ObjectId],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
-        self.generate_pack_with_bases(object_ids, &[], cancellation)
+        self.generate_pack_with_bases_mode(object_ids, &[], false, cancellation)
             .await
     }
 
@@ -296,6 +296,17 @@ impl RemoteGitRepository {
         &self,
         object_ids: &[ObjectId],
         thin_bases: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
+        self.generate_pack_with_bases_mode(object_ids, thin_bases, false, cancellation)
+            .await
+    }
+
+    async fn generate_pack_with_bases_mode(
+        &self,
+        object_ids: &[ObjectId],
+        thin_bases: &[ObjectId],
+        allow_dense_selected_assembly: bool,
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
         let operation = self
@@ -343,31 +354,51 @@ impl RemoteGitRepository {
                             .await?
                             {
                                 Some(pack) => Ok(pack),
-                                None => match Self::try_repack_selected_pack(
-                                    self,
-                                    &operation,
-                                    &unique,
-                                    cancellation,
-                                )
-                                .await?
-                                {
-                                    Some(pack) => Ok(pack),
-                                    None => {
-                                        generate_pack_with_operation(
+                                None => {
+                                    let assembled = if allow_dense_selected_assembly {
+                                        Self::try_assemble_selected_pack(
+                                            self,
                                             &operation,
                                             &unique,
-                                            thin_bases,
                                             cancellation,
                                         )
-                                        .await
+                                        .await?
+                                    } else {
+                                        None
+                                    };
+                                    match assembled {
+                                        Some(pack) => Ok(pack),
+                                        None => match Self::try_repack_selected_pack(
+                                            self,
+                                            &operation,
+                                            &unique,
+                                            cancellation,
+                                        )
+                                        .await?
+                                        {
+                                            Some(pack) => Ok(pack),
+                                            None => {
+                                                generate_pack_with_operation(
+                                                    &operation,
+                                                    &unique,
+                                                    thin_bases,
+                                                    None,
+                                                    "packed_entries",
+                                                    cancellation,
+                                                )
+                                                .await
+                                            }
+                                        },
                                     }
-                                },
+                                }
                             }
                         } else {
                             generate_pack_with_operation(
                                 &operation,
                                 &unique,
                                 thin_bases,
+                                None,
+                                "packed_entries",
                                 cancellation,
                             )
                             .await
@@ -379,6 +410,48 @@ impl RemoteGitRepository {
             Err(error) => Err(error),
         };
         operation.finish(result).await
+    }
+
+    async fn try_assemble_selected_pack(
+        repository: &RemoteGitRepository,
+        operation: &crate::OperationContext,
+        object_ids: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GeneratedPack>> {
+        let (inventory_objects, inventory_bytes) =
+            repository
+                .state
+                .inventory
+                .values()
+                .fold((0_u64, 0_u64), |(objects, bytes), pack| {
+                    (
+                        objects.saturating_add(pack.object_count),
+                        bytes.saturating_add(pack.pack_size),
+                    )
+                });
+        if !Self::selected_pack_repack_candidate(
+            inventory_objects,
+            object_ids.len(),
+            SELECTED_PACK_REPACK_MIN_OBJECTS,
+        ) || inventory_bytes > operation.max_fetched_bytes()
+        {
+            return Ok(None);
+        }
+
+        // REF_DELTA names its base by OID, so the base may be emitted in a
+        // later batch. OFS_DELTA is rewritten by PackWriter before it leaves
+        // this path, making a dependency sort unnecessary for dense reads.
+        let selected_objects = object_ids.iter().copied().collect::<HashSet<_>>();
+        let pack = generate_pack_with_operation(
+            operation,
+            object_ids,
+            &[],
+            Some(&selected_objects),
+            "selected_packed_entries",
+            cancellation,
+        )
+        .await?;
+        Ok(Some(pack))
     }
 
     async fn try_consolidate_complete_pack(
@@ -657,6 +730,31 @@ impl RemoteGitRepository {
         cache_key: GeneratedPackCacheKey,
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
+        self.generate_pack_cached_mode(object_ids, cache_key, false, cancellation)
+            .await
+    }
+
+    /// Reuse or publish a response pack for a catalog-exact dense filter.
+    ///
+    /// Callers must restrict this entry point to no-have requests using only
+    /// `blob:none` or `object:type` catalog filters without shallow state.
+    pub async fn generate_pack_cached_with_dense_selection(
+        &self,
+        object_ids: &[ObjectId],
+        cache_key: GeneratedPackCacheKey,
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
+        self.generate_pack_cached_mode(object_ids, cache_key, true, cancellation)
+            .await
+    }
+
+    async fn generate_pack_cached_mode(
+        &self,
+        object_ids: &[ObjectId],
+        cache_key: GeneratedPackCacheKey,
+        allow_dense_selected_assembly: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
         if !cache_key.matches_selection(object_ids) {
             return Err(Error::InternalInvariant {
                 invariant: "generated pack cache key does not match object selection",
@@ -682,6 +780,7 @@ impl RemoteGitRepository {
                         &repository,
                         &object_ids,
                         cache_key,
+                        allow_dense_selected_assembly,
                         &background_cancellation,
                     )
                     .await
@@ -729,11 +828,18 @@ async fn produce_cached_pack(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
+    allow_dense_selected_assembly: bool,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let Some(provider) = repository.generated_pack_lease_provider.as_ref() else {
-        return produce_cached_pack_without_lease(repository, object_ids, cache_key, cancellation)
-            .await;
+        return produce_cached_pack_without_lease(
+            repository,
+            object_ids,
+            cache_key,
+            allow_dense_selected_assembly,
+            cancellation,
+        )
+        .await;
     };
     let deadline =
         tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
@@ -783,6 +889,7 @@ async fn produce_cached_pack(
             repository,
             object_ids,
             cache_key,
+            allow_dense_selected_assembly,
             lock,
             cancellation,
         )
@@ -794,6 +901,7 @@ async fn produce_cached_pack_under_lease(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
+    allow_dense_selected_assembly: bool,
     mut lock: Box<dyn GeneratedPackLease>,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
@@ -803,7 +911,14 @@ async fn produce_cached_pack_under_lease(
         {
             return Ok(pack);
         }
-        let generated = repository.generate_pack(object_ids, cancellation).await?;
+        let generated = repository
+            .generate_pack_with_bases_mode(
+                object_ids,
+                &[],
+                allow_dense_selected_assembly,
+                cancellation,
+            )
+            .await?;
         publish_cached_pack(
             repository,
             cache_key,
@@ -843,6 +958,7 @@ async fn produce_cached_pack_without_lease(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
+    allow_dense_selected_assembly: bool,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     if let Some(pack) =
@@ -850,7 +966,9 @@ async fn produce_cached_pack_without_lease(
     {
         return Ok(pack);
     }
-    let generated = repository.generate_pack(object_ids, cancellation).await?;
+    let generated = repository
+        .generate_pack_with_bases_mode(object_ids, &[], allow_dense_selected_assembly, cancellation)
+        .await?;
     publish_cached_pack(
         repository,
         cache_key,
@@ -1320,6 +1438,8 @@ async fn generate_pack_with_operation(
     operation: &crate::OperationContext,
     object_ids: &[ObjectId],
     thin_bases: &[ObjectId],
+    selected_objects: Option<&HashSet<ObjectId>>,
+    strategy: &'static str,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let started = Instant::now();
@@ -1336,14 +1456,29 @@ async fn generate_pack_with_operation(
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let entries = order_packed_entries(operation.read_packed_entries(batch).await?)?;
+        let entries = operation.read_packed_entries(batch).await?;
+        // Selected dense responses preserve REF_DELTA dependencies by object
+        // ID. The conservative path still orders entries for its historical
+        // OFS_DELTA handling and thin-pack behavior.
+        let entries = if selected_objects.is_none() {
+            order_packed_entries(entries)?
+        } else {
+            entries
+        };
         let materialize = entries
             .iter()
             .filter_map(|entry| {
-                let materialize = entry
-                    .base_oid
-                    .is_some_and(|base| !emitted.contains(&base) && !thin_bases.contains(&base));
-                emitted.insert(entry.oid);
+                let materialize = selected_objects.map_or_else(
+                    || {
+                        entry.base_oid.is_some_and(|base| {
+                            !emitted.contains(&base) && !thin_bases.contains(&base)
+                        })
+                    },
+                    |selected| should_materialize_selected_entry(entry, selected, &thin_bases),
+                );
+                if selected_objects.is_none() {
+                    emitted.insert(entry.oid);
+                }
                 materialize.then_some(entry.oid)
             })
             .collect::<Vec<_>>();
@@ -1378,7 +1513,7 @@ async fn generate_pack_with_operation(
     tracing::info!(
         target: "crab_remote_git::telemetry",
         telemetry_event = "pack_generation",
-        strategy = "packed_entries",
+        strategy,
         object_count,
         copied_entries = stats.copied_entries,
         converted_deltas = stats.converted_deltas,
@@ -1389,6 +1524,16 @@ async fn generate_pack_with_operation(
         "remote Git response pack generated"
     );
     Ok(pack)
+}
+
+fn should_materialize_selected_entry(
+    entry: &crate::reader::RemoteGitPackedEntry,
+    selected: &HashSet<ObjectId>,
+    thin_bases: &HashSet<ObjectId>,
+) -> bool {
+    entry
+        .base_oid
+        .is_some_and(|base| !selected.contains(&base) && !thin_bases.contains(&base))
 }
 
 fn order_packed_entries(
@@ -1822,6 +1967,131 @@ mod tests {
                 ObjectId::from([3; 20]),
             ]
         );
+    }
+
+    #[test]
+    fn selected_pack_reuses_a_base_that_is_read_after_its_delta() {
+        let selected = [ObjectId::from([1; 20]), ObjectId::from([2; 20])]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let entry = packed_entry(2, Some(1));
+
+        assert!(!should_materialize_selected_entry(
+            &entry,
+            &selected,
+            &HashSet::new(),
+        ));
+    }
+
+    #[test]
+    fn selected_pack_materializes_a_delta_base_outside_the_selection() {
+        let selected = [ObjectId::from([2; 20])]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let entry = packed_entry(2, Some(1));
+
+        assert!(should_materialize_selected_entry(
+            &entry,
+            &selected,
+            &HashSet::new(),
+        ));
+    }
+
+    #[test]
+    fn pack_writer_accepts_a_ref_delta_before_its_base() {
+        let base_data = b"hello world";
+        let target_data = b"hello world!";
+        let base_oid = blob_oid(base_data);
+        let target_oid = blob_oid(target_data);
+        let delta = [0x0b, 0x0c, 0x90, 0x0b, 0x01, b'!'];
+        let target = valid_packed_entry(
+            target_oid,
+            Header::RefDelta { base_id: base_oid },
+            &delta,
+            Some(base_oid),
+        );
+        let base = valid_packed_entry(base_oid, Header::Blob, base_data, None);
+        let cancellation = CancellationToken::new();
+        let writer = PackWriter::new(2, 1024).expect("pack header fits response bound");
+        let (writer, stats) = writer
+            .write_entries(vec![target, base], HashMap::new(), &cancellation)
+            .expect("forward REF delta is writable");
+        let generated = writer.finish(&cancellation).expect("finish generated pack");
+
+        assert_strict_pack(&generated);
+        assert_eq!(stats.copied_entries, 2);
+        assert_eq!(stats.materialized_entries, 0);
+    }
+
+    #[test]
+    fn pack_writer_rewrites_an_ofs_delta_before_its_base() {
+        let base_data = b"hello world";
+        let target_data = b"hello world!";
+        let base_oid = blob_oid(base_data);
+        let target_oid = blob_oid(target_data);
+        let delta = [0x0b, 0x0c, 0x90, 0x0b, 0x01, b'!'];
+        let target = valid_packed_entry(
+            target_oid,
+            Header::OfsDelta { base_distance: 1 },
+            &delta,
+            Some(base_oid),
+        );
+        let base = valid_packed_entry(base_oid, Header::Blob, base_data, None);
+        let cancellation = CancellationToken::new();
+        let writer = PackWriter::new(2, 1024).expect("pack header fits response bound");
+        let (writer, stats) = writer
+            .write_entries(vec![target, base], HashMap::new(), &cancellation)
+            .expect("forward OFS delta is writable");
+        let generated = writer.finish(&cancellation).expect("finish generated pack");
+
+        assert_strict_pack(&generated);
+        assert_eq!(stats.converted_deltas, 1);
+        assert_eq!(stats.materialized_entries, 0);
+    }
+
+    fn assert_strict_pack(pack: &GeneratedPack) {
+        let output = std::process::Command::new("git")
+            .args(["index-pack", "--strict", "--stdin"])
+            .stdin(std::process::Stdio::from(
+                std::fs::File::open(pack.path()).expect("open generated pack"),
+            ))
+            .output()
+            .expect("run strict index-pack");
+        assert!(
+            output.status.success(),
+            "strict index-pack failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn blob_oid(data: &[u8]) -> ObjectId {
+        let mut object = format!("blob {}\0", data.len()).into_bytes();
+        object.extend_from_slice(data);
+        ObjectId::from(<[u8; 20]>::from(Sha1::digest(object)))
+    }
+
+    fn valid_packed_entry(
+        oid: ObjectId,
+        header: Header,
+        data: &[u8],
+        base_oid: Option<ObjectId>,
+    ) -> crate::reader::RemoteGitPackedEntry {
+        let mut bytes = Vec::new();
+        let header_size = header
+            .write_to(data.len() as u64, &mut bytes)
+            .expect("write pack entry header");
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).expect("compress pack entry");
+        bytes.extend(encoder.finish().expect("finish pack entry compression"));
+        crate::reader::RemoteGitPackedEntry {
+            oid,
+            pack_offset: 12,
+            header,
+            decompressed_size: data.len() as u64,
+            header_size,
+            base_oid,
+            bytes: Bytes::from(bytes),
+        }
     }
 
     #[test]

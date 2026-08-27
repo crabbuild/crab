@@ -306,6 +306,18 @@ impl UploadPackFilter {
             _ => false,
         }
     }
+
+    /// Return whether kind metadata alone can select this filter exactly.
+    #[must_use]
+    pub fn is_catalog_exact(&self) -> bool {
+        match self {
+            Self::BlobNone | Self::ObjectType(_) => true,
+            Self::Combine(filters) => {
+                !filters.is_empty() && filters.iter().all(Self::is_catalog_exact)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Semantic inputs collected from one protocol-v2 fetch request.
@@ -1198,16 +1210,6 @@ fn plan_from_visibility(
     }))
 }
 
-fn catalog_filter_supported(filter: &UploadPackFilter) -> bool {
-    match filter {
-        UploadPackFilter::BlobNone | UploadPackFilter::ObjectType(_) => true,
-        UploadPackFilter::Combine(filters) => {
-            !filters.is_empty() && filters.iter().all(catalog_filter_supported)
-        }
-        _ => false,
-    }
-}
-
 fn catalog_filter_accepts(filter: &UploadPackFilter, kind: gix_object::Kind) -> bool {
     match filter {
         UploadPackFilter::BlobNone => kind != gix_object::Kind::Blob,
@@ -1253,7 +1255,7 @@ async fn plan_from_visibility_catalog(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
-    if !catalog_filter_supported(&request.filter)
+    if !request.filter.is_catalog_exact()
         || request.wants.is_empty()
         || !request.shallow.is_empty()
         || request.deepen.is_some()
@@ -2315,21 +2317,18 @@ mod tests {
 
     #[test]
     fn catalog_filter_supports_kind_only_combinations_and_rejects_contextual_filters() {
-        assert!(catalog_filter_supported(&UploadPackFilter::BlobNone));
-        assert!(catalog_filter_supported(&UploadPackFilter::ObjectType(
-            UploadPackObjectType::Tree,
-        )));
-        assert!(catalog_filter_supported(&UploadPackFilter::Combine(vec![
-            UploadPackFilter::BlobNone,
-            UploadPackFilter::ObjectType(UploadPackObjectType::Tree),
-        ])));
-        assert!(!catalog_filter_supported(&UploadPackFilter::BlobLimit(
-            1024
-        )));
-        assert!(!catalog_filter_supported(&UploadPackFilter::TreeDepth(1)));
-        assert!(!catalog_filter_supported(&UploadPackFilter::Sparse {
-            oid: oid('7')
-        }));
+        assert!(UploadPackFilter::BlobNone.is_catalog_exact());
+        assert!(UploadPackFilter::ObjectType(UploadPackObjectType::Tree,).is_catalog_exact());
+        assert!(
+            UploadPackFilter::Combine(vec![
+                UploadPackFilter::BlobNone,
+                UploadPackFilter::ObjectType(UploadPackObjectType::Tree),
+            ])
+            .is_catalog_exact()
+        );
+        assert!(!UploadPackFilter::BlobLimit(1024).is_catalog_exact());
+        assert!(!UploadPackFilter::TreeDepth(1).is_catalog_exact());
+        assert!(!UploadPackFilter::Sparse { oid: oid('7') }.is_catalog_exact());
     }
 
     #[test]

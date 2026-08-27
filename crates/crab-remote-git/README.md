@@ -80,9 +80,15 @@ semantics, output policy, and ordered object selection. Complete pack bodies
 and descriptors are verified on every read. Runtime single-flight and the
 existing renewable internal-lock contract coalesce concurrent producers;
 cancelling one waiter does not cancel work still needed by another process.
-Repository GC treats these objects as a soft acceleration cache: recent
-descriptors retain their referenced artifacts through the configured grace
-period, after which stale descriptor/artifact pairs become collectible.
+Catalog-exact dense filters (`blob:none` and `object:type`) can assemble a
+large selected response directly from verified packed entries, preserving
+delta payloads and materializing only bases omitted from the selection. The
+assembler uses OID-based REF_DELTA links across read batches; shallow,
+path-context, and other filters retain the conservative selected-repack path
+until their reachability proofs can bound the same optimization. Repository
+GC treats these objects as a soft acceleration cache: recent descriptors
+retain their referenced artifacts through the configured grace period, after
+which stale descriptor/artifact pairs become collectible.
 GC resolves recent descriptors with bounded list-concurrency and streams
 validated pairs, keeping response-cache cleanup from turning into an
 unbounded read or memory wave as request history grows.

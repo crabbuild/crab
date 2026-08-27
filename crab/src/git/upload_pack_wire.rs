@@ -1501,9 +1501,19 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
             &plan.object_ids,
             !thin_bases.is_empty(),
         );
-        repository
-            .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
-            .await
+        if dense_selected_response(&request) {
+            repository
+                .generate_pack_cached_with_dense_selection(
+                    &plan.object_ids,
+                    cache_key,
+                    cancellation,
+                )
+                .await
+        } else {
+            repository
+                .generate_pack_cached(&plan.object_ids, cache_key, cancellation)
+                .await
+        }
     } else {
         repository
             .generate_pack_with_bases(&plan.object_ids, thin_bases, cancellation)
@@ -1578,6 +1588,13 @@ fn generated_pack_request_digest(
         }
     }
     *hash.finalize().as_bytes()
+}
+
+fn dense_selected_response(request: &FetchRequest) -> bool {
+    request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+        && request.filter.is_catalog_exact()
 }
 
 fn is_likely_lazy_fetch(repository: &RemoteGitRepository, request: &FetchRequest) -> bool {
@@ -1839,6 +1856,25 @@ mod tests {
             digest,
             generated_pack_request_digest(&reordered, &[first, second], &[])
         );
+    }
+
+    #[test]
+    fn dense_selected_response_requires_a_catalog_filter_without_shallow_state() {
+        let mut request = FetchRequest {
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        assert!(dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::ObjectType(crab_read::UploadPackObjectType::Tree);
+        assert!(dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::TreeDepth(1);
+        assert!(!dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::BlobNone;
+        request.deepen = Some(100);
+        assert!(!dense_selected_response(&request));
     }
 
     #[tokio::test]
