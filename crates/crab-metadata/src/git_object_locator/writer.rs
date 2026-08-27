@@ -47,6 +47,9 @@ const GC_GENERATION_INTERVAL: u64 = 32;
 // batch covers a meaningful fraction of the current ordinal universe. Keep
 // small incremental pushes on the point-read path.
 const BULK_ORDINAL_LOOKUP_FACTOR: u64 = 64;
+// Small catalogs have fewer rows than the fixed SST/read-ahead overhead of a
+// full scan. Keep their incremental writes on bounded OID point lookups.
+const BULK_ORDINAL_LOOKUP_MIN_CATALOG_OBJECTS: u64 = 4_096;
 const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
 
@@ -617,11 +620,7 @@ impl GitObjectLocatorWriter {
         let current_objects = self.metadata.next_object_ordinal;
         if current_objects == 0 {
             self.existing_ordinals = Some(HashMap::new());
-        } else if self
-            .ordinal_lookup_candidates
-            .saturating_mul(BULK_ORDINAL_LOOKUP_FACTOR)
-            >= current_objects
-        {
+        } else if should_load_existing_ordinals(current_objects, self.ordinal_lookup_candidates) {
             self.load_existing_ordinals().await?;
         }
         Ok(())
@@ -1433,6 +1432,11 @@ async fn close_after_error<T>(db: slatedb::Db, operation: MetadataError) -> Resu
     }
 }
 
+fn should_load_existing_ordinals(current_objects: u64, candidate_objects: u64) -> bool {
+    current_objects >= BULK_ORDINAL_LOOKUP_MIN_CATALOG_OBJECTS
+        && candidate_objects.saturating_mul(BULK_ORDINAL_LOOKUP_FACTOR) >= current_objects
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1560,6 +1564,17 @@ mod tests {
         assert!(options.wal_options.is_none());
         assert!(options.wal_fence_options.is_none());
         assert!(options.detach_options.is_none());
+    }
+
+    #[test]
+    fn ordinal_lookup_scans_only_large_dense_catalogs() {
+        assert!(!should_load_existing_ordinals(204, 32));
+        assert!(!should_load_existing_ordinals(
+            BULK_ORDINAL_LOOKUP_MIN_CATALOG_OBJECTS,
+            63,
+        ));
+        assert!(should_load_existing_ordinals(1_000_000, 20_000));
+        assert!(!should_load_existing_ordinals(1_000_000, 10_000));
     }
 
     #[tokio::test]
