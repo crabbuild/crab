@@ -145,8 +145,9 @@ The locator writer also maintains a derived pack-slot membership index for
 stale-pack cleanup. It scans only memberships for slots absent from the
 current manifest, then validates and removes their canonical OID, ordinal, and
 metadata rows. If the completion marker is absent on a historical catalog, the
-owner rebuilds this derived index once; readers and the manifest never depend
-on it.
+owner rebuilds this derived index once. An interrupted rebuild leaves an
+explicit in-progress marker and cannot advance catalog coverage until every
+retained pack has replayed; readers and the manifest never depend on it.
 
 When a current generation is missing its split commit graph but the immediately
 previous generation has a validated graph, the owner reads only the new commit

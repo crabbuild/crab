@@ -126,9 +126,11 @@ correction in `cdc2335e`:
 - Locator stale-pack cleanup now uses a derived `(pack_slot, oid)` membership
   index. Canonical OID rows remain authoritative; routine sweeps read only
   stale-slot memberships and point-validate their canonical rows, while a
-  marker-less historical catalog performs one idempotent rebuild before
-  returning to the bounded path. Pure repacks remove old memberships as they
-  rebind OIDs, so they do not trigger a complete object-catalog scan.
+  marker-less or interrupted catalog performs one idempotent rebuild before
+  returning to the bounded path. Rebuilds use an explicit in-progress marker
+  and verified retained-pack object counts, so coverage cannot advance over a
+  partial reverse index. Pure repacks remove old memberships as they rebind
+  OIDs, so they do not trigger a complete object-catalog scan.
 
 The next owner hardening keeps the documented one-action-per-cycle contract
 literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
@@ -323,8 +325,9 @@ reader-fanout hardening at `fd95e8fd`):
   admission with renewal, cancellation, crash-reclaimable TTL leases, and
   non-blocking reader-side repair probes.
 - stale locator-pack cleanup uses an atomic derived pack-slot membership index;
-  marker-less catalogs rebuild it once, while routine sweeps avoid scanning
-  retained OID rows.
+  marker-less or interrupted catalogs rebuild it once, while routine sweeps
+  avoid scanning retained OID rows. Rebuild completion is count-checked before
+  coverage can advance.
 
 Still required before the roadmap is DONE:
 

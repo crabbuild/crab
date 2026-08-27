@@ -1770,7 +1770,7 @@ async fn commit_service_git_locators_with_source(
             if sweep.object_rows_deleted != 0 {
                 // Only an actual object deletion changes the dense ordinal
                 // universe. Rebuild then replay every current pack.
-                writer.replace_object_catalog().await?;
+                writer.replace_object_catalog(&retained_slots).await?;
                 pending_ids = current_packs
                     .iter()
                     .map(|pack| merkle_hash_from_hex(&pack.pack_id, "committed pack id"))
@@ -1785,6 +1785,7 @@ async fn commit_service_git_locators_with_source(
                 .await?;
                 write_service_locator_evidence(&mut writer, &bindings, &derived, &pending_ids)
                     .await?;
+                writer.complete_object_catalog_rebuild().await?;
             }
             tracing::debug!(
                 object_rows_deleted = sweep.object_rows_deleted,

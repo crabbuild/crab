@@ -6325,7 +6325,7 @@ async fn publish_pack_locator_inventory(
         // Only deleting an object proves that the dense ordinal universe
         // changed. Rebuild then replay every current pack, including packs
         // that were covered before the sweep.
-        writer.replace_object_catalog().await?;
+        writer.replace_object_catalog(&retained_slots).await?;
         for pack in current_packs {
             let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
                 CrabError::Internal(format!(
@@ -6350,6 +6350,7 @@ async fn publish_pack_locator_inventory(
             evidence.push(pack_evidence);
         }
         write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
+        writer.complete_object_catalog_rebuild().await?;
     }
     debug!(
         object_rows_deleted = sweep.object_rows_deleted,

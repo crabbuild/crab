@@ -797,9 +797,11 @@ The locator also stores a derived pack-slot membership index keyed by
 `(pack_slot, oid)`. Canonical OID rows remain the source of truth; the derived
 rows are written atomically with every location update and let stale-pack
 cleanup scan only objects owned by stale slots instead of scanning the entire
-OID catalog. A legacy or interrupted catalog without the completion marker is
-rebuilt once under the existing repository owner, then uses the bounded path;
-readers never consult this maintenance index.
+OID catalog. Rebuilds publish an explicit in-progress marker and do not become
+ready until every retained pack's verified object count has replayed; a restart
+seeing that marker rebuilds the derived rows before advancing coverage. A
+legacy marker-less catalog follows the same one-time repair path. Readers
+never consult this maintenance index.
 
 **Source:** `crab/src/git/push.rs` (`upload_packs`, `compute_remote_objects`),
 `crab/src/git/pack.rs` (`generate_push_pack_files_with_exclusions`,

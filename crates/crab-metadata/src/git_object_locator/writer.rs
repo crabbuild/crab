@@ -14,11 +14,12 @@ use tracing::{debug, warn};
 use super::format::{
     LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
     PACK_OBJECT_FAMILY, PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE,
-    PACK_OBJECT_VALUE_LEN, StoredObjectLocation, coverage, decode_metadata, decode_object_key,
-    decode_object_location, decode_pack_key, decode_pack_object_key, decode_pack_object_ordinal,
-    decode_pack_record, encode_metadata, encode_object_location, encode_object_metadata,
-    encode_pack_object_ordinal, encode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
-    pack_key, pack_object_key, pack_object_prefix, validate_location_for_pack,
+    PACK_OBJECT_INDEX_REBUILDING_VALUE, PACK_OBJECT_VALUE_LEN, StoredObjectLocation, coverage,
+    decode_metadata, decode_object_key, decode_object_location, decode_pack_key,
+    decode_pack_object_key, decode_pack_object_ordinal, decode_pack_record, encode_metadata,
+    encode_object_location, encode_object_metadata, encode_pack_object_ordinal, encode_pack_record,
+    object_key, ordinal_key, ordinal_metadata_key, pack_key, pack_object_key, pack_object_prefix,
+    validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
@@ -96,6 +97,7 @@ pub struct GitObjectLocatorWriter {
     existing_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
     ordinal_lookup_candidates: u64,
     pack_membership_index_ready: bool,
+    rebuild_remaining_rows: Option<HashMap<u64, u64>>,
     catalog_dirty: bool,
     checkpoint_required: bool,
     stats: LocatorWriteStats,
@@ -185,12 +187,9 @@ impl GitObjectLocatorWriter {
                 Err(error) => return Err((db, error)),
             }
             let metadata = LocatorMetadata::empty();
-            if let Err(error) = write_batch(
-                &db,
-                metadata_batch(metadata),
-                "initialize compact locator metadata",
-            )
-            .await
+            let mut batch = metadata_batch(metadata);
+            batch.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
+            if let Err(error) = write_batch(&db, batch, "initialize compact locator metadata").await
             {
                 return Err((db, error));
             }
@@ -203,6 +202,7 @@ impl GitObjectLocatorWriter {
         };
         let pack_membership_index_ready = match db.get(PACK_OBJECT_INDEX_MARKER_KEY).await {
             Ok(Some(value)) if value.as_ref() == PACK_OBJECT_INDEX_MARKER_VALUE => true,
+            Ok(Some(value)) if value.as_ref() == PACK_OBJECT_INDEX_REBUILDING_VALUE => false,
             Ok(Some(_)) => {
                 return Err((
                     db,
@@ -212,7 +212,10 @@ impl GitObjectLocatorWriter {
                     ),
                 ));
             }
-            Ok(None) => metadata.next_object_ordinal == 0,
+            // Marker-less empty databases predate the derived index and are
+            // safe because they have no bindings or canonical object rows.
+            // A populated marker-less catalog must rebuild before a sweep.
+            Ok(None) => metadata.next_object_ordinal == 0 && bindings.is_empty(),
             Err(source) => {
                 return Err((
                     db,
@@ -255,6 +258,7 @@ impl GitObjectLocatorWriter {
             existing_ordinals: None,
             ordinal_lookup_candidates: 0,
             pack_membership_index_ready,
+            rebuild_remaining_rows: None,
             catalog_dirty,
             checkpoint_required,
             stats: LocatorWriteStats::default(),
@@ -428,6 +432,23 @@ impl GitObjectLocatorWriter {
             ));
         }
 
+        let entry_count = u64::try_from(entries.len()).map_err(|_| {
+            MetadataError::Internal("Git locator object batch is too large".to_owned())
+        })?;
+        if let Some(remaining) = &self.rebuild_remaining_rows {
+            let expected = remaining.get(&binding.pack_slot).ok_or_else(|| {
+                MetadataError::Internal(
+                    "Git locator rebuild received an object batch for an unplanned pack".to_owned(),
+                )
+            })?;
+            if entry_count > *expected {
+                return Err(MetadataError::Internal(
+                    "Git locator rebuild received more objects than the pack index reports"
+                        .to_owned(),
+                ));
+            }
+        }
+
         self.prepare_ordinal_lookup(entries.len()).await?;
 
         let mut batch = slatedb::WriteBatch::new();
@@ -563,6 +584,14 @@ impl GitObjectLocatorWriter {
             self.catalog_dirty = true;
             self.checkpoint_required = true;
         }
+        if let Some(remaining) = &mut self.rebuild_remaining_rows {
+            let count = remaining.get_mut(&binding.pack_slot).ok_or_else(|| {
+                MetadataError::Internal(
+                    "Git locator rebuild received an object batch for an unplanned pack".to_owned(),
+                )
+            })?;
+            *count = count.saturating_sub(entry_count);
+        }
         Ok(())
     }
 
@@ -658,7 +687,21 @@ impl GitObjectLocatorWriter {
     ///
     /// Historical checkpoints retain the prior universe. The caller must
     /// rewrite every current pack before advancing coverage.
-    pub async fn replace_object_catalog(&mut self) -> Result<()> {
+    pub async fn replace_object_catalog(&mut self, retained_slots: &HashSet<u64>) -> Result<()> {
+        let mut rebuild_remaining_rows = HashMap::with_capacity(retained_slots.len());
+        for slot in retained_slots {
+            if *slot == 0 {
+                return Err(MetadataError::Internal(
+                    "Git locator rebuild retained an invalid pack slot".to_owned(),
+                ));
+            }
+            let record = self.bindings.get(slot).ok_or_else(|| {
+                MetadataError::Internal(
+                    "Git locator rebuild retained an unbound pack slot".to_owned(),
+                )
+            })?;
+            rebuild_remaining_rows.insert(*slot, record.object_count);
+        }
         for family in [
             OBJECT_FAMILY,
             super::format::ORDINAL_FAMILY,
@@ -690,29 +733,53 @@ impl GitObjectLocatorWriter {
         self.metadata.next_object_ordinal = 0;
         self.metadata.identity = None;
         self.catalog_dirty = true;
-        write_batch(
-            &self.db,
-            metadata_batch(self.metadata),
-            "reset Git object catalog metadata",
-        )
-        .await?;
+        let mut reset = metadata_batch(self.metadata);
+        reset.put(
+            PACK_OBJECT_INDEX_MARKER_KEY,
+            PACK_OBJECT_INDEX_REBUILDING_VALUE,
+        );
+        write_batch(&self.db, reset, "reset Git object catalog metadata").await?;
         self.writes_durable = false;
         self.flush_objects().await?;
         self.empty_catalog_binding = None;
         self.replacement_ordinals = Some(HashMap::new());
         self.existing_ordinals = None;
         self.ordinal_lookup_candidates = 0;
-        self.pack_membership_index_ready = true;
+        self.pack_membership_index_ready = false;
+        self.rebuild_remaining_rows = Some(rebuild_remaining_rows);
+        Ok(())
+    }
+
+    /// Mark a fully replayed object catalog's derived membership index ready.
+    pub async fn complete_object_catalog_rebuild(&mut self) -> Result<()> {
+        let Some(remaining) = &self.rebuild_remaining_rows else {
+            if self.pack_membership_index_ready {
+                return Ok(());
+            }
+            return Err(MetadataError::Internal(
+                "Git locator rebuild completion was not planned".to_owned(),
+            ));
+        };
+        if let Some((slot, count)) = remaining
+            .iter()
+            .find_map(|(slot, count)| (*count != 0).then_some((*slot, *count)))
+        {
+            return Err(MetadataError::Internal(format!(
+                "Git locator rebuild is missing {count} objects for pack slot {slot}"
+            )));
+        }
         let mut marker = slatedb::WriteBatch::new();
         marker.put(PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE);
         write_batch(
             &self.db,
             marker,
-            "mark empty compact locator pack membership index",
+            "mark rebuilt compact locator pack membership index",
         )
         .await?;
         self.writes_durable = false;
         self.flush_objects().await?;
+        self.pack_membership_index_ready = true;
+        self.rebuild_remaining_rows = None;
         Ok(())
     }
 
@@ -918,6 +985,11 @@ impl GitObjectLocatorWriter {
 
     /// Mark one immutable manifest inventory fully covered with one durability flush.
     pub async fn set_coverage(&mut self, coverage: GitLocatorCoverage) -> Result<()> {
+        if !self.pack_membership_index_ready {
+            return Err(MetadataError::Internal(
+                "Git locator coverage cannot advance before catalog rebuild completion".to_owned(),
+            ));
+        }
         if coverage.generation == 0 {
             return Err(MetadataError::Internal(
                 "Git locator coverage generation must be non-zero".to_owned(),
@@ -1776,6 +1848,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_catalog_rebuild_replays_before_membership_ready() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut initial = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open initial writer");
+        let original = initial.bind_packs(&[pack(1)]).await.expect("bind original")[0];
+        initial
+            .write_locations(original, &[entry(1)])
+            .await
+            .expect("write original location");
+        initial
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: hash(100),
+            })
+            .await
+            .expect("cover original pack");
+        initial.close().await.expect("close initial writer");
+
+        let mut interrupted = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open interrupted writer");
+        let replacement = interrupted
+            .bind_packs(&[pack(2)])
+            .await
+            .expect("bind replacement")[0];
+        interrupted
+            .write_locations(replacement, &[entry(2)])
+            .await
+            .expect("write replacement location");
+        let sweep = interrupted
+            .sweep_unreferenced(&HashSet::from([replacement.pack_slot]))
+            .await
+            .expect("sweep original pack");
+        assert_eq!(sweep.object_rows_deleted, 1);
+        interrupted
+            .replace_object_catalog(&HashSet::from([replacement.pack_slot]))
+            .await
+            .expect("start catalog rebuild");
+        assert!(!interrupted.pack_membership_index_ready);
+        let error = interrupted
+            .complete_object_catalog_rebuild()
+            .await
+            .expect_err("incomplete catalog rebuild must not become ready");
+        assert!(error.to_string().contains("missing 1 objects"));
+        interrupted
+            .close()
+            .await
+            .expect("close interrupted rebuild");
+
+        let mut resumed = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("reopen interrupted rebuild");
+        assert!(!resumed.pack_membership_index_ready);
+        resumed
+            .write_locations(replacement, &[entry(2)])
+            .await
+            .expect("replay replacement location");
+        let error = resumed
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect_err("coverage must wait for membership completion");
+        assert!(error.to_string().contains("rebuild completion"));
+        let recovery = resumed
+            .sweep_unreferenced(&HashSet::from([replacement.pack_slot]))
+            .await
+            .expect("recover rebuilding membership index");
+        assert_eq!(recovery.object_rows_scanned, 1);
+        resumed
+            .complete_object_catalog_rebuild()
+            .await
+            .expect("complete catalog rebuild");
+        resumed
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect("cover replayed pack");
+        let identity = resumed.catalog_identity().expect("replayed identity");
+        resumed.close().await.expect("close resumed writer");
+
+        let reader = super::super::GitObjectLocatorSession::open_for_catalog(
+            store,
+            "org/repo",
+            identity,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open replayed catalog");
+        assert_eq!(
+            reader.all_object_ids().await.expect("replayed object IDs"),
+            vec![entry(2).oid]
+        );
+        reader.close().await.expect("close replayed reader");
+    }
+
+    #[tokio::test]
     async fn rebound_pack_preserves_proven_object_metadata() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
@@ -2113,6 +2286,16 @@ mod tests {
             .write_locations(binding, &[entry(1)])
             .await
             .expect("write location");
+        let mut marker_delete = slatedb::WriteBatch::new();
+        marker_delete.delete(PACK_OBJECT_INDEX_MARKER_KEY);
+        write_batch(&writer.db, marker_delete, "remove legacy membership marker")
+            .await
+            .expect("remove legacy membership marker");
+        writer.writes_durable = false;
+        writer
+            .flush_objects()
+            .await
+            .expect("flush legacy marker removal");
         writer.close().await.expect("close legacy writer");
 
         let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")

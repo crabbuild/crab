@@ -25,6 +25,7 @@ pub(crate) const PACK_OBJECT_KEY_LEN: usize = 29;
 pub(crate) const PACK_OBJECT_PREFIX_LEN: usize = 9;
 pub(crate) const PACK_OBJECT_VALUE_LEN: usize = 4;
 pub(crate) const PACK_OBJECT_INDEX_MARKER_KEY: [u8; 2] = [PACK_OBJECT_FAMILY, 0xff];
+pub(crate) const PACK_OBJECT_INDEX_REBUILDING_VALUE: [u8; 1] = [0];
 pub(crate) const PACK_OBJECT_INDEX_MARKER_VALUE: [u8; 1] = [1];
 
 const PACK_HEADER_LEN: u64 = 12;
@@ -464,6 +465,8 @@ mod tests {
         );
         assert_eq!(pack_object_key(0, &oid), None);
         assert_eq!(decode_pack_object_key(&PACK_OBJECT_INDEX_MARKER_KEY), None);
+        assert_eq!(PACK_OBJECT_INDEX_REBUILDING_VALUE, [0]);
+        assert_eq!(PACK_OBJECT_INDEX_MARKER_VALUE, [1]);
     }
 
     #[test]

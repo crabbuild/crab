@@ -2677,7 +2677,7 @@ async fn rebuild_git_object_locators(
             // Rebuild is the explicit format-migration boundary. Resetting the
             // canonical object universe before replay makes retries idempotent
             // and prevents ordinals from depending on an interrupted attempt.
-            writer.replace_object_catalog().await?;
+            writer.replace_object_catalog(&retained_slots).await?;
             for (binding, (_, pack_id, _, index_path, reverse_index_path, git_sha1)) in
                 bindings.into_iter().zip(&derived)
             {
@@ -2724,6 +2724,7 @@ async fn rebuild_git_object_locators(
                     writer.write_locations(binding, &entries).await?;
                 }
             }
+            writer.complete_object_catalog_rebuild().await?;
             writer.flush_objects().await?;
             writer.sweep_unreferenced(&retained_slots).await?;
             let (after, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;

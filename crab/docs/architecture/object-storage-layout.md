@@ -163,9 +163,11 @@ membership keyspace used only by the exclusive locator writer. It maps each
 canonical OID row to its current immutable pack slot, so stale-pack cleanup is
 proportional to stale membership rows rather than the complete object catalog.
 The writer marks the index complete in the same SlateDB publication stream;
-marker-less historical catalogs receive one idempotent rebuild before normal
-incremental cleanup. Readers use the canonical OID, ordinal, and pack rows and
-do not depend on this derived keyspace.
+rebuilds first publish an in-progress marker and only mark it complete after
+every retained pack's verified object count has replayed. A restart seeing an
+in-progress or marker-less historical catalog performs one idempotent rebuild
+before normal incremental cleanup. Readers use the canonical OID, ordinal, and
+pack rows and do not depend on this derived keyspace.
 
 An optional feature that adds a repository-local namespace must document its
 owner, relative grammar, mutability, reachability, and cleanup policy. The
