@@ -6845,7 +6845,12 @@ async fn repair_git_visibility_if_current_with_options(
     if manifest.generation != required_generation {
         return Ok(None);
     }
-    if git_visibility_index_exists_for_manifest(store, router, &manifest).await? {
+    let visibility_available = if allow_catalog_materialization {
+        git_visibility_index_exists_for_manifest(store, router, &manifest).await?
+    } else {
+        git_visibility_proof_available_for_manifest(store, router, &manifest).await?
+    };
+    if visibility_available {
         return Ok(Some(GitVisibilityPublication::Published));
     }
     if manifest.refs.is_empty() {
@@ -6902,7 +6907,12 @@ async fn repair_git_visibility_if_current_with_options(
         {
             return Ok(None);
         }
-        if git_visibility_index_exists_for_manifest(store, router, &current).await? {
+        let visibility_available = if allow_catalog_materialization {
+            git_visibility_index_exists_for_manifest(store, router, &current).await?
+        } else {
+            git_visibility_proof_available_for_manifest(store, router, &current).await?
+        };
+        if visibility_available {
             return Ok(Some(GitVisibilityPublication::Published));
         }
 
@@ -7095,6 +7105,26 @@ pub(crate) async fn git_visibility_index_exists_for_manifest(
         &storage_router,
         manifest.generation,
         &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
+async fn git_visibility_proof_available_for_manifest(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+) -> Result<bool> {
+    if git_visibility_index_exists_for_manifest(store, router, manifest).await? {
+        return Ok(true);
+    }
+    let storage = store.as_storage();
+    let storage_router =
+        crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+    crab_metadata::git_visibility::digest_bound_available(
+        storage,
+        &storage_router,
         &manifest.git_validation_digest,
     )
     .await
@@ -22118,12 +22148,31 @@ mod tests {
                 .index
                 .contains_hex_in_ref("refs/heads/main", &commit)
         );
+        {
+            let reads = reads.lock().expect("read log lock");
+            assert!(
+                reads
+                    .iter()
+                    .all(|path| !path.contains("git_object_catalog_db/")),
+                "visibility admission opened the remote catalog: {reads:?}"
+            );
+        }
+        reads.lock().expect("read log lock").clear();
+        assert!(matches!(
+            ensure_current_git_visibility(
+                &store,
+                &router,
+                Duration::from_secs(2),
+                1,
+                &CancellationToken::new(),
+            )
+            .await,
+            Ok(GitVisibilityPublication::Published)
+        ));
         let reads = reads.lock().expect("read log lock");
         assert!(
-            reads
-                .iter()
-                .all(|path| !path.contains("git_object_catalog_db/")),
-            "visibility admission opened the remote catalog: {reads:?}"
+            reads.iter().all(|path| !path.contains("/packs/")),
+            "existing digest-bound visibility proof triggered a remote pack scan: {reads:?}"
         );
     }
 

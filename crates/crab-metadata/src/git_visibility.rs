@@ -2821,6 +2821,30 @@ mod storage {
         catalog_checkpoint_marker_matches(store, router, identity).await
     }
 
+    /// Check whether a digest-bound visibility proof is present without reading its body.
+    ///
+    /// Callers must still decode and validate the proof before using its contents.
+    pub async fn digest_bound_available(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        git_validation_digest: &str,
+    ) -> Result<bool> {
+        validate_hash(git_validation_digest, "Git validation digest")?;
+        let path = router.git_visibility_path(git_validation_digest);
+        match store.head(&path).await {
+            Ok(metadata) if metadata.size <= MAX_GIT_VISIBILITY_INDEX_BYTES => Ok(true),
+            Ok(metadata) => Err(crate::error::MetadataError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: format!(
+                    "visibility index is {} bytes; maximum is {}",
+                    metadata.size, MAX_GIT_VISIBILITY_INDEX_BYTES
+                ),
+            }),
+            Err(StorageError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Check the post-checkpoint marker without opening the large SlateDB catalog.
     #[cfg(feature = "remote-index")]
     async fn catalog_checkpoint_marker_matches(
@@ -3891,9 +3915,9 @@ mod storage {
 
 #[cfg(feature = "storage")]
 pub use storage::{
-    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, ensure_catalog_bound,
-    prepare_catalog_journal_edits, read, read_edit, read_for_manifest, read_with_format,
-    upload_digest_bound_if_absent, upload_edit, upload_if_absent,
+    GitVisibilityFormat, GitVisibilityRead, compact_journal_edits, digest_bound_available,
+    ensure_catalog_bound, prepare_catalog_journal_edits, read, read_edit, read_for_manifest,
+    read_with_format, upload_digest_bound_if_absent, upload_edit, upload_if_absent,
 };
 
 #[cfg(all(feature = "remote-index", feature = "storage"))]
@@ -4580,6 +4604,39 @@ mod tests {
             .unwrap();
         assert_eq!(left_read, left);
         assert_eq!(right_read, right);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn digest_bound_availability_tracks_bounded_immutable_proof_presence() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let index = GitVisibilityIndex::new(
+            7,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["1".repeat(40)])]),
+        )
+        .expect("valid visibility index");
+
+        assert!(
+            !digest_bound_available(&store, &router, &index.git_validation_digest)
+                .await
+                .expect("missing proof is unavailable")
+        );
+        upload_digest_bound_if_absent(&store, &router, &index)
+            .await
+            .expect("upload proof");
+        assert!(
+            digest_bound_available(&store, &router, &index.git_validation_digest)
+                .await
+                .expect("uploaded proof is available")
+        );
     }
 
     #[cfg(all(feature = "storage", feature = "remote-index"))]
