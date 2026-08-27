@@ -29,6 +29,7 @@ use crab_remote_git::{
     RepositoryOptions as RemoteGitRepositoryOptions,
 };
 use crab_storage::error::StorageError;
+use futures_util::stream::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStoreExt, path::Path as ObjectPath};
 use rand::Rng;
 use serde::Serialize;
@@ -2717,6 +2718,7 @@ const PUSH_ADMISSION_THROTTLE_COOLDOWN: Duration = Duration::from_secs(1);
 const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = PUSH_ADMISSION_SLOTS;
 const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
+const LOCATOR_EVIDENCE_CONCURRENCY: usize = 16;
 const GIT_VISIBILITY_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
 
@@ -5862,7 +5864,9 @@ async fn download_locator_pack_evidence(
     router: &StoreLayout,
     pack: &PackManifestEntry,
     populate_kind_metadata: bool,
+    cancel: &CancellationToken,
 ) -> Result<LocatorPackEvidence> {
+    check_cancelled(cancel)?;
     if pack.size < 20 {
         return Err(CrabError::CorruptObject {
             path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
@@ -5886,6 +5890,7 @@ async fn download_locator_pack_evidence(
     store
         .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
         .await?;
+    check_cancelled(cancel)?;
     match store
         .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
         .await
@@ -5915,13 +5920,14 @@ async fn download_locator_pack_evidence(
                     reverse_size,
                     reverse_hash,
                     8 * 1024 * 1024,
-                    &CancellationToken::new(),
+                    cancel,
                     None,
                 )
                 .await?;
         }
         Err(error) => return Err(error),
     }
+    check_cancelled(cancel)?;
     validate_locator_pack_evidence(
         pack,
         &idx_path,
@@ -5939,6 +5945,7 @@ async fn download_locator_pack_evidence(
         let downloaded = store
             .download_to_path(&router.pack_path(&pack.pack_id), &source)
             .await?;
+        check_cancelled(cancel)?;
         if downloaded != pack.size {
             return Err(CrabError::CorruptObject {
                 path: source.display().to_string(),
@@ -6040,6 +6047,7 @@ async fn download_locator_pack_evidence(
     } else {
         None
     };
+    check_cancelled(cancel)?;
     let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
         CrabError::Internal(format!(
             "committed pack id is invalid for locator publication: {error}"
@@ -6112,6 +6120,60 @@ async fn load_pack_kind_metadata(
         CrabError::Internal(format!("Git object-kind metadata worker failed: {error}"))
     })??;
     Ok(Some(map))
+}
+
+async fn collect_locator_pack_evidence(
+    store: &Store,
+    router: &StoreLayout,
+    local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
+    packs: &[PackManifestEntry],
+    skip_packs: &HashSet<MerkleHash>,
+    populate_kind_metadata: bool,
+    cancel: &CancellationToken,
+) -> Result<Vec<LocatorPackEvidence>> {
+    let mut evidence = Vec::new();
+    let mut remote_packs = Vec::new();
+    for pack in packs {
+        check_cancelled(cancel)?;
+        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
+            CrabError::Internal(format!(
+                "committed pack id is invalid for locator publication: {error}"
+            ))
+        })?;
+        if skip_packs.contains(&pack_id) {
+            continue;
+        }
+        if let Some(local) = local_evidence.remove(&pack_id) {
+            validate_locator_pack_evidence(
+                pack,
+                &local.idx_path,
+                &local.rev_path,
+                &local.git_sha1,
+                &local.idx_path.display().to_string(),
+            )?;
+            evidence.push(local);
+        } else {
+            remote_packs.push(pack.clone());
+        }
+    }
+    let remote_pack_count = remote_packs.len();
+    let started = Instant::now();
+    let remote_evidence =
+        futures_util::stream::iter(remote_packs.into_iter().map(|pack| async move {
+            check_cancelled(cancel)?;
+            download_locator_pack_evidence(store, router, &pack, populate_kind_metadata, cancel)
+                .await
+        }))
+        .buffer_unordered(LOCATOR_EVIDENCE_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    tracing::debug!(
+        locator_remote_pack_count = remote_pack_count,
+        locator_evidence_download_ms = started.elapsed().as_millis() as u64,
+        "downloaded Git locator pack evidence"
+    );
+    evidence.extend(remote_evidence);
+    Ok(evidence)
 }
 
 async fn acquire_current_git_locator_lock(
@@ -6257,6 +6319,7 @@ async fn publish_pack_locator_inventory(
     anchor: CommittedManifestAnchor,
     current_packs: &[PackManifestEntry],
     populate_kind_metadata: bool,
+    cancel: &CancellationToken,
 ) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
     let mut pack_records = Vec::with_capacity(current_packs.len());
     for pack in current_packs {
@@ -6287,33 +6350,19 @@ async fn publish_pack_locator_inventory(
         .filter(|binding| writer.binding_has_covered_objects(**binding))
         .map(|binding| binding.record.pack_id)
         .collect::<HashSet<_>>();
-    let mut evidence = Vec::new();
-    for pack in current_packs {
-        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed pack id is invalid for locator publication: {error}"
-            ))
-        })?;
-        // Pack bytes are immutable. Sweeping an obsolete slot removes only
-        // rows owned by that slot; covered retained packs remain valid and do
-        // not need another full index scan.
-        if covered.contains(&pack_id) {
-            continue;
-        }
-        let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
-            validate_locator_pack_evidence(
-                pack,
-                &local.idx_path,
-                &local.rev_path,
-                &local.git_sha1,
-                &local.idx_path.display().to_string(),
-            )?;
-            local
-        } else {
-            download_locator_pack_evidence(store, router, pack, populate_kind_metadata).await?
-        };
-        evidence.push(pack_evidence);
-    }
+    // Pack bytes are immutable. Sweeping an obsolete slot removes only rows
+    // owned by that slot; covered retained packs remain valid and do not need
+    // another full index scan.
+    let mut evidence = collect_locator_pack_evidence(
+        store,
+        router,
+        local_evidence,
+        current_packs,
+        &covered,
+        populate_kind_metadata,
+        cancel,
+    )
+    .await?;
     let bindings = bindings
         .into_iter()
         .map(|binding| (binding.record.pack_id, binding))
@@ -6326,29 +6375,21 @@ async fn publish_pack_locator_inventory(
         // changed. Rebuild then replay every current pack, including packs
         // that were covered before the sweep.
         writer.replace_object_catalog(&retained_slots).await?;
-        for pack in current_packs {
-            let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-                CrabError::Internal(format!(
-                    "committed pack id is invalid for locator publication: {error}"
-                ))
-            })?;
-            if evidence.iter().any(|item| item.pack_id == pack_id) {
-                continue;
-            }
-            let pack_evidence = if let Some(local) = local_evidence.remove(&pack_id) {
-                validate_locator_pack_evidence(
-                    pack,
-                    &local.idx_path,
-                    &local.rev_path,
-                    &local.git_sha1,
-                    &local.idx_path.display().to_string(),
-                )?;
-                local
-            } else {
-                download_locator_pack_evidence(store, router, pack, populate_kind_metadata).await?
-            };
-            evidence.push(pack_evidence);
-        }
+        let already_loaded = evidence
+            .iter()
+            .map(|item| item.pack_id)
+            .collect::<HashSet<_>>();
+        let mut replay = collect_locator_pack_evidence(
+            store,
+            router,
+            local_evidence,
+            current_packs,
+            &already_loaded,
+            populate_kind_metadata,
+            cancel,
+        )
+        .await?;
+        evidence.append(&mut replay);
         write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
         writer.complete_object_catalog_rebuild().await?;
     }
@@ -6451,6 +6492,7 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
     router: &StoreLayout,
     anchor: CommittedManifestAnchor,
     current_packs: &[PackManifestEntry],
+    cancel: &CancellationToken,
 ) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
     if writer.coverage()
         == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
@@ -6475,6 +6517,7 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
         // OID. New OIDs without local push evidence use the documented
         // canonical filtered-read fallback instead of a repository-sized scan.
         false,
+        cancel,
     )
     .await?;
     if updated {
@@ -6608,6 +6651,7 @@ async fn publish_committed_pack_locators_with_mode(
             anchor,
             current_packs,
             false,
+            cancel,
         )
         .await;
         let close_result = writer.close().await.map_err(CrabError::from);
@@ -18630,9 +18674,16 @@ mod tests {
             )
             .await
             .expect("open graph fixture locator writer");
-        publish_pack_locator_inventory_for_owner(&mut writer, &store, &router, anchor, &[pack])
-            .await
-            .expect("publish graph fixture locator");
+        publish_pack_locator_inventory_for_owner(
+            &mut writer,
+            &store,
+            &router,
+            anchor,
+            &[pack],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("publish graph fixture locator");
         writer
             .close()
             .await
@@ -24787,6 +24838,7 @@ mod tests {
                 &router,
                 anchor,
                 &[pack],
+                &CancellationToken::new(),
             )
             .await
             .expect("publish owner locator")

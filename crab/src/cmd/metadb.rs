@@ -862,6 +862,7 @@ async fn maintain_object_catalog(
                             router,
                             anchor,
                             packs,
+                            cancel,
                         )
                         .await?
                     } else {

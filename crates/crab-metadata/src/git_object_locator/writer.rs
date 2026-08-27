@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_xet::hash::MerkleHash;
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::config::{
@@ -34,6 +35,9 @@ const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
 const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
 const LOCATOR_L0_MAX_SSTS: usize = 32;
 const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
+const LOCATOR_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
+const LOCATOR_SCAN_FETCH_TASKS: usize = 8;
+const LOCATOR_EXISTING_LOOKUP_CONCURRENCY: usize = 256;
 // Each object now contributes an OID row, reverse-ordinal row, and metadata
 // sidecar row. B-tree nodes and SlateDB bookkeeping make the in-memory rows
 // materially larger than their 147 encoded bytes. This bound only starts
@@ -465,12 +469,20 @@ impl GitObjectLocatorWriter {
         }
 
         self.prepare_ordinal_lookup(entries.len()).await?;
+        let skip_existing_lookup = self.existing_ordinals.is_some()
+            || self.replacement_ordinals.is_some()
+            || self.empty_catalog_binding == Some(binding.pack_slot);
+        let existing_objects = if skip_existing_lookup {
+            vec![None; entries.len()]
+        } else {
+            self.lookup_existing_objects(entries).await?
+        };
 
         let mut batch = slatedb::WriteBatch::new();
         let mut batch_rows = 0_usize;
         let mut batch_bytes = 0_usize;
         let mut submitted = HashSet::with_capacity(entries.len());
-        for entry in entries {
+        for (entry_index, entry) in entries.iter().enumerate() {
             if !submitted.insert(entry.oid) {
                 return Err(MetadataError::Internal(
                     "Git locator object batch contains a duplicate OID".to_owned(),
@@ -496,29 +508,10 @@ impl GitObjectLocatorWriter {
                     .as_ref()
                     .and_then(|ordinals| ordinals.get(&entry.oid).copied())
             });
-            let existing = if existing_object.is_some()
-                || self.existing_ordinals.is_some()
-                || self.empty_catalog_binding == Some(binding.pack_slot)
-            {
-                None
-            } else {
-                self.db.get(key).await.map_err(read_error)?
-            };
-            let (ordinal, previous_object) = match (existing_object, existing) {
-                (Some(existing), _) => (existing.ordinal, Some(existing)),
-                (None, Some(value)) => {
-                    let location = decode_object_location(&value)
-                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
-                    (
-                        location.ordinal,
-                        Some(ExistingObject {
-                            ordinal: location.ordinal,
-                            pack_slot: location.pack_slot,
-                            metadata: location.metadata,
-                        }),
-                    )
-                }
-                (None, None) => (self.allocate_ordinal()?, None),
+            let existing_object = existing_object.or(existing_objects[entry_index]);
+            let (ordinal, previous_object) = match existing_object {
+                Some(existing) => (existing.ordinal, Some(existing)),
+                None => (self.allocate_ordinal()?, None),
             };
             // A repack changes the physical location but not the OID's
             // logical facts. Preserve facts already proven by the covered
@@ -610,6 +603,40 @@ impl GitObjectLocatorWriter {
         Ok(())
     }
 
+    async fn lookup_existing_objects(
+        &self,
+        entries: &[GitObjectLocatorEntry],
+    ) -> Result<Vec<Option<ExistingObject>>> {
+        let fetched = stream::iter(entries.iter().enumerate().map(|(index, entry)| {
+            let db = &self.db;
+            async move {
+                db.get(object_key(&entry.oid))
+                    .await
+                    .map(|value| (index, value))
+                    .map_err(read_error)
+            }
+        }))
+        .buffer_unordered(LOCATOR_EXISTING_LOOKUP_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        let mut existing = vec![None; entries.len()];
+        for (index, value) in fetched {
+            existing[index] = match value {
+                None => None,
+                Some(value) => {
+                    let location = decode_object_location(&value)
+                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
+                    Some(ExistingObject {
+                        ordinal: location.ordinal,
+                        pack_slot: location.pack_slot,
+                        metadata: location.metadata,
+                    })
+                }
+            };
+        }
+        Ok(existing)
+    }
+
     async fn prepare_ordinal_lookup(&mut self, entry_count: usize) -> Result<()> {
         if self.replacement_ordinals.is_some() || self.existing_ordinals.is_some() {
             return Ok(());
@@ -630,9 +657,13 @@ impl GitObjectLocatorWriter {
         if self.existing_ordinals.is_some() {
             return Ok(());
         }
+        let started = std::time::Instant::now();
+        let options = slatedb::config::ScanOptions::default()
+            .with_read_ahead_bytes(LOCATOR_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(LOCATOR_SCAN_FETCH_TASKS);
         let mut rows = self
             .db
-            .scan_prefix([OBJECT_FAMILY], ..)
+            .scan_prefix_with_options([OBJECT_FAMILY], .., &options)
             .await
             .map_err(read_error)?;
         let mut ordinals = HashMap::new();
@@ -657,6 +688,11 @@ impl GitObjectLocatorWriter {
             );
         }
         self.existing_ordinals = Some(ordinals);
+        tracing::debug!(
+            locator_existing_objects = self.existing_ordinals.as_ref().map_or(0, HashMap::len),
+            locator_existing_objects_ms = started.elapsed().as_millis() as u64,
+            "loaded existing Git locator ordinals"
+        );
         Ok(())
     }
 
@@ -893,34 +929,56 @@ impl GitObjectLocatorWriter {
                         "pack membership row crossed its slot prefix",
                     ));
                 }
-                let value = self
-                    .db
-                    .get(object_key(&oid))
-                    .await
-                    .map_err(read_error)?
-                    .ok_or_else(|| {
-                        corrupt(
+                let delete_object = if let Some(ordinals) = &self.existing_ordinals {
+                    let Some(current) = ordinals.get(&oid).copied() else {
+                        return Err(corrupt(
                             "pack-object-index",
                             "pack membership row has no canonical object row",
-                        )
+                        ));
+                    };
+                    if current.ordinal != ordinal {
+                        return Err(corrupt(
+                            "pack-object-index",
+                            "pack membership row disagrees with its object ordinal",
+                        ));
+                    }
+                    current.pack_slot == *slot
+                } else {
+                    let value = self
+                        .db
+                        .get(object_key(&oid))
+                        .await
+                        .map_err(read_error)?
+                        .ok_or_else(|| {
+                            corrupt(
+                                "pack-object-index",
+                                "pack membership row has no canonical object row",
+                            )
+                        })?;
+                    let location = decode_object_location(&value).ok_or_else(|| {
+                        corrupt("object", "invalid compact locator object location")
                     })?;
-                let location = decode_object_location(&value)
-                    .ok_or_else(|| corrupt("object", "invalid compact locator object location"))?;
-                if location.pack_slot != *slot || location.ordinal != ordinal {
-                    return Err(corrupt(
-                        "pack-object-index",
-                        "pack membership row disagrees with its object row",
-                    ));
-                }
-                if let Some(ordinals) = &mut self.existing_ordinals {
+                    if location.pack_slot != *slot || location.ordinal != ordinal {
+                        return Err(corrupt(
+                            "pack-object-index",
+                            "pack membership row disagrees with its object row",
+                        ));
+                    }
+                    true
+                };
+                if let Some(ordinals) = &mut self.existing_ordinals
+                    && delete_object
+                {
                     ordinals.remove(&oid);
                 }
-                deletes.delete(object_key(&oid));
-                deletes.delete(ordinal_key(ordinal));
-                deletes.delete(ordinal_metadata_key(ordinal));
-                stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
-                self.catalog_dirty = true;
-                self.checkpoint_required = true;
+                if delete_object {
+                    deletes.delete(object_key(&oid));
+                    deletes.delete(ordinal_key(ordinal));
+                    deletes.delete(ordinal_metadata_key(ordinal));
+                    stats.object_rows_deleted = stats.object_rows_deleted.saturating_add(1);
+                    self.catalog_dirty = true;
+                    self.checkpoint_required = true;
+                }
                 deletes.delete(row.key);
                 delete_count += 1;
                 if delete_count == MAX_BATCH_ROWS {
@@ -1840,6 +1898,10 @@ mod tests {
             })
             .await
             .expect("cover original pack");
+        writer
+            .load_existing_ordinals()
+            .await
+            .expect("load existing ordinals before repack");
 
         let repacked = writer.bind_packs(&[pack(2)]).await.expect("bind repacked")[0];
         let mut moved = entry(1);
